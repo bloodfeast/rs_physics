@@ -22,4 +22,6 @@ pub fn assert_float_eq(a: f64, b: f64, epsilon: f64, optional_message: Option<&s
 
 #[cfg(test)]
 mod physics_tests;
+
+#[cfg(test)]
 mod interactions_tests;
