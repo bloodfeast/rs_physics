@@ -20,33 +20,30 @@ fn test_elastic_collision() {
     let constants = PhysicsConstants::default();
     let mut obj1 = Object::new(1.0, 1.0, 0.0).unwrap();
     let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
+    let drag_coefficient = 0.47;
+    let cross_sectional_area = 1.0;
 
     // Horizontal collision (angle = 0)
-    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001).unwrap();
+    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001, drag_coefficient, cross_sectional_area).unwrap();
 
     // For a horizontal collision with equal masses, objects should exchange velocities
-    // We'll use a slightly larger epsilon to account for small numerical effects
-    assert_float_eq(obj1.velocity, -1.0, 1e-3, Some("Horizontal collision, object 1"));
-    assert_float_eq(obj2.velocity, 1.0, 1e-3, Some("Horizontal collision, object 2"));
-
-    // Print values for investigation
-    println!("Horizontal collision, object 1 velocity: {}", obj1.velocity);
-    println!("Horizontal collision, object 2 velocity: {}", obj2.velocity);
+    // We'll use a slightly larger epsilon to account for small numerical effects and air resistance
+    assert_float_eq(obj1.velocity, -1.0, 1e-2, Some("Horizontal collision, object 1"));
+    assert_float_eq(obj2.velocity, 1.0, 1e-2, Some("Horizontal collision, object 2"));
 
     // Reset objects
     obj1 = Object::new(1.0, 1.0, 0.0).unwrap();
     obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 
     // Collision at 45 degrees upward
-    elastic_collision(&constants, &mut obj1, &mut obj2, PI / 4.0, 0.1).unwrap();
+    elastic_collision(&constants, &mut obj1, &mut obj2, PI / 4.0, 0.1, drag_coefficient, cross_sectional_area).unwrap();
 
     // Calculate expected velocities
     let gravity_effect = constants.gravity * 0.1 * (PI / 4.0).sin();
     let air_resistance = |v: f64| -> f64 {
-        let drag_coefficient = 0.47;
-        let cross_sectional_area = 1.0;
-        let drag_force = 0.5 * constants.air_density * v.powi(2) * drag_coefficient * cross_sectional_area;
-        -drag_force * 0.1
+        let air_resistance_force = constants.calculate_air_resistance(v.abs(), drag_coefficient, cross_sectional_area).unwrap();
+        let deceleration = air_resistance_force / 1.0; // mass is 1.0
+        -deceleration * 0.1 * v.signum()
     };
 
     let expected_v1 = -1.0 - gravity_effect + air_resistance(-1.0);
@@ -54,11 +51,6 @@ fn test_elastic_collision() {
 
     assert_float_eq(obj1.velocity, expected_v1, 1e-3, Some("45 degree collision, object 1"));
     assert_float_eq(obj2.velocity, expected_v2, 1e-3, Some("45 degree collision, object 2"));
-
-    println!("45 degree collision, object 1 velocity: {}", obj1.velocity);
-    println!("45 degree collision, object 2 velocity: {}", obj2.velocity);
-    println!("Expected velocity for object 1: {}", expected_v1);
-    println!("Expected velocity for object 2: {}", expected_v2);
 }
 
 #[test]
@@ -66,8 +58,10 @@ fn test_elastic_collision_with_different_masses() {
     let constants = PhysicsConstants::default();
     let mut obj1 = Object::new(1.0, 2.0, 0.0).unwrap();
     let mut obj2 = Object::new(2.0, -1.0, 1.0).unwrap();
+    let drag_coefficient = 0.47;
+    let cross_sectional_area = 1.0;
 
-    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001).unwrap();
+    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001, drag_coefficient, cross_sectional_area).unwrap();
 
     // Calculate expected velocities
     let m1 = 1.0;
@@ -77,12 +71,9 @@ fn test_elastic_collision_with_different_masses() {
     let expected_v1 = ((m1 - m2) * v1 + 2.0 * m2 * v2) / (m1 + m2);
     let expected_v2 = ((m2 - m1) * v2 + 2.0 * m1 * v1) / (m1 + m2);
 
+    // Account for minor air resistance effects
     assert_float_eq(obj1.velocity, expected_v1, 1e-2, Some("Different masses, object 1"));
     assert_float_eq(obj2.velocity, expected_v2, 1e-2, Some("Different masses, object 2"));
-
-    // Print actual and expected values for verification
-    println!("Object 1: Expected velocity: {}, Actual velocity: {}", expected_v1, obj1.velocity);
-    println!("Object 2: Expected velocity: {}, Actual velocity: {}", expected_v2, obj2.velocity);
 }
 
 #[test]
@@ -90,8 +81,10 @@ fn test_elastic_collision_with_long_duration() {
     let constants = PhysicsConstants::default();
     let mut obj1 = Object::new(1.0, 1.0, 0.0).unwrap();
     let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
+    let drag_coefficient = 0.47;
+    let cross_sectional_area = 1.0;
 
-    elastic_collision(&constants, &mut obj1, &mut obj2, PI / 4.0, 1.0).unwrap();
+    elastic_collision(&constants, &mut obj1, &mut obj2, PI / 4.0, 1.0, drag_coefficient, cross_sectional_area).unwrap();
 
     // Calculate expected velocities
     let m1 = obj1.mass;
@@ -106,23 +99,16 @@ fn test_elastic_collision_with_long_duration() {
     // Apply gravity effect
     let gravity_effect = constants.gravity * 1.0 * (PI / 4.0).sin();
 
-    // Apply air resistance (simplified model)
+    // Apply air resistance
     let air_resistance = |v: f64, m: f64| -> f64 {
-        let drag_coefficient = 0.47;
-        let cross_sectional_area = 1.0;
-        let drag_force = 0.5 * constants.air_density * v.powi(2) * drag_coefficient * cross_sectional_area;
-        let deceleration = drag_force / m;
-        -deceleration * 1.0
+        let air_resistance_force = constants.calculate_air_resistance(v.abs(), drag_coefficient, cross_sectional_area).unwrap();
+        let deceleration = air_resistance_force / m;
+        -deceleration * 1.0 * v.signum()
     };
 
     // Calculate final velocities considering gravity and air resistance
     let expected_v1 = v1_final - gravity_effect + air_resistance(v1_final, m1);
     let expected_v2 = v2_final - gravity_effect + air_resistance(v2_final, m2);
-
-    println!("Long duration collision, object 1 velocity: {}", obj1.velocity);
-    println!("Long duration collision, object 2 velocity: {}", obj2.velocity);
-    println!("Expected velocity for object 1: {}", expected_v1);
-    println!("Expected velocity for object 2: {}", expected_v2);
 
     assert_float_eq(obj1.velocity, expected_v1, 1e-3, Some("Long duration collision, object 1"));
     assert_float_eq(obj2.velocity, expected_v2, 1e-3, Some("Long duration collision, object 2"));
@@ -176,11 +162,22 @@ fn test_apply_force_failure() {
 }
 
 #[test]
-fn test_elastic_collision_failure() {
+fn test_elastic_collision_invalid_inputs() {
     let constants = PhysicsConstants::default();
     let mut obj1 = Object::new(1.0, 1.0, 0.0).unwrap();
     let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
+    let drag_coefficient = 0.47;
+    let cross_sectional_area = 1.0;
 
-    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.0).is_err(), "Should fail with zero duration");
-    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, -1.0).is_err(), "Should fail with negative duration");
+    // Test with zero duration
+    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.0, drag_coefficient, cross_sectional_area).is_err());
+
+    // Test with negative duration
+    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, -1.0, drag_coefficient, cross_sectional_area).is_err());
+
+    // Test with negative drag coefficient
+    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 1.0, -0.5, cross_sectional_area).is_err());
+
+    // Test with negative cross-sectional area
+    assert!(elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 1.0, drag_coefficient, -1.0).is_err());
 }

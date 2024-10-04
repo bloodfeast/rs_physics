@@ -64,13 +64,13 @@ impl Object {
 /// use rs_physics::physics::create_constants;
 ///
 /// let constants = create_constants(None, None, None, None);
-/// let mut obj1 = Object::new(1.0, 1.0, 0.0).unwrap();
+/// let mut obj1 = Object::new(1.0, 2.0, 0.0).unwrap();
 /// let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 ///
-/// elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 1.0).unwrap();
+/// elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
 ///
-/// assert_eq!(obj1.velocity, -1.287875);
-/// assert_eq!(obj2.velocity, 0.712125);
+/// assert_eq!(obj1.velocity, -0.724375);
+/// assert_eq!(obj2.velocity, 0.8975);
 /// ```
 ///
 pub fn elastic_collision(
@@ -78,10 +78,18 @@ pub fn elastic_collision(
     obj1: &mut Object,
     obj2: &mut Object,
     angle: f64,
-    duration: f64
+    duration: f64,
+    drag_coefficient: f64,
+    cross_sectional_area: f64
 ) -> Result<(), &'static str> {
     if duration <= 0.0 {
         return Err("Collision duration must be positive");
+    }
+    if drag_coefficient < 0.0 {
+        return Err("Drag coefficient must be non-negative");
+    }
+    if cross_sectional_area < 0.0 {
+        return Err("Cross-sectional area must be non-negative");
     }
 
     let m1 = obj1.mass;
@@ -96,18 +104,16 @@ pub fn elastic_collision(
     // Apply gravity effect
     let gravity_effect = constants.gravity * duration * angle.sin();
 
-    // Apply air resistance (simplified model)
-    let air_resistance = |v: f64, m: f64| -> f64 {
-        let drag_coefficient = 0.47; // Approximate drag coefficient for a sphere
-        let cross_sectional_area = 1.0; // Assuming unit area for simplicity
-        let drag_force = 0.5 * constants.air_density * v.powi(2) * drag_coefficient * cross_sectional_area;
-        let deceleration = drag_force / m;
-        -deceleration * duration
+    // Air resistance calculation
+    let air_resistance = |v: f64, m: f64| -> Result<f64, &'static str> {
+        let air_resistance_force = constants.calculate_air_resistance(v.abs(), drag_coefficient, cross_sectional_area)?;
+        let deceleration = air_resistance_force / m;
+        Ok(-deceleration * duration * v.signum())
     };
 
     // Calculate final velocities considering gravity and air resistance
-    let v1_final = v1_final - gravity_effect + air_resistance(v1_final, m1);
-    let v2_final = v2_final - gravity_effect + air_resistance(v2_final, m2);
+    let v1_final = v1_final - gravity_effect + air_resistance(v1_final, m1)?;
+    let v2_final = v2_final - gravity_effect + air_resistance(v2_final, m2)?;
 
     obj1.velocity = v1_final;
     obj2.velocity = v2_final;

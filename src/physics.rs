@@ -267,7 +267,6 @@ pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocit
     constants.calculate_kinetic_energy(mass, velocity)
 }
 
-
 /// Calculates the gravitational potential energy of an object.
 /// # Arguments
 /// * `constants` - The set of physics constants to use.
@@ -293,7 +292,6 @@ pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocit
 pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, height: f64) -> Result<f64, &'static str> {
     constants.calculate_potential_energy(mass, height)
 }
-
 
 /// Calculates the work done on an object.
 /// # Arguments
