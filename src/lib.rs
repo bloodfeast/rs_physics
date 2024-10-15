@@ -20,6 +20,8 @@ pub fn assert_float_eq(a: f64, b: f64, epsilon: f64, optional_message: Option<&s
     }
 }
 
+pub mod apis;
+
 #[cfg(test)]
 mod physics_tests;
 

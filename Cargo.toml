@@ -7,4 +7,10 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 
+[workspace]
+members = [
+    ".", ## This is the current directory
+    "rs_physics_wasm" ## This is the directory for the wasm project
+]
+
 [dependencies]

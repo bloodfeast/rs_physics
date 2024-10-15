@@ -109,7 +109,6 @@ pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f6
     constants.calculate_acceleration(force, mass)
 }
 
-
 /// Calculates the deceleration of an object.
 /// # Arguments
 /// * `constants` - The set of physics constants to use.
