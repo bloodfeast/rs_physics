@@ -40,7 +40,6 @@ impl Fluid {
     }
 }
 
-
 /// Calculates the Reynolds number for a fluid flow.
 /// # Arguments
 /// * `fluid` - A reference to the `Fluid` instance.

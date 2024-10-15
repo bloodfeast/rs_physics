@@ -43,6 +43,7 @@ pub struct PhysicsSystem {
     pub constants: PhysicsConstants,
 }
 impl PhysicsSystem {
+
     /// Creates a new `PhysicsSystem` with the given physical constants.
     /// # Arguments
     /// * `constants` - An instance of `PhysicsConstants` containing the physical constants for the simulation.
