@@ -1,9 +1,14 @@
 // src/lib.rs
 
+mod errors;
+pub mod apis;
 mod constants_config;
 pub mod physics;
 pub mod interactions;
 pub mod forces;
+pub mod rotational_dynamics;
+pub mod fluid_dynamics;
+pub mod thermodynamics;
 
 /// Asserts that two floating point numbers are approximately equal.
 ///
@@ -21,14 +26,19 @@ pub fn assert_float_eq(a: f64, b: f64, epsilon: f64, optional_message: Option<&s
     }
 }
 
+// -------------------------- //
+// local unit tests by module //
+// -------------------------- //
 
 #[cfg(test)]
 mod physics_tests;
-
 #[cfg(test)]
 mod interactions_tests;
 #[cfg(test)]
 mod forces_tests;
-
-pub mod apis;
-mod errors;
+#[cfg(test)]
+mod rotational_dynamics_tests;
+#[cfg(test)]
+mod fluid_dynamics_tests;
+#[cfg(test)]
+mod thermodynamics_tests;

@@ -1,7 +1,6 @@
 use std::f64::consts::PI;
 use std::cell::RefCell;
 use log::{Record, Level, Metadata, LevelFilter};
-use env_logger::Builder;
 use crate::physics::*;
 use crate::constants_config::PhysicsConstants;
 
