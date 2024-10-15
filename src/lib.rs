@@ -3,6 +3,7 @@
 mod constants_config;
 pub mod physics;
 pub mod interactions;
+pub mod forces;
 
 /// Asserts that two floating point numbers are approximately equal.
 ///
@@ -20,10 +21,14 @@ pub fn assert_float_eq(a: f64, b: f64, epsilon: f64, optional_message: Option<&s
     }
 }
 
-pub mod apis;
 
 #[cfg(test)]
 mod physics_tests;
 
 #[cfg(test)]
 mod interactions_tests;
+#[cfg(test)]
+mod forces_tests;
+
+pub mod apis;
+mod errors;

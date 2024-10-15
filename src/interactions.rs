@@ -1,18 +1,16 @@
 // src/interactions.rs
 
 use crate::constants_config::PhysicsConstants;
+use crate::forces::Force;
 use crate::physics;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Object {
-    /// The mass of the object in kilograms.
     pub mass: f64,
-    /// The velocity of the object in meters per second.
     pub velocity: f64,
-    /// The position of the object in meters.
     pub position: f64,
+    pub forces: Vec<Force>,
 }
-
 impl Object {
 
     /// Creates a new `Object` with the given mass, velocity, and position.
@@ -42,7 +40,20 @@ impl Object {
         if mass <= 0.0 {
             return Err("Mass must be positive");
         }
-        Ok(Self { mass, velocity, position })
+        Ok(Object {
+            mass,
+            velocity,
+            position,
+            forces: Vec::new(),
+        })
+    }
+
+    pub fn add_force(&mut self, force: Force) {
+        self.forces.push(force);
+    }
+
+    pub fn clear_forces(&mut self) {
+        self.forces.clear();
     }
 }
 
@@ -97,26 +108,23 @@ pub fn elastic_collision(
     let v1 = obj1.velocity;
     let v2 = obj2.velocity;
 
+    // Pre-compute common terms
+    let total_mass = m1 + m2;
+    let mass_diff = m1 - m2;
+
     // Calculate velocities after collision (ignoring external forces)
-    let v1_final = ((m1 - m2) * v1 + 2.0 * m2 * v2) / (m1 + m2);
-    let v2_final = ((m2 - m1) * v2 + 2.0 * m1 * v1) / (m1 + m2);
+    let v1_final = (mass_diff * v1 + 2.0 * m2 * v2) / total_mass;
+    let v2_final = (2.0 * m1 * v1 - mass_diff * v2) / total_mass;
 
     // Apply gravity effect
     let gravity_effect = constants.gravity * duration * angle.sin();
 
-    // Air resistance calculation
-    let air_resistance = |v: f64, m: f64| -> Result<f64, &'static str> {
-        let air_resistance_force = constants.calculate_air_resistance(v.abs(), drag_coefficient, cross_sectional_area)?;
-        let deceleration = air_resistance_force / m;
-        Ok(-deceleration * duration * v.signum())
-    };
+    // Simplified air resistance calculation
+    let air_resistance_factor = 0.5 * constants.air_density * drag_coefficient * cross_sectional_area * duration;
 
     // Calculate final velocities considering gravity and air resistance
-    let v1_final = v1_final - gravity_effect + air_resistance(v1_final, m1)?;
-    let v2_final = v2_final - gravity_effect + air_resistance(v2_final, m2)?;
-
-    obj1.velocity = v1_final;
-    obj2.velocity = v2_final;
+    obj1.velocity = v1_final - gravity_effect - air_resistance_factor * v1_final.abs() * v1_final / m1;
+    obj2.velocity = v2_final - gravity_effect - air_resistance_factor * v2_final.abs() * v2_final / m2;
 
     Ok(())
 }
@@ -188,8 +196,8 @@ pub fn apply_force(constants: &PhysicsConstants, obj: &mut Object, force: f64, t
     if time < 0.0 {
         return Err("Time cannot be negative");
     }
-    let acceleration = physics::calculate_acceleration(constants, force, obj.mass)?;
-    let velocity_change = physics::calculate_velocity(constants, 0.0, acceleration, time)?;
+    let acceleration = physics::calculate_acceleration(constants, force, obj.mass);
+    let velocity_change = physics::calculate_velocity(constants, 0.0, acceleration, time);
     let avg_velocity = obj.velocity + velocity_change / 2.0;
     obj.velocity += velocity_change;
     obj.position += avg_velocity * time;

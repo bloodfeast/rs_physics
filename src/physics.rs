@@ -1,6 +1,9 @@
 // src/physics.rs
 
+use std::f64::consts::PI;
+use log::{error, warn};
 pub use crate::constants_config::PhysicsConstants;
+use crate::errors::PhysicsError;
 
 /// Creates a new set of physics constants.
 /// # Arguments
@@ -49,11 +52,31 @@ pub fn create_constants(
 ///
 /// let terminal_velocity = calculate_terminal_velocity(&constants, 1.0, 0.5, 1.0);
 ///
-/// assert_eq!(terminal_velocity, Ok(5.658773213843641));
+/// assert_eq!(terminal_velocity, 5.658773213843641);
 /// ```
 ///
-pub fn calculate_terminal_velocity(constants: &PhysicsConstants, mass: f64, drag_coefficient: f64, cross_sectional_area: f64) -> Result<f64, &'static str> {
-    constants.calculate_terminal_velocity(mass, drag_coefficient, cross_sectional_area)
+pub fn calculate_terminal_velocity(constants: &PhysicsConstants, mass: f64, drag_coefficient: f64, cross_sectional_area: f64) -> f64 {
+    match constants.calculate_terminal_velocity(mass, drag_coefficient, cross_sectional_area) {
+        Ok(velocity) => velocity,
+        Err(e) => {
+            error!("Error calculating terminal velocity: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_terminal_velocity(mass.abs(), drag_coefficient, cross_sectional_area).unwrap_or(0.0)
+                },
+                PhysicsError::InvalidCoefficient => {
+                    warn!("Using absolute value of drag coefficient");
+                    constants.calculate_terminal_velocity(mass, drag_coefficient.abs(), cross_sectional_area).unwrap_or(0.0)
+                },
+                PhysicsError::InvalidArea => {
+                    warn!("Using absolute value of cross-sectional area");
+                    constants.calculate_terminal_velocity(mass, drag_coefficient, cross_sectional_area.abs()).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the air resistance on an object.
@@ -76,11 +99,27 @@ pub fn calculate_terminal_velocity(constants: &PhysicsConstants, mass: f64, drag
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let air_resistance = calculate_air_resistance(&constants, 1.0, 0.5, 1.0);
-/// assert_eq!(air_resistance, Ok(0.30625));
+/// assert_eq!(air_resistance, 0.30625);
 /// ```
 ///
-pub fn calculate_air_resistance(constants: &PhysicsConstants, velocity: f64, drag_coefficient: f64, cross_sectional_area: f64) -> Result<f64, &'static str> {
-    constants.calculate_air_resistance(velocity, drag_coefficient, cross_sectional_area)
+pub fn calculate_air_resistance(constants: &PhysicsConstants, velocity: f64, drag_coefficient: f64, cross_sectional_area: f64) -> f64 {
+    match constants.calculate_air_resistance(velocity, drag_coefficient, cross_sectional_area) {
+        Ok(resistance) => resistance,
+        Err(e) => {
+            error!("Error calculating air resistance: {}", e);
+            match e {
+                PhysicsError::InvalidCoefficient => {
+                    warn!("Using absolute value of drag coefficient");
+                    constants.calculate_air_resistance(velocity, drag_coefficient.abs(), cross_sectional_area).unwrap_or(0.0)
+                },
+                PhysicsError::InvalidArea => {
+                    warn!("Using absolute value of cross-sectional area");
+                    constants.calculate_air_resistance(velocity, drag_coefficient, cross_sectional_area.abs()).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the acceleration of an object.
@@ -102,11 +141,27 @@ pub fn calculate_air_resistance(constants: &PhysicsConstants, velocity: f64, dra
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let acceleration = calculate_acceleration(&constants, 10.0, 2.0);
-/// assert_eq!(acceleration, Ok(5.0));
+/// assert_eq!(acceleration, 5.0);
 /// ```
 ///
-pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f64) -> Result<f64, &'static str> {
-    constants.calculate_acceleration(force, mass)
+pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f64) -> f64 {
+    match constants.calculate_acceleration(force, mass) {
+        Ok(acceleration) => acceleration,
+        Err(e) => {
+            error!("Error calculating acceleration: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_acceleration(force, mass.abs()).unwrap_or(0.0)
+                },
+                PhysicsError::DivisionByZero => {
+                    error!("Mass cannot be zero");
+                    0.0
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the deceleration of an object.
@@ -128,11 +183,11 @@ pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f6
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let deceleration = calculate_deceleration(&constants, 10.0, 2.0);
-/// assert_eq!(deceleration, Ok(-5.0));
+/// assert_eq!(deceleration, -5.0);
 /// ```
 ///
-pub fn calculate_deceleration(constants: &PhysicsConstants, force: f64, mass: f64) -> Result<f64, &'static str> {
-    constants.calculate_deceleration(force, mass)
+pub fn calculate_deceleration(constants: &PhysicsConstants, force: f64, mass: f64) -> f64 {
+    -calculate_acceleration(constants, force, mass)
 }
 
 /// Calculates the force acting on an object.
@@ -154,11 +209,23 @@ pub fn calculate_deceleration(constants: &PhysicsConstants, force: f64, mass: f6
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let force = calculate_force(&constants, 2.0, 5.0);
-/// assert_eq!(force, Ok(10.0));
+/// assert_eq!(force, 10.0);
 /// ```
 ///
-pub fn calculate_force(constants: &PhysicsConstants, mass: f64, acceleration: f64) -> Result<f64, &'static str> {
-    constants.calculate_force(mass, acceleration)
+pub fn calculate_force(constants: &PhysicsConstants, mass: f64, acceleration: f64) -> f64 {
+    match constants.calculate_force(mass, acceleration) {
+        Ok(force) => force,
+        Err(e) => {
+            error!("Error calculating force: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_force(mass.abs(), acceleration).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the momentum of an object.
@@ -180,11 +247,23 @@ pub fn calculate_force(constants: &PhysicsConstants, mass: f64, acceleration: f6
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let momentum = calculate_momentum(&constants, 2.0, 5.0);
-/// assert_eq!(momentum, Ok(10.0));
+/// assert_eq!(momentum, 10.0);
 /// ```
 ///
-pub fn calculate_momentum(constants: &PhysicsConstants, mass: f64, velocity: f64) -> Result<f64, &'static str> {
-    constants.calculate_momentum(mass, velocity)
+pub fn calculate_momentum(constants: &PhysicsConstants, mass: f64, velocity: f64) -> f64 {
+    match constants.calculate_momentum(mass, velocity) {
+        Ok(momentum) => momentum,
+        Err(e) => {
+            error!("Error calculating momentum: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_momentum(mass.abs(), velocity).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the final velocity of an object under constant acceleration.
@@ -207,11 +286,23 @@ pub fn calculate_momentum(constants: &PhysicsConstants, mass: f64, velocity: f64
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let final_velocity = calculate_velocity(&constants, 10.0, 2.0, 5.0);
-/// assert_eq!(final_velocity, Ok(20.0));
+/// assert_eq!(final_velocity, 20.0);
 /// ```
 ///
-pub fn calculate_velocity(constants: &PhysicsConstants, initial_velocity: f64, acceleration: f64, time: f64) -> Result<f64, &'static str> {
-    constants.calculate_velocity(initial_velocity, acceleration, time)
+pub fn calculate_velocity(constants: &PhysicsConstants, initial_velocity: f64, acceleration: f64, time: f64) -> f64 {
+    match constants.calculate_velocity(initial_velocity, acceleration, time) {
+        Ok(velocity) => velocity,
+        Err(e) => {
+            error!("Error calculating velocity: {}", e);
+            match e {
+                PhysicsError::InvalidTime => {
+                    warn!("Using absolute value of time");
+                    constants.calculate_velocity(initial_velocity, acceleration, time.abs()).unwrap_or(initial_velocity)
+                },
+                _ => initial_velocity,
+            }
+        }
+    }
 }
 
 /// Calculates the average velocity of an object.
@@ -233,13 +324,21 @@ pub fn calculate_velocity(constants: &PhysicsConstants, initial_velocity: f64, a
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let avg_velocity = calculate_average_velocity(&constants, 100.0, 10.0);
-/// assert_eq!(avg_velocity, Ok(10.0));
+/// assert_eq!(avg_velocity, 10.0);
 /// ```
 ///
-pub fn calculate_average_velocity(constants: &PhysicsConstants, displacement: f64, time: f64) -> Result<f64, &'static str> {
-    constants.calculate_average_velocity(displacement, time)
+pub fn calculate_average_velocity(constants: &PhysicsConstants, displacement: f64, time: f64) -> f64 {
+    constants.calculate_average_velocity(displacement, time).unwrap_or_else(|e| {
+        error!("Error calculating average velocity: {}", e);
+        match e {
+            PhysicsError::DivisionByZero => {
+                error!("Time cannot be zero");
+                0.0
+            },
+            _ => 0.0,
+        }
+    })
 }
-
 /// Calculates the kinetic energy of an object.
 /// # Arguments
 /// * `constants` - The set of physics constants to use.
@@ -259,11 +358,23 @@ pub fn calculate_average_velocity(constants: &PhysicsConstants, displacement: f6
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let kinetic_energy = calculate_kinetic_energy(&constants, 2.0, 3.0);
-/// assert_eq!(kinetic_energy, Ok(9.0));
+/// assert_eq!(kinetic_energy, 9.0);
 /// ```
 ///
-pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocity: f64) -> Result<f64, &'static str> {
-    constants.calculate_kinetic_energy(mass, velocity)
+pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocity: f64) -> f64 {
+    match constants.calculate_kinetic_energy(mass, velocity) {
+        Ok(energy) => energy,
+        Err(e) => {
+            error!("Error calculating kinetic energy: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_kinetic_energy(mass.abs(), velocity).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the gravitational potential energy of an object.
@@ -285,11 +396,23 @@ pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocit
 ///
 /// let constants = create_constants(Some(9.8), None, None, None);
 /// let potential_energy = calculate_potential_energy(&constants, 2.0, 5.0);
-/// assert_eq!(potential_energy, Ok(98.0));
+/// assert_eq!(potential_energy, 98.0);
 /// ```
 ///
-pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, height: f64) -> Result<f64, &'static str> {
-    constants.calculate_potential_energy(mass, height)
+pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, height: f64) -> f64 {
+    match constants.calculate_potential_energy(mass, height) {
+        Ok(energy) => energy,
+        Err(e) => {
+            error!("Error calculating potential energy: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_potential_energy(mass.abs(), height).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the work done on an object.
@@ -308,11 +431,14 @@ pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, heigh
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let work = calculate_work(&constants, 10.0, 5.0);
-/// assert_eq!(work, Ok(50.0));
+/// assert_eq!(work, 50.0);
 /// ```
 ///
-pub fn calculate_work(constants: &PhysicsConstants, force: f64, displacement: f64) -> Result<f64, &'static str> {
-    constants.calculate_work(force, displacement)
+pub fn calculate_work(constants: &PhysicsConstants, force: f64, displacement: f64) -> f64 {
+    constants.calculate_work(force, displacement).unwrap_or_else(|e| {
+        error!("Error calculating work: {}", e);
+        0.0
+    })
 }
 
 
@@ -335,11 +461,20 @@ pub fn calculate_work(constants: &PhysicsConstants, force: f64, displacement: f6
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let power = calculate_power(&constants, 100.0, 10.0);
-/// assert_eq!(power, Ok(10.0));
+/// assert_eq!(power, 10.0);
 /// ```
 ///
-pub fn calculate_power(constants: &PhysicsConstants, work: f64, time: f64) -> Result<f64, &'static str> {
-    constants.calculate_power(work, time)
+pub fn calculate_power(constants: &PhysicsConstants, work: f64, time: f64) -> f64 {
+    constants.calculate_power(work, time).unwrap_or_else(|e| {
+        error!("Error calculating power: {}", e);
+        match e {
+            PhysicsError::DivisionByZero => {
+                error!("Time cannot be zero");
+                0.0
+            },
+            _ => 0.0,
+        }
+    })
 }
 
 /// Calculates the impulse applied to an object.
@@ -361,11 +496,23 @@ pub fn calculate_power(constants: &PhysicsConstants, work: f64, time: f64) -> Re
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let impulse = calculate_impulse(&constants, 10.0, 0.5);
-/// assert_eq!(impulse, Ok(5.0));
+/// assert_eq!(impulse, 5.0);
 /// ```
 ///
-pub fn calculate_impulse(constants: &PhysicsConstants, force: f64, time: f64) -> Result<f64, &'static str> {
-    constants.calculate_impulse(force, time)
+pub fn calculate_impulse(constants: &PhysicsConstants, force: f64, time: f64) -> f64 {
+    match constants.calculate_impulse(force, time) {
+        Ok(impulse) => impulse,
+        Err(e) => {
+            error!("Error calculating impulse: {}", e);
+            match e {
+                PhysicsError::InvalidTime => {
+                    warn!("Using absolute value of time");
+                    constants.calculate_impulse(force, time.abs()).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the coefficient of restitution for a collision.
@@ -387,11 +534,20 @@ pub fn calculate_impulse(constants: &PhysicsConstants, force: f64, time: f64) ->
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let cor = calculate_coefficient_of_restitution(&constants, -5.0, 3.0);
-/// assert_eq!(cor, Ok(0.6));
+/// assert_eq!(cor, 0.6);
 /// ```
 ///
-pub fn calculate_coefficient_of_restitution(constants: &PhysicsConstants, velocity_before: f64, velocity_after: f64) -> Result<f64, &'static str> {
-    constants.calculate_coefficient_of_restitution(velocity_before, velocity_after)
+pub fn calculate_coefficient_of_restitution(constants: &PhysicsConstants, velocity_before: f64, velocity_after: f64) -> f64 {
+    constants.calculate_coefficient_of_restitution(velocity_before, velocity_after).unwrap_or_else(|e| {
+        error!("Error calculating coefficient of restitution: {}", e);
+        match e {
+            PhysicsError::DivisionByZero => {
+                error!("Velocity before collision cannot be zero");
+                0.0
+            },
+            _ => 0.0,
+        }
+    })
 }
 
 
@@ -415,11 +571,28 @@ pub fn calculate_coefficient_of_restitution(constants: &PhysicsConstants, veloci
 ///
 /// let constants = create_constants(Some(9.8), None, None, None);
 /// let time = calculate_projectile_time_of_flight(&constants, 10.0, PI/4.0);
-/// assert_eq!(time.unwrap(), 1.4430750636460152);
+/// assert_eq!(time, 1.4430750636460152);
 /// ```
 ///
-pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial_velocity: f64, angle: f64) -> Result<f64, &'static str> {
-    constants.calculate_projectile_time_of_flight(initial_velocity, angle)
+pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial_velocity: f64, angle: f64) -> f64 {
+    match constants.calculate_projectile_time_of_flight(initial_velocity, angle) {
+        Ok(time) => time,
+        Err(e) => {
+            error!("Error calculating projectile time of flight: {}", e);
+            match e {
+                PhysicsError::InvalidVelocity => {
+                    warn!("Using absolute value of initial velocity");
+                    constants.calculate_projectile_time_of_flight(initial_velocity.abs(), angle).unwrap_or(0.0)
+                },
+                PhysicsError::InvalidAngle => {
+                    warn!("Clamping angle to range [0, π/2]");
+                    let clamped_angle = angle.clamp(0.0, PI / 2.0);
+                    constants.calculate_projectile_time_of_flight(initial_velocity, clamped_angle).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the maximum height reached by a projectile.
@@ -442,11 +615,28 @@ pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial
 ///
 /// let constants = create_constants(Some(9.8), None, None, None);
 /// let height = calculate_projectile_max_height(&constants, 10.0, PI/4.0);
-/// assert_eq!(height.unwrap(), 2.5510204081632657);
+/// assert_eq!(height, 2.5510204081632657);
 /// ```
 ///
-pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_velocity: f64, angle: f64) -> Result<f64, &'static str> {
-    constants.calculate_projectile_max_height(initial_velocity, angle)
+pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_velocity: f64, angle: f64) -> f64 {
+    match constants.calculate_projectile_max_height(initial_velocity, angle) {
+        Ok(height) => height,
+        Err(e) => {
+            error!("Error calculating projectile max height: {}", e);
+            match e {
+                PhysicsError::InvalidVelocity => {
+                    warn!("Using absolute value of initial velocity");
+                    constants.calculate_projectile_max_height(initial_velocity.abs(), angle).unwrap_or(0.0)
+                },
+                PhysicsError::InvalidAngle => {
+                    warn!("Clamping angle to range [0, π/2]");
+                    let clamped_angle = angle.clamp(0.0, PI / 2.0);
+                    constants.calculate_projectile_max_height(initial_velocity, clamped_angle).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the centripetal force on an object in circular motion.
@@ -469,11 +659,27 @@ pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_vel
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let force = calculate_centripetal_force(&constants, 1.0, 5.0, 2.0);
-/// assert_eq!(force, Ok(12.5));
+/// assert_eq!(force, 12.5);
 /// ```
 ///
-pub fn calculate_centripetal_force(constants: &PhysicsConstants, mass: f64, velocity: f64, radius: f64) -> Result<f64, &'static str> {
-    constants.calculate_centripetal_force(mass, velocity, radius)
+pub fn calculate_centripetal_force(constants: &PhysicsConstants, mass: f64, velocity: f64, radius: f64) -> f64 {
+    match constants.calculate_centripetal_force(mass, velocity, radius) {
+        Ok(force) => force,
+        Err(e) => {
+            error!("Error calculating centripetal force: {}", e);
+            match e {
+                PhysicsError::InvalidMass => {
+                    warn!("Using absolute value of mass");
+                    constants.calculate_centripetal_force(mass.abs(), velocity, radius).unwrap_or(0.0)
+                },
+                PhysicsError::DivisionByZero => {
+                    error!("Radius cannot be zero");
+                    0.0
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the torque applied to an object.
@@ -497,11 +703,23 @@ pub fn calculate_centripetal_force(constants: &PhysicsConstants, mass: f64, velo
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let torque = calculate_torque(&constants, 10.0, 2.0, PI/2.0);
-/// assert_eq!(torque, Ok(20.0));
+/// assert_eq!(torque, 20.0);
 /// ```
 ///
-pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64, angle: f64) -> Result<f64, &'static str> {
-    constants.calculate_torque(force, lever_arm, angle)
+pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64, angle: f64) -> f64 {
+    match constants.calculate_torque(force, lever_arm, angle) {
+        Ok(torque) => torque,
+        Err(e) => {
+            error!("Error calculating torque: {}", e);
+            match e {
+                PhysicsError::InvalidArea => {
+                    warn!("Using absolute value of lever arm");
+                    constants.calculate_torque(force, lever_arm.abs(), angle).unwrap_or(0.0)
+                },
+                _ => 0.0,
+            }
+        }
+    }
 }
 
 /// Calculates the angular velocity of an object in circular motion.
@@ -523,9 +741,18 @@ pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64
 ///
 /// let constants = create_constants(None, None, None, None);
 /// let angular_velocity = calculate_angular_velocity(&constants, 10.0, 2.0);
-/// assert_eq!(angular_velocity, Ok(5.0));
+/// assert_eq!(angular_velocity, 5.0);
 /// ```
 ///
-pub fn calculate_angular_velocity(constants: &PhysicsConstants, linear_velocity: f64, radius: f64) -> Result<f64, &'static str> {
-    constants.calculate_angular_velocity(linear_velocity, radius)
+pub fn calculate_angular_velocity(constants: &PhysicsConstants, linear_velocity: f64, radius: f64) -> f64 {
+    constants.calculate_angular_velocity(linear_velocity, radius).unwrap_or_else(|e| {
+        error!("Error calculating angular velocity: {}", e);
+        match e {
+            PhysicsError::DivisionByZero => {
+                error!("Radius cannot be zero");
+                0.0
+            },
+            _ => 0.0,
+        }
+    })
 }

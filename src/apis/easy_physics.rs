@@ -2,7 +2,7 @@
 
 use crate::constants_config::PhysicsConstants;
 use crate::interactions::{Object, elastic_collision, gravitational_force, apply_force};
-
+use rayon::prelude::*;
 
 /// A simplified interface for physics simulations.
 ///
@@ -166,6 +166,19 @@ impl EasyPhysics {
         cross_sectional_area: f64
     ) -> Result<(), &'static str> {
         elastic_collision(&self.constants, obj1, obj2, angle, duration, drag_coefficient, cross_sectional_area)
+    }
+
+    pub fn simulate_multiple_collisions(
+        constants: &PhysicsConstants,
+        object_pairs: &mut [(Object, Object)],
+        angle: f64,
+        duration: f64,
+        drag_coefficient: f64,
+        cross_sectional_area: f64
+    ) {
+        object_pairs.par_iter_mut().for_each(|(obj1, obj2)| {
+            let _ = elastic_collision(constants, obj1, obj2, angle, duration, drag_coefficient, cross_sectional_area);
+        });
     }
 
     /// Calculates the gravitational force between two objects.
