@@ -5,7 +5,7 @@ use env_logger::Builder;
 use crate::physics::*;
 use crate::constants_config::PhysicsConstants;
 
-// Helper function to assert floating point equality
+// Helper function to assert floating point equality (didn't want to pass a `None` message to assert_float_eq)
 fn assert_float_eq(a: f64, b: f64, epsilon: f64) {
     assert!((a - b).abs() < epsilon, "Expected {} to be approximately equal to {} (epsilon: {})", a, b, epsilon);
 }
