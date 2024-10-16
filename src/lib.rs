@@ -1,7 +1,7 @@
 // src/lib.rs
 
 mod errors;
-mod constants_config;
+ mod constants_config;
 pub mod apis;
 pub mod physics;
 pub mod interactions;
@@ -9,6 +9,8 @@ pub mod forces;
 pub mod rotational_dynamics;
 pub mod fluid_dynamics;
 pub mod thermodynamics;
+#[cfg(feature = "constraints")]
+pub mod constraint_solvers;
 
 /// Asserts that two floating point numbers are approximately equal.
 ///
@@ -42,3 +44,6 @@ mod rotational_dynamics_tests;
 mod fluid_dynamics_tests;
 #[cfg(test)]
 mod thermodynamics_tests;
+#[cfg(feature = "constraints")]
+#[cfg(test)]
+mod constraint_solvers_tests;

@@ -9,11 +9,16 @@ readme = "README.md"
 
 [workspace]
 members = [
-    ".", ## This is the current directory
-    "rs_physics_wasm" ## This is the directory for the wasm project
+    ".",
+    "rs_physics_wasm",
 ]
+
+[features]
+default = []
+constraints = []
 
 [dependencies]
 rayon = "1.10.0"
 log = "0.4"
 env_logger = "0.11"
+rand = "0.9.0-alpha.2"
