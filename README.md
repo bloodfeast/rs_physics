@@ -1,12 +1,17 @@
 # rs_physics
 
-rs_physics is a Rust library for simulating basic physics calculations and interactions. It provides a set of tools for working with physical constants, performing calculations, and simulating object interactions.
+rs_physics is a Rust library for simulating advanced physics calculations and interactions. It provides a comprehensive set of tools for working with physical constants, performing calculations, and simulating object interactions across various domains of physics.
 
 ## Features
 
 - Customizable physical constants
-- Basic physics calculations (e.g., velocity, acceleration, energy)
+- Advanced physics calculations (e.g., velocity, acceleration, energy)
 - Object interaction simulations (e.g., collisions, gravitational force)
+- Rotational dynamics
+- Thermodynamics
+- Fluid dynamics
+- Constraint solvers for connected bodies (optional, available behind feature flag)
+- WebAssembly (WASM) support
 - Comprehensive test suite
 
 ## Installation
@@ -35,7 +40,7 @@ fn main() {
     let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 
     // Simulate an elastic collision
-    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001).unwrap();
+    elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 0.001, 0.47, 1.0).unwrap();
 
     println!("After collision:");
     println!("Object 1 velocity: {}", obj1.velocity);
@@ -71,12 +76,55 @@ fn main() {
 - `gravitational_force`: Function to calculate gravitational force between objects
 - `apply_force`: Function to apply a force to an object and update its state
 
+### Rotational Dynamics
+
+- `RotationalObject`: Struct for objects with rotational properties
+- Moment of inertia calculations
+- Angular momentum and rotational kinetic energy
+- Torque application
+
+### Thermodynamics
+
+- `Thermodynamic`: Struct for thermodynamic systems
+- Heat transfer calculations
+- Entropy change
+- Work done in thermodynamic processes
+- Thermal efficiency
+- Specific heat capacity
+
+### Fluid Dynamics
+
+- `Fluid`: Struct representing fluid properties
+- Reynolds number calculation
+- Drag force calculation
+- Buoyant force calculation
+- Pressure drop in pipes
+
+### Constraint Solvers
+
+- `Joint`: Struct for rigid connections between objects
+- `Spring`: Struct for spring connections between objects
+- `IterativeConstraintSolver`: Solver for systems with multiple constraints
+
+### WebAssembly Support
+
+- WASM bindings for core library functionality
+- Easy integration with web projects
+
 ## Testing
 
 The library includes a comprehensive test suite. To run the tests, use:
 
 ```
 cargo test
+```
+
+## WebAssembly Build
+
+To build the WebAssembly module, navigate to the `rs_physics_wasm` directory and run:
+
+```
+wasm-pack build --target web
 ```
 
 ## Contributing
