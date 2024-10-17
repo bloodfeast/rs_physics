@@ -1,6 +1,7 @@
 // src/constants_config.rs
 
 use std::f64::consts::PI;
+use crate::DEFAULT_PHYSICS_CONSTANTS;
 use crate::errors::PhysicsError;
 
 #[derive(Debug, Clone, Copy)]
@@ -10,6 +11,7 @@ pub struct PhysicsConstants {
     pub speed_of_sound: f64,
     pub atmospheric_pressure: f64,
 }
+
 
 impl Default for PhysicsConstants {
     fn default() -> Self {
@@ -29,7 +31,7 @@ impl PhysicsConstants {
         speed_of_sound: Option<f64>,
         atmospheric_pressure: Option<f64>
     ) -> Self {
-        let default = PhysicsConstants::default();
+        let default = DEFAULT_PHYSICS_CONSTANTS;
         Self {
             gravity: gravity.unwrap_or(default.gravity),
             air_density: air_density.unwrap_or(default.air_density),

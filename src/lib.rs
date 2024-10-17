@@ -1,5 +1,7 @@
 // src/lib.rs
 
+use crate::constants_config::PhysicsConstants;
+
 mod errors;
  mod constants_config;
 pub mod apis;
@@ -11,6 +13,13 @@ pub mod fluid_dynamics;
 pub mod thermodynamics;
 #[cfg(feature = "constraints")]
 pub mod constraint_solvers;
+
+pub const DEFAULT_PHYSICS_CONSTANTS: PhysicsConstants = PhysicsConstants {
+    gravity: 9.80665,
+    air_density: 1.225,
+    speed_of_sound: 343.0,
+    atmospheric_pressure: 101_325.0,
+};
 
 /// Asserts that two floating point numbers are approximately equal.
 ///

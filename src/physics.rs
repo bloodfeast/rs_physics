@@ -46,11 +46,8 @@ pub fn create_constants(
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_terminal_velocity;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-///
-/// let terminal_velocity = calculate_terminal_velocity(&constants, 1.0, 0.5, 1.0);
+/// let terminal_velocity = calculate_terminal_velocity(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 1.0, 0.5, 1.0);
 ///
 /// assert_eq!(terminal_velocity, 5.658773213843641);
 /// ```
@@ -95,10 +92,8 @@ pub fn calculate_terminal_velocity(constants: &PhysicsConstants, mass: f64, drag
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_air_resistance;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let air_resistance = calculate_air_resistance(&constants, 1.0, 0.5, 1.0);
+/// let air_resistance = calculate_air_resistance(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 1.0, 0.5, 1.0);
 /// assert_eq!(air_resistance, 0.30625);
 /// ```
 ///
@@ -137,10 +132,8 @@ pub fn calculate_air_resistance(constants: &PhysicsConstants, velocity: f64, dra
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_acceleration;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let acceleration = calculate_acceleration(&constants, 10.0, 2.0);
+/// let acceleration = calculate_acceleration(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 2.0);
 /// assert_eq!(acceleration, 5.0);
 /// ```
 ///
@@ -179,10 +172,8 @@ pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_deceleration;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let deceleration = calculate_deceleration(&constants, 10.0, 2.0);
+/// let deceleration = calculate_deceleration(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 2.0);
 /// assert_eq!(deceleration, -5.0);
 /// ```
 ///
@@ -205,10 +196,8 @@ pub fn calculate_deceleration(constants: &PhysicsConstants, force: f64, mass: f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_force;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let force = calculate_force(&constants, 2.0, 5.0);
+/// let force = calculate_force(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 2.0, 5.0);
 /// assert_eq!(force, 10.0);
 /// ```
 ///
@@ -243,10 +232,8 @@ pub fn calculate_force(constants: &PhysicsConstants, mass: f64, acceleration: f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_momentum;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let momentum = calculate_momentum(&constants, 2.0, 5.0);
+/// let momentum = calculate_momentum(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 2.0, 5.0);
 /// assert_eq!(momentum, 10.0);
 /// ```
 ///
@@ -282,10 +269,8 @@ pub fn calculate_momentum(constants: &PhysicsConstants, mass: f64, velocity: f64
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_velocity;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let final_velocity = calculate_velocity(&constants, 10.0, 2.0, 5.0);
+/// let final_velocity = calculate_velocity(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 2.0, 5.0);
 /// assert_eq!(final_velocity, 20.0);
 /// ```
 ///
@@ -320,10 +305,8 @@ pub fn calculate_velocity(constants: &PhysicsConstants, initial_velocity: f64, a
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_average_velocity;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let avg_velocity = calculate_average_velocity(&constants, 100.0, 10.0);
+/// let avg_velocity = calculate_average_velocity(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 100.0, 10.0);
 /// assert_eq!(avg_velocity, 10.0);
 /// ```
 ///
@@ -354,10 +337,8 @@ pub fn calculate_average_velocity(constants: &PhysicsConstants, displacement: f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_kinetic_energy;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let kinetic_energy = calculate_kinetic_energy(&constants, 2.0, 3.0);
+/// let kinetic_energy = calculate_kinetic_energy(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 2.0, 3.0);
 /// assert_eq!(kinetic_energy, 9.0);
 /// ```
 ///
@@ -427,10 +408,8 @@ pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, heigh
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_work;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let work = calculate_work(&constants, 10.0, 5.0);
+/// let work = calculate_work(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 5.0);
 /// assert_eq!(work, 50.0);
 /// ```
 ///
@@ -457,10 +436,8 @@ pub fn calculate_work(constants: &PhysicsConstants, force: f64, displacement: f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_power;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let power = calculate_power(&constants, 100.0, 10.0);
+/// let power = calculate_power(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 100.0, 10.0);
 /// assert_eq!(power, 10.0);
 /// ```
 ///
@@ -492,10 +469,8 @@ pub fn calculate_power(constants: &PhysicsConstants, work: f64, time: f64) -> f6
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_impulse;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let impulse = calculate_impulse(&constants, 10.0, 0.5);
+/// let impulse = calculate_impulse(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 0.5);
 /// assert_eq!(impulse, 5.0);
 /// ```
 ///
@@ -530,10 +505,8 @@ pub fn calculate_impulse(constants: &PhysicsConstants, force: f64, time: f64) ->
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_coefficient_of_restitution;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let cor = calculate_coefficient_of_restitution(&constants, -5.0, 3.0);
+/// let cor = calculate_coefficient_of_restitution(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, -5.0, 3.0);
 /// assert_eq!(cor, 0.6);
 /// ```
 ///
@@ -655,10 +628,8 @@ pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_vel
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_centripetal_force;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let force = calculate_centripetal_force(&constants, 1.0, 5.0, 2.0);
+/// let force = calculate_centripetal_force(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 1.0, 5.0, 2.0);
 /// assert_eq!(force, 12.5);
 /// ```
 ///
@@ -699,10 +670,8 @@ pub fn calculate_centripetal_force(constants: &PhysicsConstants, mass: f64, velo
 /// ```
 /// use std::f64::consts::PI;
 /// use rs_physics::physics::calculate_torque;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let torque = calculate_torque(&constants, 10.0, 2.0, PI/2.0);
+/// let torque = calculate_torque(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 2.0, PI/2.0);
 /// assert_eq!(torque, 20.0);
 /// ```
 ///
@@ -737,10 +706,8 @@ pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64
 /// # Example
 /// ```
 /// use rs_physics::physics::calculate_angular_velocity;
-/// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(None, None, None, None);
-/// let angular_velocity = calculate_angular_velocity(&constants, 10.0, 2.0);
+/// let angular_velocity = calculate_angular_velocity(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, 10.0, 2.0);
 /// assert_eq!(angular_velocity, 5.0);
 /// ```
 ///

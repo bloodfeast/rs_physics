@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use log::{Record, Level, Metadata, LevelFilter};
 use crate::physics::*;
 use crate::constants_config::PhysicsConstants;
+use crate::DEFAULT_PHYSICS_CONSTANTS;
 
 // Helper function to assert floating point equality (didn't want to pass a `None` message to assert_float_eq)
 fn assert_float_eq(a: f64, b: f64, epsilon: f64) {
@@ -61,31 +62,29 @@ fn test_create_constants() {
 
 #[test]
 fn test_terminal_velocity() {
-    let constants = create_constants(None, None, None, None);
     let mass = 70.0; // kg
     let drag_coefficient = 0.7;
     let cross_sectional_area = 0.5; // m^2
-    let terminal_velocity = calculate_terminal_velocity(&constants, mass, drag_coefficient, cross_sectional_area);
-    let expected = ((2.0 * mass * constants.gravity) / (constants.air_density * drag_coefficient * cross_sectional_area)).sqrt();
+    let terminal_velocity = calculate_terminal_velocity(&DEFAULT_PHYSICS_CONSTANTS, mass, drag_coefficient, cross_sectional_area);
+    let expected = ((2.0 * mass * DEFAULT_PHYSICS_CONSTANTS.gravity) / (DEFAULT_PHYSICS_CONSTANTS.air_density * drag_coefficient * cross_sectional_area)).sqrt();
     assert_float_eq(terminal_velocity, expected, 1e-6);
 }
 
 #[test]
 fn test_terminal_velocity_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
     setup_test_logger();
     clear_log_messages();
 
     // Test with negative mass
-    let velocity = calculate_terminal_velocity(&constants, -70.0, 0.7, 0.5);
+    let velocity = calculate_terminal_velocity(&DEFAULT_PHYSICS_CONSTANTS, -70.0, 0.7, 0.5);
     assert!(velocity > 0.0);
 
     // Test with negative drag coefficient
-    let velocity = calculate_terminal_velocity(&constants, 70.0, -0.7, 0.5);
+    let velocity = calculate_terminal_velocity(&DEFAULT_PHYSICS_CONSTANTS, 70.0, -0.7, 0.5);
     assert!(velocity > 0.0);
 
     // Test with negative cross-sectional area
-    let velocity = calculate_terminal_velocity(&constants, 70.0, 0.7, -0.5);
+    let velocity = calculate_terminal_velocity(&DEFAULT_PHYSICS_CONSTANTS, 70.0, 0.7, -0.5);
     assert!(velocity > 0.0);
 
     // Check log messages
@@ -97,27 +96,25 @@ fn test_terminal_velocity_invalid_inputs() {
 
 #[test]
 fn test_air_resistance() {
-    let constants = create_constants(None, None, None, None);
     let velocity = 10.0; // m/s
     let drag_coefficient = 0.7;
     let cross_sectional_area = 0.5; // m^2
-    let air_resistance = calculate_air_resistance(&constants, velocity, drag_coefficient, cross_sectional_area);
-    let expected = 0.5 * constants.air_density * velocity * velocity * drag_coefficient * cross_sectional_area;
+    let air_resistance = calculate_air_resistance(&DEFAULT_PHYSICS_CONSTANTS, velocity, drag_coefficient, cross_sectional_area);
+    let expected = 0.5 * DEFAULT_PHYSICS_CONSTANTS.air_density * velocity * velocity * drag_coefficient * cross_sectional_area;
     assert_float_eq(air_resistance, expected, 1e-6);
 }
 
 #[test]
 fn test_air_resistance_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
     setup_test_logger();
     clear_log_messages();
 
     // Test with negative drag coefficient
-    let resistance = calculate_air_resistance(&constants, 10.0, -0.7, 0.5);
+    let resistance = calculate_air_resistance(&DEFAULT_PHYSICS_CONSTANTS, 10.0, -0.7, 0.5);
     assert!(resistance > 0.0);
 
     // Test with negative cross-sectional area
-    let resistance = calculate_air_resistance(&constants, 10.0, 0.7, -0.5);
+    let resistance = calculate_air_resistance(&DEFAULT_PHYSICS_CONSTANTS, 10.0, 0.7, -0.5);
     assert!(resistance > 0.0);
 
     // Check log messages
@@ -128,41 +125,35 @@ fn test_air_resistance_invalid_inputs() {
 
 #[test]
 fn test_acceleration() {
-    let constants = create_constants(None, None, None, None);
     let force = 100.0; // N
     let mass = 10.0; // kg
-    let acceleration = calculate_acceleration(&constants, force, mass);
+    let acceleration = calculate_acceleration(&DEFAULT_PHYSICS_CONSTANTS, force, mass);
     assert_float_eq(acceleration, 10.0, 1e-6);
 }
 
 #[test]
 fn test_acceleration_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with zero mass
-    let acceleration = calculate_acceleration(&constants, 100.0, 0.0);
+    let acceleration = calculate_acceleration(&DEFAULT_PHYSICS_CONSTANTS, 100.0, 0.0);
     assert_float_eq(acceleration, 0.0, 1e-6);
 
     // Test with negative mass
-    let acceleration = calculate_acceleration(&constants, 100.0, -10.0);
+    let acceleration = calculate_acceleration(&DEFAULT_PHYSICS_CONSTANTS, 100.0, -10.0);
     assert_float_eq(acceleration, 10.0, 1e-6); // Should use absolute value of mass
 }
 
 #[test]
 fn test_kinetic_energy() {
-    let constants = create_constants(None, None, None, None);
     let mass = 2.0; // kg
     let velocity = 3.0; // m/s
-    let kinetic_energy = calculate_kinetic_energy(&constants, mass, velocity);
+    let kinetic_energy = calculate_kinetic_energy(&DEFAULT_PHYSICS_CONSTANTS, mass, velocity);
     assert_float_eq(kinetic_energy, 9.0, 1e-6);
 }
 
 #[test]
 fn test_kinetic_energy_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with negative mass
-    let energy = calculate_kinetic_energy(&constants, -2.0, 3.0);
+    let energy = calculate_kinetic_energy(&DEFAULT_PHYSICS_CONSTANTS, -2.0, 3.0);
     assert_float_eq(energy, 9.0, 1e-6); // Should use absolute value of mass
 }
 
@@ -186,64 +177,54 @@ fn test_potential_energy_invalid_inputs() {
 
 #[test]
 fn test_work() {
-    let constants = create_constants(None, None, None, None);
     let force = 10.0; // N
     let displacement = 5.0; // m
-    let work = calculate_work(&constants, force, displacement);
+    let work = calculate_work(&DEFAULT_PHYSICS_CONSTANTS, force, displacement);
     assert_float_eq(work, 50.0, 1e-6);
 }
 
 #[test]
 fn test_power() {
-    let constants = create_constants(None, None, None, None);
     let work = 1000.0; // J
     let time = 10.0; // s
-    let power = calculate_power(&constants, work, time);
+    let power = calculate_power(&DEFAULT_PHYSICS_CONSTANTS, work, time);
     assert_float_eq(power, 100.0, 1e-6);
 }
 
 #[test]
 fn test_power_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with zero time
-    let power = calculate_power(&constants, 1000.0, 0.0);
+    let power = calculate_power(&DEFAULT_PHYSICS_CONSTANTS, 1000.0, 0.0);
     assert_float_eq(power, 0.0, 1e-6);
 }
 
 #[test]
 fn test_impulse() {
-    let constants = create_constants(None, None, None, None);
     let force = 50.0; // N
     let time = 0.1; // s
-    let impulse = calculate_impulse(&constants, force, time);
+    let impulse = calculate_impulse(&DEFAULT_PHYSICS_CONSTANTS, force, time);
     assert_float_eq(impulse, 5.0, 1e-6);
 }
 
 #[test]
 fn test_impulse_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with negative time
-    let impulse = calculate_impulse(&constants, 50.0, -0.1);
+    let impulse = calculate_impulse(&DEFAULT_PHYSICS_CONSTANTS, 50.0, -0.1);
     assert_float_eq(impulse, 5.0, 1e-6); // Should use absolute value of time
 }
 
 #[test]
 fn test_coefficient_of_restitution() {
-    let constants = create_constants(None, None, None, None);
     let velocity_before = -5.0; // m/s
     let velocity_after = 3.0; // m/s
-    let cor = calculate_coefficient_of_restitution(&constants, velocity_before, velocity_after);
+    let cor = calculate_coefficient_of_restitution(&DEFAULT_PHYSICS_CONSTANTS, velocity_before, velocity_after);
     assert_float_eq(cor, 0.6, 1e-6);
 }
 
 #[test]
 fn test_coefficient_of_restitution_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with zero velocity before collision
-    let cor = calculate_coefficient_of_restitution(&constants, 0.0, 3.0);
+    let cor = calculate_coefficient_of_restitution(&DEFAULT_PHYSICS_CONSTANTS, 0.0, 3.0);
     assert_float_eq(cor, 0.0, 1e-6);
 }
 
@@ -283,60 +264,51 @@ fn test_projectile_motion_invalid_inputs() {
 
 #[test]
 fn test_centripetal_force() {
-    let constants = create_constants(None, None, None, None);
     let mass = 2.0; // kg
     let velocity = 5.0; // m/s
     let radius = 3.0; // m
-    let force = calculate_centripetal_force(&constants, mass, velocity, radius);
+    let force = calculate_centripetal_force(&DEFAULT_PHYSICS_CONSTANTS, mass, velocity, radius);
     assert_float_eq(force, (2.0 * 5.0 * 5.0) / 3.0, 1e-6);
 }
 
 #[test]
 fn test_centripetal_force_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with negative mass
-    let force = calculate_centripetal_force(&constants, -2.0, 5.0, 3.0);
+    let force = calculate_centripetal_force(&DEFAULT_PHYSICS_CONSTANTS, -2.0, 5.0, 3.0);
     assert_float_eq(force, (2.0 * 5.0 * 5.0) / 3.0, 1e-6);
 
     // Test with zero radius
-    let force = calculate_centripetal_force(&constants, 2.0, 5.0, 0.0);
+    let force = calculate_centripetal_force(&DEFAULT_PHYSICS_CONSTANTS, 2.0, 5.0, 0.0);
     assert_float_eq(force, 0.0, 1e-6);
 }
 
 #[test]
 fn test_torque() {
-    let constants = create_constants(None, None, None, None);
     let force = 10.0; // N
     let lever_arm = 2.0; // m
     let angle = PI / 2.0; // 90 degrees in radians
-    let torque = calculate_torque(&constants, force, lever_arm, angle);
+    let torque = calculate_torque(&DEFAULT_PHYSICS_CONSTANTS, force, lever_arm, angle);
     assert_float_eq(torque, 20.0, 1e-6);
 }
 
 #[test]
 fn test_torque_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with negative lever arm
-    let torque = calculate_torque(&constants, 10.0, -2.0, PI / 2.0);
+    let torque = calculate_torque(&DEFAULT_PHYSICS_CONSTANTS, 10.0, -2.0, PI / 2.0);
     assert_float_eq(torque, 20.0, 1e-6);
 }
 
 #[test]
 fn test_angular_velocity() {
-    let constants = create_constants(None, None, None, None);
     let linear_velocity = 10.0; // m/s
     let radius = 2.0; // m
-    let angular_velocity = calculate_angular_velocity(&constants, linear_velocity, radius);
+    let angular_velocity = calculate_angular_velocity(&DEFAULT_PHYSICS_CONSTANTS, linear_velocity, radius);
     assert_float_eq(angular_velocity, 5.0, 1e-6);
 }
 
 #[test]
 fn test_angular_velocity_invalid_inputs() {
-    let constants = create_constants(None, None, None, None);
-
     // Test with zero radius
-    let angular_velocity = calculate_angular_velocity(&constants, 10.0, 0.0);
+    let angular_velocity = calculate_angular_velocity(&DEFAULT_PHYSICS_CONSTANTS, 10.0, 0.0);
     assert_float_eq(angular_velocity, 0.0, 1e-6);
 }

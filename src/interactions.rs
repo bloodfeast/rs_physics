@@ -72,9 +72,9 @@ impl Object {
 /// # Example
 /// ```
 /// use rs_physics::interactions::{Object, elastic_collision};
-/// use rs_physics::physics::create_constants;
+/// use rs_physics::DEFAULT_PHYSICS_CONSTANTS;
 ///
-/// let constants = create_constants(None, None, None, None);
+/// let constants = DEFAULT_PHYSICS_CONSTANTS;
 /// let mut obj1 = Object::new(1.0, 2.0, 0.0).unwrap();
 /// let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 ///
@@ -181,9 +181,9 @@ pub fn gravitational_force(constants: &PhysicsConstants, obj1: &Object, obj2: &O
 /// # Example
 /// ```
 /// use rs_physics::interactions::{Object, apply_force};
-/// use rs_physics::physics::create_constants;
+/// use rs_physics::DEFAULT_PHYSICS_CONSTANTS;
 ///
-/// let constants = create_constants(None, None, None, None);
+/// let constants = DEFAULT_PHYSICS_CONSTANTS;
 /// let mut obj = Object::new(1.0, 0.0, 0.0).unwrap();
 ///
 /// apply_force(&constants, &mut obj, 1.0, 1.0).unwrap();
