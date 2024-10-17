@@ -72,13 +72,10 @@ impl Object {
 /// # Example
 /// ```
 /// use rs_physics::interactions::{Object, elastic_collision};
-/// use rs_physics::DEFAULT_PHYSICS_CONSTANTS;
-///
-/// let constants = DEFAULT_PHYSICS_CONSTANTS;
 /// let mut obj1 = Object::new(1.0, 2.0, 0.0).unwrap();
 /// let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 ///
-/// elastic_collision(&constants, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
+/// elastic_collision(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
 ///
 /// assert_eq!(obj1.velocity, -0.724375);
 /// assert_eq!(obj2.velocity, 0.8975);
@@ -181,12 +178,9 @@ pub fn gravitational_force(constants: &PhysicsConstants, obj1: &Object, obj2: &O
 /// # Example
 /// ```
 /// use rs_physics::interactions::{Object, apply_force};
-/// use rs_physics::DEFAULT_PHYSICS_CONSTANTS;
-///
-/// let constants = DEFAULT_PHYSICS_CONSTANTS;
 /// let mut obj = Object::new(1.0, 0.0, 0.0).unwrap();
 ///
-/// apply_force(&constants, &mut obj, 1.0, 1.0).unwrap();
+/// apply_force(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, &mut obj, 1.0, 1.0).unwrap();
 ///
 /// assert_eq!(obj.velocity, 1.0);
 /// assert_eq!(obj.position, 0.5);
