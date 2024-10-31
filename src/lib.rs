@@ -3,16 +3,24 @@
 use crate::constants_config::PhysicsConstants;
 
 mod errors;
- mod constants_config;
+mod constants_config;
 pub mod apis;
 pub mod physics;
 pub mod interactions;
 pub mod forces;
+#[cfg(feature = "rotational_dynamics")]
 pub mod rotational_dynamics;
+#[cfg(feature = "fluid_dynamics")]
 pub mod fluid_dynamics;
+#[cfg(feature = "thermodynamics")]
 pub mod thermodynamics;
+
 #[cfg(feature = "constraints")]
 pub mod constraint_solvers;
+#[cfg(feature = "fluid_simulation")]
+pub mod fluid_simulation;
+#[cfg(feature = "materials")]
+pub mod materials;
 
 pub const DEFAULT_PHYSICS_CONSTANTS: PhysicsConstants = PhysicsConstants {
     gravity: 9.80665,
@@ -47,12 +55,21 @@ mod physics_tests;
 mod interactions_tests;
 #[cfg(test)]
 mod forces_tests;
+#[cfg(feature = "rotational_dynamics")]
 #[cfg(test)]
 mod rotational_dynamics_tests;
+#[cfg(feature = "fluid_dynamics")]
 #[cfg(test)]
 mod fluid_dynamics_tests;
+#[cfg(feature = "thermodynamics")]
 #[cfg(test)]
 mod thermodynamics_tests;
 #[cfg(feature = "constraints")]
 #[cfg(test)]
 mod constraint_solvers_tests;
+#[cfg(feature = "fluid_simulation")]
+#[cfg(test)]
+mod fluid_simulation_tests;
+#[cfg(feature = "materials")]
+#[cfg(test)]
+mod materials_tests;

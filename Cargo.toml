@@ -2,7 +2,7 @@
 name = "rs_physics"
 authors = ["Brandon White"]
 description = "A simple physics library written in Rust"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -14,8 +14,14 @@ members = [
 ]
 
 [features]
-default = []
+default = ["constraints", "materials"]
+all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics"]
 constraints = []
+materials = []
+fluid_simulation = []
+thermodynamics = []
+fluid_dynamics = []
+rotational_dynamics = []
 
 [dependencies]
 rayon = "1.10.0"
