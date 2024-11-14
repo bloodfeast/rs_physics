@@ -148,12 +148,15 @@ pub fn calculate_moment_of_inertia(shape: &ObjectShape, mass: f64, dimension: f6
         return Err(PhysicsError::InvalidMass);
     }
     if dimension <= 0.0 {
-        return Err(PhysicsError::InvalidArea);
+        return Err(PhysicsError::InvalidDimension);
     }
     match shape {
         ObjectShape::SolidSphere => Ok(0.4 * mass * dimension * dimension),
         ObjectShape::HollowSphere => Ok((2.0 / 3.0) * mass * dimension * dimension),
         ObjectShape::SolidCylinder => Ok(0.5 * mass * dimension * dimension),
         ObjectShape::Rod => Ok((1.0 / 12.0) * mass * dimension * dimension),
+        // If we get this far, then we must have forgotten something along the way
+        #[allow(unreachable_patterns)]
+        _ => Err(PhysicsError::UnsupportedShape),
     }
 }

@@ -1,17 +1,20 @@
 # rs_physics
 
-rs_physics is a Rust library for simulating advanced physics calculations and interactions. It provides a comprehensive set of tools for working with physical constants, performing calculations, and simulating object interactions across various domains of physics.
+rs_physics is a Rust library for simulating advanced physics calculations and interactions. 
+It provides a comprehensive set of tools for working with physical constants, performing calculations, and simulating object interactions across various domains of physics.
 
 ## Features
 
 - Customizable physical constants
 - Advanced physics calculations (e.g., velocity, acceleration, energy)
 - Object interaction simulations (e.g., collisions, gravitational force)
-- Rotational dynamics
-- Thermodynamics
-- Fluid dynamics
+- Rotational dynamics (e.g., torque, angular momentum) (optional, available behind feature flag)
+- Thermodynamics (e.g., heat transfer, entropy change) (optional, available behind feature flag)
+- Fluid dynamics (e.g., drag force, buoyant force) (optional, available behind feature flag)
+- Fluid Simulation based on eulerian method (optional, available behind feature flag)
+- Material properties and physics (e.g., density, specific heat capacity) (optional, available behind feature flag)
 - Constraint solvers for connected bodies (optional, available behind feature flag)
-- WebAssembly (WASM) support
+- WebAssembly (WASM) api for easy integration with web projects
 - Comprehensive test suite
 
 ## Installation

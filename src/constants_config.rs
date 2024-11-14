@@ -139,11 +139,20 @@ impl PhysicsConstants {
     }
 
     pub fn calculate_torque(&self, force: f64, lever_arm: f64, angle: f64) -> Result<f64, PhysicsError> {
-        if lever_arm < 0.0 { return Err(PhysicsError::InvalidArea); }
+        if lever_arm < 0.0 {
+            return Err(PhysicsError::InvalidDistance);
+        }
+        if !(0.0..=PI).contains(&angle) {
+            return Err(PhysicsError::InvalidAngle);
+        }
+        // TODO: Should we allow negative forces? I'm leaning towards yes for now.
+        // we may want to consider refactoring this into 2 functions based on torque direction
+        // and have a separate function to calculate the net torque
         Ok(force * lever_arm * angle.sin())
     }
 
     pub fn calculate_angular_velocity(&self, linear_velocity: f64, radius: f64) -> Result<f64, PhysicsError> {
+        if radius < 0.0 { return Err(PhysicsError::InvalidRadius); }
         if radius == 0.0 { return Err(PhysicsError::DivisionByZero); }
         Ok(linear_velocity / radius)
     }

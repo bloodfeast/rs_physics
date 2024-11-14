@@ -39,7 +39,7 @@ impl Thermodynamic {
             return Err(PhysicsError::CalculationError("Pressure must be positive".to_string()));
         }
         if volume <= 0.0 {
-            return Err(PhysicsError::InvalidArea);
+            return Err(PhysicsError::InvalidVolume);
         }
         Ok(Self {
             temperature,
@@ -79,6 +79,9 @@ pub fn calculate_heat_transfer(thermal_conductivity: f64, area: f64, temperature
     if area <= 0.0 || thickness <= 0.0 {
         return Err(PhysicsError::InvalidArea);
     }
+    if temperature_difference < 0.0 {
+        return Err(PhysicsError::CalculationError("Temperature difference cannot be negative".to_string()));
+    }
     Ok(thermal_conductivity * area * temperature_difference / thickness)
 }
 
@@ -108,6 +111,8 @@ pub fn calculate_entropy_change(initial_state: &Thermodynamic, final_state: &The
     if initial_state.temperature <= 0.0 || final_state.temperature <= 0.0 {
         return Err(PhysicsError::CalculationError("Temperature must be positive".to_string()));
     }
+    // TODO: Maybe add a check for heat_added < 0.0 here? or should it be allowed to calculate a negative entropy change in this function?
+    // TODO: Maybe it would be better to have a increase_entropy and decrease_entropy function instead?
     Ok(heat_added * (1.0 / initial_state.temperature - 1.0 / final_state.temperature))
 }
 

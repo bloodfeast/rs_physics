@@ -1,6 +1,7 @@
 // src/constraint_solvers.rs
 
 use rand::Rng;
+use std::arch::x86_64::*;
 use crate::errors::PhysicsError;
 use crate::interactions::Object;
 
@@ -123,21 +124,41 @@ impl IterativeConstraintSolver {
         let mut rng = rand::thread_rng();
 
         for iteration in 0..self.max_iterations {
-            let mut total_error = 0.0;
+            // Initialize SIMD register for error accumulation inside an unsafe block
+            let mut total_error_simd;
+
+            // SIMD must be performed inside an unsafe block
+            unsafe {
+                total_error_simd = _mm_set1_pd(0.0); // Set initial error to 0 in the SIMD register
+            }
 
             for constraint in &mut self.constraints {
                 constraint.solve(dt)?;
-                let error = constraint.calculate_error();
-                total_error += error * error;  // Sum of squared errors
 
-                // Add significant random perturbation to prevent trivial solutions
+                // Calculate error and square it
+                let error = constraint.calculate_error();
+                let error_squared = error * error;
+
+                unsafe {
+                    // Load error squared into a SIMD register and accumulate
+                    let error_simd = _mm_set1_pd(error_squared);
+                    total_error_simd = _mm_add_pd(total_error_simd, error_simd);
+                }
+
+                // Add random perturbations to prevent trivial solutions
                 if let Some(joint) = constraint.as_any().downcast_mut::<Joint>() {
                     joint.object1.position += rng.gen_range(-0.1..0.1);
                     joint.object2.position += rng.gen_range(-0.1..0.1);
                 }
             }
 
-            let rms_error = (total_error / self.constraints.len() as f64).sqrt();
+            // Sum elements in total_error_simd to get the final total_error value
+            let mut total_error = [0.0; 2];
+            unsafe {
+                _mm_storeu_pd(total_error.as_mut_ptr(), total_error_simd);
+            }
+            let total_error_scalar = total_error[0] + total_error[1];
+            let rms_error = (total_error_scalar / self.constraints.len() as f64).sqrt();
 
             println!("Iteration {}: RMS error = {}", iteration + 1, rms_error);
 

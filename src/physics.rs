@@ -30,6 +30,13 @@ pub fn create_constants(
     PhysicsConstants::new(gravity, air_density, speed_of_sound, atmospheric_pressure)
 }
 
+/// Defaulting to 0.0 to prevent a panic in the case of a completely unexpected error.
+/// We may want to actually panic here (since it would indicate that the calculation has failed) but for now let's leave it up to the caller to handle.
+fn warn_about_unexpected_calculation_error() -> f64 {
+    warn!("Unexpected calculation error.\nDefaulting to 0.0 to prevent panic\n - This behavior may be changed in the future.");
+    0.0
+}
+
 /// Calculates the terminal velocity of an object.
 /// # Arguments
 /// * `constants` - The set of physics constants to use.
@@ -70,7 +77,7 @@ pub fn calculate_terminal_velocity(constants: &PhysicsConstants, mass: f64, drag
                     warn!("Using absolute value of cross-sectional area");
                     constants.calculate_terminal_velocity(mass, drag_coefficient, cross_sectional_area.abs()).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -111,7 +118,7 @@ pub fn calculate_air_resistance(constants: &PhysicsConstants, velocity: f64, dra
                     warn!("Using absolute value of cross-sectional area");
                     constants.calculate_air_resistance(velocity, drag_coefficient, cross_sectional_area.abs()).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -151,7 +158,7 @@ pub fn calculate_acceleration(constants: &PhysicsConstants, force: f64, mass: f6
                     error!("Mass cannot be zero");
                     0.0
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -211,7 +218,7 @@ pub fn calculate_force(constants: &PhysicsConstants, mass: f64, acceleration: f6
                     warn!("Using absolute value of mass");
                     constants.calculate_force(mass.abs(), acceleration).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -247,7 +254,7 @@ pub fn calculate_momentum(constants: &PhysicsConstants, mass: f64, velocity: f64
                     warn!("Using absolute value of mass");
                     constants.calculate_momentum(mass.abs(), velocity).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -318,7 +325,7 @@ pub fn calculate_average_velocity(constants: &PhysicsConstants, displacement: f6
                 error!("Time cannot be zero");
                 0.0
             },
-            _ => 0.0,
+            _ => warn_about_unexpected_calculation_error(),
         }
     })
 }
@@ -352,7 +359,7 @@ pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocit
                     warn!("Using absolute value of mass");
                     constants.calculate_kinetic_energy(mass.abs(), velocity).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -390,7 +397,7 @@ pub fn calculate_potential_energy(constants: &PhysicsConstants, mass: f64, heigh
                     warn!("Using absolute value of mass");
                     constants.calculate_potential_energy(mass.abs(), height).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -449,7 +456,7 @@ pub fn calculate_power(constants: &PhysicsConstants, work: f64, time: f64) -> f6
                 error!("Time cannot be zero");
                 0.0
             },
-            _ => 0.0,
+            _ => warn_about_unexpected_calculation_error(),
         }
     })
 }
@@ -484,7 +491,7 @@ pub fn calculate_impulse(constants: &PhysicsConstants, force: f64, time: f64) ->
                     warn!("Using absolute value of time");
                     constants.calculate_impulse(force, time.abs()).unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -518,7 +525,7 @@ pub fn calculate_coefficient_of_restitution(constants: &PhysicsConstants, veloci
                 error!("Velocity before collision cannot be zero");
                 0.0
             },
-            _ => 0.0,
+            _ => warn_about_unexpected_calculation_error(),
         }
     })
 }
@@ -554,15 +561,19 @@ pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial
             error!("Error calculating projectile time of flight: {}", e);
             match e {
                 PhysicsError::InvalidVelocity => {
-                    warn!("Using absolute value of initial velocity");
-                    constants.calculate_projectile_time_of_flight(initial_velocity.abs(), angle).unwrap_or(0.0)
+                    warn!("Invalid initial_velocity provided ({:?}), defaulting to the absolute value of initial_velocity", initial_velocity);
+                    constants
+                        .calculate_projectile_time_of_flight(initial_velocity.abs(), angle)
+                        .unwrap_or(0.0)
                 },
                 PhysicsError::InvalidAngle => {
-                    warn!("Clamping angle to range [0, π/2]");
+                    warn!("Recovering from InvalidAngle by clamping angle to range [0, π/2].\n - The angle provided was: {:?}", angle);
                     let clamped_angle = angle.clamp(0.0, PI / 2.0);
-                    constants.calculate_projectile_time_of_flight(initial_velocity, clamped_angle).unwrap_or(0.0)
+                    constants
+                        .calculate_projectile_time_of_flight(initial_velocity, clamped_angle)
+                        .unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -598,15 +609,19 @@ pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_vel
             error!("Error calculating projectile max height: {}", e);
             match e {
                 PhysicsError::InvalidVelocity => {
-                    warn!("Using absolute value of initial velocity");
-                    constants.calculate_projectile_max_height(initial_velocity.abs(), angle).unwrap_or(0.0)
+                    warn!("Invalid initial_velocity provided ({:?}), defaulting to the absolute value of initial_velocity", initial_velocity);
+                    constants
+                        .calculate_projectile_max_height(initial_velocity.abs(), angle)
+                        .unwrap_or(0.0)
                 },
                 PhysicsError::InvalidAngle => {
-                    warn!("Clamping angle to range [0, π/2]");
+                    warn!("Recovering from InvalidAngle by clamping angle to range [0, π/2].\n - The angle provided was: {:?}", angle);
                     let clamped_angle = angle.clamp(0.0, PI / 2.0);
-                    constants.calculate_projectile_max_height(initial_velocity, clamped_angle).unwrap_or(0.0)
+                    constants
+                        .calculate_projectile_max_height(initial_velocity, clamped_angle)
+                        .unwrap_or(0.0)
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -640,14 +655,16 @@ pub fn calculate_centripetal_force(constants: &PhysicsConstants, mass: f64, velo
             error!("Error calculating centripetal force: {}", e);
             match e {
                 PhysicsError::InvalidMass => {
-                    warn!("Using absolute value of mass");
-                    constants.calculate_centripetal_force(mass.abs(), velocity, radius).unwrap_or(0.0)
+                    warn!("Invalid mass provided ({:?}), defaulting to the absolute value of mass", mass);
+                    constants
+                        .calculate_centripetal_force(mass.abs(), velocity, radius)
+                        .unwrap_or(0.0)
                 },
                 PhysicsError::DivisionByZero => {
                     error!("Radius cannot be zero");
                     0.0
                 },
-                _ => 0.0,
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -681,11 +698,20 @@ pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64
         Err(e) => {
             error!("Error calculating torque: {}", e);
             match e {
-                PhysicsError::InvalidArea => {
+                PhysicsError::InvalidDistance => {
                     warn!("Using absolute value of lever arm");
-                    constants.calculate_torque(force, lever_arm.abs(), angle).unwrap_or(0.0)
+                    constants
+                        .calculate_torque(force, lever_arm.abs(), angle)
+                        .unwrap_or(0.0)
                 },
-                _ => 0.0,
+                PhysicsError::InvalidAngle => {
+                    warn!("Recovering from InvalidAngle by clamping angle to range [0, π].\n - The angle provided was: {:?}", angle);
+                    let clamped_angle = angle.clamp(0.0, PI);
+                    constants
+                        .calculate_torque(force, lever_arm, clamped_angle)
+                        .unwrap_or(0.0)
+                },
+                _ => warn_about_unexpected_calculation_error(),
             }
         }
     }
@@ -712,14 +738,24 @@ pub fn calculate_torque(constants: &PhysicsConstants, force: f64, lever_arm: f64
 /// ```
 ///
 pub fn calculate_angular_velocity(constants: &PhysicsConstants, linear_velocity: f64, radius: f64) -> f64 {
+    if linear_velocity == 0.0 {
+        warn!("Linear velocity is zero; angular velocity will also be zero.");
+        return 0.0;
+    }
     constants.calculate_angular_velocity(linear_velocity, radius).unwrap_or_else(|e| {
         error!("Error calculating angular velocity: {}", e);
         match e {
+            PhysicsError::InvalidRadius => {
+                warn!("Recovering from InvalidRadius, using the absolute value of radius");
+                constants
+                    .calculate_angular_velocity(linear_velocity, radius.abs())
+                    .unwrap_or(0.0)
+            },
             PhysicsError::DivisionByZero => {
                 error!("Radius cannot be zero");
                 0.0
             },
-            _ => 0.0,
+            _ => warn_about_unexpected_calculation_error(),
         }
     })
 }
