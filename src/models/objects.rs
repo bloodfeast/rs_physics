@@ -1,4 +1,5 @@
 use crate::forces::Force;
+use crate::models::{Axis2D, Axis3D, Direction2D, Direction3D, ObjectIn2D, ObjectIn3D, ToObjectIn2D, ToObjectIn3D};
 
 pub trait FromCoordinates <T> {
     /// Creates a new instance of the struct from the given coordinates.
@@ -37,50 +38,6 @@ pub trait ToCoordinates <T> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Axis2D {
-    pub x: f64,
-    pub y: f64,
-}
-
-impl FromCoordinates<(f64, f64)> for Axis2D {
-    fn from_coord(position: (f64, f64)) -> Self {
-        Axis2D {
-            x: position.0,
-            y: position.1,
-        }
-    }
-}
-
-impl ToCoordinates<(f64, f64)> for Axis2D {
-    fn to_coord(&self) -> (f64, f64) {
-        (self.x, self.y)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Axis3D {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl FromCoordinates<(f64, f64, f64)> for Axis3D {
-    fn from_coord(position: (f64, f64, f64)) -> Self {
-        Axis3D {
-            x: position.0,
-            y: position.1,
-            z: position.2,
-        }
-    }
-}
-
-impl ToCoordinates<(f64, f64, f64)> for Axis3D {
-    fn to_coord(&self) -> (f64, f64, f64) {
-        (self.x, self.y, self.z)
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct Object {
     pub mass: f64,
     pub velocity: f64,
@@ -88,18 +45,49 @@ pub struct Object {
     pub forces: Vec<Force>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ObjectIn2D {
-    pub mass: f64,
-    pub velocity: f64,
-    pub position: Axis2D,
-    pub forces: Vec<Force>,
+impl Default for Object {
+    /// Creates a new `Object` with default values.
+    /// # Returns
+    /// A new `Object` with default values.
+    /// # Example
+    /// ```
+    /// use rs_physics::models::Object;
+    /// let obj = Object::default();
+    /// assert_eq!(obj.mass, 1.0);
+    /// assert_eq!(obj.velocity, 0.0);
+    /// assert_eq!(obj.position, 0.0);
+    /// assert_eq!(obj.forces.len(), 0);
+    /// ```
+    fn default() -> Self {
+        Object {
+            mass: 1.0,
+            velocity: 0.0,
+            position: 0.0,
+            forces: Vec::new(),
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
-pub struct ObjectIn3D {
-    pub mass: f64,
-    pub velocity: f64,
-    pub position: Axis3D,
-    pub forces: Vec<Force>,
+impl ToObjectIn2D for Object {
+    fn to_2d(&self) -> ObjectIn2D {
+        ObjectIn2D {
+            mass: self.mass,
+            velocity: self.velocity,
+            direction: Direction2D { x: 0.0, y: 0.0 },
+            position: Axis2D { x: self.position, y: 0.0 },
+            forces: self.forces.to_owned(),
+        }
+    }
+}
+
+impl ToObjectIn3D for Object {
+    fn to_3d(&self) -> ObjectIn3D {
+        ObjectIn3D {
+            mass: self.mass,
+            velocity: self.velocity,
+            direction: Direction3D { x: 0.0, y: 0.0, z: 0.0 },
+            position: Axis3D { x: self.position, y: 0.0, z: 0.0 },
+            forces: self.forces.to_owned(),
+        }
+    }
 }
