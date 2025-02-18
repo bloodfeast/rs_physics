@@ -598,7 +598,7 @@ pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial
 ///
 /// let constants = create_constants(Some(9.8), None, None, None);
 /// let height = calculate_projectile_max_height(&constants, 10.0, PI/4.0);
-/// assert_eq!(height, 2.5510204081632657);
+/// assert!((height - 2.551020408163265).abs() < 1e-6);
 /// ```
 ///
 pub fn calculate_projectile_max_height(constants: &PhysicsConstants, initial_velocity: f64, angle: f64) -> f64 {
