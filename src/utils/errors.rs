@@ -4,9 +4,11 @@ use std::error::Error;
 /// Represents errors that can occur during physics calculations.
 #[derive(Debug, Clone)]
 pub enum PhysicsError {
-    /// Indicates an invalid mass value (e.g., negative or zero mass).
+    /// Indicates an invalid mass value\
+    /// (e.g., negative or zero mass).
     InvalidMass,
-    /// Indicates an invalid dimension value (e.g., negative dimension).
+    /// Indicates an invalid dimension value\
+    /// (e.g., negative dimension).
     InvalidDimension,
     /// Indicates that the shape is not supported for the operation.
     UnsupportedShape,
@@ -14,25 +16,34 @@ pub enum PhysicsError {
     DivisionByZero,
     /// Indicates an invalid velocity value.
     InvalidVelocity,
-    /// Indicates an invalid time value (e.g., negative time).
+    /// Indicates an invalid time value\
+    /// (e.g., unexpectedly negative time).
     InvalidTime,
-    /// Indicates an invalid angle value (e.g., angle outside the expected range).
+    /// Indicates an invalid angle value\
+    /// (e.g., angle outside the expected range).
     InvalidAngle,
     /// Indicates an invalid force value.
     InvalidForce,
-    /// Indicates an invalid radius value (e.g., negative radius).
+    /// Indicates an invalid radius value\
+    /// (e.g., negative radius).
     InvalidRadius,
-    /// Indicates an invalid distance value (e.g., negative distance).
+    /// Indicates an invalid distance value\
+    /// (e.g., negative distance).
     InvalidDistance,
-    /// Indicates an invalid area value (e.g., negative area).
+    /// Indicates an invalid area value\
+    /// (e.g., negative area).
     InvalidArea,
-    /// Indicates an invalid volume value (e.g., negative volume).
+    /// Indicates an invalid volume value\
+    /// (e.g., negative volume).
     InvalidVolume,
-    /// Indicates an invalid coefficient value (e.g., negative drag coefficient).
+    /// Indicates an invalid coefficient value\
+    /// (e.g., negative drag coefficient).
     InvalidCoefficient,
-    /// Indicates that two objects are at the same position (e.g., when calculating gravitational force).
+    /// Indicates that two objects are at the same position\
+    /// (e.g., when calculating gravitational force).
     ObjectsAtSamePosition,
-    /// A general error for calculations that produce invalid results.
+    /// A general error for calculations that produce invalid results.\
+    /// The associated string is intended to add context.
     CalculationError(String),
 }
 

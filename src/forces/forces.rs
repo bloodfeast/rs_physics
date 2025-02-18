@@ -1,7 +1,7 @@
 // src/forces.rs
 
-use crate::constants_config::PhysicsConstants;
-use crate::interactions::Object;
+use crate::utils::PhysicsConstants;
+use crate::models::Object;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Force {
@@ -12,7 +12,6 @@ pub enum Force {
 }
 
 impl Force {
-
     /// Applies the force to an object with the given mass and velocity.
     /// # Arguments
     /// * `mass` - The mass of the object in kilograms.
@@ -53,7 +52,7 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// ```
     pub fn new(constants: PhysicsConstants) -> Self {
         PhysicsSystem {
@@ -68,8 +67,8 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let object = rs_physics::interactions::Object::new(10.0, 5.0, 0.0).unwrap();
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let object = rs_physics::models::Object::new(10.0, 5.0, 0.0).unwrap();
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.add_object(object);
     /// ```
     pub fn add_object(&mut self, object: Object) {
@@ -86,7 +85,7 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.update(0.01); // Update the system for a 10ms time step
     /// ```
     pub fn update(&mut self, dt: f64) {
@@ -108,7 +107,7 @@ impl PhysicsSystem {
     /// # Example
     ///
     /// ```
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.apply_gravity();
     /// ```
     pub fn apply_gravity(&mut self) {
@@ -125,7 +124,7 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.apply_drag(0.47, 1.0); // Apply drag with Cd = 0.47 and area = 1.0 m^2
     /// ```
     pub fn apply_drag(&mut self, drag_coefficient: f64, area: f64) {
@@ -142,7 +141,7 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.apply_spring(10.0, 0.1); // Apply spring force with k = 10 N/m and x = 0.1 m
     /// ```
     pub fn apply_spring(&mut self, k: f64, x: f64) {
@@ -158,7 +157,7 @@ impl PhysicsSystem {
     ///
     /// # Example
     /// ```
-    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::DEFAULT_PHYSICS_CONSTANTS);
+    /// let mut system = rs_physics::forces::PhysicsSystem::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.clear_forces();
     /// ```
     pub fn clear_forces(&mut self) {

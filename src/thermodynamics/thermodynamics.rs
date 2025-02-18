@@ -1,6 +1,6 @@
 // src/thermodynamics.rs
 
-use crate::errors::PhysicsError;
+use crate::utils::PhysicsError;
 
 pub struct Thermodynamic {
     pub temperature: f64,

@@ -1,8 +1,9 @@
 // src/constants_config.rs
-
 use std::f64::consts::PI;
-use crate::DEFAULT_PHYSICS_CONSTANTS;
-use crate::errors::PhysicsError;
+use crate::utils::{
+    DEFAULT_PHYSICS_CONSTANTS,
+    errors::PhysicsError
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicsConstants {

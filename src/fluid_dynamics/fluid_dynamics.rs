@@ -1,6 +1,6 @@
 // src/fluid_dynamics.rs
 
-use crate::errors::PhysicsError;
+use crate::utils::PhysicsError;
 
 pub struct Fluid {
     pub density: f64,

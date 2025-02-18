@@ -1,6 +1,6 @@
 // src/rotational_dynamics.rs
 
-use crate::errors::PhysicsError;
+use crate::utils::PhysicsError;
 
 pub enum ObjectShape {
     SolidSphere,

@@ -3,7 +3,7 @@
 
 use wasm_bindgen::prelude::*;
 use rs_physics::apis::easy_physics::EasyPhysics;
-use rs_physics::interactions::Object;
+use rs_physics::models::Object;
 
 #[wasm_bindgen]
 pub struct WasmPhysics {
