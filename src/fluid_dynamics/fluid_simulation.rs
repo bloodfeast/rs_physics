@@ -1,6 +1,6 @@
 // src/fluid_simulation.rs
 
-use crate::errors::PhysicsError;
+use crate::utils::PhysicsError;
 use std::vec::Vec;
 
 /// A 2D grid-based fluid simulation using the Eulerian method.
@@ -45,7 +45,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// // Create a 100x100 grid with water-like properties
     /// let fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
@@ -97,7 +97,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     ///
@@ -133,7 +133,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     ///
@@ -168,7 +168,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     ///
@@ -249,7 +249,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     /// fluid.add_density(50, 50, 1.0).unwrap();
@@ -280,7 +280,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     /// fluid.add_velocity(50, 50, 1.0, -1.0).unwrap();
@@ -596,7 +596,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     /// assert_eq!(fluid.get_total_mass(), 0.0);
@@ -629,7 +629,7 @@ impl FluidGrid {
     ///
     /// # Examples
     /// ```
-    /// use rs_physics::fluid_simulation::FluidGrid;
+    /// use rs_physics::fluid_dynamics::FluidGrid;
     ///
     /// let mut fluid = FluidGrid::new(100, 100, 0.1, 0.001, 0.016).unwrap();
     /// assert_eq!(fluid.get_kinetic_energy(), 0.0);

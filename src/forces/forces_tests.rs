@@ -1,8 +1,8 @@
 // src/forces_tests.rs
 
-use crate::constants_config::PhysicsConstants;
+use crate::utils::PhysicsConstants;
 use crate::forces::{Force, PhysicsSystem};
-use crate::interactions::Object;
+use crate::models::Object;
 use crate::assert_float_eq;
 
 #[test]

@@ -1,4 +1,4 @@
-use crate::fluid_simulation::FluidGrid;
+use crate::fluid_dynamics::FluidGrid;
 
 #[test]
 fn test_fluid_grid_creation() {

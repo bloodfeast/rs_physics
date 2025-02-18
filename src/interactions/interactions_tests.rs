@@ -2,8 +2,9 @@
 
 use std::f64::consts::PI;
 use crate::assert_float_eq;
-use crate::constants_config::PhysicsConstants;
-use crate::interactions::{Object, elastic_collision, gravitational_force, apply_force};
+use crate::utils::PhysicsConstants;
+use crate::interactions::{elastic_collision, gravitational_force, apply_force};
+use crate::models::Object;
 
 #[test]
 fn test_object_creation() {

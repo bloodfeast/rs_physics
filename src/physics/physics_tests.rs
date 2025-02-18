@@ -2,8 +2,7 @@ use std::f64::consts::PI;
 use std::cell::RefCell;
 use log::{Record, Level, Metadata, LevelFilter};
 use crate::physics::*;
-use crate::constants_config::PhysicsConstants;
-use crate::DEFAULT_PHYSICS_CONSTANTS;
+use crate::utils::{DEFAULT_PHYSICS_CONSTANTS, PhysicsConstants};
 
 // Helper function to assert floating point equality (didn't want to pass a `None` message to assert_float_eq)
 fn assert_float_eq(a: f64, b: f64, epsilon: f64) {

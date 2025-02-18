@@ -1,9 +1,9 @@
 // src/constraint_solvers_tests.rs
 
 use crate::assert_float_eq;
-use crate::interactions::Object;
-use crate::constraint_solvers::{Joint, Spring, ConstraintSolver, IterativeConstraintSolver};
-use crate::errors::PhysicsError;
+use crate::models::Object;
+use crate::constraints::constraint_solvers::{Joint, Spring, ConstraintSolver, IterativeConstraintSolver};
+use crate::utils::PhysicsError;
 
 #[test]
 fn test_joint_creation() {

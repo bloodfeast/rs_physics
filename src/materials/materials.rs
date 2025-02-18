@@ -1,6 +1,6 @@
 // src/materials.rs
 
-use crate::errors::PhysicsError;
+use crate::utils::PhysicsError;
 
 /// Represents different types of material failure
 #[derive(Debug, PartialEq)]

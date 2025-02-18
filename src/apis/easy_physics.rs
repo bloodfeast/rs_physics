@@ -1,8 +1,9 @@
 // src/apis/easy_physics.rs
 
-use crate::constants_config::PhysicsConstants;
-use crate::interactions::{Object, elastic_collision, gravitational_force, apply_force};
+use crate::utils::PhysicsConstants;
+use crate::interactions::{elastic_collision, gravitational_force, apply_force};
 use rayon::prelude::*;
+use crate::models::Object;
 
 /// A simplified interface for physics simulations.
 ///

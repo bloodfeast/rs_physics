@@ -2,8 +2,8 @@
 
 use rand::Rng;
 use std::arch::x86_64::*;
-use crate::errors::PhysicsError;
-use crate::interactions::Object;
+use crate::utils::PhysicsError;
+use crate::models::Object;
 
 pub struct Joint {
     pub object1: Object,

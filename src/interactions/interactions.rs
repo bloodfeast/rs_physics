@@ -1,18 +1,12 @@
 // src/interactions.rs
 
-use crate::constants_config::PhysicsConstants;
+use crate::utils::PhysicsConstants;
 use crate::forces::Force;
+use crate::models::Object;
 use crate::physics;
 
-#[derive(Debug, Clone)]
-pub struct Object {
-    pub mass: f64,
-    pub velocity: f64,
-    pub position: f64,
-    pub forces: Vec<Force>,
-}
-impl Object {
 
+impl Object {
     /// Creates a new `Object` with the given mass, velocity, and position.
     ///
     /// # Arguments
@@ -28,7 +22,7 @@ impl Object {
     ///
     /// # Example
     /// ```
-    /// use rs_physics::interactions::Object;
+    /// use rs_physics::models::Object;
     ///
     /// let obj = Object::new(1.0, 2.0, 3.0);
     /// assert!(obj.is_ok());
@@ -71,11 +65,12 @@ impl Object {
 ///
 /// # Example
 /// ```
-/// use rs_physics::interactions::{Object, elastic_collision};
+/// use rs_physics::interactions::elastic_collision;
+/// use rs_physics::models::Object;
 /// let mut obj1 = Object::new(1.0, 2.0, 0.0).unwrap();
 /// let mut obj2 = Object::new(1.0, -1.0, 1.0).unwrap();
 ///
-/// elastic_collision(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
+/// elastic_collision(&rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
 ///
 /// assert_eq!(obj1.velocity, -0.724375);
 /// assert_eq!(obj2.velocity, 0.8975);
@@ -141,7 +136,8 @@ pub fn elastic_collision(
 ///
 /// # Example
 /// ```
-/// use rs_physics::interactions::{Object, gravitational_force};
+/// use rs_physics::interactions::gravitational_force;
+/// use rs_physics::models::Object;
 /// use rs_physics::physics::create_constants;
 ///
 /// let constants = create_constants(Some(6.67430e-11), None, None, None);
@@ -177,10 +173,11 @@ pub fn gravitational_force(constants: &PhysicsConstants, obj1: &Object, obj2: &O
 ///
 /// # Example
 /// ```
-/// use rs_physics::interactions::{Object, apply_force};
+/// use rs_physics::interactions::apply_force;
+/// use rs_physics::models::Object;
 /// let mut obj = Object::new(1.0, 0.0, 0.0).unwrap();
 ///
-/// apply_force(&rs_physics::DEFAULT_PHYSICS_CONSTANTS, &mut obj, 1.0, 1.0).unwrap();
+/// apply_force(&rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS, &mut obj, 1.0, 1.0).unwrap();
 ///
 /// assert_eq!(obj.velocity, 1.0);
 /// assert_eq!(obj.position, 0.5);
