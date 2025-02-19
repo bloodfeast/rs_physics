@@ -70,6 +70,14 @@ impl ToCoordinates<(f64, f64)> for Axis2D {
     }
 }
 
+/// A 2D direction.\
+/// The x and y values should be between -1.0 and 1.0.\
+/// These values determine the velocity of an object in the x and y directions.
+/// - If the x is 1.0 and y is 0.0, it's expected to move right.
+/// - If the x is -1.0 and y is 0.0, it's expected to move left.
+/// - If the x is 0.0 and y is 1.0, it's expected to move up.
+/// - If the x is 0.0 and y is -1.0, it's expected to move down.
+/// - For non-cardinal directions, x and y are somewhere between -1.0 and 1.0.
 #[derive(Debug, Clone)]
 pub struct Direction2D {
     pub x: f64,
@@ -85,18 +93,20 @@ impl <T: FromCoordinates<(f64, f64, f64)>>To3D<T> for Direction2D {
     /// use rs_physics::models::{Direction2D, Direction3D};
     /// use rs_physics::models::To3D;
     ///
-    /// let direction = Direction2D { x: 1.0, y: 2.0 };
+    /// let direction = Direction2D { x: 0.5, y: 0.5 };
     /// let direction_3d: Direction3D = direction.to_3d();
     ///
-    /// assert_eq!(direction_3d.x, 1.0);
-    /// assert_eq!(direction_3d.y, 2.0);
+    /// assert_eq!(direction_3d.x, 0.5);
+    /// assert_eq!(direction_3d.y, 0.5);
     /// assert_eq!(direction_3d.z, 0.0);
     /// ```
     fn to_3d(&self) -> T
     where
         T: FromCoordinates<(f64, f64, f64)>
     {
-        T::from_coord((self.x, self.y, 0.0))
+        let x = self.x.clamp(-1.0, 1.0);
+        let y = self.y.clamp(-1.0, 1.0);
+        T::from_coord((x, y, 0.0))
     }
 }
 
@@ -108,9 +118,11 @@ impl PartialEq for Direction2D {
 
 impl FromCoordinates<(f64, f64)> for Direction2D {
     fn from_coord(position: (f64, f64)) -> Self {
+        let x = position.0.clamp(-1.0, 1.0);
+        let y = position.1.clamp(-1.0, 1.0);
         Direction2D {
-            x: position.0,
-            y: position.1,
+            x,
+            y,
         }
     }
 }

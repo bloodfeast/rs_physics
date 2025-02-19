@@ -73,6 +73,10 @@ impl <T: FromCoordinates<(f64, f64)>>To2D<T> for Axis3D {
     }
 }
 
+/// Represents 3D direction.\
+/// Like [Direction2D](super::Direction2D), this struct represents a direction vector in 3D space.\
+/// The `x`, `y`, and `z` fields represent the direction in the x, y, and z axes.\
+/// The values should be between -1.0 and 1.0.
 #[derive(Debug, Clone)]
 pub struct Direction3D {
     pub x: f64,
@@ -89,17 +93,19 @@ impl <T: FromCoordinates<(f64, f64)>>To2D<T> for Direction3D {
     /// use rs_physics::models::{Direction2D, Direction3D};
     /// use rs_physics::models::To2D;
     ///
-    /// let direction = Direction3D { x: 1.0, y: 2.0, z: 3.0 };
+    /// let direction = Direction3D { x: 0.5, y: 0.25, z: 0.25 };
     /// let direction_2d: Direction2D = direction.to_2d();
     ///
-    /// assert_eq!(direction_2d.x, 1.0);
-    /// assert_eq!(direction_2d.y, 2.0);
+    /// assert_eq!(direction_2d.x, 0.5);
+    /// assert_eq!(direction_2d.y, 0.25);
     /// ```
     fn to_2d(&self) -> T
     where
         T: FromCoordinates<(f64, f64)>
     {
-        T::from_coord((self.x, self.y))
+        let x = self.x.clamp(-1.0, 1.0);
+        let y = self.y.clamp(-1.0, 1.0);
+        T::from_coord((x, y))
     }
 }
 
@@ -111,10 +117,13 @@ impl PartialEq for Direction3D {
 
 impl FromCoordinates<(f64, f64, f64)> for Direction3D {
     fn from_coord(position: (f64, f64, f64)) -> Self {
+        let x = position.0.clamp(-1.0, 1.0);
+        let y = position.1.clamp(-1.0, 1.0);
+        let z = position.2.clamp(-1.0, 1.0);
         Direction3D {
-            x: position.0,
-            y: position.1,
-            z: position.2,
+            x,
+            y,
+            z,
         }
     }
 }
