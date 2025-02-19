@@ -187,6 +187,13 @@ impl PhysicsSystem2D {
             });
     }
 
+    /// Clears all forces from all objects in the system.
+    /// # Example
+    /// ```
+    /// use rs_physics::forces::PhysicsSystem2D;
+    /// let mut system = rs_physics::forces::PhysicsSystem2D::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
+    /// system.clear_forces();
+    /// ```
     pub fn clear_forces(&mut self) {
         self.objects
             .par_iter_mut()
