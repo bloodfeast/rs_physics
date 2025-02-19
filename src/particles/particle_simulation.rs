@@ -121,8 +121,7 @@ impl Simulation {
     /// For each particle, the simulation computes the velocity components,
     /// applies gravity, updates the position, and recalculates the new speed and normalized direction.
     ///
-    /// When AVX is available, particles are updated in blocks of 4 using SIMD intrinsics.
-    /// Otherwise, Rayon is used to process the particles in parallel.
+    /// This method uses runtime detection to decide whether to use an AVX‑optimized update or a Rayon‑based fallback.
     ///
     /// # Examples (non-AVX)
     ///
@@ -142,78 +141,93 @@ impl Simulation {
     /// assert!(sim.positions_y[0] > initial_y, "Particle did not move vertically");
     /// ```
     pub fn step(&mut self) -> Result<(), PhysicsError> {
-
-        #[cfg(target_feature = "avx")]
-        {
-            let n = self.speeds.len();
-            let mut i = 0;
-            // Process particles in blocks of 4 using AVX.
+        if std::is_x86_feature_detected!("avx") {
+            // SAFETY: We have confirmed at runtime that the CPU supports AVX.
             unsafe {
-                use std::arch::x86_64::*;
-                while i + 4 <= n {
-                    let speed = _mm256_loadu_pd(self.speeds.as_ptr().add(i));
-                    let dir_x = _mm256_loadu_pd(self.directions_x.as_ptr().add(i));
-                    let dir_y = _mm256_loadu_pd(self.directions_y.as_ptr().add(i));
-                    let pos_x = _mm256_loadu_pd(self.positions_x.as_ptr().add(i));
-                    let pos_y = _mm256_loadu_pd(self.positions_y.as_ptr().add(i));
-
-                    let vx = _mm256_mul_pd(speed, dir_x);
-                    let vy = _mm256_mul_pd(speed, dir_y);
-
-                    let gravity_dt = _mm256_set1_pd(self.constants.gravity * self.dt);
-                    let vy = _mm256_add_pd(vy, gravity_dt);
-
-                    let dt_vec = _mm256_set1_pd(self.dt);
-                    let new_pos_x = _mm256_add_pd(pos_x, _mm256_mul_pd(vx, dt_vec));
-                    let new_pos_y = _mm256_add_pd(pos_y, _mm256_mul_pd(vy, dt_vec));
-
-                    let vx2 = _mm256_mul_pd(vx, vx);
-                    let vy2 = _mm256_mul_pd(vy, vy);
-                    let sum = _mm256_add_pd(vx2, vy2);
-                    let new_speed = _mm256_sqrt_pd(sum);
-
-                    let zero = _mm256_set1_pd(0.0);
-                    let mask = _mm256_cmp_pd(new_speed, zero, _CMP_EQ_OQ);
-                    let new_dir_x = _mm256_blendv_pd(_mm256_div_pd(vx, new_speed), dir_x, mask);
-                    let new_dir_y = _mm256_blendv_pd(_mm256_div_pd(vy, new_speed), dir_y, mask);
-
-                    _mm256_storeu_pd(self.positions_x.as_mut_ptr().add(i), new_pos_x);
-                    _mm256_storeu_pd(self.positions_y.as_mut_ptr().add(i), new_pos_y);
-                    _mm256_storeu_pd(self.speeds.as_mut_ptr().add(i), new_speed);
-                    _mm256_storeu_pd(self.directions_x.as_mut_ptr().add(i), new_dir_x);
-                    _mm256_storeu_pd(self.directions_y.as_mut_ptr().add(i), new_dir_y);
-
-                    i += 4;
-                }
+                Self::step_avx(self)
+                    .expect("AVX step failed");
             }
+        } else {
+            Self::step_fallback(self);
+        }
+        Ok(())
+    }
 
-            // If there are any remaining particles, use the update_slice function.
-            if i < n {
-                Self::update_slice(
-                    &mut self.positions_x[i..n],
-                    &mut self.positions_y[i..n],
-                    &mut self.speeds[i..n],
-                    &mut self.directions_x[i..n],
-                    &mut self.directions_y[i..n],
-                    self.dt,
-                    self.constants.gravity,
-                );
-            }
+    /// AVX-optimized update function.
+    ///
+    /// # Safety
+    ///
+    /// This function must only be called when AVX is available.
+    #[target_feature(enable = "avx")]
+    unsafe fn step_avx(&mut self) -> Result<(), PhysicsError> {
+
+        let n = self.speeds.len();
+        let mut i = 0;
+        // Process particles in blocks of 4 using AVX.
+        use std::arch::x86_64::*;
+        while i + 4 <= n {
+            let speed = _mm256_loadu_pd(self.speeds.as_ptr().add(i));
+            let dir_x = _mm256_loadu_pd(self.directions_x.as_ptr().add(i));
+            let dir_y = _mm256_loadu_pd(self.directions_y.as_ptr().add(i));
+            let pos_x = _mm256_loadu_pd(self.positions_x.as_ptr().add(i));
+            let pos_y = _mm256_loadu_pd(self.positions_y.as_ptr().add(i));
+
+            let vx = _mm256_mul_pd(speed, dir_x);
+            let vy = _mm256_mul_pd(speed, dir_y);
+
+            let gravity_dt = _mm256_set1_pd(self.constants.gravity * self.dt);
+            let vy = _mm256_add_pd(vy, gravity_dt);
+
+            let dt_vec = _mm256_set1_pd(self.dt);
+            let new_pos_x = _mm256_add_pd(pos_x, _mm256_mul_pd(vx, dt_vec));
+            let new_pos_y = _mm256_add_pd(pos_y, _mm256_mul_pd(vy, dt_vec));
+
+            let vx2 = _mm256_mul_pd(vx, vx);
+            let vy2 = _mm256_mul_pd(vy, vy);
+            let sum = _mm256_add_pd(vx2, vy2);
+            let new_speed = _mm256_sqrt_pd(sum);
+
+            let zero = _mm256_set1_pd(0.0);
+            let mask = _mm256_cmp_pd::<_CMP_EQ_OQ>(new_speed, zero);
+            let new_dir_x = _mm256_blendv_pd(_mm256_div_pd(vx, new_speed), dir_x, mask);
+            let new_dir_y = _mm256_blendv_pd(_mm256_div_pd(vy, new_speed), dir_y, mask);
+
+            _mm256_storeu_pd(self.positions_x.as_mut_ptr().add(i), new_pos_x);
+            _mm256_storeu_pd(self.positions_y.as_mut_ptr().add(i), new_pos_y);
+            _mm256_storeu_pd(self.speeds.as_mut_ptr().add(i), new_speed);
+            _mm256_storeu_pd(self.directions_x.as_mut_ptr().add(i), new_dir_x);
+            _mm256_storeu_pd(self.directions_y.as_mut_ptr().add(i), new_dir_y);
+
+            i += 4;
         }
 
-        #[cfg(not(target_feature = "avx"))]
-        {
+        // If there are any remaining particles, use the update_slice function.
+        if i < n {
             Self::update_slice(
-                &mut self.positions_x,
-                &mut self.positions_y,
-                &mut self.speeds,
-                &mut self.directions_x,
-                &mut self.directions_y,
+                &mut self.positions_x[i..n],
+                &mut self.positions_y[i..n],
+                &mut self.speeds[i..n],
+                &mut self.directions_x[i..n],
+                &mut self.directions_y[i..n],
                 self.dt,
                 self.constants.gravity,
             );
         }
+
         Ok(())
+    }
+
+    /// Fallback update function when AVX is not available.
+    fn step_fallback(sim: &mut Simulation) {
+        Self::update_slice(
+            &mut sim.positions_x,
+            &mut sim.positions_y,
+            &mut sim.speeds,
+            &mut sim.directions_x,
+            &mut sim.directions_y,
+            sim.dt,
+            sim.constants.gravity,
+        );
     }
 
     /// Runs the simulation for a specified number of steps.
