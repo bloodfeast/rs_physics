@@ -14,6 +14,7 @@ It provides a comprehensive set of tools for working with physical constants, pe
 - Fluid Simulation based on eulerian method (optional, available behind feature flag)
 - Material properties and physics (e.g., density, specific heat capacity) (optional, available behind feature flag)
 - Constraint solvers for connected bodies (optional, available behind feature flag)
+- Particle system simulation (optional, available behind feature flag)
 - WebAssembly (WASM) api for easy integration with web projects
 - Comprehensive test suite
 
@@ -108,6 +109,12 @@ fn main() {
 - `Joint`: Struct for rigid connections between objects
 - `Spring`: Struct for spring connections between objects
 - `IterativeConstraintSolver`: Solver for systems with multiple constraints
+
+### Particle System Simulation
+- `Particle`: Struct for individual particles
+- `Simulation`: Struct for particle system simulation
+  - Includes support for AVX instructions for faster calculations (4-way SIMD implementation)
+    - Fallback to scalar implementation for systems without AVX support using `Rayon` for parallelism
 
 ### WebAssembly Support
 
