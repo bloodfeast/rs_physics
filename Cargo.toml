@@ -15,13 +15,14 @@ members = [
 
 [features]
 default = ["constraints", "materials"]
-all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics"]
+all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics", "particles"]
 constraints = []
 materials = []
 fluid_simulation = []
 thermodynamics = []
 fluid_dynamics = []
 rotational_dynamics = []
+particles = []
 
 [dependencies]
 rayon = "1.10.0"

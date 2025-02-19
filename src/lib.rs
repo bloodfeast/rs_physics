@@ -9,6 +9,7 @@ pub mod fluid_dynamics;
 pub mod thermodynamics;
 pub mod materials;
 pub mod models;
+pub mod particles;
 
 /// ### General helper function
 /// - Asserts that two floating point numbers are approximately equal.
