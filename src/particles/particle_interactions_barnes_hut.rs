@@ -525,8 +525,8 @@ pub fn compute_force_scalar(p: ParticleData, worklist: &[ApproxNode], g: f64) ->
 /// # Example
 ///
 /// ```
-/// use rs_physics::particles::{BarnesHutNode, ParticleData, Quad, build_tree, compute_net_force};
 /// // This example assumes AVX is available.
+/// use rs_physics::particles::{BarnesHutNode, ParticleData, Quad, build_tree, compute_net_force};
 /// let particles = [
 ///     ParticleData { x: 0.1, y: 0.0, mass: 1.0 },
 ///     ParticleData { x: 0.2, y: 0.0, mass: 1.0 },
