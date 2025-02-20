@@ -2,6 +2,7 @@ use log::warn;
 use rayon::prelude::*;
 use crate::forces::Force;
 use crate::models::ObjectIn2D;
+use crate::physics::calculate_terminal_velocity;
 use crate::utils::PhysicsConstants;
 
 pub struct PhysicsSystem2D {
@@ -130,6 +131,28 @@ impl PhysicsSystem2D {
                 let (x_velocity, y_velocity) = object.get_directional_velocities();
                 object.position.x += x_velocity * time_step;
                 object.position.y += y_velocity * time_step;
+
+                // --- New Code to Correct for Gravity and Adjust Vertical Direction ---
+                // Apply gravity to the y velocity.
+                let new_y_velocity = y_velocity + self.constants.gravity * time_step;
+                // Recalculate overall speed using the original x component and the adjusted y.
+                let new_speed = (x_velocity * x_velocity + new_y_velocity * new_y_velocity).sqrt();
+                object.velocity = new_speed;
+                if new_speed > 0.0 {
+                    object.direction.x = (x_velocity / new_speed).clamp(-1.0, 1.0);
+                }
+                // Use your helper to calculate terminal velocity.
+                // Here we assume default values (0.45 for drag coefficient and 1.0 for area)
+                // Adjust these as needed for your simulation.
+                let terminal_velocity = calculate_terminal_velocity(&self.constants, object.mass, 0.45, 1.0);
+                // If the object is falling (new_y_velocity negative), scale direction.y toward -1.0.
+                // When ascending, set direction.y to 0.
+                if new_y_velocity < 0.0 {
+                    let ratio = (-new_y_velocity / terminal_velocity).min(1.0);
+                    object.direction.y = -ratio;
+                } else {
+                    object.direction.y = 0.0;
+                }
             });
     }
 
