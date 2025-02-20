@@ -139,7 +139,7 @@ impl PhysicsSystem2D {
                 let new_speed = (x_velocity * x_velocity + new_y_velocity * new_y_velocity).sqrt();
                 object.velocity = new_speed;
                 if new_speed > 0.0 {
-                    object.direction.x = (x_velocity / new_speed).clamp(-1.0, 1.0) * -1.0;
+                    object.direction.x = (x_velocity / new_speed).clamp(-1.0, 1.0);
                 }
                 // Use your helper to calculate terminal velocity.
                 // Here we assume default values (0.45 for drag coefficient and 1.0 for area)
