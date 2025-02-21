@@ -10,6 +10,7 @@ pub use crate::utils::{PhysicsConstants, PhysicsError};
 /// * `air_density` - The density of air.
 /// * `speed_of_sound` - The speed of sound in air.
 /// * `atmospheric_pressure` - The atmospheric pressure.
+/// * `ground_level` - The reference point for gravitational potential energy.
 ///
 /// # Returns
 /// A new set of physics constants.
@@ -18,15 +19,16 @@ pub use crate::utils::{PhysicsConstants, PhysicsError};
 /// ```
 /// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(Some(9.81), Some(1.225), Some(343.0), Some(101325.0));
+/// let constants = create_constants(Some(9.81), Some(1.225), Some(343.0), Some(101325.0), Some(0.0));
 /// ```
 pub fn create_constants(
     gravity: Option<f64>,
     air_density: Option<f64>,
     speed_of_sound: Option<f64>,
-    atmospheric_pressure: Option<f64>
+    atmospheric_pressure: Option<f64>,
+    ground_level: Option<f64>,
 ) -> PhysicsConstants {
-    PhysicsConstants::new(gravity, air_density, speed_of_sound, atmospheric_pressure)
+    PhysicsConstants::new(gravity, air_density, speed_of_sound, atmospheric_pressure, ground_level)
 }
 
 /// Defaulting to 0.0 to prevent a panic in the case of a completely unexpected error.
@@ -381,7 +383,7 @@ pub fn calculate_kinetic_energy(constants: &PhysicsConstants, mass: f64, velocit
 /// use rs_physics::physics::calculate_potential_energy;
 /// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(Some(9.8), None, None, None);
+/// let constants = create_constants(Some(9.8), None, None, None, None);
 /// let potential_energy = calculate_potential_energy(&constants, 2.0, 5.0);
 /// assert_eq!(potential_energy, 98.0);
 /// ```
@@ -548,7 +550,7 @@ pub fn calculate_coefficient_of_restitution(constants: &PhysicsConstants, veloci
 /// use rs_physics::physics::calculate_projectile_time_of_flight;
 /// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(Some(9.8), None, None, None);
+/// let constants = create_constants(Some(9.8), None, None, None, None);
 /// let time = calculate_projectile_time_of_flight(&constants, 10.0, PI/4.0);
 /// assert_eq!(time, 1.4430750636460152);
 /// ```
@@ -596,7 +598,7 @@ pub fn calculate_projectile_time_of_flight(constants: &PhysicsConstants, initial
 /// use rs_physics::physics::calculate_projectile_max_height;
 /// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(Some(9.8), None, None, None);
+/// let constants = create_constants(Some(9.8), None, None, None, None);
 /// let height = calculate_projectile_max_height(&constants, 10.0, PI/4.0);
 /// assert!((height - 2.551020408163265).abs() < 1e-6);
 /// ```

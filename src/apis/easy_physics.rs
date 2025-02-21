@@ -74,7 +74,8 @@ impl EasyPhysics {
     ///     3.711,  // Mars gravity in m/s²
     ///     0.020,  // Approximate Mars atmosphere density in kg/m³
     ///     244.0,  // Approximate speed of sound on Mars in m/s
-    ///     600.0   // Approximate atmospheric pressure on Mars in Pa
+    ///     600.0,   // Approximate atmospheric pressure on Mars in Pa
+    ///     0.0,  // Ground level on Mars in meters
     /// );
     /// ```
     ///
@@ -82,13 +83,14 @@ impl EasyPhysics {
     ///
     /// This method allows you to simulate physics in different environments,
     /// such as other planets or hypothetical scenarios.
-    pub fn with_custom_constants(gravity: f64, air_density: f64, speed_of_sound: f64, atmospheric_pressure: f64) -> Self {
+    pub fn with_custom_constants(gravity: f64, air_density: f64, speed_of_sound: f64, atmospheric_pressure: f64, ground_level: f64) -> Self {
         Self {
             constants: PhysicsConstants::new(
                 Some(gravity),
                 Some(air_density),
                 Some(speed_of_sound),
                 Some(atmospheric_pressure),
+                Some(ground_level),
             ),
         }
     }

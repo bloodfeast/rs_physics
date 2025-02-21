@@ -11,6 +11,7 @@ pub struct PhysicsConstants {
     pub air_density: f64,
     pub speed_of_sound: f64,
     pub atmospheric_pressure: f64,
+    pub ground_level: f64,
 }
 
 
@@ -21,6 +22,7 @@ impl Default for PhysicsConstants {
             air_density: 1.225,
             speed_of_sound: 343.0,
             atmospheric_pressure: 101_325.0,
+            ground_level: 0.0,
         }
     }
 }
@@ -30,7 +32,8 @@ impl PhysicsConstants {
         gravity: Option<f64>,
         air_density: Option<f64>,
         speed_of_sound: Option<f64>,
-        atmospheric_pressure: Option<f64>
+        atmospheric_pressure: Option<f64>,
+        ground_level: Option<f64>,
     ) -> Self {
         let default = DEFAULT_PHYSICS_CONSTANTS;
         Self {
@@ -38,6 +41,7 @@ impl PhysicsConstants {
             air_density: air_density.unwrap_or(default.air_density),
             speed_of_sound: speed_of_sound.unwrap_or(default.speed_of_sound),
             atmospheric_pressure: atmospheric_pressure.unwrap_or(default.atmospheric_pressure),
+            ground_level: ground_level.unwrap_or(default.ground_level),
         }
     }
 

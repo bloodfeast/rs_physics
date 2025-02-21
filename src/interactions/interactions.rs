@@ -140,7 +140,7 @@ pub fn elastic_collision(
 /// use rs_physics::models::Object;
 /// use rs_physics::physics::create_constants;
 ///
-/// let constants = create_constants(Some(6.67430e-11), None, None, None);
+/// let constants = create_constants(Some(6.67430e-11), None, None, None, None);
 /// let obj1 = Object::new(5.97e24, 0.0, 0.0).unwrap(); // Earth
 /// let obj2 = Object::new(7.34e22, 0.0, 3.84e8).unwrap(); // Moon
 ///

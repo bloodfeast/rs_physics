@@ -119,8 +119,6 @@ impl PhysicsSystem2D {
     /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
     /// ```
     pub fn update(&mut self, time_step: f64) {
-        self.apply_gravity();
-
         self.objects.par_iter_mut().for_each(|object| {
             // Sum forces as vectors.
             let mut total_fx = 0.0;
@@ -146,6 +144,13 @@ impl PhysicsSystem2D {
             object.position.x += vx * time_step;
             object.position.y += vy * time_step;
 
+            // Check ground collision using the ground_level from constants.
+            if object.position.y <= self.constants.ground_level {
+                object.position.y = self.constants.ground_level;
+                // Zero out vertical velocity and reset vertical direction.
+                vy = 0.0;
+            }
+
             // Recompose scalar velocity and normalized direction.
             let new_speed = (vx * vx + vy * vy).sqrt();
             object.velocity = new_speed;
@@ -156,7 +161,7 @@ impl PhysicsSystem2D {
             }
 
             // Optionally clear forces after applying them, or let them persist for a duration.
-            object.clear_forces();
+            object.forces.retain(|f| matches!(f, Force::Gravity(_)) && matches!(f, Force::Drag { .. }));
         });
     }
 
