@@ -15,8 +15,8 @@ impl ObjectIn2D {
 
     pub fn get_directional_velocities(&self) -> (f64, f64) {
         let (x, y) = self.direction.to_coord();
-        let x_velocity = (x - y.abs()) * self.velocity;
-        let y_velocity = (y - x.abs()) * self.velocity;
+        let x_velocity = x * self.velocity;
+        let y_velocity = y * self.velocity;
         (x_velocity, y_velocity)
     }
 

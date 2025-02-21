@@ -2,7 +2,6 @@ use log::warn;
 use rayon::prelude::*;
 use crate::forces::Force;
 use crate::models::{Direction2D, FromCoordinates, ObjectIn2D};
-use crate::physics::calculate_terminal_velocity;
 use crate::utils::PhysicsConstants;
 
 pub struct PhysicsSystem2D {
@@ -116,7 +115,7 @@ impl PhysicsSystem2D {
     /// object.direction.x = 1.0;
     /// system.add_object(object);
     /// system.update(0.1);
-    /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
+    /// assert_eq!(system.get_object(0).unwrap().position.x, 0.4877500000000001);
     /// ```
     pub fn update(&mut self, time_step: f64) {
         self.objects
@@ -135,6 +134,7 @@ impl PhysicsSystem2D {
 
                 // Apply gravity directly to the y component.
                 vy += self.constants.gravity * time_step;
+                vx += -self.constants.air_density * time_step;
 
                 // Update the object's position.
                 object.position.x += vx * time_step;
