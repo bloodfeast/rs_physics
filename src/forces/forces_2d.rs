@@ -124,7 +124,7 @@ impl PhysicsSystem2D {
             let mut total_fx = 0.0;
             let mut total_fy = 0.0;
             for force in object.forces.iter() {
-                let (fx, fy) = force.apply_vector(object.mass, object.velocity);
+                let (fx, fy) = force.apply_vector(object.mass, object.velocity, &object.direction);
                 total_fx += fx;
                 total_fy += fy;
             }

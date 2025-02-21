@@ -1,7 +1,7 @@
 // src/forces.rs
 
 use crate::utils::PhysicsConstants;
-use crate::models::Object;
+use crate::models::{Direction2D, Object};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Force {
@@ -37,16 +37,16 @@ impl Force {
             Force::Thrust { magnitude, angle } => magnitude * angle.cos(),
         }
     }
-    pub fn apply_vector(&self, mass: f64, velocity: f64) -> (f64, f64) {
+
+    pub fn apply_vector(&self, mass: f64, velocity: f64, direction: &Direction2D) -> (f64, f64) {
         match *self {
             Force::Gravity(g) => (0.0, mass * g),
             Force::Drag { coefficient, area } => {
-                // For simplicity, assume drag acts opposite to velocity,
-                // and the drag force is proportional to the square of the velocity.
-                let drag_force = -0.5 * coefficient * area * velocity.abs().powi(2);
-                let angle = velocity.atan2(1.0);
-
-                (drag_force * angle.cos(), drag_force * angle.sin())
+                // Compute drag magnitude. Note: velocity^2 gives the proper scaling.
+                let drag_magnitude = -0.5 * coefficient * area * velocity.powi(2);
+                // The drag force vector is drag_magnitude times the unit vector in the direction of motion.
+                // Since drag opposes the velocity, we multiply by the normalized direction.
+                (drag_magnitude * direction.x, drag_magnitude * direction.y)
             },
             Force::Spring { k, x } => (0.0, -k * x),
             Force::Constant(f) => (f, f), // Not really directional, this is currently unused
