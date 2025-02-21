@@ -119,38 +119,36 @@ impl PhysicsSystem2D {
     /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
     /// ```
     pub fn update(&mut self, time_step: f64) {
-        self.objects
-            .par_iter_mut()
-            .for_each(|object| {
-                // Sum all forces and update the scalar velocity.
-                let mut total_force = 0.0;
-                for force in object.forces.iter() {
-                    total_force += force.apply(object.mass, object.velocity);
-                }
-                let acceleration = total_force / object.mass;
-                object.velocity += acceleration * time_step;
+        self.objects.par_iter_mut().for_each(|object| {
+            // Sum all forces and update the scalar velocity.
+            let mut total_force = 0.0;
+            for force in object.forces.iter() {
+                total_force += force.apply(object.mass, object.velocity);
+            }
+            let acceleration = total_force / object.mass;
+            object.velocity += acceleration * time_step;
 
-                // Get current velocity components using the object's scalar velocity and direction.
-                let (mut vx, mut vy) = object.get_directional_velocities();
+            // Get directional velocities based on the normalized ratio of the direction.
+            let (mut vx, mut vy) = object.get_directional_velocities();
 
-                // Apply gravity directly to the y component.
-                vy += self.constants.gravity * time_step;
+            // Apply gravity directly to the y component.
+            vy += self.constants.gravity * time_step;
 
-                // Update the object's position.
-                object.position.x += vx * time_step;
-                object.position.y += vy * time_step;
+            // Update the object's position.
+            object.position.x += vx * time_step;
+            object.position.y += vy * time_step;
 
-                // Recalculate the overall speed from the updated velocity components.
-                let new_speed = (vx * vx + vy * vy).sqrt();
-                object.velocity = new_speed;
+            // Recalculate the overall speed from the updated velocity components.
+            let new_speed = (vx * vx + vy * vy).sqrt();
+            object.velocity = new_speed;
 
-                // Update the direction based on the new velocity vector (if new_speed is non-zero).
-                if new_speed > 0.0 {
-                    object.direction = Direction2D::from_coord((vx / new_speed, vy / new_speed));
-                } else {
-                    object.direction = Direction2D::from_coord((0.0, 0.0));
-                }
-            });
+            // Update the direction based on the new velocity vector.
+            if new_speed > 0.0 {
+                object.direction = Direction2D::from_coord((vx / new_speed, vy / new_speed));
+            } else {
+                object.direction = Direction2D::from_coord((0.0, 0.0));
+            }
+        });
     }
 
     /// Applies gravity to all objects in the system.
