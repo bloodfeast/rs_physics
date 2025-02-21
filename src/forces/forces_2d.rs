@@ -147,6 +147,8 @@ impl PhysicsSystem2D {
                 // Update the direction based on the new velocity vector (if new_speed is non-zero).
                 if new_speed > 0.0 {
                     object.direction = Direction2D::from_coord((vx / new_speed, vy / new_speed));
+                } else {
+                    object.direction = Direction2D::from_coord((0.0, 0.0));
                 }
             });
     }
