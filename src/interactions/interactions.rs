@@ -43,6 +43,15 @@ impl Object {
     }
 
     pub fn add_force(&mut self, force: Force) {
+        self.forces.retain(|f| {
+            match force {
+                Force::Gravity(_) => !matches!(f, Force::Gravity(_)),
+                Force::Drag { .. } => !matches!(f, Force::Drag { .. }),
+                Force::Spring { .. } => !matches!(f, Force::Spring { .. }),
+                Force::Constant(_) => !matches!(f, Force::Constant(_)),
+                Force::Thrust { .. } => !matches!(f, Force::Thrust { .. }),
+            }
+        });
         self.forces.push(force);
     }
 

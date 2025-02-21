@@ -124,7 +124,7 @@ impl PhysicsSystem2D {
             let mut total_fx = 0.0;
             let mut total_fy = 0.0;
             for force in object.forces.iter() {
-                let (fx, fy) = force.apply_vector(object.mass);
+                let (fx, fy) = force.apply_vector(object.mass, object.velocity);
                 total_fx += fx;
                 total_fy += fy;
             }
@@ -161,7 +161,7 @@ impl PhysicsSystem2D {
             }
 
             // Optionally clear forces after applying them, or let them persist for a duration.
-            object.forces.retain(|f| matches!(f, Force::Gravity(_)) && matches!(f, Force::Drag { .. }));
+            object.forces.retain(|f| matches!(f, Force::Gravity(_)) || matches!(f, Force::Drag { .. }));
         });
     }
 

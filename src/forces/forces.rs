@@ -37,12 +37,16 @@ impl Force {
             Force::Thrust { magnitude, angle } => magnitude * angle.cos(),
         }
     }
-    pub fn apply_vector(&self, mass: f64) -> (f64, f64) {
+    pub fn apply_vector(&self, mass: f64, velocity: f64) -> (f64, f64) {
         match *self {
             Force::Gravity(g) => (0.0, mass * g),
             Force::Drag { coefficient, area } => {
                 // For simplicity, assume drag acts opposite to velocity,
-                (0.0, 0.0)
+                // and the drag force is proportional to the square of the velocity.
+                let drag_force = -0.5 * coefficient * area * velocity.abs().powi(2);
+                let angle = velocity.atan2(1.0);
+
+                (drag_force * angle.cos(), drag_force * angle.sin())
             },
             Force::Spring { k, x } => (0.0, -k * x),
             Force::Constant(f) => (f, f), // Not really directional, this is currently unused
