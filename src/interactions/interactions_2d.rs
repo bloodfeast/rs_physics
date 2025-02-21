@@ -15,9 +15,27 @@ impl ObjectIn2D {
 
     pub fn get_directional_velocities(&self) -> (f64, f64) {
         let (x, y) = self.direction.to_coord();
-        let x_velocity = x * self.velocity;
-        let y_velocity = y * self.velocity;
-        (x_velocity, y_velocity)
+        match (x, y) {
+            (x, y) if y > x && x != 0.0 => {
+                let x_ratio = x - y;
+                let y_ratio = (y - x).abs();
+                (self.velocity * x_ratio, self.velocity * y_ratio)
+            },
+            (x, y) if x > y  && y != 0.0 => {
+                let x_ratio = (x - y).abs();
+                let y_ratio = y - x;
+                (self.velocity * x_ratio, self.velocity * y_ratio)
+            },
+            (x, y) => {
+                if x == 0.0 {
+                    return (0.0, self.velocity * y)
+                }
+                if y == 0.0 {
+                    return (self.velocity * x, 0.0)
+                }
+                (self.velocity * 0.5, self.velocity * 0.5)
+            },
+        }
     }
 
     pub fn add_force(&mut self, force: Force) {
@@ -49,11 +67,11 @@ impl ObjectIn2D {
 /// ```
 /// use rs_physics::interactions::elastic_collision_2d;
 /// use rs_physics::models::ObjectIn2D;
-/// let mut obj1 = ObjectIn2D::new(1.0, 2.0, (1.0, 0.0), (0.0, 0.0));
-/// let mut obj2 = ObjectIn2D::new(1.0, -1.0, (-1.0, 0.0), (1.0, 0.0));
+/// let mut obj1 = ObjectIn2D::new(1.0, 1.0, (1.0, 0.0), (0.0, 0.0));
+/// let mut obj2 = ObjectIn2D::new(1.0, 1.0, (-1.0, 0.0), (1.0, 0.0));
 /// elastic_collision_2d(&rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
 /// assert_eq!(obj1.velocity, 0.724375);
-/// assert_eq!(obj2.velocity, 1.44875);
+/// assert_eq!(obj2.velocity, 1.2347951816495721);
 /// ```
 ///
 /// # Notes
