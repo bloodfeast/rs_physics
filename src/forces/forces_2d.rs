@@ -119,6 +119,8 @@ impl PhysicsSystem2D {
     /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
     /// ```
     pub fn update(&mut self, time_step: f64) {
+        self.apply_gravity();
+
         self.objects.par_iter_mut().for_each(|object| {
             // Sum forces as vectors.
             let mut total_fx = 0.0;
