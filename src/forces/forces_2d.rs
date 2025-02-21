@@ -120,34 +120,41 @@ impl PhysicsSystem2D {
     /// ```
     pub fn update(&mut self, time_step: f64) {
         self.objects.par_iter_mut().for_each(|object| {
-            // Sum all forces and update the scalar velocity.
-            let mut total_force = 0.0;
+            // Sum forces as vectors.
+            let mut total_fx = 0.0;
+            let mut total_fy = 0.0;
             for force in object.forces.iter() {
-                total_force += force.apply(object.mass, object.velocity);
+                let (fx, fy) = force.apply_vector(object.mass);
+                total_fx += fx;
+                total_fy += fy;
             }
-            let acceleration = total_force / object.mass;
-            object.velocity += acceleration * time_step;
 
-            // Get directional velocities based on the normalized ratio of the direction.
+            // Compute acceleration components.
+            let ax = total_fx / object.mass;
+            let ay = total_fy / object.mass;
+
+            // Get current velocity components (using your normalized ratio method).
             let (mut vx, mut vy) = object.get_directional_velocities();
 
-            // Apply gravity directly to the y component.
-            vy += self.constants.gravity * time_step;
+            // Update velocity components with acceleration.
+            vx += ax * time_step;
+            vy += ay * time_step;
 
-            // Update the object's position.
+            // Update position.
             object.position.x += vx * time_step;
             object.position.y += vy * time_step;
 
-            // Recalculate the overall speed from the updated velocity components.
+            // Recompose scalar velocity and normalized direction.
             let new_speed = (vx * vx + vy * vy).sqrt();
             object.velocity = new_speed;
-
-            // Update the direction based on the new velocity vector.
             if new_speed > 0.0 {
                 object.direction = Direction2D::from_coord((vx / new_speed, vy / new_speed));
             } else {
                 object.direction = Direction2D::from_coord((0.0, 0.0));
             }
+
+            // Optionally clear forces after applying them, or let them persist for a duration.
+            object.clear_forces();
         });
     }
 

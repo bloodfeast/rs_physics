@@ -9,6 +9,7 @@ pub enum Force {
     Drag { coefficient: f64, area: f64 },
     Spring { k: f64, x: f64 },
     Constant(f64),
+    Thrust { magnitude: f64, angle: f64 },
 }
 
 impl Force {
@@ -33,8 +34,24 @@ impl Force {
             Force::Drag { coefficient, area } => -0.5 * coefficient * area * velocity.abs() * velocity,
             Force::Spring { k, x } => -k * x,
             Force::Constant(f) => f,
+            Force::Thrust { magnitude, angle } => magnitude * angle.cos(),
         }
     }
+    pub fn apply_vector(&self, mass: f64) -> (f64, f64) {
+        match *self {
+            Force::Gravity(g) => (0.0, mass * g),
+            Force::Drag { coefficient, area } => {
+                // For simplicity, assume drag acts opposite to velocity,
+                (0.0, 0.0)
+            },
+            Force::Spring { k, x } => (0.0, -k * x),
+            Force::Constant(f) => (f, f), // Not really directional, this is currently unused
+            Force::Thrust { magnitude, angle } => {
+                (magnitude * angle.cos(), magnitude * angle.sin())
+            },
+        }
+    }
+
 }
 
 pub struct PhysicsSystem {
