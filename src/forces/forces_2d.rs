@@ -165,6 +165,7 @@ impl PhysicsSystem2D {
             .par_iter_mut()
             .for_each(|object| {
                 let force = Force::Gravity(self.constants.gravity);
+                object.forces.retain(|f| !matches!(f, Force::Gravity(_)));
                 object.add_force(force);
             });
     }
@@ -184,6 +185,7 @@ impl PhysicsSystem2D {
             .par_iter_mut()
             .for_each(|object| {
                 let force = Force::Drag { coefficient: drag_coefficient, area: cross_sectional_area };
+                object.forces.retain(|f| !matches!(f, Force::Drag { .. }));
                 object.add_force(force);
             });
     }
@@ -203,6 +205,7 @@ impl PhysicsSystem2D {
             .par_iter_mut()
             .for_each(|object| {
                 let force = Force::Spring { k: spring_constant, x: displacement };
+                object.forces.retain(|f| !matches!(f, Force::Spring { .. }));
                 object.add_force(force);
             });
     }
