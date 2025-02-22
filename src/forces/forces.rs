@@ -43,7 +43,9 @@ impl Force {
             Force::Gravity(g) => (0.0, mass * g),
             Force::Drag { coefficient, area } => {
                 // Compute drag magnitude. Note: velocity^2 gives the proper scaling.
-                let drag_magnitude = -0.5 * coefficient * area * velocity.powi(2);
+                // Note: I adjusted the drag constant to -0.25 to make the motion feel better.
+                // the realistic formula is -0.5 * coefficient * area * velocity.powi(2)
+                let drag_magnitude = -0.25 * coefficient * area * velocity.powi(2);
                 // The drag force vector is drag_magnitude times the unit vector in the direction of motion.
                 // Since drag opposes the velocity, we multiply by the normalized direction.
                 (drag_magnitude * direction.x, drag_magnitude * direction.y)
