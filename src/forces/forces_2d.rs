@@ -17,6 +17,10 @@ impl PhysicsSystem2D {
         }
     }
 
+    pub fn update_ground_level(&mut self, new_ground_level: f64) {
+        self.constants.ground_level = new_ground_level;
+    }
+
     /// Adds an object to the system.
     /// # Arguments
     /// * `object` - The object to be added.
