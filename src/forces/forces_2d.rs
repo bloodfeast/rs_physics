@@ -1,9 +1,7 @@
 use log::warn;
 use rayon::prelude::*;
 use crate::forces::Force;
-use crate::interactions::elastic_collision_2d;
 use crate::models::{Direction2D, FromCoordinates, ObjectIn2D};
-use crate::physics::calculate_terminal_velocity;
 use crate::utils::PhysicsConstants;
 
 pub struct PhysicsSystem2D {
@@ -149,41 +147,23 @@ impl PhysicsSystem2D {
             object.position.x += vx * time_step;
             object.position.y += vy * time_step;
 
-            // If the object has reached or penetrated the ground...
+            // Check ground collision using the ground_level from constants.
             if object.position.y <= self.constants.ground_level {
                 object.position.y = self.constants.ground_level;
-
-                // Calculate the collision angle from current velocity.
-                let (curr_vx, curr_vy) = object.get_directional_velocities();
-                let collision_angle = curr_vy.atan2(curr_vx);
-
-                // Create a temporary ground object.
-                // Use a very high mass and zero velocity, and set its position at the ground.
-                let mut ground = ObjectIn2D::new(
-                    1e9,                    // huge mass so it barely moves
-                    0.0,                    // no initial velocity
-                    (0.0, 1.0),             // upward normal (ground is flat)
-                    (object.position.x, self.constants.ground_level)
-                );
-
-                // Use your elastic collision function to transfer momentum.
-                // (You may need to adjust the drag coefficient and cross-sectional area values.)
-                let drag_coefficient = 0.45;
-                let cross_sectional_area = 0.5;
-                if let Err(e) = elastic_collision_2d(
-                    &self.constants,
-                    object,
-                    &mut ground,
-                    collision_angle,
-                    time_step,
-                    drag_coefficient,
-                    cross_sectional_area,
-                ) {
-                    // Optionally log or handle the error.
-                    warn!("Elastic collision with ground failed: {}", e);
+                // Only process if the object is falling.
+                if vy < -0.1 {
+                    // Define restitution and friction values.
+                    let restitution = 0.0; // 0 = fully inelastic (no bounce)
+                    let friction = 0.1;    // adjust friction to reduce horizontal momentum on landing
+                    // Apply restitution to vertical velocity.
+                    vy = -restitution * vy;
+                    // Reduce horizontal velocity by friction.
+                    vx *= 1.0 - friction;
+                } else {
+                    // If not falling, simply zero out vertical velocity.
+                    vy = 0.0;
                 }
             }
-
 
             // Recompose scalar velocity and normalized direction.
             let new_speed = (vx * vx + vy * vy).sqrt();
