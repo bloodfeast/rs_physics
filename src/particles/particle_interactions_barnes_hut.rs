@@ -1014,7 +1014,7 @@ pub fn collect_approx_nodes<'a>(
 ///     }
 /// }
 /// ```
-#[target_feature(enable = "avx")]
+#[cfg(target_feature = "avx")]
 pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g: f64) -> (f64, f64) {
     use std::arch::x86_64::*;
     let mut force_x = 0.0;
@@ -1098,7 +1098,7 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
 ///
 /// This function requires AVX support on the target CPU and should be called only
 /// when AVX is available. Use the `std::is_x86_feature_detected!("avx")` macro to check.
-#[target_feature(enable = "avx")]
+#[cfg(target_feature = "avx")]
 pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[ApproxNode], g: f32) -> (f32, f32) {
     use std::arch::x86_64::*;
     let mut force_x = 0.0_f32;
@@ -1260,7 +1260,7 @@ pub fn compute_net_force(tree: &BarnesHutTree, p: ParticleData, theta: f64, g: f
     let mut worklist = Vec::with_capacity(1000);
     collect_approx_nodes(&tree.root, p, theta, &mut worklist);
 
-    // Use SIMD if available
+
     if std::is_x86_feature_detected!("avx") {
         // For large worklists, use lower precision for better performance
         if worklist.len() > 1000 {
