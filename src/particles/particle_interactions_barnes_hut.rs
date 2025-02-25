@@ -126,6 +126,7 @@ impl BarnesHutNode {
                     sw: Box::new(BarnesHutNode::new(sw_quad)),
                     se: Box::new(BarnesHutNode::new(se_quad)),
                 };
+
                 let existing_particle = *existing;
                 if nw_quad.contains(existing_particle.x, existing_particle.y) {
                     internal.insert(existing_particle);
@@ -260,10 +261,12 @@ pub fn build_tree(particles: &[ParticleData], quad: Quad) -> BarnesHutNode {
 
     let (nw_quad, ne_quad, sw_quad, se_quad) = quad.subdivide();
 
-    let mut nw_particles = Vec::new();
-    let mut ne_particles = Vec::new();
-    let mut sw_particles = Vec::new();
-    let mut se_particles = Vec::new();
+    // Preallocate with estimated capacities
+    let estimated_capacity = particles.len().div_ceil(4);
+    let mut nw_particles = Vec::with_capacity(estimated_capacity);
+    let mut ne_particles = Vec::with_capacity(estimated_capacity);
+    let mut sw_particles = Vec::with_capacity(estimated_capacity);
+    let mut se_particles = Vec::with_capacity(estimated_capacity);
 
     for &p in particles {
         if nw_quad.contains(p.x, p.y) {
@@ -427,9 +430,9 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
     let n = worklist.len();
     let mut i = 0;
     while i + 4 <= n {
-        let mut mass_arr = vec![0.0; 4];
-        let mut com_x_arr = vec![0.0; 4];
-        let mut com_y_arr = vec![0.0; 4];
+        let mut mass_arr = [0.0; 4];
+        let mut com_x_arr = [0.0; 4];
+        let mut com_y_arr = [0.0; 4];
         for j in 0..4 {
             mass_arr[j] = worklist[i + j].mass;
             com_x_arr[j] = worklist[i + j].com_x;
@@ -454,14 +457,19 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
         let force_mag_v = _mm256_div_pd(numerator, dist_sq_v);
         let force_x_v = _mm256_div_pd(_mm256_mul_pd(force_mag_v, dx_v), dist_v);
         let force_y_v = _mm256_div_pd(_mm256_mul_pd(force_mag_v, dy_v), dist_v);
-        let mut fx_arr = vec![0.0; 4];
-        let mut fy_arr = vec![0.0; 4];
-        _mm256_storeu_pd(fx_arr.as_mut_ptr(), force_x_v);
-        _mm256_storeu_pd(fy_arr.as_mut_ptr(), force_y_v);
-        for j in 0..4 {
-            force_x += fx_arr[j];
-            force_y += fy_arr[j];
-        }
+
+        let sum_low = _mm256_extractf128_pd::<0>(force_x_v);  // Extract lower 128 bits (2 doubles)
+        let sum_high = _mm256_extractf128_pd::<1>(force_x_v); // Extract upper 128 bits (2 doubles)
+        let sum = _mm_add_pd(sum_low, sum_high);            // Add them together -> (sum[0], sum[1])
+        let sum_halves = _mm_hadd_pd(sum, sum);             // Horizontal add -> (sum[0]+sum[1], garbage)
+        force_x += _mm_cvtsd_f64(sum_halves);
+
+        let sum_low = _mm256_extractf128_pd::<0>(force_y_v);
+        let sum_high = _mm256_extractf128_pd::<1>(force_y_v);
+        let sum = _mm_add_pd(sum_low, sum_high);
+        let sum_halves = _mm_hadd_pd(sum, sum);
+        force_y += _mm_cvtsd_f64(sum_halves);
+
         i += 4;
     }
     // Process remaining nodes in scalar.
@@ -510,14 +518,19 @@ pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[
         let force_mag_v = _mm256_div_ps(numerator, dist_sq_v);
         let force_x_v = _mm256_div_ps(_mm256_mul_ps(force_mag_v, dx_v), dist_v);
         let force_y_v = _mm256_div_ps(_mm256_mul_ps(force_mag_v, dy_v), dist_v);
-        let mut fx_arr = vec![0.0; 8];
-        let mut fy_arr = vec![0.0; 8];
-        _mm256_storeu_ps(fx_arr.as_mut_ptr(), force_x_v);
-        _mm256_storeu_ps(fy_arr.as_mut_ptr(), force_y_v);
-        for j in 0..8{
-            force_x += fx_arr[j];
-            force_y += fy_arr[j];
-        }
+
+        let sum256 = _mm256_hadd_ps(force_x_v, force_x_v);  // Horizontal add pairs -> (a+b, c+d, a+b, c+d, e+f, g+h, e+f, g+h)
+        let sum128 = _mm_add_ps(_mm256_extractf128_ps::<0>(sum256), _mm256_extractf128_ps::<1>(sum256));
+        // Now sum128 contains (a+b+e+f, c+d+g+h, a+b+e+f, c+d+g+h)
+        let sum64 = _mm_hadd_ps(sum128, sum128); // Contains (a+b+c+d+e+f+g+h, a+b+c+d+e+f+g+h, ...)
+        force_x += _mm_cvtss_f32(sum64); // Extract first float (contains total sum)
+
+        let sum256 = _mm256_hadd_ps(force_y_v, force_y_v);  // Horizontal add pairs -> (a+b, c+d, a+b, c+d, e+f, g+h, e+f, g+h)
+        let sum128 = _mm_add_ps(_mm256_extractf128_ps::<0>(sum256), _mm256_extractf128_ps::<1>(sum256));
+        // Now sum128 contains (a+b+e+f, c+d+g+h, a+b+e+f, c+d+g+h)
+        let sum64 = _mm_hadd_ps(sum128, sum128); // Contains (a+b+c+d+e+f+g+h, a+b+c+d+e+f+g+h, ...)
+        force_y += _mm_cvtss_f32(sum64); // Extract first float (contains total sum)
+
         i += 8;
     }
     // Process remaining nodes in scalar.
