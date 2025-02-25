@@ -388,6 +388,7 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: ParticleData, theta: f64, w
     }
 }
 
+
 /// Computes net force on particle `p` from a worklist of approximated nodes using AVX intrinsics.
 /// Processes the worklist in batches of 4.
 ///
@@ -402,7 +403,7 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: ParticleData, theta: f64, w
 ///
 /// # #[cfg(target_feature = "avx")]
 /// {
-///     use rs_physics::particles::{ApproxNode, ParticleData, compute_force_simd_avx};
+///     use rs_physics::particles::{ApproxNode, ParticleData, compute_force_simd_avx, DGirth};
 ///     // This example assumes AVX is available.
 ///     let worklist = vec![
 ///         ApproxNode { mass: 1.0, com_x: 0.5, com_y: 0.5 },
@@ -426,9 +427,9 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
     let n = worklist.len();
     let mut i = 0;
     while i + 4 <= n {
-        let mut mass_arr = [0.0; 4];
-        let mut com_x_arr = [0.0; 4];
-        let mut com_y_arr = [0.0; 4];
+        let mut mass_arr = vec![0.0; 4];
+        let mut com_x_arr = vec![0.0; 4];
+        let mut com_y_arr = vec![0.0; 4];
         for j in 0..4 {
             mass_arr[j] = worklist[i + j].mass;
             com_x_arr[j] = worklist[i + j].com_x;
@@ -453,8 +454,8 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
         let force_mag_v = _mm256_div_pd(numerator, dist_sq_v);
         let force_x_v = _mm256_div_pd(_mm256_mul_pd(force_mag_v, dx_v), dist_v);
         let force_y_v = _mm256_div_pd(_mm256_mul_pd(force_mag_v, dy_v), dist_v);
-        let mut fx_arr = [0.0; 4];
-        let mut fy_arr = [0.0; 4];
+        let mut fx_arr = vec![0.0; 4];
+        let mut fy_arr = vec![0.0; 4];
         _mm256_storeu_pd(fx_arr.as_mut_ptr(), force_x_v);
         _mm256_storeu_pd(fy_arr.as_mut_ptr(), force_y_v);
         for j in 0..4 {
@@ -470,6 +471,62 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
         let dist_sq = dx * dx + dy * dy + 1e-12;
         let dist = dist_sq.sqrt();
         let force = g * p.mass * worklist[j].mass / dist_sq;
+        force_x += force * dx / dist;
+        force_y += force * dy / dist;
+    }
+    (force_x, force_y)
+}
+pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[ApproxNode], g: f32) -> (f32, f32) {
+    use std::arch::x86_64::*;
+    let mut force_x = 0.0_f32;
+    let mut force_y = 0.0_f32;
+    let n = worklist.len();
+    let mut i = 0;
+    while i + 8 <= n {
+        let mut mass_arr = [0.0_f32; 8];
+        let mut com_x_arr = [0.0_f32; 8];
+        let mut com_y_arr = [0.0_f32; 8];
+        for j in 0..8 {
+            mass_arr[j] = worklist[i + j].mass as f32;
+            com_x_arr[j] = worklist[i + j].com_x as f32;
+            com_y_arr[j] = worklist[i + j].com_y as f32;
+        }
+        let mass_v = _mm256_loadu_ps(mass_arr.as_ptr());
+        let com_x_v = _mm256_loadu_ps(com_x_arr.as_ptr());
+        let com_y_v = _mm256_loadu_ps(com_y_arr.as_ptr());
+        let p_x_v = _mm256_set1_ps(p.x as f32);
+        let p_y_v = _mm256_set1_ps(p.y as f32);
+        let dx_v = _mm256_sub_ps(com_x_v, p_x_v);
+        let dy_v = _mm256_sub_ps(com_y_v, p_y_v);
+        let dx2 = _mm256_mul_ps(dx_v, dx_v);
+        let dy2 = _mm256_mul_ps(dy_v, dy_v);
+        let sum_v = _mm256_add_ps(dx2, dy2);
+        let eps = _mm256_set1_ps(1e-12);
+        let dist_sq_v = _mm256_add_ps(sum_v, eps);
+        let dist_v = _mm256_sqrt_ps(dist_sq_v);
+        let p_mass_v = _mm256_set1_ps(p.mass as f32);
+        let g_v = _mm256_set1_ps(g);
+        let numerator = _mm256_mul_ps(g_v, _mm256_mul_ps(p_mass_v, mass_v));
+        let force_mag_v = _mm256_div_ps(numerator, dist_sq_v);
+        let force_x_v = _mm256_div_ps(_mm256_mul_ps(force_mag_v, dx_v), dist_v);
+        let force_y_v = _mm256_div_ps(_mm256_mul_ps(force_mag_v, dy_v), dist_v);
+        let mut fx_arr = vec![0.0; 8];
+        let mut fy_arr = vec![0.0; 8];
+        _mm256_storeu_ps(fx_arr.as_mut_ptr(), force_x_v);
+        _mm256_storeu_ps(fy_arr.as_mut_ptr(), force_y_v);
+        for j in 0..8{
+            force_x += fx_arr[j];
+            force_y += fy_arr[j];
+        }
+        i += 8;
+    }
+    // Process remaining nodes in scalar.
+    for j in i..n {
+        let dx = worklist[j].com_x as f32 - p.x as f32;
+        let dy = worklist[j].com_y as f32 - p.y as f32;
+        let dist_sq = dx * dx + dy * dy + 1e-12;
+        let dist = dist_sq.sqrt();
+        let force = g as f32 * p.mass as f32 * worklist[j].mass as f32 / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
     }
@@ -543,7 +600,14 @@ pub fn compute_force_scalar(p: ParticleData, worklist: &[ApproxNode], g: f64) ->
 pub fn compute_net_force(tree: &BarnesHutNode, p: ParticleData, theta: f64, g: f64) -> (f64, f64) {
     let mut worklist = Vec::new();
     collect_approx_nodes(tree, p, theta, &mut worklist);
+
     if std::is_x86_feature_detected!("avx") {
+        if worklist.len() > 1000 {
+            return unsafe {
+                let res = compute_force_simd_avx_low_precision(p, &worklist, g as f32);
+                (res.0 as f64, res.1 as f64)
+            };
+        }
         unsafe { compute_force_simd_avx(p, &worklist, g) }
     } else {
         compute_force_scalar(p, &worklist, g)

@@ -1,14 +1,4 @@
-use crate::particles::{
-    ApproxNode,
-    BarnesHutNode,
-    build_tree,
-    collect_approx_nodes,
-    compute_force_scalar,
-    compute_force_simd_avx,
-    compute_net_force,
-    ParticleData,
-    Quad
-};
+use crate::particles::{ApproxNode, BarnesHutNode, build_tree, collect_approx_nodes, compute_force_scalar, compute_force_simd_avx, compute_net_force, ParticleData, Quad};
 
 #[test]
 fn test_quad_contains() {
