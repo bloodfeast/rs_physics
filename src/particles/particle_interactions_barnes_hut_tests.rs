@@ -1,4 +1,4 @@
-use crate::particles::{ApproxNode, BarnesHutNode, build_tree, collect_approx_nodes, compute_force_scalar, compute_force_simd_avx, ParticleData, Quad};
+use crate::particles::{ApproxNode, BarnesHutNode, build_tree, collect_approx_nodes, compute_force_scalar, compute_force_simd_avx, compute_net_force, ParticleData, Quad};
 
 #[test]
 fn test_quad_contains() {
@@ -72,7 +72,7 @@ fn test_compute_net_force() {
     let target = ParticleData { x: 0.0, y: 0.0, mass: 1.0 };
     let theta = 0.5;
     let g = 6.67430e-11;
-    let (fx, _fy) = tree.compute_force(target, theta, g);
+    let (fx, _fy) = compute_net_force(&tree, target, theta, g);
     // With both particles on the positive x-axis, the net force in x should be positive.
     assert!(fx > 0.0, "Expected positive force in x-direction");
 }
