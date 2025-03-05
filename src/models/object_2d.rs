@@ -73,7 +73,7 @@ impl ToCoordinates<(f64, f64)> for Axis2D {
 /// A 2D velocity vector representing both speed and direction.
 /// - x: Velocity in the x direction (positive = right, negative = left)
 /// - y: Velocity in the y direction (positive = up, negative = down)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Velocity2D {
     pub x: f64,
     pub y: f64,
