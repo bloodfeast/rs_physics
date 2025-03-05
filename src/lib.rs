@@ -1,3 +1,5 @@
+#![feature(avx512_target_feature)]
+#![feature(stdarch_x86_avx512)]
 pub mod utils;
 pub mod apis;
 pub mod physics;
