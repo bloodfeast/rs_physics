@@ -2,7 +2,7 @@
 name = "rs_physics"
 authors = ["Brandon White"]
 description = "A simple physics library written in Rust"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 readme = "README.md"

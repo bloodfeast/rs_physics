@@ -1,7 +1,7 @@
 // src/forces.rs
 
 use crate::utils::PhysicsConstants;
-use crate::models::{Direction2D, Object};
+use crate::models::{Direction2D, Direction3D, Object, Velocity2D, Velocity3D};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Force {
@@ -38,9 +38,20 @@ impl Force {
         }
     }
 
+    /// Applies the force to an object and returns the force components as a vector.
+    /// This method is useful for 2D and 3D simulations.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `velocity` - The speed of the object in meters per second.
+    /// * `direction` - The direction of the object's motion.
+    ///
+    /// # Returns
+    /// A tuple containing the x and y components of the force in Newtons.
+    ///
     pub fn apply_vector(&self, mass: f64, velocity: f64, direction: &Direction2D) -> (f64, f64) {
         match *self {
-            Force::Gravity(g) => (0.0, mass * g),
+            Force::Gravity(g) => (0.0, -g * mass),
             Force::Drag { coefficient, area } => {
                 // Compute drag magnitude. Note: velocity^2 gives the proper scaling.
                 // Note: I adjusted the drag constant to -0.25 to make the motion feel better.
@@ -50,7 +61,7 @@ impl Force {
                 // Since drag opposes the velocity, we multiply by the normalized direction.
                 (drag_magnitude * direction.x, drag_magnitude * direction.y)
             },
-            Force::Spring { k, x } => (0.0, -k * x),
+            Force::Spring { k, x } => (-k * x, 0.0),
             Force::Constant(f) => (f, f), // Not really directional, this is currently unused
             Force::Thrust { magnitude, angle } => {
                 (magnitude * angle.cos(), magnitude * angle.sin())
@@ -58,6 +69,92 @@ impl Force {
         }
     }
 
+    /// Applies the force to an object and returns the force components as a 3D vector.
+    /// This method is useful for 3D simulations.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `velocity` - The speed of the object in meters per second.
+    /// * `direction` - The direction of the object's motion in 3D space.
+    ///
+    /// # Returns
+    /// A tuple containing the x, y, and z components of the force in Newtons.
+    ///
+    pub fn apply_vector_3d(&self, mass: f64, velocity: f64, direction: &Direction3D) -> (f64, f64, f64) {
+        match *self {
+            Force::Gravity(g) => (0.0, -g * mass, 0.0), // Assuming gravity acts in the -y direction
+            Force::Drag { coefficient, area } => {
+                let drag_magnitude = -0.25 * coefficient * area * velocity.powi(2);
+                (drag_magnitude * direction.x, drag_magnitude * direction.y, drag_magnitude * direction.z)
+            },
+            Force::Spring { k, x } => (-k * x, 0.0, 0.0), // Assuming spring acts along the x axis
+            Force::Constant(f) => (f, f, f), // Not really directional
+            Force::Thrust { magnitude, angle } => {
+                // For 3D, we'd need more angles, but for simplicity we'll assume thrust in xy plane
+                (magnitude * angle.cos(), magnitude * angle.sin(), 0.0)
+            },
+        }
+    }
+
+    /// Applies the force directly to a 2D velocity vector.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `velocity` - The velocity vector of the object.
+    ///
+    /// # Returns
+    /// A tuple containing the x and y components of the force in Newtons.
+    ///
+    pub fn apply_to_velocity_2d(&self, mass: f64, velocity: &Velocity2D) -> (f64, f64) {
+        match *self {
+            Force::Gravity(g) => (0.0, -g * mass),
+            Force::Drag { coefficient, area } => {
+                let speed = velocity.magnitude();
+                if speed == 0.0 {
+                    return (0.0, 0.0);
+                }
+                let drag_magnitude = -0.25 * coefficient * area * speed.powi(2);
+                (drag_magnitude * velocity.x / speed, drag_magnitude * velocity.y / speed)
+            },
+            Force::Spring { k, x } => (-k * x, 0.0),
+            Force::Constant(f) => (f, f),
+            Force::Thrust { magnitude, angle } => {
+                (magnitude * angle.cos(), magnitude * angle.sin())
+            },
+        }
+    }
+
+    /// Applies the force directly to a 3D velocity vector.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `velocity` - The velocity vector of the object in 3D space.
+    ///
+    /// # Returns
+    /// A tuple containing the x, y, and z components of the force in Newtons.
+    ///
+    pub fn apply_to_velocity_3d(&self, mass: f64, velocity: &Velocity3D) -> (f64, f64, f64) {
+        match *self {
+            Force::Gravity(g) => (0.0, -g * mass, 0.0),
+            Force::Drag { coefficient, area } => {
+                let speed = velocity.magnitude();
+                if speed == 0.0 {
+                    return (0.0, 0.0, 0.0);
+                }
+                let drag_magnitude = -0.25 * coefficient * area * speed.powi(2);
+                (
+                    drag_magnitude * velocity.x / speed,
+                    drag_magnitude * velocity.y / speed,
+                    drag_magnitude * velocity.z / speed
+                )
+            },
+            Force::Spring { k, x } => (-k * x, 0.0, 0.0),
+            Force::Constant(f) => (f, f, f),
+            Force::Thrust { magnitude, angle } => {
+                (magnitude * angle.cos(), magnitude * angle.sin(), 0.0)
+            },
+        }
+    }
 }
 
 pub struct PhysicsSystem {

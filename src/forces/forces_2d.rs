@@ -1,7 +1,7 @@
 use log::warn;
 use rayon::prelude::*;
 use crate::forces::Force;
-use crate::models::{Direction2D, FromCoordinates, ObjectIn2D};
+use crate::models::{ObjectIn2D, Velocity2D};
 use crate::utils::PhysicsConstants;
 
 pub struct PhysicsSystem2D {
@@ -111,12 +111,13 @@ impl PhysicsSystem2D {
     /// # Example
     /// ```
     /// use rs_physics::forces::PhysicsSystem2D;
+    /// use rs_physics::models::{ObjectIn2D, Velocity2D};
+    ///
     /// let mut system = rs_physics::forces::PhysicsSystem2D::new(rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS);
     /// system.update(0.1);
     ///
-    /// let mut object = rs_physics::models::ObjectIn2D::default();
-    /// object.velocity = 5.0;
-    /// object.direction.x = 1.0;
+    /// let mut object = ObjectIn2D::default();
+    /// object.velocity.x = 5.0;
     /// system.add_object(object);
     /// system.update(0.1);
     /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
@@ -127,7 +128,12 @@ impl PhysicsSystem2D {
             let mut total_fx = 0.0;
             let mut total_fy = 0.0;
             for force in object.forces.iter() {
-                let (fx, fy) = force.apply_vector(object.mass, object.velocity, &object.direction);
+                // We need to adapt force application for the new velocity structure
+                // Get the current direction for the force calculation
+                let direction = object.direction();
+                let speed = object.speed();
+
+                let (fx, fy) = force.apply_vector(object.mass, speed, &direction);
                 total_fx += fx;
                 total_fy += fy;
             }
@@ -136,43 +142,33 @@ impl PhysicsSystem2D {
             let ax = total_fx / object.mass;
             let ay = total_fy / object.mass;
 
-            // Get current velocity components (using your normalized ratio method).
-            let (mut vx, mut vy) = object.get_directional_velocities();
-
             // Update velocity components with acceleration.
-            vx += ax * time_step;
-            vy += ay * time_step;
+            object.velocity.x += ax * time_step;
+            object.velocity.y += ay * time_step;
 
             // Update position.
-            object.position.x += vx * time_step;
-            object.position.y += vy * time_step;
+            object.position.x += object.velocity.x * time_step;
+            object.position.y += object.velocity.y * time_step;
 
             // Check ground collision using the ground_level from constants.
             if object.position.y <= self.constants.ground_level {
                 object.position.y = self.constants.ground_level;
                 // Only process if the object is falling.
-                if vy < -0.1 {
+                if object.velocity.y < -0.1 {
                     // Define restitution and friction values.
                     let restitution = 0.0; // 0 = fully inelastic (no bounce)
                     let friction = 0.1;    // adjust friction to reduce horizontal momentum on landing
                     // Apply restitution to vertical velocity.
-                    vy = -restitution * vy;
+                    object.velocity.y = -restitution * object.velocity.y;
                     // Reduce horizontal velocity by friction.
-                    vx *= 1.0 - friction;
+                    object.velocity.x *= 1.0 - friction;
                 } else {
                     // If not falling, simply zero out vertical velocity.
-                    vy = 0.0;
+                    object.velocity.y = 0.0;
                 }
             }
 
-            // Recompose scalar velocity and normalized direction.
-            let new_speed = (vx * vx + vy * vy).sqrt();
-            object.velocity = new_speed;
-            if new_speed > 0.0 {
-                object.direction = Direction2D::from_coord((vx / new_speed, vy / new_speed));
-            } else {
-                object.direction = Direction2D::from_coord((0.0, 0.0));
-            }
+            // No need to recompose velocity and direction as we now use velocity components directly
 
             // Optionally clear forces after applying them, or let them persist for a duration.
             object.forces.retain(|f| matches!(f, Force::Gravity(_)) || matches!(f, Force::Drag { .. }));
