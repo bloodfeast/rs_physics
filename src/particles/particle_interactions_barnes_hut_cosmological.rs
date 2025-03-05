@@ -396,48 +396,95 @@ impl BarnesHutNode {
 pub fn update_density_estimates_iterative(root: &mut BarnesHutNode) {
     use std::collections::VecDeque;
 
+    // For density updates, we need to use raw pointers to avoid borrow checker issues
+    // with mutably borrowing multiple parts of the tree
+    enum QueueItem {
+        Node(*mut BarnesHutNode),
+        NodeWithStats(*mut BarnesHutNode, f64, usize)  // node, parent_mass, parent_count
+    }
+
     // Use breadth-first traversal to avoid stack overflow
     let mut queue = VecDeque::new();
-    queue.push_back((root, None));
+    queue.push_back(QueueItem::Node(root as *mut BarnesHutNode));
 
-    while let Some((node, parent_stats)) = queue.pop_front() {
-        match node {
-            BarnesHutNode::Empty(_) => {},
+    while let Some(item) = queue.pop_front() {
+        // Safe to use unsafe here because we don't modify the tree structure, just update values
+        unsafe {
+            match item {
+                QueueItem::Node(node_ptr) => {
+                    match &mut *node_ptr {
+                        BarnesHutNode::Empty(_) => {},
 
-            BarnesHutNode::Leaf(quad, particle) => {
-                // Update density using parent stats if available
-                if let Some((parent_mass, parent_count)) = parent_stats {
-                    let volume = (2.0 * quad.half_size).powi(2);
+                        BarnesHutNode::Leaf(quad, particle) => {
+                            // Basic leaf node case - no parent stats
+                            let volume = (2.0 * quad.half_size).powi(2);
+                            particle.density = particle.mass / volume;
+                        },
 
-                    if parent_count > 1 {
-                        let parent_density = parent_mass / volume;
-                        let local_density = particle.mass / volume;
-                        let mass_ratio = particle.mass / parent_mass;
+                        BarnesHutNode::Internal { quad, mass, children, num_particles, .. } => {
+                            // Calculate node stats
+                            let volume = (2.0 * quad.half_size).powi(2);
+                            let parent_mass = *mass;
+                            let parent_count = *num_particles;
 
-                        // Weighted average
-                        particle.density = (parent_density * (1.0 - mass_ratio) +
-                            local_density * mass_ratio * 2.0) /
-                            (1.0 + mass_ratio);
-                    } else {
-                        // Simple case when parent has only one particle
-                        particle.density = parent_mass / volume;
+                            // Add all non-empty children to the queue with parent stats
+                            for child in children.iter_mut() {
+                                match &mut **child {
+                                    BarnesHutNode::Empty(_) => {},
+                                    _ => {
+                                        let child_ptr = child.as_mut() as *mut BarnesHutNode;
+                                        queue.push_back(QueueItem::NodeWithStats(
+                                            child_ptr, parent_mass, parent_count
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
-                } else {
-                    // Leaf without parent info - use own values
-                    let volume = (2.0 * quad.half_size).powi(2);
-                    particle.density = particle.mass / volume;
-                }
-            },
+                },
 
-            BarnesHutNode::Internal { quad, mass, children, num_particles, .. } => {
-                // Calculate node stats
-                let volume = (2.0 * quad.half_size).powi(2);
-                let stats = Some((*mass, *num_particles));
+                QueueItem::NodeWithStats(node_ptr, parent_mass, parent_count) => {
+                    match &mut *node_ptr {
+                        BarnesHutNode::Empty(_) => {},
 
-                // Add all non-empty children to the queue
-                for child in children.iter_mut() {
-                    if !matches!(**child, BarnesHutNode::Empty(_)) {
-                        queue.push_back((child, stats));
+                        BarnesHutNode::Leaf(quad, particle) => {
+                            // Update density using parent stats
+                            let volume = (2.0 * quad.half_size).powi(2);
+
+                            if parent_count > 1 {
+                                let parent_density = parent_mass / volume;
+                                let local_density = particle.mass / volume;
+                                let mass_ratio = particle.mass / parent_mass;
+
+                                // Weighted average
+                                particle.density = (parent_density * (1.0 - mass_ratio) +
+                                    local_density * mass_ratio * 2.0) /
+                                    (1.0 + mass_ratio);
+                            } else {
+                                // Simple case when parent has only one particle
+                                particle.density = parent_mass / volume;
+                            }
+                        },
+
+                        BarnesHutNode::Internal { quad, mass, children, num_particles, .. } => {
+                            // Calculate node stats, considering parent stats too
+                            let volume = (2.0 * quad.half_size).powi(2);
+                            let node_mass = *mass;
+                            let node_count = *num_particles;
+
+                            // Add all non-empty children to the queue with this node's stats
+                            for child in children.iter_mut() {
+                                match &mut **child {
+                                    BarnesHutNode::Empty(_) => {},
+                                    _ => {
+                                        let child_ptr = child.as_mut() as *mut BarnesHutNode;
+                                        queue.push_back(QueueItem::NodeWithStats(
+                                            child_ptr, node_mass, node_count
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -539,8 +586,11 @@ pub fn collect_approx_nodes_iterative(node: &BarnesHutNode, p: &Particle, theta:
                     });
                 } else {
                     // Add children to stack in reverse order (so they're processed in the right order)
-                    for child in children.iter().rev() {
-                        stack.push(child);
+                    for child in children.iter() {
+                        match **child {
+                            BarnesHutNode::Empty(_) => {}, // Skip empty nodes
+                            _ => stack.push(child),
+                        }
                     }
                 }
             }
@@ -565,86 +615,150 @@ pub fn build_tree(particles: &[Particle], bounds: Quad) -> BarnesHutNode {
 pub fn build_tree_iterative(particles: &[Particle], bounds: Quad) -> BarnesHutNode {
     let mut root = BarnesHutNode::new(bounds);
 
-    // Use a queue-based approach to avoid deep recursion
+    // Process each particle
     for &particle in particles {
-        let mut current = &mut root;
-        let mut path = Vec::with_capacity(32); // Track path for backtracking
-
-        loop {
-            match current {
-                BarnesHutNode::Empty(quad) => {
-                    *current = BarnesHutNode::Leaf(*quad, particle);
-                    break;
-                },
-                BarnesHutNode::Leaf(quad, existing) => {
-                    // Split leaf into internal node
-                    let (nw_quad, ne_quad, sw_quad, se_quad) = quad.subdivide();
-
-                    // Create empty children
-                    let children = [
-                        Box::new(BarnesHutNode::Empty(nw_quad)),
-                        Box::new(BarnesHutNode::Empty(ne_quad)),
-                        Box::new(BarnesHutNode::Empty(sw_quad)),
-                        Box::new(BarnesHutNode::Empty(se_quad)),
-                    ];
-
-                    let existing_particle = *existing;
-
-                    // Create internal node
-                    let internal = BarnesHutNode::Internal {
-                        quad: *quad,
-                        mass: existing_particle.mass + particle.mass,
-                        com: calculate_center_of_mass(existing_particle, particle),
-                        angular_momentum: calculate_angular_momentum(existing_particle, particle),
-                        children,
-                        num_particles: 2,
-                    };
-
-                    *current = internal;
-
-                    // Continue insertion for both particles
-                    // For existing particle first
-                    if let BarnesHutNode::Internal { ref mut children, .. } = *current {
-                        let idx = determine_child_index_for_position(
-                            *quad,
-                            existing_particle.position.0,
-                            existing_particle.position.1
-                        );
-                        path.push((current, idx));
-                        current = &mut children[idx];
-                        continue;
-                    }
-                },
-                BarnesHutNode::Internal { quad, mass, com, angular_momentum, children, num_particles } => {
-                    // Update aggregate values
-                    let total_mass = *mass + particle.mass;
-                    let com_x = (com.0 * *mass + particle.position.0 * particle.mass) / total_mass;
-                    let com_y = (com.1 * *mass + particle.position.1 * particle.mass) / total_mass;
-                    *com = (com_x, com_y);
-                    *mass = total_mass;
-                    *num_particles += 1;
-
-                    // Calculate angular momentum contribution
-                    let r_x = particle.position.0 - com_x;
-                    let r_y = particle.position.1 - com_y;
-                    let p_x = particle.mass * particle.velocity.x;
-                    let p_y = particle.mass * particle.velocity.y;
-                    let contribution = r_x * p_y - r_y * p_x + particle.spin * particle.mass;
-                    *angular_momentum += contribution;
-
-                    // Determine child quadrant
-                    let idx = determine_child_index_for_position(*quad, particle.position.0, particle.position.1);
-                    path.push((current, idx));
-                    current = &mut children[idx];
-                }
-            }
-        }
+        // Insert particle with non-recursive method
+        insert_particle_iterative(&mut root, particle);
     }
 
-    // Update density estimates in a separate pass to avoid stack overflow
+    // Update density estimates in a separate pass
     update_density_estimates_iterative(&mut root);
 
     root
+}
+
+pub fn insert_particle_iterative(root: &mut BarnesHutNode, particle: Particle) {
+    // Using an enum to represent operations we need to perform
+    enum Operation {
+        Insert { node: *mut BarnesHutNode, particle: Particle },
+        UpdateInternal {
+            node: *mut BarnesHutNode,
+            particle: Particle,
+            child_idx: usize
+        },
+        InsertExistingParticle {
+            node: *mut BarnesHutNode,
+            particle: Particle,
+            child_idx: usize
+        }
+    }
+
+    // Start with inserting at the root
+    let mut operations = vec![Operation::Insert {
+        node: root as *mut BarnesHutNode,
+        particle
+    }];
+
+    // Process operations until none are left
+    while let Some(op) = operations.pop() {
+        match op {
+            Operation::Insert { node, particle } => {
+                // Need to use unsafe to work with the raw pointer
+                unsafe {
+                    match &mut *node {
+                        BarnesHutNode::Empty(quad) => {
+                            // Just replace the empty node with a leaf
+                            let quad_copy = *quad;
+                            *node = BarnesHutNode::Leaf(quad_copy, particle);
+                        },
+
+                        BarnesHutNode::Leaf(quad, existing) => {
+                            // Need to split this leaf into an internal node
+                            let quad_copy = *quad;
+                            let existing_copy = *existing;
+
+                            // Subdivide the quad
+                            let (nw_quad, ne_quad, sw_quad, se_quad) = quad_copy.subdivide();
+
+                            // Create internal node
+                            let children = [
+                                Box::new(BarnesHutNode::Empty(nw_quad)),
+                                Box::new(BarnesHutNode::Empty(ne_quad)),
+                                Box::new(BarnesHutNode::Empty(sw_quad)),
+                                Box::new(BarnesHutNode::Empty(se_quad)),
+                            ];
+
+                            // Calculate center of mass and angular momentum
+                            let total_mass = existing_copy.mass + particle.mass;
+                            let com_x = (existing_copy.position.0 * existing_copy.mass +
+                                particle.position.0 * particle.mass) / total_mass;
+                            let com_y = (existing_copy.position.1 * existing_copy.mass +
+                                particle.position.1 * particle.mass) / total_mass;
+
+                            // Basic angular momentum calculation
+                            let angular_momentum = existing_copy.spin * existing_copy.mass +
+                                particle.spin * particle.mass;
+
+                            // Create the internal node
+                            *node = BarnesHutNode::Internal {
+                                quad: quad_copy,
+                                mass: total_mass,
+                                com: (com_x, com_y),
+                                angular_momentum,
+                                children,
+                                num_particles: 2,
+                            };
+
+                            // Now queue up operations to insert both particles
+                            if let BarnesHutNode::Internal { ref mut children, quad, .. } = &mut *node {
+                                // First, determine which child quadrant each particle belongs to
+                                let existing_idx = determine_child_index_for_position(
+                                    *quad, existing_copy.position.0, existing_copy.position.1);
+
+                                let new_idx = determine_child_index_for_position(
+                                    *quad, particle.position.0, particle.position.1);
+
+                                // Queue the operations
+                                operations.push(Operation::Insert {
+                                    node: &mut **children.get_mut(new_idx).unwrap() as *mut BarnesHutNode,
+                                    particle
+                                });
+
+                                operations.push(Operation::Insert {
+                                    node: &mut **children.get_mut(existing_idx).unwrap() as *mut BarnesHutNode,
+                                    particle: existing_copy
+                                });
+                            }
+                        },
+
+                        BarnesHutNode::Internal {
+                            quad, mass, com, angular_momentum, children, num_particles
+                        } => {
+                            // Update the aggregate values
+                            let total_mass = *mass + particle.mass;
+                            let com_x = (com.0 * *mass + particle.position.0 * particle.mass) / total_mass;
+                            let com_y = (com.1 * *mass + particle.position.1 * particle.mass) / total_mass;
+                            *com = (com_x, com_y);
+                            *mass = total_mass;
+                            *num_particles += 1;
+
+                            // Calculate angular momentum contribution
+                            let r_x = particle.position.0 - com_x;
+                            let r_y = particle.position.1 - com_y;
+                            let p_x = particle.mass * particle.velocity.x;
+                            let p_y = particle.mass * particle.velocity.y;
+                            let contribution = r_x * p_y - r_y * p_x + particle.spin * particle.mass;
+                            *angular_momentum += contribution;
+
+                            // Determine the child index
+                            let idx = determine_child_index_for_position(
+                                *quad, particle.position.0, particle.position.1);
+
+                            // Queue the operation to insert into the child
+                            operations.push(Operation::Insert {
+                                node: &mut **children.get_mut(idx).unwrap() as *mut BarnesHutNode,
+                                particle
+                            });
+                        }
+                    }
+                }
+            },
+
+            // Other operations we defined but don't need in this implementation
+            Operation::UpdateInternal { .. } => { },
+            Operation::InsertExistingParticle { .. } => { }
+        }
+    }
 }
 
 /// Helper function to determine child index without self-reference
@@ -1484,7 +1598,27 @@ pub fn simulate_step_optimized(
     // Process particles in batches to reduce memory pressure
     for batch in particles.chunks_mut(batch_size) {
         let forces: Vec<(f64, f64)> = batch.par_iter()
-            .map(|p| compute_net_force_iterative(&tree, p, theta, g, time))
+            .map(|p| {
+                // Use the regular compute_net_force but with our non-recursive node collection
+                let mut worklist = Vec::new();
+                collect_approx_nodes_iterative(&tree, p, theta, &mut worklist);
+
+                // Use the existing SIMD-optimized force calculations
+                #[cfg(all(target_arch = "x86_64", feature = "avx512-simd"))]
+                {
+                    if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vl") {
+                        if worklist.len() > 1000 {
+                            return unsafe { compute_forces_simd_avx512_f32(p, &worklist, g, time) };
+                        }
+                        if is_x86_feature_detected!("avx512f") {
+                            return unsafe { compute_forces_simd_avx512(p, &worklist, g, time) };
+                        }
+                    }
+                }
+
+                // Fall back to scalar implementation
+                compute_forces_scalar(p, &worklist, g, time)
+            })
             .collect();
 
         // Update particles based on forces
