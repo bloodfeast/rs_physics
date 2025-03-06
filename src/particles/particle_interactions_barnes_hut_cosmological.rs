@@ -1501,6 +1501,22 @@ pub fn compute_net_force_iterative(tree: &BarnesHutNode, p: &Particle, theta: f6
                 return unsafe { compute_forces_simd_avx512(p, &worklist, g, time) };
             }
         }
+        // Fall back to AVX2 if available
+        #[cfg(target_feature = "avx2")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                return unsafe { compute_forces_simd_avx2(p, &worklist, g, time) };
+            }
+        }
+
+        // Fall back to SSE4.1 if available
+        #[cfg(target_feature = "sse4.1")]
+        {
+            if is_x86_feature_detected!("sse4.1") {
+                return unsafe { compute_forces_simd_sse41(p, &worklist, g, time) };
+            }
+        }
+
     }
 
     // Fall back to scalar implementation
