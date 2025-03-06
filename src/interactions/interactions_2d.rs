@@ -1,26 +1,86 @@
 use crate::forces::Force;
-use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, ToCoordinates};
+use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, ToCoordinates, Velocity2D};
 use crate::utils::PhysicsConstants;
 
 impl ObjectIn2D {
-    pub fn new(mass: f64, velocity: f64, direction: (f64, f64), position: (f64, f64)) -> Self {
+    /// Creates a new `ObjectIn2D` with the given mass, velocity components, and position.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `vx` - The velocity in the x direction in meters per second.
+    /// * `vy` - The velocity in the y direction in meters per second.
+    /// * `position` - The position as (x, y) coordinates.
+    ///
+    /// # Returns
+    /// A new `ObjectIn2D` with the specified properties.
+    ///
+    /// # Example
+    /// ```
+    /// use rs_physics::models::ObjectIn2D;
+    /// let obj = ObjectIn2D::new(1.0, 2.0, 3.0, (0.0, 0.0));
+    /// assert_eq!(obj.mass, 1.0);
+    /// assert_eq!(obj.velocity.x, 2.0);
+    /// assert_eq!(obj.velocity.y, 3.0);
+    /// ```
+    pub fn new(mass: f64, vx: f64, vy: f64, position: (f64, f64)) -> Self {
         ObjectIn2D {
             mass,
-            velocity,
-            direction: Direction2D::from_coord(direction),
+            velocity: Velocity2D { x: vx, y: vy },
             position: Axis2D::from_coord(position),
             forces: Vec::new(),
         }
     }
 
-    pub fn get_directional_velocities(&self) -> (f64, f64) {
-        let (x, y) = self.direction.to_coord();
-        let sum = x.abs() + y.abs();
-        if sum == 0.0 {
-            (0.0, 0.0)
+    /// Creates a new `ObjectIn2D` with the given mass, velocity magnitude, direction, and position.
+    /// This method maintains backward compatibility with the old API.
+    ///
+    /// # Arguments
+    /// * `mass` - The mass of the object in kilograms.
+    /// * `speed` - The magnitude of velocity in meters per second.
+    /// * `direction` - The direction as (x, y) components (will be normalized).
+    /// * `position` - The position as (x, y) coordinates.
+    ///
+    /// # Returns
+    /// A new `ObjectIn2D` with the specified properties.
+    ///
+    /// # Example
+    /// ```
+    /// use rs_physics::models::ObjectIn2D;
+    /// let obj = ObjectIn2D::new_with_direction(1.0, 5.0, (1.0, 0.0), (0.0, 0.0));
+    /// assert_eq!(obj.mass, 1.0);
+    /// assert_eq!(obj.velocity.x, 5.0);
+    /// assert_eq!(obj.velocity.y, 0.0);
+    /// ```
+    pub fn new_with_direction(mass: f64, speed: f64, direction: (f64, f64), position: (f64, f64)) -> Self {
+        let dir = Direction2D::from_coord(direction);
+
+        // Normalize direction components if they're not already
+        let magnitude = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        let (x_normalized, y_normalized) = if magnitude > 0.0 {
+            (dir.x / magnitude, dir.y / magnitude)
         } else {
-            (self.velocity * (x / sum), self.velocity * (y / sum))
+            (0.0, 0.0)
+        };
+
+        ObjectIn2D {
+            mass,
+            velocity: Velocity2D {
+                x: speed * x_normalized,
+                y: speed * y_normalized
+            },
+            position: Axis2D::from_coord(position),
+            forces: Vec::new(),
         }
+    }
+
+    /// Get the speed (magnitude of velocity)
+    pub fn speed(&self) -> f64 {
+        self.velocity.magnitude()
+    }
+
+    /// Get the direction as a normalized vector
+    pub fn direction(&self) -> Direction2D {
+        self.velocity.direction()
     }
 
     pub fn add_force(&mut self, force: Force) {
@@ -36,34 +96,38 @@ impl ObjectIn2D {
 ///
 /// # Arguments
 ///
-/// * \`constants\` - Structure containing gravity and air density.
-/// * \`obj1\`, \`obj2\` - Mutable references to the two colliding objects.
-/// * \`angle\` - The angle of collision in radians.
-/// * \`duration\` - The duration of the collision in seconds (must be positive).
-/// * \`drag_coefficient\` - The coefficient of drag (must be non-negative).
-/// * \`cross_sectional_area\` - The cross-sectional area of the objects (must be non-negative).
+/// * `constants` - Structure containing gravity and air density.
+/// * `obj1`, `obj2` - Mutable references to the two colliding objects.
+/// * `angle` - The angle of collision in radians.
+/// * `duration` - The duration of the collision in seconds (must be positive).
+/// * `drag_coefficient` - The coefficient of drag (must be non-negative).
+/// * `cross_sectional_area` - The cross-sectional area of the objects (must be non-negative).
 ///
 /// # Returns
 ///
-/// \`Ok(())\` if the collision was successfully computed, or an error message on invalid parameters.
+/// `Ok(())` if the collision was successfully computed, or an error message on invalid parameters.
 ///
 /// # Examples
 ///
 /// ```
 /// use rs_physics::interactions::elastic_collision_2d;
 /// use rs_physics::models::ObjectIn2D;
-/// let mut obj1 = ObjectIn2D::new(1.0, 2.0, (1.0, 0.0), (0.0, 0.0));
-/// let mut obj2 = ObjectIn2D::new(1.0, 1.0, (-1.0, 0.0), (1.0, 0.0));
-/// elastic_collision_2d(&rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS, &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
-/// assert_eq!(obj1.velocity, 0.724375);
-/// assert_eq!(obj2.velocity, 1.44875);
+///
+/// // Create objects with x and y velocity components
+/// let mut obj1 = ObjectIn2D::new(1.0, 2.0, 0.0, (0.0, 0.0));
+/// let mut obj2 = ObjectIn2D::new(1.0, -1.0, 0.0, (1.0, 0.0));
+///
+/// elastic_collision_2d(&rs_physics::utils::DEFAULT_PHYSICS_CONSTANTS,
+///                     &mut obj1, &mut obj2, 0.0, 1.0, 0.45, 1.0).unwrap();
+///
+/// assert!((obj1.velocity.x - (-0.724375)).abs() < 1e-6);
+/// assert!((obj2.velocity.x - 1.44875).abs() < 1e-6);
 /// ```
 ///
 /// # Notes
 ///
 /// This function projects each object's velocity onto axes parallel and perpendicular to the collision angle,
 /// applies a 1D elastic collision formula to the parallel components, then updates velocities considering gravity and drag.
-/// Finally, it recombines velocities and updates direction and speed.
 pub fn elastic_collision_2d(
     constants: &PhysicsConstants,
     obj1: &mut ObjectIn2D,
@@ -86,8 +150,10 @@ pub fn elastic_collision_2d(
         return Err("Cross-sectional area must be non-negative");
     }
 
-    let (vx1, vy1) = obj1.get_directional_velocities();
-    let (vx2, vy2) = obj2.get_directional_velocities();
+    let vx1 = obj1.velocity.x;
+    let vy1 = obj1.velocity.y;
+    let vx2 = obj2.velocity.x;
+    let vy2 = obj2.velocity.y;
 
     // Project velocities onto collision axis (angle) and perpendicular axis (angle + 90)
     let v1_along = vx1 * angle.cos() + vy1 * angle.sin();
@@ -122,17 +188,11 @@ pub fn elastic_collision_2d(
     let new_vx2 = v2_along_updated * angle.cos() - v2_perp * angle.sin();
     let new_vy2 = v2_along_updated * angle.sin() + v2_perp * angle.cos();
 
-    // Convert back to speed and direction
-    let speed1 = (new_vx1 * new_vx1 + new_vy1 * new_vy1).sqrt();
-    let dir1 = (new_vx1 / speed1, new_vy1 / speed1);
-
-    let speed2 = (new_vx2 * new_vx2 + new_vy2 * new_vy2).sqrt();
-    let dir2 = (new_vx2 / speed2, new_vy2 / speed2);
-
-    obj1.velocity = speed1;
-    obj1.direction = Direction2D::from_coord(dir1);
-    obj2.velocity = speed2;
-    obj2.direction = Direction2D::from_coord(dir2);
+    // Update velocity vectors directly
+    obj1.velocity.x = new_vx1;
+    obj1.velocity.y = new_vy1;
+    obj2.velocity.x = new_vx2;
+    obj2.velocity.y = new_vy2;
 
     Ok(())
 }

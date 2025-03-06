@@ -1,5 +1,5 @@
 use crate::forces::Force;
-use crate::models::{Axis2D, Axis3D, Direction2D, Direction3D, ObjectIn2D, ObjectIn3D, ToObjectIn2D, ToObjectIn3D};
+use crate::models::{Axis2D, Axis3D, Velocity2D, Velocity3D, ObjectIn2D, ObjectIn3D, ToObjectIn2D, ToObjectIn3D};
 
 pub trait FromCoordinates <T> {
     /// Creates a new instance of the struct from the given coordinates.
@@ -69,11 +69,29 @@ impl Default for Object {
 }
 
 impl ToObjectIn2D for Object {
+    /// Converts a 1D object into a 2D object.
+    /// The 1D velocity becomes the x component of the 2D velocity.
+    ///
+    /// # Returns
+    /// A 2D representation of the object.
+    ///
+    /// # Example
+    /// ```
+    /// use rs_physics::models::{Object, ObjectIn2D, ToObjectIn2D, Velocity2D};
+    ///
+    /// let obj = Object { mass: 2.0, velocity: 5.0, position: 10.0, forces: vec![] };
+    /// let obj_2d = obj.to_2d();
+    ///
+    /// assert_eq!(obj_2d.mass, 2.0);
+    /// assert_eq!(obj_2d.velocity.x, 5.0);
+    /// assert_eq!(obj_2d.velocity.y, 0.0);
+    /// assert_eq!(obj_2d.position.x, 10.0);
+    /// assert_eq!(obj_2d.position.y, 0.0);
+    /// ```
     fn to_2d(&self) -> ObjectIn2D {
         ObjectIn2D {
             mass: self.mass,
-            velocity: self.velocity,
-            direction: Direction2D { x: 0.0, y: 0.0 },
+            velocity: Velocity2D { x: self.velocity, y: 0.0 },
             position: Axis2D { x: self.position, y: 0.0 },
             forces: self.forces.to_owned(),
         }
@@ -81,11 +99,31 @@ impl ToObjectIn2D for Object {
 }
 
 impl ToObjectIn3D for Object {
+    /// Converts a 1D object into a 3D object.
+    /// The 1D velocity becomes the x component of the 3D velocity.
+    ///
+    /// # Returns
+    /// A 3D representation of the object.
+    ///
+    /// # Example
+    /// ```
+    /// use rs_physics::models::{Object, ObjectIn3D, ToObjectIn3D, Velocity3D};
+    ///
+    /// let obj = Object { mass: 2.0, velocity: 5.0, position: 10.0, forces: vec![] };
+    /// let obj_3d = obj.to_3d();
+    ///
+    /// assert_eq!(obj_3d.mass, 2.0);
+    /// assert_eq!(obj_3d.velocity.x, 5.0);
+    /// assert_eq!(obj_3d.velocity.y, 0.0);
+    /// assert_eq!(obj_3d.velocity.z, 0.0);
+    /// assert_eq!(obj_3d.position.x, 10.0);
+    /// assert_eq!(obj_3d.position.y, 0.0);
+    /// assert_eq!(obj_3d.position.z, 0.0);
+    /// ```
     fn to_3d(&self) -> ObjectIn3D {
         ObjectIn3D {
             mass: self.mass,
-            velocity: self.velocity,
-            direction: Direction3D { x: 0.0, y: 0.0, z: 0.0 },
+            velocity: Velocity3D { x: self.velocity, y: 0.0, z: 0.0 },
             position: Axis3D { x: self.position, y: 0.0, z: 0.0 },
             forces: self.forces.to_owned(),
         }

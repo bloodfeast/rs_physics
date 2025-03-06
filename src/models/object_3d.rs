@@ -1,5 +1,5 @@
 use crate::forces::Force;
-use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates};
+use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates, Velocity2D};
 
 #[derive(Debug, Clone)]
 pub struct Axis3D {
@@ -29,7 +29,6 @@ impl ToCoordinates<(f64, f64, f64)> for Axis3D {
         (self.x, self.y, self.z)
     }
 }
-
 
 pub trait To3D<T> {
     /// Converts the struct to a 3D representation.
@@ -73,9 +72,85 @@ impl <T: FromCoordinates<(f64, f64)>>To2D<T> for Axis3D {
     }
 }
 
-/// Represents 3D direction.\
-/// Like [Direction2D](super::Direction2D), this struct represents a direction vector in 3D space.\
-/// The `x`, `y`, and `z` fields represent the direction in the x, y, and z axes.\
+/// A 3D velocity vector representing both speed and direction.
+/// - x: Velocity in the x direction (positive = right, negative = left)
+/// - y: Velocity in the y direction (positive = up, negative = down)
+/// - z: Velocity in the z direction (positive = forward, negative = backward)
+#[derive(Debug, Clone)]
+pub struct Velocity3D {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl PartialEq for Velocity3D {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y && self.z == other.z
+    }
+}
+
+impl FromCoordinates<(f64, f64, f64)> for Velocity3D {
+    fn from_coord(velocity: (f64, f64, f64)) -> Self {
+        Velocity3D {
+            x: velocity.0,
+            y: velocity.1,
+            z: velocity.2,
+        }
+    }
+}
+
+impl ToCoordinates<(f64, f64, f64)> for Velocity3D {
+    fn to_coord(&self) -> (f64, f64, f64) {
+        (self.x, self.y, self.z)
+    }
+}
+
+impl <T: FromCoordinates<(f64, f64)>>To2D<T> for Velocity3D {
+    /// Converts the 3D velocity to a 2D representation.
+    /// # Returns
+    /// A 2D representation of the velocity.
+    /// # Example
+    /// ```
+    /// use rs_physics::models::{Velocity2D, Velocity3D};
+    /// use rs_physics::models::To2D;
+    ///
+    /// let velocity = Velocity3D { x: 3.0, y: 4.0, z: 5.0 };
+    /// let velocity_2d: Velocity2D = velocity.to_2d();
+    ///
+    /// assert_eq!(velocity_2d.x, 3.0);
+    /// assert_eq!(velocity_2d.y, 4.0);
+    /// ```
+    fn to_2d(&self) -> T
+    where
+        T: FromCoordinates<(f64, f64)>
+    {
+        T::from_coord((self.x, self.y))
+    }
+}
+
+impl Velocity3D {
+    /// Calculate the magnitude (speed) of the velocity vector
+    pub fn magnitude(&self) -> f64 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    /// Calculate the direction of the velocity vector as a normalized unit vector
+    pub fn direction(&self) -> Direction3D {
+        let magnitude = self.magnitude();
+        if magnitude == 0.0 {
+            Direction3D { x: 0.0, y: 0.0, z: 0.0 }
+        } else {
+            Direction3D {
+                x: self.x / magnitude,
+                y: self.y / magnitude,
+                z: self.z / magnitude,
+            }
+        }
+    }
+}
+
+/// Represents 3D direction as a unit vector.
+/// The `x`, `y`, and `z` fields represent the direction in the x, y, and z axes.
 /// The values should be between -1.0 and 1.0.
 #[derive(Debug, Clone)]
 pub struct Direction3D {
@@ -137,8 +212,7 @@ impl ToCoordinates<(f64, f64, f64)> for Direction3D {
 #[derive(Debug, Clone)]
 pub struct ObjectIn3D {
     pub mass: f64,
-    pub velocity: f64,
-    pub direction: Direction3D,
+    pub velocity: Velocity3D,
     pub position: Axis3D,
     pub forces: Vec<Force>,
 }
@@ -151,23 +225,74 @@ impl Default for ObjectIn3D {
     /// ```
     /// use rs_physics::models::ObjectIn3D;
     /// use rs_physics::models::Axis3D;
-    /// use rs_physics::models::Direction3D;
+    /// use rs_physics::models::Velocity3D;
     ///
     /// let obj = ObjectIn3D::default();
     /// assert_eq!(obj.mass, 1.0);
-    /// assert_eq!(obj.velocity, 0.0);
-    /// assert_eq!(obj.direction, Direction3D { x: 0.0, y: 0.0, z: 0.0 });
+    /// assert_eq!(obj.velocity, Velocity3D { x: 0.0, y: 0.0, z: 0.0 });
     /// assert_eq!(obj.position, Axis3D { x: 0.0, y: 0.0, z: 0.0 });
     /// assert_eq!(obj.forces.len(), 0);
     /// ```
     fn default() -> Self {
         ObjectIn3D {
             mass: 1.0,
-            velocity: 0.0,
-            direction: Direction3D { x: 0.0, y: 0.0, z: 0.0 },
+            velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x: 0.0, y: 0.0, z: 0.0 },
             forces: Vec::new(),
         }
+    }
+}
+
+impl ObjectIn3D {
+    pub fn new(mass: f64, vx: f64, vy: f64, vz: f64, position: (f64, f64, f64)) -> Self {
+        ObjectIn3D {
+            mass,
+            velocity: Velocity3D { x: vx, y: vy, z: vz },
+            position: Axis3D::from_coord(position),
+            forces: Vec::new(),
+        }
+    }
+
+    /// Creates a new object with speed and direction
+    pub fn new_with_direction(mass: f64, speed: f64, direction: (f64, f64, f64), position: (f64, f64, f64)) -> Self {
+        let dir = Direction3D::from_coord(direction);
+
+        // Normalize direction components if they're not already
+        let magnitude = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+        let (x_normalized, y_normalized, z_normalized) = if magnitude > 0.0 {
+            (dir.x / magnitude, dir.y / magnitude, dir.z / magnitude)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+
+        ObjectIn3D {
+            mass,
+            velocity: Velocity3D {
+                x: speed * x_normalized,
+                y: speed * y_normalized,
+                z: speed * z_normalized
+            },
+            position: Axis3D::from_coord(position),
+            forces: Vec::new(),
+        }
+    }
+
+    /// Get the speed (magnitude of velocity)
+    pub fn speed(&self) -> f64 {
+        self.velocity.magnitude()
+    }
+
+    /// Get the direction as a normalized vector
+    pub fn direction(&self) -> Direction3D {
+        self.velocity.direction()
+    }
+
+    pub fn add_force(&mut self, force: Force) {
+        self.forces.push(force);
+    }
+
+    pub fn clear_forces(&mut self) {
+        self.forces.clear();
     }
 }
 
@@ -177,14 +302,13 @@ pub trait ToObjectIn2D {
     /// A 2D representation of the struct.
     /// # Example
     /// ```
-    /// use rs_physics::models::{ObjectIn2D, ObjectIn3D, ToObjectIn2D, Axis2D, Direction2D};
+    /// use rs_physics::models::{ObjectIn2D, ObjectIn3D, ToObjectIn2D, Axis2D, Velocity2D};
     ///
     /// let obj = ObjectIn3D::default();
     /// let obj_2d: ObjectIn2D = obj.to_2d();
     ///
     /// assert_eq!(obj_2d.mass, 1.0);
-    /// assert_eq!(obj_2d.velocity, 0.0);
-    /// assert_eq!(obj_2d.direction, Direction2D { x: 0.0, y: 0.0 });
+    /// assert_eq!(obj_2d.velocity, Velocity2D { x: 0.0, y: 0.0 });
     /// assert_eq!(obj_2d.position, Axis2D { x: 0.0, y: 0.0 });
     /// assert_eq!(obj_2d.forces.len(), 0);
     /// ```
@@ -195,11 +319,9 @@ impl ToObjectIn2D for ObjectIn3D {
     fn to_2d(&self) -> ObjectIn2D {
         ObjectIn2D {
             mass: self.mass,
-            velocity: self.velocity,
-            direction: self.direction.to_2d(),
+            velocity: self.velocity.to_2d(),
             position: self.position.to_2d(),
             forces: self.forces.to_owned(),
         }
     }
 }
-
