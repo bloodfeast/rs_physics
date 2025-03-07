@@ -18,7 +18,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["constraints", "materials"]
-all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics", "particles", "particles-cosmological", "avx512-simd"]
+all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics", "particles"]
 constraints = []
 materials = []
 fluid_simulation = []
@@ -26,8 +26,6 @@ thermodynamics = []
 fluid_dynamics = []
 rotational_dynamics = []
 particles = []
-particles-cosmological = []
-avx512-simd = []
 
 
 [dependencies]
@@ -35,4 +33,3 @@ rayon = "1.10.0"
 log = "0.4"
 env_logger = "0.11"
 rand = "0.9.0-alpha.2"
-approx = "0.5.1"
