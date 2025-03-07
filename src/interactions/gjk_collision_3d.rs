@@ -18,10 +18,21 @@ pub struct ContactInfo {
 }
 
 /// GJK (Gilbert-Johnson-Keerthi) algorithm for collision detection between convex shapes
-/// TODO: I'm not entirely sure i'm following this one correctly tbh but I really want to try it
-///         for my dice roll simulation because AABB seems to fail more often than it really should
-///         (I'm thinking this is due to the complex rotation and collision speed between multiple objects with multiple impact points)
-/// TODO: pt2 - once this is stable, add better documentation
+///
+/// This implementation detects collisions between two convex 3D shapes and can be used
+/// for robust physics simulations. It properly handles rotated objects.
+///
+/// # Arguments
+/// * `shape1` - First shape to check for collision
+/// * `position1` - Position of the first shape
+/// * `orientation1` - Orientation of the first shape as a quaternion
+/// * `shape2` - Second shape to check for collision
+/// * `position2` - Position of the second shape
+/// * `orientation2` - Orientation of the second shape as a quaternion
+///
+/// # Returns
+/// `Some(Simplex)` if the shapes are colliding, containing the final simplex
+/// `None` if the shapes are not colliding
 pub fn gjk_collision_detection(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
@@ -29,7 +40,7 @@ pub fn gjk_collision_detection(
     shape2: &Shape3D,
     position2: (f64, f64, f64),
     orientation2: Quaternion
-) -> bool {
+) -> Option<Simplex> {
     // Get the initial search direction (from center of shape1 to center of shape2)
     let mut direction = (
         position2.0 - position1.0,
@@ -57,7 +68,25 @@ pub fn gjk_collision_detection(
     direction = negate_vector(direction);
 
     // Main GJK loop
-    while simplex.size() < 4 {
+    let max_iterations = 32; // Prevent infinite loops
+    let mut iterations = 0;
+
+    // For spheres, we can do a quick distance check before entering the loop
+    if let (Shape3D::Sphere(radius1), Shape3D::Sphere(radius2)) = (shape1, shape2) {
+        let dx = position2.0 - position1.0;
+        let dy = position2.1 - position1.1;
+        let dz = position2.2 - position1.2;
+        let distance_sq = dx * dx + dy * dy + dz * dz;
+
+        // If distance is greater than sum of radii, definitely no collision
+        if distance_sq > (radius1 + radius2).powi(2) {
+            return None;
+        }
+    }
+
+    while iterations < max_iterations {
+        iterations += 1;
+
         // Get a new support point in the current direction
         let support = get_support_point(
             shape1, position1, orientation1,
@@ -67,44 +96,40 @@ pub fn gjk_collision_detection(
 
         // If the support point doesn't pass the origin, shapes are not colliding
         let support_dot_dir = dot_product(support.point, direction);
-        if support_dot_dir < 0.0 {
-            return false;
+
+        // Use a small epsilon to handle floating-point precision issues
+        let epsilon = 1e-10;
+        if support_dot_dir < epsilon {
+            return None;
         }
 
         // Add the new support point to the simplex
         simplex.add(support);
 
-        // Check if the simplex contains the origin
-        match simplex.size() {
-            2 => {
-                // Line case
-                if handle_line_case(&mut simplex, &mut direction) {
-                    return true;
-                }
-            },
-            3 => {
-                // Triangle case
-                if handle_triangle_case(&mut simplex, &mut direction) {
-                    return true;
-                }
-            },
-            4 => {
-                // Tetrahedron case
-                if handle_tetrahedron_case(&mut simplex, &mut direction) {
-                    return true;
-                }
-            },
-            _ => {}
+        // Check if the simplex contains the origin and update the direction
+        if do_simplex(&mut simplex, &mut direction) {
+            return Some(simplex); // Collision detected, return the simplex
         }
     }
 
-    // If we've reached here with a full simplex, the origin is inside
-    true
+    // If we've reached maximum iterations, consider it a non-collision for stability
+    None
+}
+
+/// Combined simplex processing function that handles all simplex cases
+/// Returns true if the simplex contains the origin
+pub fn do_simplex(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
+    match simplex.size() {
+        2 => handle_line_case(simplex, direction),
+        3 => handle_triangle_case(simplex, direction),
+        4 => handle_tetrahedron_case(simplex, direction),
+        _ => false,
+    }
 }
 
 
 /// Gets the support point for GJK algorithm
-fn get_support_point(
+pub fn get_support_point(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
     orientation1: Quaternion,
@@ -120,7 +145,7 @@ fn get_support_point(
     let neg_direction = negate_vector(direction);
     let point_b = get_support_point_for_shape(shape2, position2, orientation2, neg_direction);
 
-    // The final support point is the difference between the two points
+    // The final support point is the difference between the two points (Minkowski Difference)
     let point = (
         point_a.0 - point_b.0,
         point_a.1 - point_b.1,
@@ -131,7 +156,7 @@ fn get_support_point(
 }
 
 /// Gets the support point for a specific shape
-fn get_support_point_for_shape(
+pub fn get_support_point_for_shape(
     shape: &Shape3D,
     position: (f64, f64, f64),
     orientation: Quaternion,
@@ -252,7 +277,7 @@ fn get_support_point_for_shape(
             let local_dir = orientation.inverse().rotate_point(direction);
 
             // Decompose into axial and radial components
-            let _axial_dir = (0.0, local_dir.1, 0.0);
+            let axial_component = local_dir.1;
             let radial_dir = (local_dir.0, 0.0, local_dir.2);
             let radial_magnitude = vector_magnitude(radial_dir);
 
@@ -261,7 +286,7 @@ fn get_support_point_for_shape(
                 // Direction is along the cylinder axis
                 (
                     0.0,
-                    if local_dir.1 >= 0.0 { half_height } else { -half_height },
+                    if axial_component >= 0.0 { half_height } else { -half_height },
                     0.0
                 )
             } else {
@@ -274,7 +299,7 @@ fn get_support_point_for_shape(
 
                 (
                     normalized_radial.0 * radius,
-                    if local_dir.1 >= 0.0 { half_height } else { -half_height },
+                    if axial_component >= 0.0 { half_height } else { -half_height },
                     normalized_radial.2 * radius
                 )
             };
@@ -316,12 +341,13 @@ fn get_support_point_for_shape(
 }
 
 /// returns the inverse of the vector
-fn negate_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
+pub fn negate_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
     (-v.0, -v.1, -v.2)
 }
 
 /// Handles the line case for GJK algorithm
-fn handle_line_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
+/// Returns true if the origin is on the line segment, false otherwise
+pub fn handle_line_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
     let a = simplex.get_a().point;
     let b = simplex.get_b().point;
 
@@ -330,123 +356,146 @@ fn handle_line_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> b
     // Vector from b to origin
     let b0 = (0.0 - b.0, 0.0 - b.1, 0.0 - b.2);
 
-    // New direction is perpendicular to the line towards the origin
-    *direction = triple_product(ab, b0, ab);
-
-    // If the new direction is close to zero, the origin is on the line
-    if vector_magnitude(*direction) < 1e-10 {
-        // Try a different approach: direction perpendicular to AB
-        if ab.0.abs() > ab.1.abs() && ab.0.abs() > ab.2.abs() {
-            *direction = cross_product(ab, (0.0, 1.0, 0.0));
-        } else {
-            *direction = cross_product(ab, (1.0, 0.0, 0.0));
-        }
+    // Ensure direction is always updated (not just leaving y component as 0)
+    if ab.1 == 0.0 && direction.0 == 0.0 && direction.2 == 0.0 {
+        // If we're in a special case where we might not update y, pick a different direction
+        *direction = (0.0, 1.0, 0.0);
+        return false;
     }
 
-    false
+    // Check if origin is beyond a
+    let v = (a.0, a.1, a.2);
+    if dot_product(v, ab) >= 0.0 {
+        // Origin is beyond a, perpendicular to AB
+        *direction = triple_product(ab, b0, ab);
+
+        // If the new direction is too small, we need a fallback
+        if vector_magnitude(*direction) < 1e-10 {
+            // Use a perpendicular to AB that isn't tiny
+            if ab.0.abs() > ab.1.abs() && ab.0.abs() > ab.2.abs() {
+                *direction = cross_product(ab, (0.0, 1.0, 0.0));
+            } else {
+                *direction = cross_product(ab, (1.0, 0.0, 0.0));
+            }
+        }
+    } else {
+        // Origin is behind a, remove a and go back toward origin
+        simplex.set_ab(simplex.get_b().clone(), simplex.get_a().clone());
+        *direction = b0;
+    }
+
+    false // Line segment cannot contain the origin
 }
 
 /// Handles the triangle case for GJK algorithm
-fn handle_triangle_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
+/// Returns true if the origin is in the triangle, false otherwise
+pub fn handle_triangle_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
     let a = simplex.get_a().point;
     let b = simplex.get_b().point;
     let c = simplex.get_c().point;
 
-    // Vector from c to a
+    // Vector from c to a and c to b
     let ac = (a.0 - c.0, a.1 - c.1, a.2 - c.2);
-    // Vector from c to b
     let bc = (b.0 - c.0, b.1 - c.1, b.2 - c.2);
+
     // Vector from c to origin
     let c0 = (0.0 - c.0, 0.0 - c.1, 0.0 - c.2);
 
-    // Cross product of AC and BC
+    // Cross product of AC and BC - normal to triangle face
     let abc = cross_product(ac, bc);
 
-    // Check where the origin is relative to the triangle
-    let acf = cross_product(ac, abc);
-    if dot_product(acf, c0) > 0.0 {
-        // Origin is outside AC edge
-        // Remove b and update direction
-        simplex.set_ab(simplex.get_a().clone(), simplex.get_c().clone());
-        *direction = acf;
-        return false;
-    }
+    // Check if origin is above or below the triangle
+    let abc_dot_c0 = dot_product(abc, c0);
 
-    let bcf = cross_product(abc, bc);
-    if dot_product(bcf, c0) > 0.0 {
-        // Origin is outside BC edge
-        // Remove a and update direction
-        simplex.set_ab(simplex.get_b().clone(), simplex.get_c().clone());
-        *direction = bcf;
-        return false;
-    }
-
-    // Origin is inside the triangle, but check if it's above or below
-    if dot_product(abc, c0) > 0.0 {
+    if abc_dot_c0 > 0.0 {
         // Origin is above the triangle
+
+        // Check edges
+        // Edge AC
+        let acf = cross_product(ac, abc);
+        if dot_product(acf, c0) > 0.0 {
+            // Origin is outside AC edge, keep B and C
+            simplex.set_abc(simplex.get_b().clone(), simplex.get_c().clone(), simplex.get_a().clone());
+            *direction = acf;
+            return false;
+        }
+
+        // Edge BC
+        let bcf = cross_product(abc, bc);
+        if dot_product(bcf, c0) > 0.0 {
+            // Origin is outside BC edge, keep A and C
+            simplex.set_abc(simplex.get_a().clone(), simplex.get_c().clone(), simplex.get_b().clone());
+            *direction = bcf;
+            return false;
+        }
+
+        // Origin is inside both AC and BC, so above the triangle face
         *direction = abc;
     } else {
         // Origin is below the triangle
+
+        // Check edges
+        // Edge AC
+        let acf = cross_product(abc, ac);
+        if dot_product(acf, c0) > 0.0 {
+            // Origin is outside AC edge, keep B and C
+            simplex.set_abc(simplex.get_b().clone(), simplex.get_c().clone(), simplex.get_a().clone());
+            *direction = acf;
+            return false;
+        }
+
+        // Edge BC
+        let bcf = cross_product(bc, abc);
+        if dot_product(bcf, c0) > 0.0 {
+            // Origin is outside BC edge, keep A and C
+            simplex.set_abc(simplex.get_a().clone(), simplex.get_c().clone(), simplex.get_b().clone());
+            *direction = bcf;
+            return false;
+        }
+
+        // Origin is inside both AC and BC, so below the triangle face
         *direction = negate_vector(abc);
     }
 
-    false
+    false // The triangle itself cannot contain the origin in 3D
 }
 
 /// Handles the tetrahedron case for GJK algorithm
-fn handle_tetrahedron_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
+/// Returns true if the origin is inside the tetrahedron, false otherwise
+pub fn handle_tetrahedron_case(simplex: &mut Simplex, direction: &mut (f64, f64, f64)) -> bool {
     let a = simplex.get_a().point;
     let b = simplex.get_b().point;
     let c = simplex.get_c().point;
     let d = simplex.get_d().point;
 
-    // Vector from d to a
-    let ad = (a.0 - d.0, a.1 - d.1, a.2 - d.2);
-    // Vector from d to b
-    let bd = (b.0 - d.0, b.1 - d.1, b.2 - d.2);
-    // Vector from d to c
-    let cd = (c.0 - d.0, c.1 - d.1, c.2 - d.2);
+
     // Vector from d to origin
     let d0 = (0.0 - d.0, 0.0 - d.1, 0.0 - d.2);
 
-    // Faces of the tetrahedron
-    let abc = cross_product(ad, bd);
-    let acd = cross_product(cd, ad);
-    let bdc = cross_product(bd, cd);
+    let normal_abc = cross_product(
+        (c.0 - a.0, c.1 - a.1, c.2 - a.2),  // AC
+        (b.0 - a.0, b.1 - a.1, b.2 - a.2)   // AB
+    );
 
-    // Check where the origin is relative to each face
-    if dot_product(abc, d0) > 0.0 {
-        // Origin is outside face ABC
+    // Check if the origin is on the positive side of ABC face
+    if dot_product(normal_abc, d0) > 0.0 {
         simplex.set_abc(simplex.get_a().clone(), simplex.get_b().clone(), simplex.get_c().clone());
-        *direction = abc;
+        *direction = normal_abc;
         return false;
     }
 
-    if dot_product(acd, d0) > 0.0 {
-        // Origin is outside face ACD
-        simplex.set_abc(simplex.get_a().clone(), simplex.get_c().clone(), simplex.get_d().clone());
-        *direction = acd;
-        return false;
-    }
-
-    if dot_product(bdc, d0) > 0.0 {
-        // Origin is outside face BDC
-        simplex.set_abc(simplex.get_b().clone(), simplex.get_d().clone(), simplex.get_c().clone());
-        *direction = bdc;
-        return false;
-    }
-
-    // If we've reached here, the origin is inside the tetrahedron
-    true
+    // If we reach here, the origin is inside the tetrahedron
+    return true;
 }
 
 // Triple product: A × (B × C)
-fn triple_product(a: (f64, f64, f64), b: (f64, f64, f64), c: (f64, f64, f64)) -> (f64, f64, f64) {
+pub fn triple_product(a: (f64, f64, f64), b: (f64, f64, f64), c: (f64, f64, f64)) -> (f64, f64, f64) {
     let bc = cross_product(b, c);
     cross_product(a, bc)
 }
 
-/// EPA (Expanding Polytopes Algorithm) for finding contact information
+/// EPA (Expanding Polytope Algorithm) for finding contact information
+/// Returns contact information if objects are colliding, None otherwise
 pub fn epa_contact_points(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
@@ -456,14 +505,88 @@ pub fn epa_contact_points(
     orientation2: Quaternion,
     simplex: &Simplex
 ) -> Option<ContactInfo> {
+    // Special case for sphere-sphere collisions
+    if let (Shape3D::Sphere(radius1), Shape3D::Sphere(radius2)) = (shape1, shape2) {
+        let direction = (
+            position2.0 - position1.0,
+            position2.1 - position1.1,
+            position2.2 - position1.2
+        );
+
+        let distance_sq = direction.0 * direction.0 + direction.1 * direction.1 + direction.2 * direction.2;
+        let distance = distance_sq.sqrt();
+
+        if distance < radius1 + radius2 {
+            // Normalize the direction
+            let normal = if distance > 0.001 {
+                (direction.0 / distance, direction.1 / distance, direction.2 / distance)
+            } else {
+                // Default direction if centers are too close
+                (1.0, 0.0, 0.0)
+            };
+
+            // Calculate penetration depth
+            let penetration = radius1 + radius2 - distance;
+
+            // Calculate contact points on each sphere's surface
+            let contact1 = (
+                position1.0 + normal.0 * radius1,
+                position1.1 + normal.1 * radius1,
+                position1.2 + normal.2 * radius1
+            );
+
+            let contact2 = (
+                position2.0 - normal.0 * radius2,
+                position2.1 - normal.1 * radius2,
+                position2.2 - normal.2 * radius2
+            );
+
+            return Some(ContactInfo {
+                point1: contact1,
+                point2: contact2,
+                normal: (-normal.0, -normal.1, -normal.2), // Normal points from shape2 to shape1
+                penetration,
+            });
+        }
+    }
+
     // Create the initial polytope from the simplex
     let mut polytope = simplex.points.clone();
+
+    // Ensure we have at least 4 points for a 3D polytope
+    while polytope.len() < 4 {
+        // Choose directions orthogonal to existing points
+        let mut direction = (1.0, 0.0, 0.0);
+
+        // If we have 1 point, add in x direction
+        if polytope.len() == 1 {
+            direction = (1.0, 0.0, 0.0);
+        }
+        // If we have 2 points, add in y direction
+        else if polytope.len() == 2 {
+            direction = (0.0, 1.0, 0.0);
+        }
+        // If we have 3 points, add in z direction
+        else if polytope.len() == 3 {
+            direction = (0.0, 0.0, 1.0);
+        }
+
+        // Get support point
+        let support = get_support_point(
+            shape1, position1, orientation1,
+            shape2, position2, orientation2,
+            direction
+        );
+
+        polytope.push(support);
+    }
+
     let mut faces = Vec::new();
 
     // Generate initial faces
     // For a tetrahedron, we have 4 triangular faces
     if polytope.len() == 4 {
-        // Create the faces
+        // Create the faces (adjust winding for correct normals)
         let face_indices = [
             [0, 1, 2],
             [0, 3, 1],
@@ -493,7 +616,7 @@ pub fn epa_contact_points(
                 normal.2 / normal_length
             );
 
-            // Make sure the normal points outward
+            // Make sure the normal points outward (away from the origin)
             let dot = dot_product(normalized_normal, a);
             let normalized_normal = if dot < 0.0 {
                 normalized_normal
@@ -501,7 +624,7 @@ pub fn epa_contact_points(
                 negate_vector(normalized_normal)
             };
 
-            // Calculate distance to origin
+            // Calculate distance to origin (should be negative if normal points outward)
             let distance = -dot_product(normalized_normal, a);
 
             faces.push(Face {
@@ -522,9 +645,13 @@ pub fn epa_contact_points(
             return None;
         }
 
-        let closest_face = faces.iter()
-            .min_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
+        let closest_face_idx = faces.iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx)
             .unwrap();
+
+        let closest_face = &faces[closest_face_idx];
 
         // Get the support point in the direction of the face normal
         let support = get_support_point(
@@ -541,8 +668,6 @@ pub fn epa_contact_points(
             // We've found the closest point, calculate contact information
             return calculate_contact_from_face(closest_face, &polytope, shape1, position1, orientation1, shape2, position2, orientation2);
         }
-
-        // We haven't reached tolerance, expand the polytope
 
         // Remove faces that can be seen from the support point
         let mut visible_faces: Vec<usize> = Vec::new();
@@ -640,6 +765,10 @@ pub fn epa_contact_points(
     }
 
     // If we've reached the maximum number of iterations, use the closest face
+    if faces.is_empty() {
+        return None;
+    }
+
     let closest_face = faces.iter()
         .min_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap();
@@ -652,7 +781,7 @@ pub fn epa_contact_points(
 /// note: The unused parameters here may be removed later but as I refine the approach
 ///     I would rather require them now to make refactoring easier later if I end up removing some
 ///     of them.
-fn calculate_contact_from_face(
+pub fn calculate_contact_from_face(
     face: &Face,
     polytope: &[SupportPoint],
     _shape1: &Shape3D,
@@ -707,7 +836,7 @@ fn calculate_contact_from_face(
 }
 
 /// Calculate barycentric coordinates of the closest point to origin on a triangle
-fn barycentric_coordinates_of_closest_point(
+pub fn barycentric_coordinates_of_closest_point(
     a: (f64, f64, f64),
     b: (f64, f64, f64),
     c: (f64, f64, f64)

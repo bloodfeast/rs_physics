@@ -1,290 +1,7 @@
 use crate::interactions::{cross_product, dot_product};
-use crate::models::{normalize_angle, rotate_point, PhysicalObject3D, Shape3D, ToCoordinates};
+use crate::models::{normalize_angle, rotate_point, PhysicalObject3D, Shape3D, ToCoordinates, Quaternion};
 use rand::{rng, Rng};
-
-/// Checks for collision between two 3D shapes at specified positions
-///
-/// Performs an efficient collision detection by first using a bounding sphere test
-/// for quick rejection, then applying more precise shape-specific tests.
-///
-/// # Arguments
-/// * `shape1` - Reference to the first shape
-/// * `shape2` - Reference to the second shape
-/// * `position1` - Position of the first shape as (x, y, z) coordinates
-/// * `position2` - Position of the second shape as (x, y, z) coordinates
-///
-/// # Returns
-/// `true` if the shapes are colliding, `false` otherwise
-///
-/// # Examples
-/// ```
-/// use rs_physics::interactions::shape_collisions_3d;
-/// use rs_physics::models::Shape3D;
-///
-/// let sphere = Shape3D::new_sphere(1.0);
-/// let cube = Shape3D::new_cuboid(2.0, 2.0, 2.0);
-///
-/// // Shapes are 2 units apart - not colliding
-/// let colliding = shape_collisions_3d::check_collision(
-///     &sphere, (0.0, 0.0, 0.0),
-///     &cube, (3.0, 0.0, 0.0)
-/// );
-/// assert_eq!(colliding, false);
-///
-/// // Shapes are 1 unit apart - colliding
-/// let colliding = shape_collisions_3d::check_collision(
-///     &sphere, (0.0, 0.0, 0.0),
-///     &cube, (2.0, 0.0, 0.0)
-/// );
-/// assert_eq!(colliding, true);
-/// ```
-pub fn check_collision(
-    shape1: &Shape3D,
-    position1: (f64, f64, f64),
-    shape2: &Shape3D,
-    position2: (f64, f64, f64),
-) -> bool {
-    // First, do a quick bounding sphere check for early rejection
-    let dx = position2.0 - position1.0;
-    let dy = position2.1 - position1.1;
-    let dz = position2.2 - position1.2;
-
-    let distance_squared = dx.powi(2) + dy.powi(2) + dz.powi(2);
-    let r1 = shape1.bounding_radius();
-    let r2 = shape2.bounding_radius();
-
-    if distance_squared > (r1 + r2).powi(2) {
-        return false;
-    }
-
-    // More specific collision detection based on shape types
-    match (shape1, shape2) {
-        // Sphere-sphere collision
-        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => distance_squared <= (r1 + r2).powi(2),
-
-        // Cuboid-cuboid collision (AABB)
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
-        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
-        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _))
-        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
-            // Axis-Aligned Bounding Box test
-            let w1_half = w1 / 2.0;
-            let h1_half = h1 / 2.0;
-            let d1_half = d1 / 2.0;
-
-            let w2_half = w2 / 2.0;
-            let h2_half = h2 / 2.0;
-            let d2_half = d2 / 2.0;
-
-            // Check overlap in all three axes
-            dx.abs() <= (w1_half + w2_half)
-                && dy.abs() <= (h1_half + h2_half)
-                && dz.abs() <= (d1_half + d2_half)
-        }
-
-        // Sphere-cuboid collision
-        (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d))
-        | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
-            // Find the closest point on the cuboid to the sphere
-            let w_half = w / 2.0;
-            let h_half = h / 2.0;
-            let d_half = d / 2.0;
-
-            // Find the closest point on the cuboid (clamped to cuboid bounds)
-            let closest_x = (-dx).clamp(-w_half, w_half);
-            let closest_y = (-dy).clamp(-h_half, h_half);
-            let closest_z = (-dz).clamp(-d_half, d_half);
-
-            // Calculate squared distance from closest point to sphere center
-            let closest_dist_sq =
-                (dx + closest_x).powi(2) + (dy + closest_y).powi(2) + (dz + closest_z).powi(2);
-
-            // Collision if the closest point is within the sphere
-            closest_dist_sq <= radius.powi(2)
-        }
-
-        // Cuboid-sphere collision (reverse of above)
-        (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius))
-        | (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
-            // Just use the same logic with positions reversed
-            let w_half = w / 2.0;
-            let h_half = h / 2.0;
-            let d_half = d / 2.0;
-
-            let closest_x = dx.clamp(-w_half, w_half);
-            let closest_y = dy.clamp(-h_half, h_half);
-            let closest_z = dz.clamp(-d_half, d_half);
-
-            let closest_dist_sq =
-                (dx - closest_x).powi(2) + (dy - closest_y).powi(2) + (dz - closest_z).powi(2);
-
-            closest_dist_sq <= radius.powi(2)
-        }
-
-        // Cylinder collisions
-        (Shape3D::Cylinder(r1, h1), Shape3D::Cylinder(r2, h2)) => {
-            // Check if cylinders overlap
-            // First check height (y-axis)
-            let h1_half = h1 / 2.0;
-            let h2_half = h2 / 2.0;
-
-            if dy.abs() > (h1_half + h2_half) {
-                return false;
-            }
-
-            // Then check radius (xz-plane)
-            let xz_dist_sq = dx.powi(2) + dz.powi(2);
-            xz_dist_sq <= (r1 + r2).powi(2)
-        }
-
-        // For all other combinations, use simpler approximations
-        _ => {
-            // Fallback to the bounding sphere check we already did
-            true
-        }
-    }
-}
-
-/// Calculates the collision normal vector between two colliding shapes
-///
-/// The normal vector points from the first shape toward the second shape
-/// and can be used for collision response calculations.
-///
-/// # Arguments
-/// * `shape1` - Reference to the first shape
-/// * `shape2` - Reference to the second shape
-/// * `position1` - Position of the first shape as (x, y, z) coordinates
-/// * `position2` - Position of the second shape as (x, y, z) coordinates
-///
-/// # Returns
-/// * `Some((nx, ny, nz))` - Normalized collision normal vector if shapes are colliding
-/// * `None` - If shapes are not colliding
-///
-/// # Examples
-/// ```
-/// use rs_physics::interactions::shape_collisions_3d;
-/// use rs_physics::models::Shape3D;
-///
-/// let sphere1 = Shape3D::new_sphere(1.0);
-/// let sphere2 = Shape3D::new_sphere(1.0);
-///
-/// let normal = shape_collisions_3d::collision_normal(
-///     &sphere1, (0.0, 0.0, 0.0),
-///     &sphere2, (1.5, 0.0, 0.0)
-/// );
-///
-/// assert!(normal.is_some());
-/// let (nx, ny, nz) = normal.unwrap();
-/// assert!((nx - 1.0).abs() < 1e-10); // Normal points along x-axis
-/// assert!(ny.abs() < 1e-10);
-/// assert!(nz.abs() < 1e-10);
-/// ```
-pub fn collision_normal(
-    shape1: &Shape3D,
-    position1: (f64, f64, f64),
-    shape2: &Shape3D,
-    position2: (f64, f64, f64),
-) -> Option<(f64, f64, f64)> {
-    if !check_collision(shape1, position1, shape2, position2) {
-        return None;
-    }
-
-    // Vector from position1 to position2
-    let dx = position2.0 - position1.0;
-    let dy = position2.1 - position1.1;
-    let dz = position2.2 - position1.2;
-
-    let distance_squared = dx.powi(2) + dy.powi(2) + dz.powi(2);
-
-    // If centers are at same position, return a default normal
-    if distance_squared < 1e-10 {
-        return Some((0.0, 0.0, 1.0));
-    }
-
-    // For sphere-sphere collision, the normal is the center-to-center vector
-    match (shape1, shape2) {
-        (Shape3D::Sphere(_), Shape3D::Sphere(_)) => {
-            let distance = distance_squared.sqrt();
-            Some((dx / distance, dy / distance, dz / distance))
-        }
-
-        // For cuboid collisions, find the minimum penetration axis
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
-        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
-        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _))
-        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
-            let w1_half = w1 / 2.0;
-            let h1_half = h1 / 2.0;
-            let d1_half = d1 / 2.0;
-
-            let w2_half = w2 / 2.0;
-            let h2_half = h2 / 2.0;
-            let d2_half = d2 / 2.0;
-
-            // Calculate penetration depths in each axis
-            let x_overlap = w1_half + w2_half - dx.abs();
-            let y_overlap = h1_half + h2_half - dy.abs();
-            let z_overlap = d1_half + d2_half - dz.abs();
-
-            // Find minimum penetration axis
-            if x_overlap < y_overlap && x_overlap < z_overlap {
-                // X-axis has minimum penetration
-                Some((dx.signum(), 0.0, 0.0))
-            } else if y_overlap < z_overlap {
-                // Y-axis has minimum penetration
-                Some((0.0, dy.signum(), 0.0))
-            } else {
-                // Z-axis has minimum penetration
-                Some((0.0, 0.0, dz.signum()))
-            }
-        }
-
-        // For other combinations, use center-to-center as approximation
-        _ => {
-            // Normalize the vector
-            let distance = distance_squared.sqrt();
-            Some((dx / distance, dy / distance, dz / distance))
-        }
-    }
-}
-
-/// Checks for overlap between two sets of corners along a given axis
-///
-/// This is used in the Separating Axis Theorem (SAT) algorithm for oriented
-/// bounding box collision detection.
-///
-/// # Arguments
-/// * `corners1` - Slice of (x, y, z) coordinates for the first set of corners
-/// * `corners2` - Slice of (x, y, z) coordinates for the second set of corners
-/// * `axis` - The axis (as a direction vector) along which to check for overlap
-///
-/// # Returns
-/// `true` if the corners overlap when projected onto the axis, `false` otherwise
-pub fn check_overlap_along_axis(
-    corners1: &[(f64, f64, f64)],
-    corners2: &[(f64, f64, f64)],
-    axis: &(f64, f64, f64),
-) -> bool {
-    // Project all corners onto axis
-    let projections1: Vec<f64> = corners1
-        .iter()
-        .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
-        .collect();
-
-    let projections2: Vec<f64> = corners2
-        .iter()
-        .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
-        .collect();
-
-    // Find min and max projections
-    let min1 = projections1.iter().fold(f64::MAX, |a, &b| a.min(b));
-    let max1 = projections1.iter().fold(f64::MIN, |a, &b| a.max(b));
-    let min2 = projections2.iter().fold(f64::MAX, |a, &b| a.min(b));
-    let max2 = projections2.iter().fold(f64::MIN, |a, &b| a.max(b));
-
-    // Check for overlap
-    max1 >= min2 && max2 >= min1
-}
+use crate::interactions::gjk_collision_3d::{epa_contact_points, gjk_collision_detection};
 
 /// Calculates the impact point between two colliding physical objects
 ///
@@ -506,15 +223,15 @@ pub fn apply_linear_impulse(
         normal.2 * impulse_mag,
     );
 
-    // Apply to first object
-    obj1.object.velocity.x += impulse.0 / obj1.object.mass;
-    obj1.object.velocity.y += impulse.1 / obj1.object.mass;
-    obj1.object.velocity.z += impulse.2 / obj1.object.mass;
+    // Apply to first object - this should make the velocity more negative
+    obj1.object.velocity.x -= impulse.0 / obj1.object.mass;
+    obj1.object.velocity.y -= impulse.1 / obj1.object.mass;
+    obj1.object.velocity.z -= impulse.2 / obj1.object.mass;
 
     // Apply to second object (opposite direction)
-    obj2.object.velocity.x -= impulse.0 / obj2.object.mass;
-    obj2.object.velocity.y -= impulse.1 / obj2.object.mass;
-    obj2.object.velocity.z -= impulse.2 / obj2.object.mass;
+    obj2.object.velocity.x += impulse.0 / obj2.object.mass;
+    obj2.object.velocity.y += impulse.1 / obj2.object.mass;
+    obj2.object.velocity.z += impulse.2 / obj2.object.mass;
 }
 
 /// Applies an angular impulse to two physical objects
@@ -574,94 +291,6 @@ pub fn apply_angular_impulse(
     }
 }
 
-/// Resolves penetration between two colliding objects
-///
-/// Adjusts the positions of both objects to prevent them from occupying
-/// the same space, with adjustments proportional to their masses.
-///
-/// # Arguments
-/// * `obj1` - Mutable reference to the first physical object
-/// * `obj2` - Mutable reference to the second physical object
-/// * `normal` - The collision normal vector pointing from obj1 to obj2
-pub fn resolve_penetration(
-    obj1: &mut PhysicalObject3D,
-    obj2: &mut PhysicalObject3D,
-    normal: (f64, f64, f64),
-) {
-    let pos1 = obj1.object.position.to_coord();
-    let pos2 = obj2.object.position.to_coord();
-
-    // Calculate penetration based on shape types
-    let penetration = match (&obj1.shape, &obj2.shape) {
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
-        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
-        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2))
-        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
-            let w1_half = w1 / 2.0;
-            let h1_half = h1 / 2.0;
-            let d1_half = d1 / 2.0;
-
-            let w2_half = w2 / 2.0;
-            let h2_half = h2 / 2.0;
-            let d2_half = d2 / 2.0;
-
-            // Vector from obj1 to obj2
-            let dx = pos2.0 - pos1.0;
-            let dy = pos2.1 - pos1.1;
-            let dz = pos2.2 - pos1.2;
-
-            // Calculate overlap in each axis
-            let overlap_x = (w1_half + w2_half) - dx.abs();
-            let overlap_y = (h1_half + h2_half) - dy.abs();
-            let overlap_z = (d1_half + d2_half) - dz.abs();
-
-            // Find minimum overlap
-            overlap_x.min(overlap_y).min(overlap_z)
-        }
-
-        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
-            // Calculate distance between centers
-            let dx = pos2.0 - pos1.0;
-            let dy = pos2.1 - pos1.1;
-            let dz = pos2.2 - pos1.2;
-            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
-
-            // Penetration is overlap amount
-            (r1 + r2) - distance
-        }
-
-        // For other shape combinations, use a small default value
-        _ => 0.01,
-    };
-
-    // Apply correction only if there is actual penetration
-    let correction_threshold = 0.001;
-    let correction_percentage = 0.8;
-
-    if penetration > correction_threshold {
-        let correction = penetration * correction_percentage;
-        let correction_vector = (
-            normal.0 * correction,
-            normal.1 * correction,
-            normal.2 * correction,
-        );
-
-        // Apply correction inversely proportional to mass
-        let total_mass = obj1.object.mass + obj2.object.mass;
-        let self_ratio = obj2.object.mass / total_mass;
-        let other_ratio = obj1.object.mass / total_mass;
-
-        // Move both objects apart
-        obj1.object.position.x -= correction_vector.0 * self_ratio;
-        obj1.object.position.y -= correction_vector.1 * self_ratio;
-        obj1.object.position.z -= correction_vector.2 * self_ratio;
-
-        obj2.object.position.x += correction_vector.0 * other_ratio;
-        obj2.object.position.y += correction_vector.1 * other_ratio;
-        obj2.object.position.z += correction_vector.2 * other_ratio;
-    }
-}
-
 /// Handles a collision between two physical objects
 ///
 /// Performs collision detection, calculates response impulses,
@@ -678,62 +307,188 @@ pub fn handle_collision(obj1: &mut PhysicalObject3D, obj2: &mut PhysicalObject3D
     let pos1 = obj1.object.position.to_coord();
     let pos2 = obj2.object.position.to_coord();
 
-    // First perform collision detection
-    if !check_collision_objects(&obj1, &obj2) {
+    // Quick bounding-sphere rejection test
+    let dx = pos2.0 - pos1.0;
+    let dy = pos2.1 - pos1.1;
+    let dz = pos2.2 - pos1.2;
+    let distance_sq = dx * dx + dy * dy + dz * dz;
+
+    let r1 = obj1.shape.bounding_radius();
+    let r2 = obj2.shape.bounding_radius();
+    if distance_sq > (r1 + r2).powi(2) {
         return false;
     }
 
-    // Get collision normal
-    if let Some(normal) = collision_normal(&obj1.shape, pos1, &obj2.shape, pos2) {
-        // Calculate combined coefficient of restitution
-        let restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+    // Fast path for sphere-sphere collisions
+    if let (Shape3D::Sphere(radius1), Shape3D::Sphere(radius2)) = (&obj1.shape, &obj2.shape) {
+        if distance_sq > (radius1 + radius2).powi(2) {
+            return false;
+        }
 
-        // Calculate impact point
-        let impact_point = calculate_impact_point(obj1, obj2, normal);
+        // Calculate normal
+        let distance = distance_sq.sqrt();
+        let normal = (dx / distance, dy / distance, dz / distance);
 
-        // Calculate relative vectors from centers to impact point
-        let r1 = (
-            impact_point.0 - pos1.0,
-            impact_point.1 - pos1.1,
-            impact_point.2 - pos1.2,
-        );
+        // Create contact points
+        let r1 = (normal.0 * radius1, normal.1 * radius1, normal.2 * radius1);
+        let r2 = (-normal.0 * radius2, -normal.1 * radius2, -normal.2 * radius2);
 
-        let r2 = (
-            impact_point.0 - pos2.0,
-            impact_point.1 - pos2.1,
-            impact_point.2 - pos2.2,
-        );
+        // Calculate penetration depth
+        let penetration = radius1 + radius2 - distance;
 
-        // Calculate point velocities including rotation
-        let v1 = calculate_point_velocity(obj1, r1);
-        let v2 = calculate_point_velocity(obj2, r2);
+        // Handle collision response directly for spheres
+        if penetration > 0.0 {
+            // Calculate point velocities
+            let v1 = calculate_point_velocity(obj1, r1);
+            let v2 = calculate_point_velocity(obj2, r2);
 
-        // Relative velocity at impact point
-        let vrel = (v1.0 - v2.0, v1.1 - v2.1, v1.2 - v2.2);
+            // Relative velocity
+            let vrel = (v2.0 - v1.0, v2.1 - v1.1, v2.2 - v1.2);
 
-        // Calculate normal component of relative velocity
-        let vrel_n = dot_product(vrel, normal);
+            // Normal component of relative velocity
+            let vrel_n = dot_product(vrel, normal);
 
-        // Only proceed with collision response if objects are moving toward each other
-        if vrel_n < 0.0 {
-            // Calculate collision impulse
-            let impulse_mag =
-                calculate_collision_impulse(obj1, obj2, vrel, normal, restitution, r1, r2);
+            if vrel_n < 0.0 {
+                // Apply collision response
+                let restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                let impulse_mag = calculate_collision_impulse(
+                    obj1, obj2, vrel, normal, restitution, r1, r2
+                );
 
-            // Apply impulse to linear velocities
-            apply_linear_impulse(obj1, obj2, normal, impulse_mag);
+                apply_linear_impulse(obj1, obj2, normal, impulse_mag);
+                apply_angular_impulse(obj1, obj2, normal, impulse_mag, r1, r2, dt);
 
-            // Apply impulse to angular velocities
-            apply_angular_impulse(obj1, obj2, normal, impulse_mag, r1, r2, dt);
+                // Resolve penetration
+                resolve_sphere_penetration(obj1, obj2, normal, penetration);
 
-            // Resolve penetration
-            resolve_penetration(obj1, obj2, normal);
+                return true;
+            }
+        }
 
-            return true;
+        return false;
+    }
+
+    // For other shapes, use GJK-EPA
+    let orientation1 = Quaternion::from_euler(
+        obj1.orientation.roll,
+        obj1.orientation.pitch,
+        obj1.orientation.yaw
+    );
+
+    let orientation2 = Quaternion::from_euler(
+        obj2.orientation.roll,
+        obj2.orientation.pitch,
+        obj2.orientation.yaw
+    );
+
+    // Use GJK for collision detection
+    if let Some(simplex) = gjk_collision_detection(
+        &obj1.shape, pos1, orientation1,
+        &obj2.shape, pos2, orientation2
+    ) {
+        // Use EPA to get contact information
+        if let Some(contact) = epa_contact_points(
+            &obj1.shape, pos1, orientation1,
+            &obj2.shape, pos2, orientation2,
+            &simplex
+        ) {
+            // Calculate point velocities
+            let r1 = (
+                contact.point1.0 - pos1.0,
+                contact.point1.1 - pos1.1,
+                contact.point1.2 - pos1.2
+            );
+
+            let r2 = (
+                contact.point2.0 - pos2.0,
+                contact.point2.1 - pos2.1,
+                contact.point2.2 - pos2.2
+            );
+
+            let v1 = calculate_point_velocity(obj1, r1);
+            let v2 = calculate_point_velocity(obj2, r2);
+
+            let vrel = (v1.0 - v2.0, v1.1 - v2.1, v1.2 - v2.2);
+            let vrel_n = dot_product(vrel, contact.normal);
+
+            if vrel_n < 0.0 {
+                let restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                let impulse_mag = calculate_collision_impulse(
+                    obj1, obj2, vrel, contact.normal, restitution, r1, r2
+                );
+
+                apply_linear_impulse(obj1, obj2, contact.normal, impulse_mag);
+                apply_angular_impulse(obj1, obj2, contact.normal, impulse_mag, r1, r2, dt);
+
+                resolve_penetration_epa(obj1, obj2, contact.normal, contact.penetration);
+
+                return true;
+            }
         }
     }
 
     false
+}
+
+/// Resolves penetration using EPA results
+pub fn resolve_penetration_epa(
+    obj1: &mut PhysicalObject3D,
+    obj2: &mut PhysicalObject3D,
+    normal: (f64, f64, f64),
+    penetration: f64
+) {
+    let correction_percentage = 0.8;
+    let correction = penetration * correction_percentage;
+    let correction_vector = (
+        normal.0 * correction,
+        normal.1 * correction,
+        normal.2 * correction
+    );
+
+    // Apply correction based on inverse mass ratio
+    let total_mass = obj1.object.mass + obj2.object.mass;
+    let self_ratio = obj2.object.mass / total_mass;
+    let other_ratio = obj1.object.mass / total_mass;
+
+    // Move objects apart
+    obj1.object.position.x += correction_vector.0 * self_ratio;
+    obj1.object.position.y += correction_vector.1 * self_ratio;
+    obj1.object.position.z += correction_vector.2 * self_ratio;
+
+    obj2.object.position.x -= correction_vector.0 * other_ratio;
+    obj2.object.position.y -= correction_vector.1 * other_ratio;
+    obj2.object.position.z -= correction_vector.2 * other_ratio;
+}
+
+/// Resolves penetration for sphere-sphere collisions
+pub fn resolve_sphere_penetration(
+    obj1: &mut PhysicalObject3D,
+    obj2: &mut PhysicalObject3D,
+    normal: (f64, f64, f64),
+    penetration: f64
+) {
+    let correction_percentage = 1.0;
+    let correction = penetration * correction_percentage;
+    let correction_vector = (
+        normal.0 * correction,
+        normal.1 * correction,
+        normal.2 * correction
+    );
+
+    // Apply correction based on inverse mass ratio
+    let total_mass = obj1.object.mass + obj2.object.mass;
+    let obj1_ratio = obj1.object.mass / total_mass;
+    let obj2_ratio = obj2.object.mass / total_mass;
+
+    // Move objects apart - obj1 moves opposite to the normal direction
+    obj1.object.position.x -= correction_vector.0 * obj2_ratio;
+    obj1.object.position.y -= correction_vector.1 * obj2_ratio;
+    obj1.object.position.z -= correction_vector.2 * obj2_ratio;
+
+    // obj2 moves in the normal direction
+    obj2.object.position.x += correction_vector.0 * obj1_ratio;
+    obj2.object.position.y += correction_vector.1 * obj1_ratio;
+    obj2.object.position.z += correction_vector.2 * obj1_ratio;
 }
 
 /// Handles collision between a cuboid and the ground
@@ -1448,181 +1203,5 @@ pub fn update_physics_system(objects: &mut [PhysicalObject3D], dt: f64) {
             // Check and handle collision
             handle_collision(obj1, obj2, dt);
         }
-    }
-}
-
-/// Performs collision detection between two physical objects, respecting orientation.
-/// It preserves your bounding-sphere check and specialized sphere/cylinder logic.
-/// For oriented cuboid-cuboid, it calls SAT logic instead of AABB.
-pub fn check_collision_objects(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) -> bool {
-    // Quick bounding-sphere reject
-    let pos1 = obj1.object.position.to_coord();
-    let pos2 = obj2.object.position.to_coord();
-
-    let dx = pos2.0 - pos1.0;
-    let dy = pos2.1 - pos1.1;
-    let dz = pos2.2 - pos1.2;
-    let distance_sq = dx * dx + dy * dy + dz * dz;
-
-    let r1 = obj1.shape.bounding_radius();
-    let r2 = obj2.shape.bounding_radius();
-    if distance_sq > (r1 + r2).powi(2) {
-        return false;
-    }
-
-    // Next do shape-specific logic (sphere-sphere, sphere-cuboid, cylinder-cyl, etc.).
-    // For the "cuboid-cuboid" (or beveled) path, we do the new SAT approach.
-
-    match (&obj1.shape, &obj2.shape) {
-        // ---- Spheres ----
-        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => distance_sq <= (r1 + r2).powi(2),
-
-        // ---- Sphere-cuboid combos ----
-        (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d))
-        | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
-            let dx_clamp = dx.clamp(-w / 2.0, w / 2.0);
-            let dy_clamp = dy.clamp(-h / 2.0, h / 2.0);
-            let dz_clamp = dz.clamp(-d / 2.0, d / 2.0);
-            let closest_dist_sq =
-                (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
-            closest_dist_sq <= radius.powi(2)
-        }
-
-        // ---- Cuboid-sphere (the reverse) ----
-        (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius))
-        | (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
-            let dx_clamp = dx.clamp(-w / 2.0, w / 2.0);
-            let dy_clamp = dy.clamp(-h / 2.0, h / 2.0);
-            let dz_clamp = dz.clamp(-d / 2.0, d / 2.0);
-            let closest_dist_sq =
-                (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
-            closest_dist_sq <= radius.powi(2)
-        }
-
-        // ---- Cylinder-cylinders ----
-        (Shape3D::Cylinder(r1, h1), Shape3D::Cylinder(r2, h2)) => {
-            let half1 = h1 / 2.0;
-            let half2 = h2 / 2.0;
-            if dy.abs() > (half1 + half2) {
-                return false;
-            }
-            let xz_sq = dx * dx + dz * dz;
-            xz_sq <= (r1 + r2).powi(2)
-        }
-
-        // ---- Oriented SAT for cuboid-cuboid or beveled combos ----
-        (
-            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..),
-            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..),
-        ) => sat_cuboid_collision(obj1, obj2),
-
-        // ---- Fallback for other combos or unhandled shapes ----
-        _ => {
-            // default to `true` if no specialized logic was done, or do a bounding-sphere fallback
-            true
-        }
-    }
-}
-
-/// Returns true if two cuboid-like objects (cuboid or beveled) overlap using SAT.
-pub fn sat_cuboid_collision(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) -> bool {
-    // Collect local vertices
-    let local1 = obj1.shape.create_vertices();
-    let local2 = obj2.shape.create_vertices();
-
-    // Convert them to world coordinates (orientation + position)
-    let world1: Vec<(f64, f64, f64)> = local1
-        .iter()
-        .map(|&p| {
-            obj1.shape.transform_point(
-                p,
-                obj1.object.position.to_coord(),
-                obj1.orientation.to_tuple(),
-            )
-        })
-        .collect();
-
-    let world2: Vec<(f64, f64, f64)> = local2
-        .iter()
-        .map(|&p| {
-            obj2.shape.transform_point(
-                p,
-                obj2.object.position.to_coord(),
-                obj2.orientation.to_tuple(),
-            )
-        })
-        .collect();
-
-    // Compute the primary axes (face normals) from each shape
-    // We assume create_vertices() returns at least 8 corners for a cuboid or beveled cuboid.
-    let (ax1, ax2, ax3) = compute_box_axes(&world1);
-    let (ax4, ax5, ax6) = compute_box_axes(&world2);
-
-    // Build candidate axes: each shape's 3 face normals + cross products among them
-    let mut axes = vec![ax1, ax2, ax3, ax4, ax5, ax6];
-    let shape1_axes = [ax1, ax2, ax3];
-    let shape2_axes = [ax4, ax5, ax6];
-
-    for &a in &shape1_axes {
-        for &b in &shape2_axes {
-            let cross = cross_product(a, b);
-            // skip axis if it's nearly zero length
-            if dot_product(cross, cross) > 1e-12 {
-                axes.push(normalize(cross));
-            }
-        }
-    }
-
-    // Check for overlap on each axis
-    for axis in axes {
-        if !check_overlap_along_axis(&world1, &world2, &axis) {
-            // Found a separating axis => no collision
-            return false;
-        }
-    }
-
-    // No separating axis => colliding
-    true
-}
-
-/// Extracts three orthonormal axes from the corner set of a box.
-/// We pick corners[0], corners[1], corners[3], corners[4] to get edges
-/// that emanate from the same corner. If corners are generated consistently,
-/// that yields X, Y, and Z directions (in world space).
-fn compute_box_axes(
-    corners: &[(f64, f64, f64)],
-) -> ((f64, f64, f64), (f64, f64, f64), (f64, f64, f64)) {
-    // If something’s off (like not enough corners), return default axes
-    if corners.len() < 5 {
-        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0));
-    }
-
-    let edge_x = (
-        corners[1].0 - corners[0].0,
-        corners[1].1 - corners[0].1,
-        corners[1].2 - corners[0].2,
-    );
-    let edge_y = (
-        corners[3].0 - corners[0].0,
-        corners[3].1 - corners[0].1,
-        corners[3].2 - corners[0].2,
-    );
-    let edge_z = (
-        corners[4].0 - corners[0].0,
-        corners[4].1 - corners[0].1,
-        corners[4].2 - corners[0].2,
-    );
-
-    (normalize(edge_x), normalize(edge_y), normalize(edge_z))
-}
-
-/// Normalizes a 3D vector safely, returning (0,0,0) if it’s almost zero-length.
-fn normalize(v: (f64, f64, f64)) -> (f64, f64, f64) {
-    let len_sq = dot_product(v, v);
-    if len_sq < 1e-12 {
-        (0.0, 0.0, 0.0)
-    } else {
-        let inv_len = 1.0 / len_sq.sqrt();
-        (v.0 * inv_len, v.1 * inv_len, v.2 * inv_len)
     }
 }
