@@ -210,3 +210,63 @@ impl AtanLookupTable {
         }
     }
 }
+
+/// Fast inverse square root implementation
+/// Based on the famous Quake III Arena algorithm
+#[inline]
+pub fn fast_inverse_sqrt(x: f32) -> f32 {
+    if x == 0.0 {
+        return f32::INFINITY;
+    }
+    if x < 0.0 {
+        return f32::NAN;
+    }
+    // Initial estimate via bit manipulation
+    let i = x.to_bits();
+    let i = 0x5f3759df - (i >> 1);
+    let y = f32::from_bits(i);
+
+    // One Newton-Raphson iteration for inverse sqrt
+    let y = y * (1.5 - 0.5 * x * y * y);
+
+    y
+}
+
+#[inline]
+pub fn fast_sqrt(x: f32) -> f32 {
+    x * fast_inverse_sqrt(x)
+}
+
+/// Fast inverse square root implementation for f64 values
+/// Based on the famous Quake III Arena algorithm but adapted for 64-bit doubles
+#[inline]
+pub fn fast_inverse_sqrt_f64(x: f64) -> f64 {
+    // Handle special cases
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+
+    // Original algorithm
+    let x_half = 0.5 * x;
+    let i = x.to_bits();
+
+    // The f64 magic number is different from the f32 version (0x5f3759df)
+    let magic_constant = 0x5fe6eb50c7b537a9_u64;
+    let i = magic_constant - (i >> 1);
+    let y = f64::from_bits(i);
+
+    // One iteration gives good precision for most applications
+    let y = y * (1.5 - x_half * y * y);
+
+    // Uncomment for even higher precision (at the cost of performance)
+    // let y = y * (1.5 - x_half * y * y);
+    y
+}
+
+#[inline]
+pub fn fast_sqrt_f64(x: f64) -> f64 {
+   x * fast_inverse_sqrt_f64(x)
+}

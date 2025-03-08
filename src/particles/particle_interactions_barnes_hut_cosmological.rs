@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
+use crate::utils::fast_sqrt_f64;
 
 /// Represents a square region in 2D space.
 #[derive(Clone, Copy, Debug)]
@@ -79,14 +80,14 @@ impl Particle {
     pub fn distance_to(&self, other: &Particle) -> f64 {
         let dx = self.position.0 - other.position.0;
         let dy = self.position.1 - other.position.1;
-        (dx * dx + dy * dy).sqrt()
+        fast_sqrt_f64(dx * dx + dy * dy)
     }
 
     /// Get the direction to another particle
     pub fn direction_to(&self, other: &Particle) -> Direction2D {
         let dx = other.position.0 - self.position.0;
         let dy = other.position.1 - self.position.1;
-        let magnitude = (dx * dx + dy * dy).sqrt();
+        let magnitude = fast_sqrt_f64(dx * dx + dy * dy);
 
         if magnitude == 0.0 {
             Direction2D { x: 0.0, y: 0.0 }
@@ -238,7 +239,7 @@ impl BarnesHutNode {
                 let dx = com.0 - p.position.0;
                 let dy = com.1 - p.position.1;
                 let dist_sq = dx * dx + dy * dy;
-                let dist = dist_sq.sqrt();
+                let dist = fast_sqrt_f64(dist_sq);
 
                 // If node is distant enough (size/distance < theta), use approximation
                 if (quad.half_size * 2.0 / dist) < theta {
@@ -280,7 +281,7 @@ impl BarnesHutNode {
         // More accurate simulations (smaller theta) use smaller softening
         let softening = 1e-4 * (theta * 10.0).max(0.1);
         let dist_sq = dx * dx + dy * dy + softening;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
 
         // Basic gravitational force: F = G * m1 * m2 / r^2
         let basic_force = g * p.mass * other_mass / dist_sq;
@@ -526,7 +527,7 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: &Particle, theta: f64, work
             let dx = com.0 - p.position.0;
             let dy = com.1 - p.position.1;
             let dist_sq = dx * dx + dy * dy;
-            let dist = dist_sq.sqrt();
+            let dist = fast_sqrt_f64(dist_sq);
 
             if (quad.half_size * 2.0 / dist) < theta {
                 // Node is far enough, use approximation
@@ -574,7 +575,7 @@ pub fn collect_approx_nodes_iterative(node: &BarnesHutNode, p: &Particle, theta:
                 let dx = com.0 - p.position.0;
                 let dy = com.1 - p.position.1;
                 let dist_sq = dx * dx + dy * dy;
-                let dist = dist_sq.sqrt();
+                let dist = fast_sqrt_f64(dist_sq);
 
                 if (quad.half_size * 2.0 / dist) < theta {
                     // Node is far enough, use approximation
@@ -979,7 +980,7 @@ pub unsafe fn compute_forces_simd_avx512(
         // Use a softening parameter to avoid numerical instability
         let softening = 1e-4;
         let dist_sq = dx * dx + dy * dy + softening;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
 
         // Basic gravitational force
         let basic_force = g * p.mass * node.mass / dist_sq;
@@ -1239,7 +1240,7 @@ pub unsafe fn compute_forces_simd_avx2(
         // Use a softening parameter to avoid numerical instability
         let softening = 1e-4;
         let dist_sq = dx * dx + dy * dy + softening;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
 
         // Basic gravitational force
         let basic_force = g * p.mass * node.mass / dist_sq;
@@ -1371,7 +1372,7 @@ pub unsafe fn compute_forces_simd_sse41(
         // Use a softening parameter to avoid numerical instability
         let softening = 1e-4;
         let dist_sq = dx * dx + dy * dy + softening;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
 
         // Basic gravitational force
         let basic_force = g * p.mass * node.mass / dist_sq;
@@ -1413,7 +1414,7 @@ pub fn compute_forces_scalar(
         // Use a softening parameter to avoid numerical instability
         let softening = 1e-4;
         let dist_sq = dx * dx + dy * dy + softening;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
 
         // Basic gravitational force: F = G * m1 * m2 / r^2
         let basic_force = g * p.mass * node.mass / dist_sq;
@@ -1538,7 +1539,7 @@ pub fn create_big_bang_particles(num_particles: usize, initial_radius: f64) -> V
 
         // Initial velocity (perpendicular to radius, with some random variation)
         // This creates a basic rotation pattern
-        let speed_scale = 0.5 * radius.sqrt(); // Velocity increases with distance
+        let speed_scale = 0.5 * fast_sqrt_f64(radius); // Velocity increases with distance
         let perpendicular_angle = angle + PI/2.0;
         let velocity_variation = 0.2; // Random velocity component magnitude
 
@@ -1748,7 +1749,7 @@ pub fn run_optimized_simulation(
 ) -> Vec<Vec<Particle>> {
     // Calculate appropriate time step based on particle density
     let particle_density = num_particles as f64 / (bounds.half_size * bounds.half_size * 4.0);
-    let adaptive_dt = (0.01 / particle_density.sqrt()).clamp(0.001, 0.1);
+    let adaptive_dt = (0.01 / fast_sqrt_f64(particle_density)).clamp(0.001, 0.1);
 
     // Calculate number of steps
     let num_steps = (sim_duration / adaptive_dt) as usize;
