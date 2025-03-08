@@ -36,3 +36,10 @@ log = "0.4"
 env_logger = "0.11"
 rand = "0.9.0-alpha.2"
 approx = "0.5.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "math_helpers"
+harness = false
