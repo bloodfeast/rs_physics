@@ -3,6 +3,20 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
+use crate::particles::particle_interactions_simd_functions::{
+    compute_forces_simd_avx512,
+    compute_forces_simd_avx512_f32,
+    compute_forces_simd_soa_avx2,
+    compute_forces_simd_soa_avx512,
+    compute_forces_simd_soa_sse41,
+    compute_forces_simd_sse41,
+    update_positions_simd_avx512,
+    update_positions_simd_sse41,
+    update_positions_simd_avx2,
+    update_velocities_simd_avx2,
+    update_velocities_simd_avx512,
+    update_velocities_simd_sse41
+};
 use crate::utils::fast_sqrt_f64;
 
 /// Represents a square region in 2D space.
@@ -31,6 +45,96 @@ impl Quad {
             Quad { cx: self.cx - hs, cy: self.cy - hs, half_size: hs }, // SW
             Quad { cx: self.cx + hs, cy: self.cy - hs, half_size: hs }, // SE
         )
+    }
+}
+
+pub trait SoAFromParticles {
+    fn from_particle_slice(particles: &[Particle]) -> Self;
+}
+pub trait SoAFromParticle {
+    fn from_particle(particle: &Particle, collection_size: usize) -> Self;
+}
+
+/// Memory-efficient Structure of Arrays (SoA) for particles
+#[derive(Debug, Clone)]
+pub struct ParticleCollection {
+    pub positions_x: Vec<f32>,      // Using f32 for positions (half the memory of f64)
+    pub positions_y: Vec<f32>,
+    pub velocities_x: Vec<f32>,
+    pub velocities_y: Vec<f32>,
+    pub masses: Vec<f32>,
+    pub spins: Vec<f32>,
+    pub ages: Vec<f32>,
+    pub densities: Vec<f32>,
+    pub count: usize,
+}
+
+impl SoAFromParticle for ParticleCollection {
+    fn from_particle(particle: &Particle, collection_size: usize) -> Self {
+        let mut collection = Self::new(collection_size);
+        collection.positions_x.push(particle.position.0 as f32);
+        collection.positions_y.push(particle.position.1 as f32);
+        collection.velocities_x.push(particle.velocity.x as f32);
+        collection.velocities_y.push(particle.velocity.y as f32);
+        collection.masses.push(particle.mass as f32);
+        collection.spins.push(particle.spin as f32);
+        collection.ages.push(particle.age as f32);
+        collection.densities.push(particle.density as f32);
+        collection.count += 1;
+        collection
+    }
+}
+impl SoAFromParticles for ParticleCollection {
+    fn from_particle_slice(particles: &[Particle]) -> Self {
+        let count = particles.len();
+        let mut collection = Self::new(count);
+
+        for p in particles {
+            collection = ParticleCollection::from_particle(p, count);
+        }
+        collection
+    }
+}
+
+impl ParticleCollection {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            positions_x: Vec::with_capacity(capacity),
+            positions_y: Vec::with_capacity(capacity),
+            velocities_x: Vec::with_capacity(capacity),
+            velocities_y: Vec::with_capacity(capacity),
+            masses: Vec::with_capacity(capacity),
+            spins: Vec::with_capacity(capacity),
+            ages: Vec::with_capacity(capacity),
+            densities: Vec::with_capacity(capacity),
+            count: 0,
+        }
+    }
+
+    pub fn get_particle(&self, index: usize) -> Particle {
+        Particle {
+            position: (self.positions_x[index] as f64, self.positions_y[index] as f64),
+            velocity: Velocity2D {
+                x: self.velocities_x[index] as f64,
+                y: self.velocities_y[index] as f64
+            },
+            mass: self.masses[index] as f64,
+            spin: self.spins[index] as f64,
+            age: self.ages[index] as f64,
+            density: self.densities[index] as f64,
+        }
+    }
+
+    pub fn apply_force(&mut self, index: usize, fx: f32, fy: f32, dt: f32) {
+        let inv_mass = 1.0 / self.masses[index];
+        self.velocities_x[index] += fx * inv_mass * dt;
+        self.velocities_y[index] += fy * inv_mass * dt;
+    }
+
+    pub fn update_position(&mut self, index: usize, dt: f32) {
+        self.positions_x[index] += self.velocities_x[index] * dt;
+        self.positions_y[index] += self.velocities_y[index] * dt;
+        self.ages[index] += dt;
     }
 }
 
@@ -216,6 +320,32 @@ impl BarnesHutNode {
             (false, false) => 2, // SW
             (false, true) => 3,  // SE
         }
+    }
+
+    // Compute force specifically for a particle in the SoA structure
+    pub fn compute_force_soa(
+        &self,
+        particles: &ParticleCollection,
+        index: usize,
+        theta: f64,
+        g: f64,
+        time: f64
+    ) -> (f32, f32) {
+        // Create a temporary particle for force calculation
+        let p = Particle {
+            position: (particles.positions_x[index] as f64, particles.positions_y[index] as f64),
+            velocity: Velocity2D {
+                x: particles.velocities_x[index] as f64,
+                y: particles.velocities_y[index] as f64
+            },
+            mass: particles.masses[index] as f64,
+            spin: particles.spins[index] as f64,
+            age: particles.ages[index] as f64,
+            density: particles.densities[index] as f64,
+        };
+
+        let (fx, fy) = self.compute_force(&p, theta, g, time);
+        (fx as f32, fy as f32)
     }
 
     /// Computes force between a particle and this node, accounting for gravitational and rotational effects
@@ -492,6 +622,76 @@ pub fn update_density_estimates_iterative(root: &mut BarnesHutNode) {
         }
     }
 }
+fn update_velocities_scalar(
+    particles: &mut ParticleCollection,
+    forces_x: &[f32],
+    forces_y: &[f32],
+    dt: f32
+) {
+    for i in 0..particles.count {
+        let inv_mass = 1.0 / particles.masses[i];
+        let fx = forces_x[i];
+        let fy = forces_y[i];
+
+        // Calculate acceleration: a = F/m
+        let ax = fx * inv_mass;
+        let ay = fy * inv_mass;
+
+        // Update velocity: v = v + a*dt
+        particles.velocities_x[i] += ax * dt;
+        particles.velocities_y[i] += ay * dt;
+    }
+}
+
+fn update_positions_scalar(
+    particles: &mut ParticleCollection,
+    dt: f32
+) {
+    for i in 0..particles.count {
+        // Update position: p = p + v*dt
+        particles.positions_x[i] += particles.velocities_x[i] * dt;
+        particles.positions_y[i] += particles.velocities_y[i] * dt;
+
+        // Update age
+        particles.ages[i] += dt;
+    }
+}
+
+/// Select the best available SIMD implementation for updating velocities
+pub fn update_velocities_simd(
+    particles: &mut ParticleCollection,
+    forces_x: &[f32],
+    forces_y: &[f32],
+    dt: f32
+) {
+    if is_x86_feature_detected!("avx512f") {
+        unsafe { update_velocities_simd_avx512(particles, forces_x, forces_y, dt) }
+    } else if is_x86_feature_detected!("avx2") {
+        unsafe { update_velocities_simd_avx2(particles, forces_x, forces_y, dt) }
+    } else if is_x86_feature_detected!("sse4.1") {
+        unsafe { update_velocities_simd_sse41(particles, forces_x, forces_y, dt) }
+    } else {
+        // Scalar fallback
+        update_velocities_scalar(particles, forces_x, forces_y, dt)
+    }
+}
+
+/// Select the best available SIMD implementation for updating positions
+pub fn update_positions_simd(
+    particles: &mut ParticleCollection,
+    dt: f32
+) {
+    if is_x86_feature_detected!("avx512f") {
+        unsafe { update_positions_simd_avx512(particles, dt) }
+    } else if is_x86_feature_detected!("avx2") {
+        unsafe { update_positions_simd_avx2(particles, dt) }
+    } else if is_x86_feature_detected!("sse4.1") {
+        unsafe { update_positions_simd_sse41(particles, dt) }
+    } else {
+        // Scalar fallback
+        update_positions_scalar(particles, dt)
+    }
+}
 
 /// Helper structure representing an approximated node for SIMD processing
 #[derive(Debug, Clone, Copy)]
@@ -624,6 +824,32 @@ pub fn build_tree_iterative(particles: &[Particle], bounds: Quad) -> BarnesHutNo
 
     // Update density estimates in a separate pass
     update_density_estimates_iterative(&mut root);
+
+    root
+}
+pub fn build_tree_soa(particles: &ParticleCollection, bounds: Quad) -> BarnesHutNode {
+    let mut root = BarnesHutNode::new(bounds);
+
+    for i in 0..particles.count {
+        // Create temporary particle for insertion
+        let p = Particle {
+            position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
+            velocity: Velocity2D {
+                x: particles.velocities_x[i] as f64,
+                y: particles.velocities_y[i] as f64
+            },
+            mass: particles.masses[i] as f64,
+            spin: particles.spins[i] as f64,
+            age: particles.ages[i] as f64,
+            density: particles.densities[i] as f64,
+        };
+
+        // Use existing insert method
+        root.insert(p);
+    }
+
+    // Update density estimates
+    root.update_density_estimates();
 
     root
 }
@@ -792,610 +1018,6 @@ fn calculate_angular_momentum(p1: Particle, p2: Particle) -> f64 {
     p1.spin * p1.mass + p2.spin * p2.mass
 }
 
-/// SIMD-optimized force calculation for a batch of nodes using AVX-512
-#[target_feature(enable = "avx512f")]
-#[target_feature(enable = "avx512vl")]
-pub unsafe fn compute_forces_simd_avx512(
-    p: &Particle,
-    nodes: &[ApproxNode],
-    g: f64,
-    time: f64
-) -> (f64, f64) {
-    use std::arch::x86_64::*;
-
-    let mut total_fx = 0.0;
-    let mut total_fy = 0.0;
-    let n = nodes.len();
-    let mut i = 0;
-
-    // Process 8 nodes at a time using AVX-512
-    while i + 8 <= n {
-        // Load particle data
-        let p_x = _mm512_set1_pd(p.position.0);
-        let p_y = _mm512_set1_pd(p.position.1);
-        let p_mass = _mm512_set1_pd(p.mass);
-        let g_val = _mm512_set1_pd(g);
-        let softening = _mm512_set1_pd(1e-4);
-        let time_val = _mm512_set1_pd(time);
-        let rotation_factor = _mm512_set1_pd(0.01);
-
-        // Load node data
-        let mut masses = [0.0; 8];
-        let mut com_xs = [0.0; 8];
-        let mut com_ys = [0.0; 8];
-        let mut spins = [0.0; 8];
-
-        for j in 0..8 {
-            masses[j] = nodes[i + j].mass;
-            com_xs[j] = nodes[i + j].com_x;
-            com_ys[j] = nodes[i + j].com_y;
-            spins[j] = nodes[i + j].spin;
-        }
-
-        let node_masses = _mm512_loadu_pd(masses.as_ptr());
-        let node_com_xs = _mm512_loadu_pd(com_xs.as_ptr());
-        let node_com_ys = _mm512_loadu_pd(com_ys.as_ptr());
-        let node_spins = _mm512_loadu_pd(spins.as_ptr());
-
-        // Calculate displacement vectors
-        let dx = _mm512_sub_pd(node_com_xs, p_x);
-        let dy = _mm512_sub_pd(node_com_ys, p_y);
-
-        // Calculate distance squared
-        let dx2 = _mm512_mul_pd(dx, dx);
-        let dy2 = _mm512_mul_pd(dy, dy);
-        let dist_sq = _mm512_add_pd(_mm512_add_pd(dx2, dy2), softening);
-
-        // Calculate inverse distance for normalization
-        let dist = _mm512_sqrt_pd(dist_sq);
-        let inv_dist = _mm512_div_pd(_mm512_set1_pd(1.0), dist);
-
-        // Calculate basic gravitational force
-        let m1m2 = _mm512_mul_pd(p_mass, node_masses);
-        let force_magnitudes = _mm512_div_pd(_mm512_mul_pd(g_val, m1m2), dist_sq);
-
-        // Calculate force components
-        let fx_grav = _mm512_mul_pd(_mm512_mul_pd(force_magnitudes, dx), inv_dist);
-        let fy_grav = _mm512_mul_pd(_mm512_mul_pd(force_magnitudes, dy), inv_dist);
-
-        // Calculate rotational effects
-        let spin_strength = _mm512_mul_pd(node_spins, rotation_factor);
-        let neg_one = _mm512_set1_pd(-1.0);
-        let fx_rot = _mm512_mul_pd(_mm512_mul_pd(_mm512_mul_pd(dy, spin_strength), neg_one), inv_dist);
-        let fy_rot = _mm512_mul_pd(_mm512_mul_pd(dx, spin_strength), inv_dist);
-
-        // Calculate Hubble flow
-        let hubble_base = _mm512_set1_pd(70.0);
-        let expansion_factor = _mm512_set1_pd(0.1);
-        let hubble_denom = _mm512_add_pd(_mm512_set1_pd(1.0), _mm512_mul_pd(time_val, expansion_factor));
-        let hubble_param = _mm512_div_pd(hubble_base, hubble_denom);
-        let expansion_scale = _mm512_mul_pd(hubble_param, _mm512_set1_pd(1e-6));
-
-        let fx_exp = _mm512_mul_pd(dx, expansion_scale);
-        let fy_exp = _mm512_mul_pd(dy, expansion_scale);
-
-        // Combine all forces
-        let fx_total = _mm512_add_pd(_mm512_add_pd(fx_grav, fx_rot), fx_exp);
-        let fy_total = _mm512_add_pd(_mm512_add_pd(fy_grav, fy_rot), fy_exp);
-
-        // Sum results horizontally - AVX-512 specific horizontal add
-        total_fx += _mm512_reduce_add_pd(fx_total);
-        total_fy += _mm512_reduce_add_pd(fy_total);
-
-        i += 8;
-    }
-
-    // Handle remaining nodes with AVX2 if available (4 at a time)
-    #[cfg(target_feature = "avx")]
-    {
-        while i + 4 <= n {
-            // Load particle data
-            let p_x = _mm256_set1_pd(p.position.0);
-            let p_y = _mm256_set1_pd(p.position.1);
-            let p_mass = _mm256_set1_pd(p.mass);
-            let g_val = _mm256_set1_pd(g);
-            let softening = _mm256_set1_pd(1e-4);
-            let time_val = _mm256_set1_pd(time);
-            let rotation_factor = _mm256_set1_pd(0.01);
-
-            // Load node data
-            let mut masses = [0.0; 4];
-            let mut com_xs = [0.0; 4];
-            let mut com_ys = [0.0; 4];
-            let mut spins = [0.0; 4];
-
-            for j in 0..4 {
-                masses[j] = nodes[i + j].mass;
-                com_xs[j] = nodes[i + j].com_x;
-                com_ys[j] = nodes[i + j].com_y;
-                spins[j] = nodes[i + j].spin;
-            }
-
-            let node_masses = _mm256_loadu_pd(masses.as_ptr());
-            let node_com_xs = _mm256_loadu_pd(com_xs.as_ptr());
-            let node_com_ys = _mm256_loadu_pd(com_ys.as_ptr());
-            let node_spins = _mm256_loadu_pd(spins.as_ptr());
-
-            // Calculate displacement vectors
-            let dx = _mm256_sub_pd(node_com_xs, p_x);
-            let dy = _mm256_sub_pd(node_com_ys, p_y);
-
-            // Calculate distance squared
-            let dx2 = _mm256_mul_pd(dx, dx);
-            let dy2 = _mm256_mul_pd(dy, dy);
-            let dist_sq = _mm256_add_pd(_mm256_add_pd(dx2, dy2), softening);
-
-            // Calculate inverse distance for normalization
-            let dist = _mm256_sqrt_pd(dist_sq);
-            let inv_dist = _mm256_div_pd(_mm256_set1_pd(1.0), dist);
-
-            // Calculate basic gravitational force
-            let m1m2 = _mm256_mul_pd(p_mass, node_masses);
-            let force_magnitudes = _mm256_div_pd(_mm256_mul_pd(g_val, m1m2), dist_sq);
-
-            // Calculate force components
-            let fx_grav = _mm256_mul_pd(_mm256_mul_pd(force_magnitudes, dx), inv_dist);
-            let fy_grav = _mm256_mul_pd(_mm256_mul_pd(force_magnitudes, dy), inv_dist);
-
-            // Calculate rotational effects
-            let spin_strength = _mm256_mul_pd(node_spins, rotation_factor);
-            let fx_rot = _mm256_mul_pd(_mm256_mul_pd(_mm256_mul_pd(dy, spin_strength), _mm256_set1_pd(-1.0)), inv_dist);
-            let fy_rot = _mm256_mul_pd(_mm256_mul_pd(dx, spin_strength), inv_dist);
-
-            // Calculate Hubble flow
-            let hubble_base = _mm256_set1_pd(70.0);
-            let expansion_factor = _mm256_set1_pd(0.1);
-            let hubble_denom = _mm256_add_pd(_mm256_set1_pd(1.0), _mm256_mul_pd(time_val, expansion_factor));
-            let hubble_param = _mm256_div_pd(hubble_base, hubble_denom);
-            let expansion_scale = _mm256_mul_pd(hubble_param, _mm256_set1_pd(1e-6));
-
-            let fx_exp = _mm256_mul_pd(dx, expansion_scale);
-            let fy_exp = _mm256_mul_pd(dy, expansion_scale);
-
-            // Combine all forces
-            let fx_total = _mm256_add_pd(_mm256_add_pd(fx_grav, fx_rot), fx_exp);
-            let fy_total = _mm256_add_pd(_mm256_add_pd(fy_grav, fy_rot), fy_exp);
-
-            // Sum results horizontally
-            let mut fx_arr = [0.0; 4];
-            let mut fy_arr = [0.0; 4];
-            _mm256_storeu_pd(fx_arr.as_mut_ptr(), fx_total);
-            _mm256_storeu_pd(fy_arr.as_mut_ptr(), fy_total);
-
-            for j in 0..4 {
-                total_fx += fx_arr[j];
-                total_fy += fy_arr[j];
-            }
-
-            i += 4;
-        }
-    }
-
-    // Handle remaining nodes using scalar code
-    for j in i..n {
-        let node = &nodes[j];
-        let dx = node.com_x - p.position.0;
-        let dy = node.com_y - p.position.1;
-
-        // Use a softening parameter to avoid numerical instability
-        let softening = 1e-4;
-        let dist_sq = dx * dx + dy * dy + softening;
-        let dist = fast_sqrt_f64(dist_sq);
-
-        // Basic gravitational force
-        let basic_force = g * p.mass * node.mass / dist_sq;
-        let force_x = basic_force * dx / dist;
-        let force_y = basic_force * dy / dist;
-
-        // Rotational effect
-        let rotation_strength = node.spin * 0.01;
-        let tangential_x = -dy / dist * rotation_strength;
-        let tangential_y = dx / dist * rotation_strength;
-
-        // Expansion term
-        let hubble_param = 70.0 * (1.0 / (1.0 + time * 0.1));
-        let expansion_scale = hubble_param * 1e-6;
-        let expansion_x = dx * expansion_scale;
-        let expansion_y = dy * expansion_scale;
-
-        total_fx += force_x + tangential_x + expansion_x;
-        total_fy += force_y + tangential_y + expansion_y;
-    }
-
-    (total_fx, total_fy)
-}
-
-/// Try to use AVX-512 if available with 32-bit single precision for even greater throughput
-/// Process 16 particles at once
-#[target_feature(enable = "avx512f")]
-#[target_feature(enable = "avx512vl")]
-pub unsafe fn compute_forces_simd_avx512_f32(
-    p: &Particle,
-    nodes: &[ApproxNode],
-    g: f64,
-    time: f64
-) -> (f64, f64) {
-    use std::arch::x86_64::*;
-
-    let mut total_fx = 0.0;
-    let mut total_fy = 0.0;
-    let n = nodes.len();
-    let mut i = 0;
-
-    // Convert inputs to f32 for faster processing
-    let p_x_f32 = p.position.0 as f32;
-    let p_y_f32 = p.position.1 as f32;
-    let p_mass_f32 = p.mass as f32;
-    let g_f32 = g as f32;
-    let time_f32 = time as f32;
-
-    // Process 16 nodes at a time using AVX-512 with f32
-    while i + 16 <= n {
-        // Load particle data
-        let p_x = _mm512_set1_ps(p_x_f32);
-        let p_y = _mm512_set1_ps(p_y_f32);
-        let p_mass = _mm512_set1_ps(p_mass_f32);
-        let g_val = _mm512_set1_ps(g_f32);
-        let softening = _mm512_set1_ps(1e-4);
-        let time_val = _mm512_set1_ps(time_f32);
-        let rotation_factor = _mm512_set1_ps(0.01);
-
-        // Load node data
-        let mut masses = [0.0f32; 16];
-        let mut com_xs = [0.0f32; 16];
-        let mut com_ys = [0.0f32; 16];
-        let mut spins = [0.0f32; 16];
-
-        for j in 0..16 {
-            masses[j] = nodes[i + j].mass as f32;
-            com_xs[j] = nodes[i + j].com_x as f32;
-            com_ys[j] = nodes[i + j].com_y as f32;
-            spins[j] = nodes[i + j].spin as f32;
-        }
-
-        let node_masses = _mm512_loadu_ps(masses.as_ptr());
-        let node_com_xs = _mm512_loadu_ps(com_xs.as_ptr());
-        let node_com_ys = _mm512_loadu_ps(com_ys.as_ptr());
-        let node_spins = _mm512_loadu_ps(spins.as_ptr());
-
-        // Calculate displacement vectors
-        let dx = _mm512_sub_ps(node_com_xs, p_x);
-        let dy = _mm512_sub_ps(node_com_ys, p_y);
-
-        // Calculate distance squared
-        let dx2 = _mm512_mul_ps(dx, dx);
-        let dy2 = _mm512_mul_ps(dy, dy);
-        let dist_sq = _mm512_add_ps(_mm512_add_ps(dx2, dy2), softening);
-
-        // Calculate inverse distance for normalization
-        let dist = _mm512_sqrt_ps(dist_sq);
-        let inv_dist = _mm512_div_ps(_mm512_set1_ps(1.0), dist);
-
-        // Calculate basic gravitational force
-        let m1m2 = _mm512_mul_ps(p_mass, node_masses);
-        let force_magnitudes = _mm512_div_ps(_mm512_mul_ps(g_val, m1m2), dist_sq);
-
-        // Calculate force components
-        let fx_grav = _mm512_mul_ps(_mm512_mul_ps(force_magnitudes, dx), inv_dist);
-        let fy_grav = _mm512_mul_ps(_mm512_mul_ps(force_magnitudes, dy), inv_dist);
-
-        // Calculate rotational effects
-        let spin_strength = _mm512_mul_ps(node_spins, rotation_factor);
-        let neg_one = _mm512_set1_ps(-1.0);
-        let fx_rot = _mm512_mul_ps(_mm512_mul_ps(_mm512_mul_ps(dy, spin_strength), neg_one), inv_dist);
-        let fy_rot = _mm512_mul_ps(_mm512_mul_ps(dx, spin_strength), inv_dist);
-
-        // Calculate Hubble flow
-        let hubble_base = _mm512_set1_ps(70.0);
-        let expansion_factor = _mm512_set1_ps(0.1);
-        let hubble_denom = _mm512_add_ps(_mm512_set1_ps(1.0), _mm512_mul_ps(time_val, expansion_factor));
-        let hubble_param = _mm512_div_ps(hubble_base, hubble_denom);
-        let expansion_scale = _mm512_mul_ps(hubble_param, _mm512_set1_ps(1e-6));
-
-        let fx_exp = _mm512_mul_ps(dx, expansion_scale);
-        let fy_exp = _mm512_mul_ps(dy, expansion_scale);
-
-        // Combine all forces
-        let fx_total = _mm512_add_ps(_mm512_add_ps(fx_grav, fx_rot), fx_exp);
-        let fy_total = _mm512_add_ps(_mm512_add_ps(fy_grav, fy_rot), fy_exp);
-
-        // Sum results horizontally - AVX-512 specific horizontal add for floats
-        total_fx += _mm512_reduce_add_ps(fx_total) as f64;
-        total_fy += _mm512_reduce_add_ps(fy_total) as f64;
-
-        i += 16;
-    }
-
-    // Handle remaining nodes with AVX-512 double precision
-    if i + 8 <= n {
-        let fx_fy = compute_forces_simd_avx512(&Particle {
-            position: p.position,
-            velocity: p.velocity.clone(),
-            mass: p.mass,
-            spin: p.spin,
-            age: p.age,
-            density: p.density,
-        }, &nodes[i..i+8], g, time);
-
-        total_fx += fx_fy.0;
-        total_fy += fx_fy.1;
-        i += 8;
-    }
-
-    // Handle remaining nodes with AVX2 or scalar
-    if i < n {
-        // Use existing scalar implementation for the rest
-        let fx_fy = compute_forces_scalar(p, &nodes[i..], g, time);
-        total_fx += fx_fy.0;
-        total_fy += fx_fy.1;
-    }
-
-    (total_fx, total_fy)
-}
-
-/// SIMD-optimized force calculation for a batch of nodes using AVX2
-#[target_feature(enable = "avx2")]
-pub unsafe fn compute_forces_simd_avx2(
-    p: &Particle,
-    nodes: &[ApproxNode],
-    g: f64,
-    time: f64
-) -> (f64, f64) {
-    use std::arch::x86_64::*;
-
-    let mut total_fx = 0.0;
-    let mut total_fy = 0.0;
-    let n = nodes.len();
-    let mut i = 0;
-
-    // Process 4 nodes at a time using AVX2
-    while i + 4 <= n {
-        // Load particle data
-        let p_x = _mm256_set1_pd(p.position.0);
-        let p_y = _mm256_set1_pd(p.position.1);
-        let p_mass = _mm256_set1_pd(p.mass);
-        let g_val = _mm256_set1_pd(g);
-        let softening = _mm256_set1_pd(1e-4);
-        let time_val = _mm256_set1_pd(time);
-        let rotation_factor = _mm256_set1_pd(0.01);
-
-        // Load node data
-        let mut masses = [0.0; 4];
-        let mut com_xs = [0.0; 4];
-        let mut com_ys = [0.0; 4];
-        let mut spins = [0.0; 4];
-
-        for j in 0..4 {
-            masses[j] = nodes[i + j].mass;
-            com_xs[j] = nodes[i + j].com_x;
-            com_ys[j] = nodes[i + j].com_y;
-            spins[j] = nodes[i + j].spin;
-        }
-
-        let node_masses = _mm256_loadu_pd(masses.as_ptr());
-        let node_com_xs = _mm256_loadu_pd(com_xs.as_ptr());
-        let node_com_ys = _mm256_loadu_pd(com_ys.as_ptr());
-        let node_spins = _mm256_loadu_pd(spins.as_ptr());
-
-        // Calculate displacement vectors
-        let dx = _mm256_sub_pd(node_com_xs, p_x);
-        let dy = _mm256_sub_pd(node_com_ys, p_y);
-
-        // Calculate distance squared
-        let dx2 = _mm256_mul_pd(dx, dx);
-        let dy2 = _mm256_mul_pd(dy, dy);
-        let dist_sq = _mm256_add_pd(_mm256_add_pd(dx2, dy2), softening);
-
-        // Calculate inverse distance for normalization
-        let dist = _mm256_sqrt_pd(dist_sq);
-        let inv_dist = _mm256_div_pd(_mm256_set1_pd(1.0), dist);
-
-        // Calculate basic gravitational force
-        let m1m2 = _mm256_mul_pd(p_mass, node_masses);
-        let force_magnitudes = _mm256_div_pd(_mm256_mul_pd(g_val, m1m2), dist_sq);
-
-        // Calculate force components
-        let fx_grav = _mm256_mul_pd(_mm256_mul_pd(force_magnitudes, dx), inv_dist);
-        let fy_grav = _mm256_mul_pd(_mm256_mul_pd(force_magnitudes, dy), inv_dist);
-
-        // Calculate rotational effects
-        let spin_strength = _mm256_mul_pd(node_spins, rotation_factor);
-        let fx_rot = _mm256_mul_pd(_mm256_mul_pd(_mm256_mul_pd(dy, spin_strength), _mm256_set1_pd(-1.0)), inv_dist);
-        let fy_rot = _mm256_mul_pd(_mm256_mul_pd(dx, spin_strength), inv_dist);
-
-        // Calculate Hubble flow
-        let hubble_base = _mm256_set1_pd(70.0);
-        let expansion_factor = _mm256_set1_pd(0.1);
-        let hubble_denom = _mm256_add_pd(_mm256_set1_pd(1.0), _mm256_mul_pd(time_val, expansion_factor));
-        let hubble_param = _mm256_div_pd(hubble_base, hubble_denom);
-        let expansion_scale = _mm256_mul_pd(hubble_param, _mm256_set1_pd(1e-6));
-
-        let fx_exp = _mm256_mul_pd(dx, expansion_scale);
-        let fy_exp = _mm256_mul_pd(dy, expansion_scale);
-
-        // Combine all forces
-        let fx_total = _mm256_add_pd(_mm256_add_pd(fx_grav, fx_rot), fx_exp);
-        let fy_total = _mm256_add_pd(_mm256_add_pd(fy_grav, fy_rot), fy_exp);
-
-        // Sum results horizontally
-        let mut fx_arr = [0.0; 4];
-        let mut fy_arr = [0.0; 4];
-        _mm256_storeu_pd(fx_arr.as_mut_ptr(), fx_total);
-        _mm256_storeu_pd(fy_arr.as_mut_ptr(), fy_total);
-
-        for j in 0..4 {
-            total_fx += fx_arr[j];
-            total_fy += fy_arr[j];
-        }
-
-        i += 4;
-    }
-
-    // Handle remaining nodes using scalar code
-    for j in i..n {
-        let node = &nodes[j];
-        let dx = node.com_x - p.position.0;
-        let dy = node.com_y - p.position.1;
-
-        // Use a softening parameter to avoid numerical instability
-        let softening = 1e-4;
-        let dist_sq = dx * dx + dy * dy + softening;
-        let dist = fast_sqrt_f64(dist_sq);
-
-        // Basic gravitational force
-        let basic_force = g * p.mass * node.mass / dist_sq;
-        let force_x = basic_force * dx / dist;
-        let force_y = basic_force * dy / dist;
-
-        // Rotational effect
-        let rotation_strength = node.spin * 0.01;
-        let tangential_x = -dy / dist * rotation_strength;
-        let tangential_y = dx / dist * rotation_strength;
-
-        // Expansion term
-        let hubble_param = 70.0 * (1.0 / (1.0 + time * 0.1));
-        let expansion_scale = hubble_param * 1e-6;
-        let expansion_x = dx * expansion_scale;
-        let expansion_y = dy * expansion_scale;
-
-        total_fx += force_x + tangential_x + expansion_x;
-        total_fy += force_y + tangential_y + expansion_y;
-    }
-
-    (total_fx, total_fy)
-}
-
-/// SIMD-optimized force calculation for a batch of nodes using SSE4.1
-#[cfg(target_feature = "sse4.1")]
-pub unsafe fn compute_forces_simd_sse41(
-    p: &Particle,
-    nodes: &[ApproxNode],
-    g: f64,
-    time: f64
-) -> (f64, f64) {
-    use std::arch::x86_64::*;
-
-    let mut total_fx = 0.0;
-    let mut total_fy = 0.0;
-    let n = nodes.len();
-    let mut i = 0;
-
-    // Process 2 nodes at a time using SSE4.1 
-    while i + 2 <= n {
-        // Load particle data
-        let p_x = _mm_set1_pd(p.position.0);
-        let p_y = _mm_set1_pd(p.position.1);
-        let p_mass = _mm_set1_pd(p.mass);
-        let g_val = _mm_set1_pd(g);
-        let softening = _mm_set1_pd(1e-4);
-        let time_val = _mm_set1_pd(time);
-        let rotation_factor = _mm_set1_pd(0.01);
-
-        // Load node data
-        let mut masses = [0.0; 2];
-        let mut com_xs = [0.0; 2];
-        let mut com_ys = [0.0; 2];
-        let mut spins = [0.0; 2];
-
-        for j in 0..2 {
-            masses[j] = nodes[i + j].mass;
-            com_xs[j] = nodes[i + j].com_x;
-            com_ys[j] = nodes[i + j].com_y;
-            spins[j] = nodes[i + j].spin;
-        }
-
-        let node_masses = _mm_loadu_pd(masses.as_ptr());
-        let node_com_xs = _mm_loadu_pd(com_xs.as_ptr());
-        let node_com_ys = _mm_loadu_pd(com_ys.as_ptr());
-        let node_spins = _mm_loadu_pd(spins.as_ptr());
-
-        // Calculate displacement vectors
-        let dx = _mm_sub_pd(node_com_xs, p_x);
-        let dy = _mm_sub_pd(node_com_ys, p_y);
-
-        // Calculate distance squared
-        let dx2 = _mm_mul_pd(dx, dx);
-        let dy2 = _mm_mul_pd(dy, dy);
-        let dist_sq = _mm_add_pd(_mm_add_pd(dx2, dy2), softening);
-
-        // Calculate inverse distance for normalization
-        let dist = _mm_sqrt_pd(dist_sq);
-        let inv_dist = _mm_div_pd(_mm_set1_pd(1.0), dist);
-
-        // Calculate basic gravitational force
-        let m1m2 = _mm_mul_pd(p_mass, node_masses);
-        let force_magnitudes = _mm_div_pd(_mm_mul_pd(g_val, m1m2), dist_sq);
-
-        // Calculate force components
-        let fx_grav = _mm_mul_pd(_mm_mul_pd(force_magnitudes, dx), inv_dist);
-        let fy_grav = _mm_mul_pd(_mm_mul_pd(force_magnitudes, dy), inv_dist);
-
-        // Calculate rotational effects
-        let spin_strength = _mm_mul_pd(node_spins, rotation_factor);
-        let fx_rot = _mm_mul_pd(_mm_mul_pd(_mm_mul_pd(dy, spin_strength), _mm_set1_pd(-1.0)), inv_dist);
-        let fy_rot = _mm_mul_pd(_mm_mul_pd(dx, spin_strength), inv_dist);
-
-        // Calculate Hubble flow
-        let hubble_base = _mm_set1_pd(70.0);
-        let expansion_factor = _mm_set1_pd(0.1);
-        let hubble_denom = _mm_add_pd(_mm_set1_pd(1.0), _mm_mul_pd(time_val, expansion_factor));
-        let hubble_param = _mm_div_pd(hubble_base, hubble_denom);
-        let expansion_scale = _mm_mul_pd(hubble_param, _mm_set1_pd(1e-6));
-
-        let fx_exp = _mm_mul_pd(dx, expansion_scale);
-        let fy_exp = _mm_mul_pd(dy, expansion_scale);
-
-        // Combine all forces
-        let fx_total = _mm_add_pd(_mm_add_pd(fx_grav, fx_rot), fx_exp);
-        let fy_total = _mm_add_pd(_mm_add_pd(fy_grav, fy_rot), fy_exp);
-
-        // Sum results horizontally
-        let mut fx_arr = [0.0; 2];
-        let mut fy_arr = [0.0; 2];
-        _mm_storeu_pd(fx_arr.as_mut_ptr(), fx_total);
-        _mm_storeu_pd(fy_arr.as_mut_ptr(), fy_total);
-
-        for j in 0..2 {
-            total_fx += fx_arr[j];
-            total_fy += fy_arr[j];
-        }
-
-        i += 2;
-    }
-
-    // Handle remaining nodes using scalar code
-    for j in i..n {
-        let node = &nodes[j];
-        let dx = node.com_x - p.position.0;
-        let dy = node.com_y - p.position.1;
-
-        // Use a softening parameter to avoid numerical instability
-        let softening = 1e-4;
-        let dist_sq = dx * dx + dy * dy + softening;
-        let dist = fast_sqrt_f64(dist_sq);
-
-        // Basic gravitational force
-        let basic_force = g * p.mass * node.mass / dist_sq;
-        let force_x = basic_force * dx / dist;
-        let force_y = basic_force * dy / dist;
-
-        // Rotational effect
-        let rotation_strength = node.spin * 0.01;
-        let tangential_x = -dy / dist * rotation_strength;
-        let tangential_y = dx / dist * rotation_strength;
-
-        // Expansion term
-        let hubble_param = 70.0 * (1.0 / (1.0 + time * 0.1));
-        let expansion_scale = hubble_param * 1e-6;
-        let expansion_x = dx * expansion_scale;
-        let expansion_y = dy * expansion_scale;
-
-        total_fx += force_x + tangential_x + expansion_x;
-        total_fy += force_y + tangential_y + expansion_y;
-    }
-
-    (total_fx, total_fy)
-}
 
 /// Scalar fallback function for force calculation
 pub fn compute_forces_scalar(
@@ -1442,6 +1064,63 @@ pub fn compute_forces_scalar(
     (total_fx, total_fy)
 }
 
+/// Scalar implementation of force calculation for SoA particle data
+pub fn compute_forces_scalar_soa(
+    particles: &ParticleCollection,
+    index: usize,
+    nodes: &[ApproxNode],
+    g: f32,
+    time: f32
+) -> (f32, f32) {
+    let mut total_fx = 0.0;
+    let mut total_fy = 0.0;
+
+    // Get particle data
+    let p_x = particles.positions_x[index];
+    let p_y = particles.positions_y[index];
+    let p_mass = particles.masses[index];
+
+    // Process each node individually
+    for node in nodes {
+        let node_x = node.com_x as f32;
+        let node_y = node.com_y as f32;
+        let node_mass = node.mass as f32;
+        let node_spin = node.spin as f32;
+
+        // Calculate displacement vectors
+        let dx = node_x - p_x;
+        let dy = node_y - p_y;
+
+        // Use a softening parameter to avoid numerical instability
+        let softening = 1e-4;
+        let dist_sq = dx * dx + dy * dy + softening;
+        let dist = dist_sq.sqrt();
+
+        // Basic gravitational force: F = G * m1 * m2 / r^2
+        let basic_force = g * p_mass * node_mass / dist_sq;
+
+        // Direction of force (toward the other mass)
+        let force_x = basic_force * dx / dist;
+        let force_y = basic_force * dy / dist;
+
+        // Add rotational effect based on angular momentum
+        let rotation_strength = node_spin * 0.01;
+        let tangential_x = -dy / dist * rotation_strength;
+        let tangential_y = dx / dist * rotation_strength;
+
+        // Add expansion term (Hubble flow)
+        let hubble_param = 70.0 * (1.0 / (1.0 + time * 0.1));
+        let expansion_scale = hubble_param * 1e-6;
+        let expansion_x = dx * expansion_scale;
+        let expansion_y = dy * expansion_scale;
+
+        // Combine forces
+        total_fx += force_x + tangential_x + expansion_x;
+        total_fy += force_y + tangential_y + expansion_y;
+    }
+
+    (total_fx, total_fy)
+}
 
 /// Modified compute_net_force to use AVX-512 if available
 pub fn compute_net_force(tree: &BarnesHutNode, p: &Particle, theta: f64, g: f64, time: f64) -> (f64, f64) {
@@ -1523,6 +1202,25 @@ pub fn compute_net_force_iterative(tree: &BarnesHutNode, p: &Particle, theta: f6
     // Fall back to scalar implementation
     compute_forces_scalar(p, &worklist, g, time)
 }
+pub fn compute_forces_simd_soa(
+    particles: &ParticleCollection,
+    index: usize,
+    nodes: &[ApproxNode],
+    g: f32,
+    time: f32
+) -> (f32, f32) {
+    // Check for available SIMD features from best to worst
+    if is_x86_feature_detected!("avx512f") {
+        unsafe { compute_forces_simd_soa_avx512(particles, index, nodes, g, time) }
+    } else if is_x86_feature_detected!("avx2") {
+        unsafe { compute_forces_simd_soa_avx2(particles, index, nodes, g, time) }
+    } else if is_x86_feature_detected!("sse4.1") {
+        unsafe { compute_forces_simd_soa_sse41(particles, index, nodes, g, time) }
+    } else {
+        // Fallback to scalar implementation
+        compute_forces_scalar_soa(particles, index, nodes, g, time)
+    }
+}
 
 /// Creates a set of particles representing a Big Bang simulation
 pub fn create_big_bang_particles(num_particles: usize, initial_radius: f64) -> Vec<Particle> {
@@ -1564,6 +1262,70 @@ pub fn create_big_bang_particles(num_particles: usize, initial_radius: f64) -> V
 
     particles
 }
+
+/// SoA particle collection with Big Bang configuration
+pub fn create_big_bang_particles_soa(
+    num_particles: usize,
+    initial_radius: f32
+) -> ParticleCollection {
+    let mut particles = ParticleCollection::new(num_particles);
+    particles.count = num_particles;
+
+    // Pre-allocate all arrays
+    particles.positions_x.resize(num_particles, 0.0);
+    particles.positions_y.resize(num_particles, 0.0);
+    particles.velocities_x.resize(num_particles, 0.0);
+    particles.velocities_y.resize(num_particles, 0.0);
+    particles.masses.resize(num_particles, 0.0);
+    particles.spins.resize(num_particles, 0.0);
+    particles.ages.resize(num_particles, 0.0);
+    particles.densities.resize(num_particles, 0.0);
+
+    // Initialize in parallel for better performance
+    (0..num_particles).into_par_iter().for_each(|i| {
+        // Create particles with a denser concentration toward the center
+        let radius = initial_radius * (rand::random::<f32>().powf(0.5));
+        let angle = 2.0 * std::f32::consts::PI * rand::random::<f32>();
+
+        // Position (polar coordinates converted to Cartesian)
+        let x = radius * angle.cos();
+        let y = radius * angle.sin();
+
+        // Initial velocity (perpendicular to radius, with some random variation)
+        let speed_scale = 0.5 * radius.sqrt(); // Velocity increases with distance
+        let perpendicular_angle = angle + std::f32::consts::PI/2.0;
+        let velocity_variation = 0.2; // Random velocity component magnitude
+
+        let vx = speed_scale * perpendicular_angle.cos() +
+            velocity_variation * (rand::random::<f32>() - 0.5);
+        let vy = speed_scale * perpendicular_angle.sin() +
+            velocity_variation * (rand::random::<f32>() - 0.5);
+
+        // Mass (some particles are more massive)
+        let mass = if rand::random::<f32>() < 0.01 {
+            // A few massive particles to simulate primary attractors
+            10.0 + 5.0 * rand::random::<f32>()
+        } else {
+            0.1 + 0.9 * rand::random::<f32>()
+        };
+
+        // Spin (angular momentum)
+        let spin = 0.01 * rand::random::<f32>();
+
+        // Fill in the arrays
+        particles.positions_x[i] = x;
+        particles.positions_y[i] = y;
+        particles.velocities_x[i] = vx;
+        particles.velocities_y[i] = vy;
+        particles.masses[i] = mass;
+        particles.spins[i] = spin;
+        particles.ages[i] = 0.0;
+        particles.densities[i] = 0.0;
+    });
+
+    particles
+}
+
 
 /// Simulate particle interactions for a time step using the Barnes-Hut algorithm
 pub fn simulate_step(
@@ -1632,6 +1394,20 @@ pub fn simulate_step_optimized(
                         }
                     }
                 }
+                // Fall back to AVX2 if available
+                #[cfg(target_feature = "avx2")]
+                {
+                    if is_x86_feature_detected!("avx2") {
+                        return unsafe { compute_forces_simd_avx2(p, &worklist, g, time) };
+                    }
+                }
+                // Fall back to SSE4.1 if available
+                #[cfg(target_feature = "sse4.1")]
+                {
+                    if is_x86_feature_detected!("sse4.1") {
+                        return unsafe { compute_forces_simd_sse41(p, &worklist, g, time) };
+                    }
+                }
 
                 // Fall back to scalar implementation
                 compute_forces_scalar(p, &worklist, g, time)
@@ -1668,6 +1444,33 @@ pub fn apply_boundary_conditions(p: &mut Particle, bounds: Quad) {
         p.position.1 += bound_size;
     } else if p.position.1 >= bounds.cy + bounds.half_size {
         p.position.1 -= bound_size;
+    }
+}
+/// Apply boundary conditions to particles in SoA format
+pub fn apply_boundary_conditions_soa(
+    particles: &mut ParticleCollection,
+    bounds: Quad
+) {
+    let bound_size_x = bounds.half_size as f32 * 2.0;
+    let bound_size_y = bounds.half_size as f32 * 2.0;
+    let min_x = (bounds.cx - bounds.half_size) as f32 ;
+    let max_x = (bounds.cx + bounds.half_size) as f32 ;
+    let min_y = (bounds.cy - bounds.half_size) as f32 ;
+    let max_y = (bounds.cy + bounds.half_size) as f32 ;
+
+    for i in 0..particles.count {
+        // Periodic boundary conditions (wraparound)
+        if particles.positions_x[i] < min_x {
+            particles.positions_x[i] += bound_size_x;
+        } else if particles.positions_x[i] >= max_x {
+            particles.positions_x[i] -= bound_size_x;
+        }
+
+        if particles.positions_y[i] < min_y {
+            particles.positions_y[i] += bound_size_y;
+        } else if particles.positions_y[i] >= max_y {
+            particles.positions_y[i] -= bound_size_y;
+        }
     }
 }
 
@@ -1771,3 +1574,287 @@ pub fn run_optimized_simulation(
     )
 }
 
+/// Perform a simulation step using the SoA data structure and optimized SIMD ( from a &\[Particle] )
+pub fn simulate_step_soa_from_slice(
+    particles: &[Particle],
+    bounds: Quad,
+    theta: f32,
+    g: f32,
+    dt: f32,
+    time: f32
+) {
+    let particles = &mut ParticleCollection::from_particle_slice(particles);
+    // 1. Build Barnes-Hut tree
+    let mut tree_builder_particles = Vec::with_capacity(particles.count);
+    for i in 0..particles.count {
+        tree_builder_particles.push(Particle {
+            position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
+            velocity: Velocity2D {
+                x: particles.velocities_x[i] as f64,
+                y: particles.velocities_y[i] as f64,
+            },
+            mass: particles.masses[i] as f64,
+            spin: particles.spins[i] as f64,
+            age: particles.ages[i] as f64,
+            density: particles.densities[i] as f64,
+        });
+    }
+
+    // Convert bounds to f64 for tree building
+    let tree_bounds = Quad {
+        cx: bounds.cx as f64,
+        cy: bounds.cy as f64,
+        half_size: bounds.half_size as f64,
+    };
+
+    // Use iterative (non-recursive) tree building for large particle counts
+    let tree = build_tree_iterative(&tree_builder_particles, tree_bounds);
+
+    // 2. Calculate forces for all particles
+    // Pre-allocate force arrays
+    let mut forces_x = vec![0.0f32; particles.count];
+    let mut forces_y = vec![0.0f32; particles.count];
+
+    // Calculate parallel batch size based on available cores
+    let cpu_cores = rayon::current_num_threads();
+    let batch_size = (particles.count / cpu_cores).max(1);
+
+    // Process particles in batches to reduce memory pressure
+    (0..particles.count).into_par_iter()
+        .chunks(batch_size)
+        .for_each(|chunk| {
+            for &i in &chunk {
+                // For each particle, collect approximately nodes
+                let mut worklist = Vec::new();
+                let p = Particle {
+                    position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
+                    velocity: Velocity2D {
+                        x: particles.velocities_x[i] as f64,
+                        y: particles.velocities_y[i] as f64,
+                    },
+                    mass: particles.masses[i] as f64,
+                    spin: particles.spins[i] as f64,
+                    age: particles.ages[i] as f64,
+                    density: particles.densities[i] as f64,
+                };
+
+                // Collect approximated nodes using non-recursive method
+                collect_approx_nodes_iterative(&tree, &p, theta as f64, &mut worklist);
+
+                // Calculate forces using the best available SIMD implementation
+                let (fx, fy) = compute_forces_simd_soa(particles, i, &worklist, g, time);
+
+                // Store forces for later application
+                forces_x[i] = fx;
+                forces_y[i] = fy;
+            }
+        });
+
+    // 3. Update velocities using SIMD
+    update_velocities_simd(particles, &forces_x, &forces_y, dt);
+
+    // 4. Update positions using SIMD
+    update_positions_simd(particles, dt);
+
+    // 5. Apply boundary conditions if needed
+    apply_boundary_conditions_soa(particles, bounds);
+}
+
+/// Perform a simulation step using the SoA data structure and optimized SIMD
+pub fn simulate_step_soa(
+    particles: &mut ParticleCollection,
+    bounds: Quad,
+    theta: f32,
+    g: f32,
+    dt: f32,
+    time: f32
+) {
+    // 1. Build Barnes-Hut tree
+    let mut tree_builder_particles = Vec::with_capacity(particles.count);
+    for i in 0..particles.count {
+        tree_builder_particles.push(Particle {
+            position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
+            velocity: Velocity2D {
+                x: particles.velocities_x[i] as f64,
+                y: particles.velocities_y[i] as f64,
+            },
+            mass: particles.masses[i] as f64,
+            spin: particles.spins[i] as f64,
+            age: particles.ages[i] as f64,
+            density: particles.densities[i] as f64,
+        });
+    }
+
+    // Convert bounds to f64 for tree building
+    let tree_bounds = Quad {
+        cx: bounds.cx as f64,
+        cy: bounds.cy as f64,
+        half_size: bounds.half_size as f64,
+    };
+
+    // Use iterative (non-recursive) tree building for large particle counts
+    let tree = build_tree_iterative(&tree_builder_particles, tree_bounds);
+
+    // 2. Calculate forces for all particles
+    // Pre-allocate force arrays
+    let mut forces_x = vec![0.0f32; particles.count];
+    let mut forces_y = vec![0.0f32; particles.count];
+
+    // Calculate parallel batch size based on available cores
+    let cpu_cores = rayon::current_num_threads();
+    let batch_size = (particles.count / cpu_cores).max(1);
+
+    // Process particles in batches to reduce memory pressure
+    (0..particles.count).into_par_iter()
+        .chunks(batch_size)
+        .for_each(|chunk| {
+            for &i in &chunk {
+                // For each particle, collect approximately nodes
+                let mut worklist = Vec::new();
+                let p = Particle {
+                    position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
+                    velocity: Velocity2D {
+                        x: particles.velocities_x[i] as f64,
+                        y: particles.velocities_y[i] as f64,
+                    },
+                    mass: particles.masses[i] as f64,
+                    spin: particles.spins[i] as f64,
+                    age: particles.ages[i] as f64,
+                    density: particles.densities[i] as f64,
+                };
+
+                // Collect approximated nodes using non-recursive method
+                collect_approx_nodes_iterative(&tree, &p, theta as f64, &mut worklist);
+
+                // Calculate forces using the best available SIMD implementation
+                let (fx, fy) = compute_forces_simd_soa(particles, i, &worklist, g, time);
+
+                // Store forces for later application
+                forces_x[i] = fx;
+                forces_y[i] = fy;
+            }
+        });
+
+    // 3. Update velocities using SIMD
+    update_velocities_simd(particles, &forces_x, &forces_y, dt);
+
+    // 4. Update positions using SIMD
+    update_positions_simd(particles, dt);
+
+    // 5. Apply boundary conditions if needed
+    apply_boundary_conditions_soa(particles, bounds);
+}
+/// Run a complete simulation for a specified number of steps using SoA
+pub fn run_simulation_soa(
+    num_particles: usize,
+    initial_radius: f32,
+    bounds: Quad,
+    num_steps: usize,
+    dt: f32,
+    theta: f32,
+    g: f32
+) -> ParticleCollection {
+    // Initialize particles
+    let mut particles = create_big_bang_particles_soa(num_particles, initial_radius);
+
+    // Run simulation steps
+    for step in 0..num_steps {
+        let time = step as f32 * dt;
+        simulate_step_soa(&mut particles, bounds, theta, g, dt, time);
+    }
+
+    particles
+}
+
+/// Higher-level function that sets up and runs an optimized cosmological simulation
+pub fn run_optimized_cosmological_simulation(
+    num_particles: usize,
+    initial_radius: f32,
+    sim_duration: f32,
+    theta: f32,
+    g: f32
+) -> ParticleCollection {
+    // Calculate appropriate bounds
+    let bounds = Quad {
+        cx: 0.0,
+        cy: 0.0,
+        half_size: initial_radius as f64 * 80.0,
+    };
+
+    // Calculate appropriate time step based on particle density
+    let particle_density = num_particles as f32 / (bounds.half_size * bounds.half_size * 4.0) as f32;
+    let adaptive_dt = (0.01 / particle_density.sqrt()).clamp(0.001, 0.1);
+
+    // Calculate number of steps
+    let num_steps = (sim_duration / adaptive_dt) as usize;
+
+    // Create initial particles
+    let mut particles = create_big_bang_particles_soa(num_particles, initial_radius);
+
+    // Modify mass distribution for more interesting dynamics
+    modify_particle_masses_soa(&mut particles);
+
+    // Randomize directions a bit for more natural distribution
+    randomize_particle_directions_soa(&mut particles);
+
+    // Run simulation
+    for step in 0..num_steps {
+        let time = step as f32 * adaptive_dt;
+        simulate_step_soa(&mut particles, bounds, theta, g, adaptive_dt, time);
+    }
+
+    particles
+}
+
+/// Modify particle masses to create a more interesting distribution
+pub fn modify_particle_masses_soa(particles: &mut ParticleCollection) {
+    // Process in parallel for better performance
+    (0..particles.count).into_par_iter().for_each(|i| {
+        // Create a more diverse mass distribution
+        let mass_type = rand::random::<f32>();
+
+        if mass_type < 0.001 {
+            // Super massive "suns" (0.1% of particles)
+            particles.masses[i] = std::f32::consts::PI * rand::random::<f32>().mul_add(5000.0, 2000.0);
+            particles.spins[i] *= 20.0;
+        } else if mass_type < 0.01 {
+            // Medium "planets" (0.9% of particles)
+            particles.masses[i] = std::f32::consts::PI * rand::random::<f32>().mul_add(500.0, 100.0);
+            particles.spins[i] *= 10.0;
+        } else if mass_type < 0.1 {
+            // Small "asteroids" (9% of particles)
+            particles.masses[i] = std::f32::consts::PI * rand::random::<f32>().mul_add(50.0, 20.0);
+            particles.spins[i] *= 5.0;
+        } else {
+            // Tiny "dust" (90% of particles)
+            particles.masses[i] = std::f32::consts::PI * rand::random::<f32>().mul_add(10.0, 1.0);
+        }
+    });
+}
+
+/// Randomize particle directions a bit
+pub fn randomize_particle_directions_soa(particles: &mut ParticleCollection) {
+    // Process in parallel for better performance
+    (0..particles.count).into_par_iter().for_each(|i| {
+        let angle_variation = rand::random::<f32>().mul_add(0.5, -0.5) * std::f32::consts::PI;
+        let vx = particles.velocities_x[i];
+        let vy = particles.velocities_y[i];
+        let current_speed = (vx * vx + vy * vy).sqrt();
+
+        let current_dir = if current_speed > 0.0 {
+            (vx / current_speed, vy / current_speed)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Rotate the direction by a random angle
+        let cos_angle = angle_variation.cos();
+        let sin_angle = angle_variation.sin();
+        let new_x = current_dir.0 * cos_angle - current_dir.1 * sin_angle;
+        let new_y = current_dir.0 * sin_angle + current_dir.1 * cos_angle;
+
+        // Update velocity with new direction but maintain speed
+        particles.velocities_x[i] = new_x * current_speed;
+        particles.velocities_y[i] = new_y * current_speed;
+    });
+}
