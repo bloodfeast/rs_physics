@@ -1,3 +1,5 @@
+use crate::utils::{fast_sqrt, fast_sqrt_f64};
+
 /// Represents a square region in 2D space.
 #[derive(Clone, Copy, Debug)]
 pub struct Quad {
@@ -206,7 +208,7 @@ impl BarnesHutNode {
                     let dx = q.x - p.x;
                     let dy = q.y - p.y;
                     let dist_sq = dx * dx + dy * dy + 1e-12;
-                    let dist = dist_sq.sqrt();
+                    let dist = fast_sqrt_f64(dist_sq);
                     let force = g * p.mass * q.mass / dist_sq;
                     (force * dx / dist, force * dy / dist)
                 }
@@ -215,7 +217,7 @@ impl BarnesHutNode {
                 let dx = *com_x - p.x;
                 let dy = *com_y - p.y;
                 let dist_sq = dx * dx + dy * dy + 1e-12;
-                let dist = dist_sq.sqrt();
+                let dist = fast_sqrt_f64(dist_sq);
                 if (quad.half_size * 2.0 / dist) < theta {
                     let force = g * p.mass * (*mass) / dist_sq;
                     (force * dx / dist, force * dy / dist)
@@ -378,7 +380,7 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: ParticleData, theta: f64, w
         BarnesHutNode::Internal { quad, mass, com_x, com_y, nw, ne, sw, se } => {
             let dx = *com_x - p.x;
             let dy = *com_y - p.y;
-            let dist = (dx * dx + dy * dy).sqrt();
+            let dist = fast_sqrt_f64(dx * dx + dy * dy);
             if (quad.half_size * 2.0 / dist) < theta {
                 worklist.push(ApproxNode { mass: *mass, com_x: *com_x, com_y: *com_y });
             } else {
@@ -477,7 +479,7 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
         let dx = worklist[j].com_x - p.x;
         let dy = worklist[j].com_y - p.y;
         let dist_sq = dx * dx + dy * dy + 1e-12;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
         let force = g * p.mass * worklist[j].mass / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
@@ -538,7 +540,7 @@ pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[
         let dx = worklist[j].com_x as f32 - p.x as f32;
         let dy = worklist[j].com_y as f32 - p.y as f32;
         let dist_sq = dx * dx + dy * dy + 1e-12;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt(dist_sq);
         let force = g as f32 * p.mass as f32 * worklist[j].mass as f32 / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
@@ -568,7 +570,7 @@ pub fn compute_force_scalar(p: ParticleData, worklist: &[ApproxNode], g: f64) ->
         let dx = node.com_x - p.x;
         let dy = node.com_y - p.y;
         let dist_sq = dx * dx + dy * dy + 1e-12;
-        let dist = dist_sq.sqrt();
+        let dist = fast_sqrt_f64(dist_sq);
         let force = g * p.mass * node.mass / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
