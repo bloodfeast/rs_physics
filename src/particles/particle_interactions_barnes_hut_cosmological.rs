@@ -3,6 +3,8 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering::Relaxed;
 use crate::particles::particle_interactions_simd_functions::{
     compute_forces_simd_avx512,
     compute_forces_simd_avx512_f32,
@@ -1281,8 +1283,11 @@ pub fn create_big_bang_particles_soa(
     particles.ages.resize(num_particles, 0.0);
     particles.densities.resize(num_particles, 0.0);
 
+    let aptr_particles = AtomicPtr::new(&mut particles);
+
     // Initialize in parallel for better performance
     (0..num_particles).into_par_iter().for_each(|i| {
+        let particles = unsafe { &mut *aptr_particles.load(Relaxed) };
         // Create particles with a denser concentration toward the center
         let radius = initial_radius * (rand::random::<f32>().powf(0.5));
         let angle = 2.0 * std::f32::consts::PI * rand::random::<f32>();
@@ -1615,6 +1620,9 @@ pub fn simulate_step_soa_from_slice(
     let mut forces_x = vec![0.0f32; particles.count];
     let mut forces_y = vec![0.0f32; particles.count];
 
+    let aotr_forces_x = AtomicPtr::new(&mut forces_x);
+    let aotr_forces_y = AtomicPtr::new(&mut forces_y);
+
     // Calculate parallel batch size based on available cores
     let cpu_cores = rayon::current_num_threads();
     let batch_size = (particles.count / cpu_cores).max(1);
@@ -1643,6 +1651,9 @@ pub fn simulate_step_soa_from_slice(
 
                 // Calculate forces using the best available SIMD implementation
                 let (fx, fy) = compute_forces_simd_soa(particles, i, &worklist, g, time);
+
+                let forces_x = unsafe { &mut *aotr_forces_x.load(Relaxed) };
+                let forces_y = unsafe { &mut *aotr_forces_y.load(Relaxed) };
 
                 // Store forces for later application
                 forces_x[i] = fx;
@@ -1700,6 +1711,9 @@ pub fn simulate_step_soa(
     let mut forces_x = vec![0.0f32; particles.count];
     let mut forces_y = vec![0.0f32; particles.count];
 
+    let aotr_forces_x = AtomicPtr::new(&mut forces_x);
+    let aotr_forces_y = AtomicPtr::new(&mut forces_y);
+
     // Calculate parallel batch size based on available cores
     let cpu_cores = rayon::current_num_threads();
     let batch_size = (particles.count / cpu_cores).max(1);
@@ -1728,6 +1742,9 @@ pub fn simulate_step_soa(
 
                 // Calculate forces using the best available SIMD implementation
                 let (fx, fy) = compute_forces_simd_soa(particles, i, &worklist, g, time);
+
+                let forces_x = unsafe { &mut *aotr_forces_x.load(Relaxed) };
+                let forces_y = unsafe { &mut *aotr_forces_y.load(Relaxed) };
 
                 // Store forces for later application
                 forces_x[i] = fx;
@@ -1808,10 +1825,12 @@ pub fn run_optimized_cosmological_simulation(
 
 /// Modify particle masses to create a more interesting distribution
 pub fn modify_particle_masses_soa(particles: &mut ParticleCollection) {
+    let aptr_particles = AtomicPtr::new(particles);
     // Process in parallel for better performance
     (0..particles.count).into_par_iter().for_each(|i| {
         // Create a more diverse mass distribution
         let mass_type = rand::random::<f32>();
+        let particles = unsafe { &mut *aptr_particles.load(Relaxed) };
 
         if mass_type < 0.001 {
             // Super massive "suns" (0.1% of particles)
@@ -1834,8 +1853,10 @@ pub fn modify_particle_masses_soa(particles: &mut ParticleCollection) {
 
 /// Randomize particle directions a bit
 pub fn randomize_particle_directions_soa(particles: &mut ParticleCollection) {
+    let aptr_particles = AtomicPtr::new(particles);
     // Process in parallel for better performance
     (0..particles.count).into_par_iter().for_each(|i| {
+        let particles = unsafe { &mut *aptr_particles.load(Relaxed) };
         let angle_variation = rand::random::<f32>().mul_add(0.5, -0.5) * std::f32::consts::PI;
         let vx = particles.velocities_x[i];
         let vy = particles.velocities_y[i];
