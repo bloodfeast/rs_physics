@@ -585,7 +585,7 @@ pub unsafe fn compute_forces_simd_soa_sse41(
 }
 
 /// SIMD-optimized force calculation for a batch of nodes using SSE4.1
-#[cfg(target_feature = "sse4.1")]
+#[target_feature(enable = "sse4.1")]
 pub unsafe fn compute_forces_simd_sse41(
     p: &Particle,
     nodes: &[ApproxNode],
