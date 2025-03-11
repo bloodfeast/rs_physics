@@ -16,6 +16,9 @@ pub use particle_interactions_barnes_hut::*;
 #[cfg(feature = "particles-cosmological")]
 pub mod particle_interactions_barnes_hut_cosmological;
 
+#[cfg(feature = "particles-cosmological")]
+mod particle_interactions_simd_functions;
+
 #[cfg(test)]
 #[cfg(feature = "particles")]
 mod particle_tests;
