@@ -1,5 +1,5 @@
 /// Max error ~0.0015 radians (0.086 degrees)
-#[inline]
+#[inline(always)]
 pub fn fast_atan(x: f32) -> f32 {
     // Constants for the approximation
     const A: f32 = 0.0776509570923569;
@@ -21,7 +21,7 @@ pub fn fast_atan(x: f32) -> f32 {
 }
 
 /// Fast atan2 implementation using the optimized arctangent
-#[inline]
+#[inline(always)]
 pub fn fast_atan2(y: f32, x: f32) -> f32 {
     // Handle special cases
     if x == 0.0 {
@@ -54,25 +54,29 @@ pub fn fast_atan2(y: f32, x: f32) -> f32 {
 
 /// Even faster but less accurate arctangent approximation
 /// Max error ~0.01 radians (0.57 degrees)
-#[inline]
+#[inline(always)]
 pub fn fastest_atan(x: f32) -> f32 {
     const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
-    let abs_x = x.abs();
 
-    // Fast approximation: π/4 * x - x * (|x| - 1) * (0.2447 + 0.0663 * |x|)
+    // Extract sign bit and use absolute value
+    let sign_mask = x.to_bits() & 0x80000000;
+    let abs_x_bits = x.to_bits() & 0x7FFFFFFF;
+    let abs_x = f32::from_bits(abs_x_bits);
+
+    // Fast approximation
     let mut result = HALF_PI * abs_x - abs_x * (abs_x - 1.0) * (0.2447 + 0.0663 * abs_x);
 
-    // Handle values above 1.0
     if abs_x > 1.0 {
         result = HALF_PI - result;
     }
 
-    if x < 0.0 { -result } else { result }
+    // Apply sign bit
+    f32::from_bits(result.to_bits() | sign_mask)
 }
 
 /// Minimax polynomial approximation with better accuracy
 /// Max error ~0.0007 radians (0.04 degrees)
-#[inline]
+#[inline(always)]
 pub fn minimax_atan(x: f32) -> f32 {
     let abs_x = x.abs();
     let inv = abs_x > 1.0;
@@ -94,7 +98,7 @@ pub fn minimax_atan(x: f32) -> f32 {
 
 /// CORDIC-inspired arctangent approximation
 /// Good for platforms where multiplication is expensive
-#[inline]
+#[inline(always)]
 pub fn cordic_atan2(y: f32, x: f32) -> f32 {
     const QUARTER_PI: f32 = std::f32::consts::FRAC_PI_4;
 
@@ -149,7 +153,7 @@ impl AtanLookupTable {
         Self { table }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn atan(&self, x: f32) -> f32 {
         let abs_x = x.abs();
         let inv = abs_x > 1.0;
@@ -173,7 +177,7 @@ impl AtanLookupTable {
         if x < 0.0 { -result } else { result }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn atan2(&self, y: f32, x: f32) -> f32 {
         // Handle special cases
         if x == 0.0 {
@@ -213,42 +217,22 @@ impl AtanLookupTable {
 
 /// Fast inverse square root implementation
 /// Based on the famous Quake III Arena algorithm
-#[inline]
+#[inline(always)]
 pub fn fast_inverse_sqrt(x: f32) -> f32 {
-    if x == 0.0 {
-        return f32::INFINITY;
-    }
-    if x < 0.0 {
-        return f32::NAN;
-    }
-    // Initial estimate via bit manipulation
     let i = x.to_bits();
     let i = 0x5f3759df - (i >> 1);
-    let y = f32::from_bits(i);
-
-    // One Newton-Raphson iteration for inverse sqrt
-    let y = y * (1.5 - 0.5 * x * y * y);
-
-    y
+    f32::from_bits(i)
 }
 
-#[inline]
+#[inline(always)]
 pub fn fast_sqrt(x: f32) -> f32 {
     x * fast_inverse_sqrt(x)
 }
 
 /// Fast inverse square root implementation for f64 values
 /// Based on the famous Quake III Arena algorithm but adapted for 64-bit doubles
-#[inline]
+#[inline(always)]
 pub fn fast_inverse_sqrt_f64(x: f64) -> f64 {
-    // Handle special cases
-    if x == 0.0 {
-        return f64::INFINITY;
-    }
-    if x < 0.0 {
-        return f64::NAN;
-    }
-
     // Original algorithm
     let x_half = 0.5 * x;
     let i = x.to_bits();
@@ -259,14 +243,10 @@ pub fn fast_inverse_sqrt_f64(x: f64) -> f64 {
     let y = f64::from_bits(i);
 
     // One iteration gives good precision for most applications
-    let y = y * (1.5 - x_half * y * y);
-
-    // Uncomment for even higher precision (at the cost of performance)
-    // let y = y * (1.5 - x_half * y * y);
-    y
+    y * (1.5 - x_half * y * y)
 }
 
-#[inline]
+#[inline(always)]
 pub fn fast_sqrt_f64(x: f64) -> f64 {
    x * fast_inverse_sqrt_f64(x)
 }

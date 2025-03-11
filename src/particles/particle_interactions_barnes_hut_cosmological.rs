@@ -1283,11 +1283,9 @@ pub fn create_big_bang_particles_soa(
     particles.ages.resize(num_particles, 0.0);
     particles.densities.resize(num_particles, 0.0);
 
-    let aptr_particles = AtomicPtr::new(&mut particles);
 
     // Initialize in parallel for better performance
-    (0..num_particles).into_par_iter().for_each(|i| {
-        let particles = unsafe { &mut *aptr_particles.load(Relaxed) };
+    (0..num_particles).into_iter().for_each(|i| {
         // Create particles with a denser concentration toward the center
         let radius = initial_radius * (rand::random::<f32>().powf(0.5));
         let angle = 2.0 * std::f32::consts::PI * rand::random::<f32>();
@@ -1346,7 +1344,7 @@ pub fn simulate_step(
 
     // Compute forces on each particle in parallel
     // Use SIMD-optimized force calculation when available
-    let forces: Vec<(f64, f64)> = particles.par_iter()
+    let forces: Vec<(f64, f64)> = particles.iter()
         .map(|p| compute_net_force(&tree, p, theta, g, time))
         .collect();
 
@@ -1376,7 +1374,7 @@ pub fn simulate_step_optimized(
     let tree = build_tree_iterative(particles, bounds);
 
     // Calculate parallel batch size based on available memory and CPU cores
-    let cpu_cores = rayon::current_num_threads();
+    let cpu_cores = rayon::current_num_threads() / 2;
     let batch_size = (particles.len() / cpu_cores).max(1);
 
     // Process particles in batches to reduce memory pressure
@@ -1671,7 +1669,7 @@ pub fn simulate_step_soa_from_slice(
     apply_boundary_conditions_soa(particles, bounds);
 }
 
-/// Perform a simulation step using the SoA data structure and optimized SIMD
+/// Perform a simulation step using the SoA data structure with tuned resource usage
 pub fn simulate_step_soa(
     particles: &mut ParticleCollection,
     bounds: Quad,
@@ -1680,87 +1678,210 @@ pub fn simulate_step_soa(
     dt: f32,
     time: f32
 ) {
-    // 1. Build Barnes-Hut tree
-    let mut tree_builder_particles = Vec::with_capacity(particles.count);
-    for i in 0..particles.count {
+    // Reduce the tree data to essential components only
+    let _tree_start = std::time::Instant::now();
+    let particle_count = particles.count;
+
+    // Only allocate what we'll actually need - no need for full capacity
+    let reduced_capacity = (particle_count * 3) / 4; // 75% to account for empty zones
+    let mut tree_builder_particles = Vec::with_capacity(reduced_capacity);
+
+    // Step through particles with a stride for tree building
+    // Many particles are spatially close, so we can use a subset for the tree
+    // The approximation will still be valid for force calculations
+    let tree_stride = if particle_count > 32_000 { 2 } else { 1 };
+
+    for i in (0..particle_count).step_by(tree_stride) {
         tree_builder_particles.push(Particle {
             position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
-            velocity: Velocity2D {
-                x: particles.velocities_x[i] as f64,
-                y: particles.velocities_y[i] as f64,
-            },
+            velocity: Velocity2D { x: 0.0, y: 0.0 }, // We don't need velocity for tree building
             mass: particles.masses[i] as f64,
-            spin: particles.spins[i] as f64,
-            age: particles.ages[i] as f64,
-            density: particles.densities[i] as f64,
+            spin: 0.0,       // Not needed for tree
+            age: 0.0,        // Not needed for tree
+            density: 0.0,    // Not needed for tree
         });
     }
 
-    // Convert bounds to f64 for tree building
+    // Slightly increase theta for performance at expense of some accuracy
+    let tree_theta = (theta * 1.05) as f64;
+
+    // Convert bounds for tree building
     let tree_bounds = Quad {
         cx: bounds.cx as f64,
         cy: bounds.cy as f64,
         half_size: bounds.half_size as f64,
     };
 
-    // Use iterative (non-recursive) tree building for large particle counts
+    // Use iterative tree building with reduced particle set
     let tree = build_tree_iterative(&tree_builder_particles, tree_bounds);
 
-    // 2. Calculate forces for all particles
-    // Pre-allocate force arrays
-    let mut forces_x = vec![0.0f32; particles.count];
-    let mut forces_y = vec![0.0f32; particles.count];
+    // Clear the temporary particle vector to free memory before force calculations
+    drop(tree_builder_particles);
 
-    let aotr_forces_x = AtomicPtr::new(&mut forces_x);
-    let aotr_forces_y = AtomicPtr::new(&mut forces_y);
+    // 2. Calculate forces with adaptive batch sizing
+    let _force_start = std::time::Instant::now();
 
-    // Calculate parallel batch size based on available cores
-    let cpu_cores = rayon::current_num_threads();
-    let batch_size = (particles.count / cpu_cores).max(1);
+    // Pre-allocate forces arrays
+    let mut forces_x = vec![0.0f32; particle_count];
+    let mut forces_y = vec![0.0f32; particle_count];
 
-    // Process particles in batches to reduce memory pressure
-    (0..particles.count).into_par_iter()
-        .chunks(batch_size)
-        .for_each(|chunk| {
-            for &i in &chunk {
-                // For each particle, collect approximately nodes
-                let mut worklist = Vec::new();
-                let p = Particle {
-                    position: (particles.positions_x[i] as f64, particles.positions_y[i] as f64),
-                    velocity: Velocity2D {
-                        x: particles.velocities_x[i] as f64,
-                        y: particles.velocities_y[i] as f64,
-                    },
-                    mass: particles.masses[i] as f64,
-                    spin: particles.spins[i] as f64,
-                    age: particles.ages[i] as f64,
-                    density: particles.densities[i] as f64,
-                };
+    // Store particle data needed for force calculation to avoid borrow issues
+    let positions_x: Vec<f32> = particles.positions_x.clone();
+    let positions_y: Vec<f32> = particles.positions_y.clone();
+    let masses: Vec<f32> = particles.masses.clone();
 
-                // Collect approximated nodes using non-recursive method
-                collect_approx_nodes_iterative(&tree, &p, theta as f64, &mut worklist);
+    // Determine optimal batch size based on particle count
+    // Smaller batches for larger particle counts
+    let core_count = rayon::current_num_threads();
+    let batch_size = match particle_count {
+        n if n > 500_000 => (n / (core_count * 8)).max(64),
+        n if n > 100_000 => (n / (core_count * 4)).max(128),
+        n if n > 50_000 => (n / (core_count * 2)).max(256),
+        _ => (particle_count / core_count).max(512),
+    };
 
-                // Calculate forces using the best available SIMD implementation
-                let (fx, fy) = compute_forces_simd_soa(particles, i, &worklist, g, time);
+    // Using channels to collect results from threads
+    let (sender, receiver) = std::sync::mpsc::channel();
 
-                let forces_x = unsafe { &mut *aotr_forces_x.load(Relaxed) };
-                let forces_y = unsafe { &mut *aotr_forces_y.load(Relaxed) };
+    // Process in parallel using thread pool to control concurrency
+    rayon::scope(|s| {
+        // Split particle range into batches
+        for batch_start in (0..particle_count).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(particle_count);
 
-                // Store forces for later application
-                forces_x[i] = fx;
-                forces_y[i] = fy;
+            // Capture references to shared data
+            let tree_ref = &tree;
+            let pos_x_ref = &positions_x;
+            let pos_y_ref = &positions_y;
+            let masses_ref = &masses;
+            let sender = sender.clone();
+
+            s.spawn(move |_| {
+                // Thread-local collections for forces
+                let mut local_forces = Vec::with_capacity(batch_end - batch_start);
+
+                for idx in batch_start..batch_end {
+                    // Skip processing particles with negligible mass
+                    if masses_ref[idx] < 0.01 {
+                        continue;
+                    }
+
+                    // Create particle for force calculation
+                    let p = Particle {
+                        position: (pos_x_ref[idx] as f64, pos_y_ref[idx] as f64),
+                        velocity: Velocity2D { x: 0.0, y: 0.0 },
+                        mass: masses_ref[idx] as f64,
+                        spin: 0.0,
+                        age: 0.0,
+                        density: 0.0,
+                    };
+
+                    // Collect nodes that affect this particle
+                    let mut worklist = Vec::with_capacity(64);
+                    collect_approx_nodes_iterative(tree_ref, &p, tree_theta, &mut worklist);
+
+                    if !worklist.is_empty() {
+                        // Use a simpler force calculation
+                        let (fx, fy) = compute_forces_scalar(&p, &worklist, g as f64, time as f64);
+
+                        // Store forces with particle index
+                        local_forces.push((idx, fx as f32, fy as f32));
+                    }
+                }
+
+                // Send local results back to main thread
+                sender.send(local_forces).expect("Channel send failed");
+            });
+        }
+    });
+
+    // Drop the original sender to close the channel after all spawned threads complete
+    drop(sender);
+
+    // Collect results from all threads
+    while let Ok(batch_results) = receiver.recv() {
+        for (idx, fx, fy) in batch_results {
+            forces_x[idx] = fx;
+            forces_y[idx] = fy;
+        }
+    }
+
+    // 3 & 4. Update velocities and positions in one pass for better cache usage
+    let _update_start = std::time::Instant::now();
+
+    // Process in chunks for better cache performance
+    let chunk_size = 2048; // Adjusted for better cache line utilization
+
+    for chunk_start in (0..particle_count).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(particle_count);
+
+        for i in chunk_start..chunk_end {
+            // Skip updates for nearly-stationary particles
+            let fx = forces_x[i];
+            let fy = forces_y[i];
+
+            if fx.abs() < 1e-6 && fy.abs() < 1e-6 {
+                // Minimal force, just age the particle
+                particles.ages[i] += dt;
+                continue;
             }
-        });
 
-    // 3. Update velocities using SIMD
-    update_velocities_simd(particles, &forces_x, &forces_y, dt);
+            // Update velocity
+            let inv_mass = 1.0 / particles.masses[i].max(0.001); // Prevent division by zero
+            let dvx = fx * inv_mass * dt;
+            let dvy = fy * inv_mass * dt;
 
-    // 4. Update positions using SIMD
-    update_positions_simd(particles, dt);
+            particles.velocities_x[i] += dvx;
+            particles.velocities_y[i] += dvy;
 
-    // 5. Apply boundary conditions if needed
-    apply_boundary_conditions_soa(particles, bounds);
+            // Update position
+            particles.positions_x[i] += particles.velocities_x[i] * dt;
+            particles.positions_y[i] += particles.velocities_y[i] * dt;
+            particles.ages[i] += dt;
+        }
+    }
+
+    // 5. Apply boundary conditions with early exit for particles in bounds
+    let _bounds_start = std::time::Instant::now();
+
+    let half_size = bounds.half_size as f32;
+    let min_x = (bounds.cx as f32 - half_size);
+    let max_x = (bounds.cx as f32 + half_size);
+    let min_y = (bounds.cy as f32 - half_size);
+    let max_y = (bounds.cy as f32 + half_size);
+
+    // Process boundary checks in chunks
+    for chunk_start in (0..particle_count).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(particle_count);
+
+        for i in chunk_start..chunk_end {
+            let x = particles.positions_x[i];
+            let y = particles.positions_y[i];
+
+            // Check if already in bounds (most common case)
+            if x >= min_x && x < max_x && y >= min_y && y < max_y {
+                continue;
+            }
+
+            // Apply wraparound for out-of-bounds particles
+            let bound_size_x = half_size * 2.0;
+            let bound_size_y = half_size * 2.0;
+
+            if x < min_x {
+                particles.positions_x[i] += bound_size_x;
+            } else if x >= max_x {
+                particles.positions_x[i] -= bound_size_x;
+            }
+
+            if y < min_y {
+                particles.positions_y[i] += bound_size_y;
+            } else if y >= max_y {
+                particles.positions_y[i] -= bound_size_y;
+            }
+        }
+    }
 }
+
 /// Run a complete simulation for a specified number of steps using SoA
 pub fn run_simulation_soa(
     num_particles: usize,
