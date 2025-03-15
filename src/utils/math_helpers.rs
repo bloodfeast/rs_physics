@@ -56,22 +56,73 @@ pub fn fast_atan2(y: f32, x: f32) -> f32 {
 /// Max error ~0.01 radians (0.57 degrees)
 #[inline(always)]
 pub fn fastest_atan(x: f32) -> f32 {
+    // Constants
     const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
 
     // Extract sign bit and use absolute value
     let sign_mask = x.to_bits() & 0x80000000;
-    let abs_x_bits = x.to_bits() & 0x7FFFFFFF;
-    let abs_x = f32::from_bits(abs_x_bits);
+    let abs_x = f32::from_bits(x.to_bits() & 0x7FFFFFFF);
 
-    // Fast approximation
-    let mut result = HALF_PI * abs_x - abs_x * (abs_x - 1.0) * (0.2447 + 0.0663 * abs_x);
+    // Check if we need to use the reciprocal
+    let use_recip = abs_x > 1.0;
+    let z = if use_recip { 1.0 / abs_x } else { abs_x };
 
-    if abs_x > 1.0 {
-        result = HALF_PI - result;
-    }
+    // Ultra-fast approximation (just linear + quadratic term)
+    // Optimized for speed over accuracy
+    let result = z * (1.0 - 0.28 * z);
+
+    // Apply transformation if needed
+    let result = if use_recip { HALF_PI - result } else { result };
 
     // Apply sign bit
     f32::from_bits(result.to_bits() | sign_mask)
+}
+
+/// Make sure you are passing 8 values at a time
+#[feature(enable = "avx2")]
+#[inline(always)]
+pub fn simd_atan_f32x8(x: [f32; 8]) -> [f32; 8] {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        // Load values into AVX register
+        let x_avx = _mm256_loadu_ps(x.as_ptr());
+
+        // Constants
+        let half_pi = _mm256_set1_ps(std::f32::consts::FRAC_PI_2);
+        let one = _mm256_set1_ps(1.0);
+        let c1 = _mm256_set1_ps(0.9963);
+        let c2 = _mm256_set1_ps(0.3214);
+
+        // Get absolute values and keep track of signs
+        let sign_mask = _mm256_and_ps(x_avx, _mm256_set1_ps(-0.0));
+        let abs_x = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x_avx);
+
+        // Create masks for values > 1.0
+        let gt_mask = _mm256_cmp_ps::<_CMP_GT_OQ>(abs_x, one);
+
+        // Calculate reciprocals where needed
+        let recip = _mm256_div_ps(one, abs_x);
+        let z = _mm256_blendv_ps(abs_x, recip, gt_mask);
+
+        // Calculate polynomial approximation
+        let z_squared = _mm256_mul_ps(z, z);
+        let term = _mm256_mul_ps(c2, z_squared);
+        let coef = _mm256_sub_ps(c1, term);
+        let polynomial = _mm256_mul_ps(z, coef);
+
+        // Apply transformation for values > 1.0
+        let transformed = _mm256_sub_ps(half_pi, polynomial);
+        let result = _mm256_blendv_ps(polynomial, transformed, gt_mask);
+
+        // Restore original sign
+        let final_result = _mm256_xor_ps(result, sign_mask);
+
+        // Store result
+        let mut output: [f32; 8] = [0.0; 8];
+        _mm256_storeu_ps(output.as_mut_ptr(), final_result);
+        output
+    }
 }
 
 /// Minimax polynomial approximation with better accuracy
@@ -217,8 +268,10 @@ impl AtanLookupTable {
 
 /// Fast inverse square root implementation
 /// Based on the famous Quake III Arena algorithm
+/// - Unsafe because it is unchecked and can cause NaN or Inf values
+/// if the input is not a valid floating point number (e.g. 0.0)
 #[inline(always)]
-pub fn fast_inverse_sqrt(x: f32) -> f32 {
+pub unsafe fn fast_inverse_sqrt(x: f32) -> f32 {
     let i = x.to_bits();
     let i = 0x5f3759df - (i >> 1);
     f32::from_bits(i)
@@ -226,13 +279,40 @@ pub fn fast_inverse_sqrt(x: f32) -> f32 {
 
 #[inline(always)]
 pub fn fast_sqrt(x: f32) -> f32 {
-    x * fast_inverse_sqrt(x)
+    // Handle edge cases
+    if x < 0.0 {
+        return f32::NAN;
+    }
+    if x == 0.0 || x == 1.0 {
+        return x;
+    }
+
+    // Start with a good initial guess using bit manipulation
+    let i: u32 = x.to_bits();
+
+    // Shift the exponent to effectively divide by 2
+    // Magic number 0x5f3759df is replaced with 0x5f375a86 which works better for sqrt
+    let mut j: u32 = 0x5f375a86 - (i >> 1);
+
+    // Convert back to float
+    let mut y: f32 = f32::from_bits(j);
+
+    // First iteration
+    y = y * (1.5 - 0.5 * x * y * y);
+
+    // Second iteration for better accuracy
+    y = y * (1.5 - 0.5 * x * y * y);
+
+    // Multiply by x to get the square root
+    x * y
 }
 
 /// Fast inverse square root implementation for f64 values
 /// Based on the famous Quake III Arena algorithm but adapted for 64-bit doubles
+/// - Unsafe because it is unchecked and can cause NaN or Inf values
+/// if the input is not a valid floating point number (e.g. 0.0)
 #[inline(always)]
-pub fn fast_inverse_sqrt_f64(x: f64) -> f64 {
+pub unsafe fn fast_inverse_sqrt_f64(x: f64) -> f64 {
     // Original algorithm
     let x_half = 0.5 * x;
     let i = x.to_bits();
@@ -248,5 +328,36 @@ pub fn fast_inverse_sqrt_f64(x: f64) -> f64 {
 
 #[inline(always)]
 pub fn fast_sqrt_f64(x: f64) -> f64 {
-   x * fast_inverse_sqrt_f64(x)
+    // Handle edge cases
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 || x == 1.0 {
+        return x;
+    }
+
+    // Start with a good initial guess using bit manipulation
+    let i: u64 = x.to_bits();
+
+    // Shift the exponent to effectively divide by 2
+    // Magic number for f64 (adjusted from the f32 version)
+    let mut j: u64 = 0x5fe6eb50c7b537a9 - (i >> 1);
+
+    // Convert back to f64
+    let mut y: f64 = f64::from_bits(j);
+
+    // Newton-Raphson iterations for refining the estimate
+    // For f64, more iterations may be beneficial for accuracy
+
+    // First iteration
+    y = y * (1.5 - 0.5 * x * y * y);
+
+    // Second iteration
+    y = y * (1.5 - 0.5 * x * y * y);
+
+    // Third iteration (additional iteration for f64 precision)
+    y = y * (1.5 - 0.5 * x * y * y);
+
+    // Multiply by x to get the square root
+    x * y
 }

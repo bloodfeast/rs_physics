@@ -1,5 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use rs_physics::utils::{AtanLookupTable, fast_atan, fastest_atan, minimax_atan};
+use log::debug;
+use rs_physics::utils::{AtanLookupTable, fast_atan, fastest_atan, minimax_atan, simd_atan_f32x8};
 
 
 pub fn bench_atan(c: &mut Criterion) {
@@ -9,7 +10,7 @@ pub fn bench_atan(c: &mut Criterion) {
     let lookup_table = AtanLookupTable::new();
 
     // Test values
-    let test_values: Vec<f32> = (-100..=100).map(|i| i as f32 / 10.0).collect();
+    let test_values: Vec<f32> = (-400..400).map(|i| i as f32 / 10.0).collect();
 
     group.bench_function("truth", |b| b.iter(|| {
         let mut sum = 0.0_f32;
@@ -45,6 +46,20 @@ pub fn bench_atan(c: &mut Criterion) {
             sum += lookup_table.atan(x);
         }
     }));
+
+    if is_x86_feature_detected!("avx2") {
+        group.bench_function("avx2_atan", |b| b.iter(|| {
+            let mut sum = 0.0_f32;
+            let count = test_values.len();
+            let mut i = 0;
+            while i < count {
+                let args: [f32; 8] = test_values[i..i + 8].try_into().unwrap();
+                simd_atan_f32x8(args)
+                    .iter().for_each(|&atan| sum += atan);
+                i += 8;
+            }
+        }));
+    }
 }
 
 pub fn bench_fast_sqrt(c: &mut Criterion) {
@@ -89,8 +104,15 @@ pub fn bench_fast_sqrt(c: &mut Criterion) {
 
     group.bench_function("fast_inverse_sqrt", |b| b.iter(|| {
         let mut sum = 0.0_f32;
-        for i in 0..100 {
-            sum += rs_physics::utils::fast_inverse_sqrt(i as f32);
+        for i in 1..101 {
+            sum += unsafe{rs_physics::utils::fast_inverse_sqrt(i as f32)};
+        }
+    }));
+
+    group.bench_function("fast_inverse_sqrt_f64", |b| b.iter(|| {
+        let mut sum = 0.0_f64;
+        for i in 1..101 {
+            sum += unsafe{rs_physics::utils::fast_inverse_sqrt_f64(i as f64)};
         }
     }));
 }
