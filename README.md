@@ -18,14 +18,6 @@ It provides a comprehensive set of tools for working with physical constants, pe
 - WebAssembly (WASM) api for easy integration with web projects
 - Comprehensive test suite
 
-## Installation
-
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-rs_physics = "0.1.0"
-```
 
 ## Usage
 
