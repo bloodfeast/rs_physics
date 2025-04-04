@@ -243,59 +243,6 @@ impl Default for ObjectIn3D {
     }
 }
 
-impl ObjectIn3D {
-    pub fn new(mass: f64, vx: f64, vy: f64, vz: f64, position: (f64, f64, f64)) -> Self {
-        ObjectIn3D {
-            mass,
-            velocity: Velocity3D { x: vx, y: vy, z: vz },
-            position: Axis3D::from_coord(position),
-            forces: Vec::new(),
-        }
-    }
-
-    /// Creates a new object with speed and direction
-    pub fn new_with_direction(mass: f64, speed: f64, direction: (f64, f64, f64), position: (f64, f64, f64)) -> Self {
-        let dir = Direction3D::from_coord(direction);
-
-        // Normalize direction components if they're not already
-        let magnitude = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
-        let (x_normalized, y_normalized, z_normalized) = if magnitude > 0.0 {
-            (dir.x / magnitude, dir.y / magnitude, dir.z / magnitude)
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-
-        ObjectIn3D {
-            mass,
-            velocity: Velocity3D {
-                x: speed * x_normalized,
-                y: speed * y_normalized,
-                z: speed * z_normalized
-            },
-            position: Axis3D::from_coord(position),
-            forces: Vec::new(),
-        }
-    }
-
-    /// Get the speed (magnitude of velocity)
-    pub fn speed(&self) -> f64 {
-        self.velocity.magnitude()
-    }
-
-    /// Get the direction as a normalized vector
-    pub fn direction(&self) -> Direction3D {
-        self.velocity.direction()
-    }
-
-    pub fn add_force(&mut self, force: Force) {
-        self.forces.push(force);
-    }
-
-    pub fn clear_forces(&mut self) {
-        self.forces.clear();
-    }
-}
-
 pub trait ToObjectIn2D {
     /// Converts the struct to a 2D representation.
     /// # Returns
