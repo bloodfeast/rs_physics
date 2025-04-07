@@ -1,9 +1,10 @@
 use crate::interactions::{cross_product, dot_product};
 use crate::materials::Material;
 use crate::models::{ObjectIn3D, ToCoordinates};
-use crate::rotational_dynamics::{calculate_moment_of_inertia, ObjectShape};
+use crate::rotational_dynamics::{apply_torque, calculate_moment_of_inertia, ObjectShape};
 use std::f64::consts::PI;
 use rand::Rng;
+use crate::physics::PhysicsConstants;
 
 /// Represents different types of 3D shapes for physics simulations
 #[derive(Debug, Clone)]
@@ -929,6 +930,31 @@ impl Shape3D {
         }
     }
 
+    // Helper function to check overlap along an axis
+    fn check_overlap_along_axis(
+        corners1: &[(f64, f64, f64)],
+        corners2: &[(f64, f64, f64)],
+        axis: &(f64, f64, f64)
+    ) -> bool {
+        // Project all corners onto axis
+        let projections1: Vec<f64> = corners1.iter()
+            .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
+            .collect();
+
+        let projections2: Vec<f64> = corners2.iter()
+            .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
+            .collect();
+
+        // Find min and max projections
+        let min1 = projections1.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let max1 = projections1.iter().fold(f64::MIN, |a, &b| a.max(b));
+        let min2 = projections2.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let max2 = projections2.iter().fold(f64::MIN, |a, &b| a.max(b));
+
+        // Check for overlap
+        max1 >= min2 && max2 >= min1
+    }
+
     /// Calculates the collision normal between this shape and another
     /// Returns the normal vector pointing from this shape to the other
     pub fn collision_normal(
@@ -1085,6 +1111,7 @@ pub struct PhysicalObject3D {
     pub angular_velocity: (f64, f64, f64),
     /// Orientation as Euler angles in radians (roll, pitch, yaw)
     pub orientation: (f64, f64, f64),
+    pub physics_constants: PhysicsConstants
 }
 
 impl PhysicalObject3D {
@@ -1096,7 +1123,8 @@ impl PhysicalObject3D {
         shape: Shape3D,
         material: Option<Material>,
         angular_velocity: (f64, f64, f64),
-        orientation: (f64, f64, f64)
+        orientation: (f64, f64, f64),
+        physics_constants: PhysicsConstants
     ) -> Self {
         PhysicalObject3D {
             object: ObjectIn3D::new(
@@ -1110,6 +1138,7 @@ impl PhysicalObject3D {
             material,
             angular_velocity,
             orientation,
+            physics_constants,
         }
     }
 
@@ -1122,7 +1151,8 @@ impl PhysicalObject3D {
         velocity: (f64, f64, f64),
         angular_velocity: (f64, f64, f64),
         orientation: (f64, f64, f64),
-        material: Option<Material>
+        material: Option<Material>,
+        physics_constants: PhysicsConstants
     ) -> Self {
         Self::new(
             mass,
@@ -1131,7 +1161,8 @@ impl PhysicalObject3D {
             Shape3D::new_die(size, bevel),
             material,
             angular_velocity,
-            orientation
+            orientation,
+            physics_constants,
         )
     }
 
@@ -1151,6 +1182,299 @@ impl PhysicalObject3D {
         self.orientation.0 = normalize_angle(self.orientation.0);
         self.orientation.1 = normalize_angle(self.orientation.1);
         self.orientation.2 = normalize_angle(self.orientation.2);
+
+        // Handle ground collision based on shape type
+        match &self.shape {
+            Shape3D::BeveledCuboid(_width, _height, _depth, _) => {
+                // Calculate the positions of the 8 corners of the cube
+                let corners = self.get_corner_positions();
+
+                // Find the lowest point (corner closest to the ground)
+                let min_y = corners.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+
+                // If the lowest point is below ground level
+                if min_y < self.physics_constants.ground_level {
+                    self.handle_cuboid_ground_collision(min_y, &corners, dt);
+                }
+            },
+            Shape3D::Cuboid(_width, _height, _depth) => {
+                // Reuse the same code for regular cuboids
+                let corners: Vec<(f64, f64, f64)> = self.get_corner_positions();
+                let min_y = corners.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+
+                if min_y < self.physics_constants.ground_level {
+                    self.handle_cuboid_ground_collision(min_y, &corners, dt);
+                }
+            },
+            Shape3D::Sphere(radius) => {
+                // For sphere, just check if the bottom point is below ground
+                let sphere_bottom = self.object.position.y - radius;
+
+                if sphere_bottom < self.physics_constants.ground_level {
+                    self.handle_sphere_ground_collision(*radius, dt);
+                }
+            },
+            Shape3D::Cylinder(radius, height) => {
+                // For cylinder, check the bottom rim points
+                let half_height = height / 2.0;
+                let bottom_y = self.object.position.y - half_height;
+
+                if bottom_y < self.physics_constants.ground_level {
+                    self.handle_cylinder_ground_collision(*radius, *height, dt);
+                }
+            },
+            Shape3D::Polyhedron(_vertices, _) => {
+                // For polyhedron, transform all vertices and find lowest point
+                let world_vertices = self.world_vertices();
+                let min_y = world_vertices.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+
+                if min_y < self.physics_constants.ground_level {
+                    self.handle_polyhedron_ground_collision(&world_vertices, dt);
+                }
+            }
+        }
+    }
+
+    fn handle_cuboid_ground_collision(&mut self, min_y: f64, corners: &[(f64, f64, f64)], dt: f64) {
+        // Calculate penetration depth
+        let penetration = self.physics_constants.ground_level - min_y;
+
+        // Adjust position to resolve penetration
+        self.object.position.y += penetration;
+
+        // Apply bounce physics if moving downward
+        if self.object.velocity.y < 0.0 {
+            // Calculate which corners are in contact with the ground
+            let ground_corners: Vec<(f64, f64, f64)> = corners.iter()
+                .filter(|(_, y, _)| (*y - self.physics_constants.ground_level).abs() < 0.01)
+                .cloned()
+                .collect();
+
+            // Only apply bounce if we have ground contact
+            if !ground_corners.is_empty() {
+                // Bounce with appropriate energy loss
+                let restitution = self.get_restitution() * 0.8;
+                self.object.velocity.y = -self.object.velocity.y * restitution;
+
+                // Friction coefficients
+                let sliding_friction = 0.7;
+                let rolling_friction = 0.4;
+
+                // Apply friction to horizontal velocity
+                self.object.velocity.x *= (1.0 - sliding_friction * dt);
+                self.object.velocity.z *= (1.0 - sliding_friction * dt);
+
+                // Apply friction to angular velocity
+                let angular_damping = rolling_friction * dt;
+                self.angular_velocity.0 *= (1.0 - angular_damping);
+                self.angular_velocity.2 *= (1.0 - angular_damping);
+
+                // Calculate torque based on impact with ground
+                if self.object.velocity.y.abs() > 0.1 {
+                    // Calculate impact point (average of ground corners)
+                    let impact_point: (f64, f64, f64) = if !ground_corners.is_empty() {
+                        let sum = ground_corners.iter().fold((0.0, 0.0, 0.0), |acc, &p| {
+                            (acc.0 + p.0, acc.1 + p.1, acc.2 + p.2)
+                        });
+                        let count = ground_corners.len() as f64;
+                        (sum.0 / count, sum.1 / count, sum.2 / count)
+                    } else {
+                        (self.object.position.x, self.physics_constants.ground_level, self.object.position.z)
+                    };
+
+                    // Calculate relative vector from center to impact point
+                    let r: (f64, f64, f64) = (
+                        impact_point.0 - self.object.position.x,
+                        impact_point.1 - self.object.position.y,
+                        impact_point.2 - self.object.position.z
+                    );
+
+                    // Calculate impact force (simplified as vertical impulse)
+                    let impact_force = (0.0, -self.object.velocity.y * self.object.mass, 0.0);
+
+                    // Calculate torque as cross product
+                    let torque: (f64, f64, f64) = cross_product(r, impact_force);
+
+                    // Scale torque effect
+                    let torque_factor = 0.2;
+                    self.apply_torque((
+                                          torque.0 * torque_factor,
+                                          torque.1 * torque_factor,
+                                          torque.2 * torque_factor
+                                      ), dt);
+                }
+            }
+        }
+    }
+
+    fn handle_sphere_ground_collision(&mut self, radius: f64, dt: f64) {
+        // Calculate penetration depth
+        let sphere_bottom = self.object.position.y - radius;
+        let penetration = self.physics_constants.ground_level - sphere_bottom;
+
+        // Adjust position to resolve penetration
+        self.object.position.y += penetration;
+
+        // Apply bounce physics if moving downward
+        if self.object.velocity.y < 0.0 {
+            // Bounce with energy loss
+            let restitution = self.get_restitution();
+            self.object.velocity.y = -self.object.velocity.y * restitution;
+
+            // Apply rolling friction
+            let friction = 0.5; // Rolling friction coefficient
+
+            // Calculate friction force direction (opposite to velocity)
+            let speed_sq = self.object.velocity.x * self.object.velocity.x +
+                self.object.velocity.z * self.object.velocity.z;
+
+            if speed_sq > 0.001 {
+                let speed = speed_sq.sqrt();
+                let friction_force_x = -self.object.velocity.x / speed * friction;
+                let friction_force_z = -self.object.velocity.z / speed * friction;
+
+                // Apply friction to slow down horizontal motion
+                self.object.velocity.x += friction_force_x * dt;
+                self.object.velocity.z += friction_force_z * dt;
+
+                // Convert linear velocity to angular (rolling without slipping)
+                self.angular_velocity.0 = -self.object.velocity.z / radius;
+                self.angular_velocity.2 = self.object.velocity.x / radius;
+            }
+        }
+    }
+
+    fn handle_cylinder_ground_collision(&mut self, radius: f64, height: f64, dt: f64) {
+        // Calculate penetration depth
+        let half_height = height / 2.0;
+        let bottom_y = self.object.position.y - half_height;
+        let penetration = self.physics_constants.ground_level - bottom_y;
+
+        // Adjust position to resolve penetration
+        self.object.position.y += penetration;
+
+        // Apply bounce physics if moving downward
+        if self.object.velocity.y < 0.0 {
+            // Bounce with energy loss
+            let restitution = self.get_restitution() * 0.9; // Cylinders bounce a bit better
+            self.object.velocity.y = -self.object.velocity.y * restitution;
+
+            // Apply friction based on orientation
+            // For a cylinder, the friction depends on whether it's on its side or its end
+
+            // Calculate the up vector in world space
+            let cylinder_up = rotate_point((0.0, 1.0, 0.0), self.orientation);
+            let up_dot_world_up = cylinder_up.1; // Dot product with world up (0,1,0)
+
+            // If cylinder is more vertical (on its end)
+            if up_dot_world_up.abs() > 0.7 {
+                // Higher friction (cylinder standing on end doesn't roll well)
+                let friction = 0.8;
+                self.object.velocity.x *= (1.0 - friction * dt);
+                self.object.velocity.z *= (1.0 - friction * dt);
+
+                // Little angular velocity
+                self.angular_velocity.0 *= 0.9;
+                self.angular_velocity.2 *= 0.9;
+            } else {
+                // Lower friction (cylinder can roll on its side)
+                let friction = 0.3;
+                self.object.velocity.x *= (1.0 - friction * dt);
+                self.object.velocity.z *= (1.0 - friction * dt);
+
+                // Calculate rolling axis (perpendicular to both cylinder axis and ground normal)
+                let cylinder_axis = rotate_point((0.0, 1.0, 0.0), self.orientation);
+                let ground_normal = (0.0, 1.0, 0.0);
+
+                let roll_axis = cross_product(cylinder_axis, ground_normal);
+                let roll_axis_length = (roll_axis.0*roll_axis.0 + roll_axis.1*roll_axis.1 + roll_axis.2*roll_axis.2).sqrt();
+
+                if roll_axis_length > 0.001 {
+                    // Normalize roll axis
+                    let roll_dir = (
+                        roll_axis.0 / roll_axis_length,
+                        roll_axis.1 / roll_axis_length,
+                        roll_axis.2 / roll_axis_length
+                    );
+
+                    // Rolling velocity (scalar)
+                    let vel_magnitude = (self.object.velocity.x*self.object.velocity.x +
+                        self.object.velocity.z*self.object.velocity.z).sqrt();
+
+                    // Set angular velocity for rolling (proportional to linear velocity)
+                    let angular_speed = vel_magnitude / radius;
+                    self.angular_velocity.0 = roll_dir.0 * angular_speed;
+                    self.angular_velocity.1 = roll_dir.1 * angular_speed;
+                    self.angular_velocity.2 = roll_dir.2 * angular_speed;
+                }
+            }
+        }
+    }
+
+    fn handle_polyhedron_ground_collision(&mut self, vertices: &[(f64, f64, f64)], dt: f64) {
+        // Find vertices that are in contact with the ground
+        let ground_vertices: Vec<(f64, f64, f64)> = vertices.iter()
+            .filter(|(_, y, _)| (*y - self.physics_constants.ground_level).abs() < 0.01)
+            .cloned()
+            .collect();
+
+        // Find lowest vertex
+        let min_y = vertices.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+
+        // Calculate penetration depth
+        let penetration = self.physics_constants.ground_level - min_y;
+
+        // Adjust position to resolve penetration
+        self.object.position.y += penetration;
+
+        // Only apply collision response if moving downward
+        if self.object.velocity.y < 0.0 && !ground_vertices.is_empty() {
+            // Bounce with energy loss
+            let restitution = self.get_restitution() * 0.7; // Polyhedra tend to bounce less
+            self.object.velocity.y = -self.object.velocity.y * restitution;
+
+            // Apply friction
+            let friction = 0.6;
+            self.object.velocity.x *= (1.0 - friction * dt);
+            self.object.velocity.z *= (1.0 - friction * dt);
+
+            // Apply angular damping
+            let angular_damping = 0.5 * dt;
+            self.angular_velocity.0 *= (1.0 - angular_damping);
+            self.angular_velocity.1 *= (1.0 - angular_damping);
+            self.angular_velocity.2 *= (1.0 - angular_damping);
+
+            // Calculate impact torque if we have ground contact
+            if !ground_vertices.is_empty() && self.object.velocity.y.abs() > 0.1 {
+                // Calculate impact point (average of ground vertices)
+                let sum = ground_vertices.iter().fold((0.0, 0.0, 0.0), |acc, &p| {
+                    (acc.0 + p.0, acc.1 + p.1, acc.2 + p.2)
+                });
+                let count = ground_vertices.len() as f64;
+                let impact_point = (sum.0 / count, sum.1 / count, sum.2 / count);
+
+                // Calculate relative vector from center to impact
+                let r = (
+                    impact_point.0 - self.object.position.x,
+                    impact_point.1 - self.object.position.y,
+                    impact_point.2 - self.object.position.z
+                );
+
+                // Impact force (simplified vertical impulse)
+                let impact_force = (0.0, -self.object.velocity.y * self.object.mass, 0.0);
+
+                // Calculate torque
+                let torque = cross_product(r, impact_force);
+
+                // Apply with scaling factor
+                let torque_factor = 0.15; // Slightly less torque for polyhedra
+                self.apply_torque((
+                                      torque.0 * torque_factor,
+                                      torque.1 * torque_factor,
+                                      torque.2 * torque_factor
+                                  ), dt);
+            }
+        }
     }
 
     /// Applies a force to the object
@@ -1183,12 +1507,85 @@ impl PhysicalObject3D {
         }
     }
 
+    /// Transform point from local to world space
+    fn transform_point_to_world(&self, local_point: (f64, f64, f64)) -> (f64, f64, f64) {
+        // Rotate using current orientation
+        let rotated = rotate_point(local_point, self.orientation);
+
+        // Translate to world position
+        (
+            rotated.0 + self.object.position.x,
+            rotated.1 + self.object.position.y,
+            rotated.2 + self.object.position.z
+        )
+    }
+    /// Helper method to get all corner positions in world space
+    fn get_corner_positions(&self) -> Vec<(f64, f64, f64)> {
+        if let Shape3D::BeveledCuboid(width, height, depth, _) = self.shape {
+            let half_w = width / 2.0;
+            let half_h = height / 2.0;
+            let half_d = depth / 2.0;
+
+            // Local corner positions (object space)
+            let local_corners = [
+                (-half_w, -half_h, -half_d),
+                (half_w, -half_h, -half_d),
+                (half_w, half_h, -half_d),
+                (-half_w, half_h, -half_d),
+                (-half_w, -half_h, half_d),
+                (half_w, -half_h, half_d),
+                (half_w, half_h, half_d),
+                (-half_w, half_h, half_d)
+            ];
+
+            // Transform to world space
+            local_corners.iter()
+                .map(|&local_pos| {
+                    let world_pos = self.transform_point_to_world(local_pos);
+                    world_pos
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
     /// Checks for collision with another physical object
     pub fn collides_with(&self, other: &PhysicalObject3D) -> bool {
         let pos1: (f64, f64, f64) = self.object.position.to_coord();
         let pos2: (f64, f64, f64) = other.object.position.to_coord();
 
-        self.shape.check_collision(pos1, &other.shape, pos2)
+        // Check actual shape collision instead of just bounding sphere
+        match (&self.shape, &other.shape) {
+            (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
+                // Use oriented bounding box (OBB) collision detection
+                // This is more complex but more accurate
+
+                // For now, use a more conservative AABB approach
+                let w1_half = w1 / 2.0;
+                let h1_half = h1 / 2.0;
+                let d1_half = d1 / 2.0;
+
+                let w2_half = w2 / 2.0;
+                let h2_half = h2 / 2.0;
+                let d2_half = d2 / 2.0;
+
+                // Get the vector between centers
+                let dx = pos2.0 - pos1.0;
+                let dy = pos2.1 - pos1.1;
+                let dz = pos2.2 - pos1.2;
+
+                // Calculate overlap
+                let overlap_x = (w1_half + w2_half) - dx.abs();
+                let overlap_y = (h1_half + h2_half) - dy.abs();
+                let overlap_z = (d1_half + d2_half) - dz.abs();
+
+                // There's a collision if all axes have overlap
+                overlap_x > 0.0 && overlap_y > 0.0 && overlap_z > 0.0
+            },
+            // Fall back to default implementation for other shapes
+            _ => self.shape.check_collision(pos1, &other.shape, pos2)
+        }
     }
 
     /// Handles collision between this object and another
@@ -1205,6 +1602,9 @@ impl PhysicalObject3D {
             // Calculate combined coefficient of restitution
             let restitution = (self.get_restitution() + other.get_restitution()) / 2.0;
 
+            let correction_percentage = 0.8; // How much to correct penetration
+            let correction_threshold = 0.01; // Minimum penetration to correct
+
             // Handle linear collision
             let _ = crate::interactions::elastic_collision_3d(
                 &crate::utils::DEFAULT_PHYSICS_CONSTANTS,
@@ -1217,27 +1617,27 @@ impl PhysicalObject3D {
             );
 
             // Calculate impact point (approximation at the midpoint between objects)
-            let impact_point = (
+            let impact_point: (f64, f64, f64) = (
                 (pos1.0 + pos2.0) / 2.0,
                 (pos1.1 + pos2.1) / 2.0,
                 (pos1.2 + pos2.2) / 2.0
             );
 
             // Calculate relative position vectors from center to impact point
-            let r1 = (
+            let r1: (f64, f64, f64) = (
                 impact_point.0 - pos1.0,
                 impact_point.1 - pos1.1,
                 impact_point.2 - pos1.2
             );
 
-            let r2 = (
+            let r2: (f64, f64, f64) = (
                 impact_point.0 - pos2.0,
                 impact_point.1 - pos2.1,
                 impact_point.2 - pos2.2
             );
 
             // Calculate relative velocity at impact point
-            let v1 = (
+            let v1: (f64, f64, f64) = (
                 self.object.velocity.x +
                     self.angular_velocity.1 * r1.2 - self.angular_velocity.2 * r1.1,
                 self.object.velocity.y +
@@ -1246,7 +1646,7 @@ impl PhysicalObject3D {
                     self.angular_velocity.0 * r1.1 - self.angular_velocity.1 * r1.0
             );
 
-            let v2 = (
+            let v2: (f64, f64, f64) = (
                 other.object.velocity.x +
                     other.angular_velocity.1 * r2.2 - other.angular_velocity.2 * r2.1,
                 other.object.velocity.y +
@@ -1256,7 +1656,7 @@ impl PhysicalObject3D {
             );
 
             // Calculate relative velocity
-            let vrel = (
+            let vrel: (f64, f64, f64) = (
                 v1.0 - v2.0,
                 v1.1 - v2.1,
                 v1.2 - v2.2
@@ -1267,7 +1667,7 @@ impl PhysicalObject3D {
                 (1.0 / self.object.mass + 1.0 / other.object.mass);
 
             // Apply impulse to angular velocities
-            let impulse = (
+            let impulse: (f64, f64, f64) = (
                 normal.0 * impulse_mag,
                 normal.1 * impulse_mag,
                 normal.2 * impulse_mag
@@ -1278,11 +1678,61 @@ impl PhysicalObject3D {
             let torque2: (f64, f64, f64) = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
 
             // Get moments of inertia
-            let inertia1 = self.shape.moment_of_inertia(self.object.mass);
-            let inertia2 = other.shape.moment_of_inertia(other.object.mass);
+            let inertia1: [f64; 6] = self.shape.moment_of_inertia(self.object.mass);
+            let inertia2: [f64; 6] = other.shape.moment_of_inertia(other.object.mass);
+
+            // Calculate penetration depth
+            let penetration = match (&self.shape, &other.shape) {
+                (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
+                    let w1_half = w1 / 2.0;
+                    let h1_half = h1 / 2.0;
+                    let d1_half = d1 / 2.0;
+
+                    let w2_half = w2 / 2.0;
+                    let h2_half = h2 / 2.0;
+                    let d2_half = d2 / 2.0;
+
+                    // Vector from obj1 to obj2
+                    let dx = pos2.0 - pos1.0;
+                    let dy = pos2.1 - pos1.1;
+                    let dz = pos2.2 - pos1.2;
+
+                    // Calculate overlap in each axis
+                    let overlap_x = (w1_half + w2_half) - dx.abs();
+                    let overlap_y = (h1_half + h2_half) - dy.abs();
+                    let overlap_z = (d1_half + d2_half) - dz.abs();
+
+                    // Find minimum overlap
+                    overlap_x.min(overlap_y).min(overlap_z)
+                },
+                _ => 0.0, // No correction for other shapes
+            };
+
+            if penetration > correction_threshold {
+                let correction = penetration * correction_percentage;
+                let correction_vector = (
+                    normal.0 * correction,
+                    normal.1 * correction,
+                    normal.2 * correction
+                );
+
+                // Apply correction inversely proportional to mass
+                let total_mass = self.object.mass + other.object.mass;
+                let self_ratio = other.object.mass / total_mass;
+                let other_ratio = self.object.mass / total_mass;
+
+                // Move both objects apart
+                self.object.position.x -= correction_vector.0 * self_ratio;
+                self.object.position.y -= correction_vector.1 * self_ratio;
+                self.object.position.z -= correction_vector.2 * self_ratio;
+
+                other.object.position.x += correction_vector.0 * other_ratio;
+                other.object.position.y += correction_vector.1 * other_ratio;
+                other.object.position.z += correction_vector.2 * other_ratio;
+            }
 
             // Update angular velocities
-            let angular_response_factor = 2.5; // Increase this for more dramatic rotation
+            let angular_response_factor = 0.8; // Increase this for more dramatic rotation
 
             self.angular_velocity.0 += torque1.0 / inertia1[0] * dt * angular_response_factor;
             self.angular_velocity.1 += torque1.1 / inertia1[1] * dt * angular_response_factor;
@@ -1299,7 +1749,6 @@ impl PhysicalObject3D {
 
             return true;
         }
-
         false
     }
 
@@ -1337,13 +1786,13 @@ impl PhysicalObject3D {
             let up = (0.0, 1.0, 0.0);
 
             // Transform the up vector to object space (inverse of orientation)
-            let inverted_orientation = (
+            let inverted_orientation: (f64, f64, f64) = (
                 -self.orientation.0,
                 -self.orientation.1,
                 -self.orientation.2
             );
 
-            let obj_up = rotate_point(up, inverted_orientation);
+            let obj_up: (f64, f64, f64) = rotate_point(up, inverted_orientation);
 
             // Find which face normal is most aligned with the up direction
             self.shape.face_from_normal(obj_up)
@@ -1360,11 +1809,32 @@ impl PhysicalObject3D {
         self.object.velocity.y *= linear_factor;
         self.object.velocity.z *= linear_factor;
 
-        // Apply angular damping
+        // Apply stronger angular damping
         let angular_factor = (1.0 - angular_damping * dt).max(0.0);
         self.angular_velocity.0 *= angular_factor;
         self.angular_velocity.1 *= angular_factor;
         self.angular_velocity.2 *= angular_factor;
+
+        // Add threshold damping to stop very slow rotations
+        let min_angular_velocity = 0.05;
+        if self.angular_velocity.0.abs() < min_angular_velocity {
+            self.angular_velocity.0 = 0.0;
+        }
+        if self.angular_velocity.1.abs() < min_angular_velocity {
+            self.angular_velocity.1 = 0.0;
+        }
+        if self.angular_velocity.2.abs() < min_angular_velocity {
+            self.angular_velocity.2 = 0.0;
+        }
+
+        // Apply additional damping when close to ground to simulate rolling resistance
+        let ground_proximity = self.object.position.y - self.physics_constants.ground_level;
+        if ground_proximity < 0.1 {
+            // Increase damping when close to ground
+            let ground_damping = 0.6 * dt;
+            self.angular_velocity.0 *= (1.0 - ground_damping);
+            self.angular_velocity.2 *= (1.0 - ground_damping);
+        }
     }
 
     /// Apply gravity to the object
