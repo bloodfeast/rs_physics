@@ -1307,6 +1307,47 @@ impl PhysicalObject3D {
         }
     }
 
+    // Calculate collision impulse considering both linear and angular components
+    fn calculate_collision_impulse(
+        obj1: &PhysicalObject3D,
+        obj2: &PhysicalObject3D,
+        vrel: (f64, f64, f64),
+        normal: (f64, f64, f64),
+        restitution: f64,
+        r1: (f64, f64, f64),
+        r2: (f64, f64, f64)
+    ) -> f64 {
+        // Normal component of relative velocity
+        let vrel_n = dot_product(vrel, normal);
+
+        // Calculate angular contribution to impulse denominator
+        let inertia1 = obj1.shape.moment_of_inertia(obj1.object.mass);
+        let inertia2 = obj2.shape.moment_of_inertia(obj2.object.mass);
+
+        // Calculate r × n for both objects
+        let r1_cross_n = cross_product(r1, normal);
+        let r2_cross_n = cross_product(r2, normal);
+
+        // Calculate angular terms
+        let angular_term1 = (
+            r1_cross_n.0 * r1_cross_n.0 / inertia1[0] +
+                r1_cross_n.1 * r1_cross_n.1 / inertia1[1] +
+                r1_cross_n.2 * r1_cross_n.2 / inertia1[2]
+        );
+
+        let angular_term2 = (
+            r2_cross_n.0 * r2_cross_n.0 / inertia2[0] +
+                r2_cross_n.1 * r2_cross_n.1 / inertia2[1] +
+                r2_cross_n.2 * r2_cross_n.2 / inertia2[2]
+        );
+
+        // Calculate full impulse magnitude with rotational components
+        let impulse_denom = 1.0 / obj1.object.mass + 1.0 / obj2.object.mass + angular_term1 + angular_term2;
+        let impulse_mag = -(1.0 + restitution) * vrel_n / impulse_denom;
+
+        impulse_mag
+    }
+
     fn handle_sphere_ground_collision(&mut self, radius: f64, dt: f64) {
         // Calculate penetration depth
         let sphere_bottom = self.object.position.y - radius;
@@ -1589,167 +1630,348 @@ impl PhysicalObject3D {
     }
 
     /// Handles collision between this object and another
-    pub fn handle_collision(
-        &mut self,
-        other: &mut PhysicalObject3D,
-        dt: f64
-    ) -> bool {
+    pub fn handle_collision(&mut self, other: &mut PhysicalObject3D, dt: f64) -> bool {
         let pos1: (f64, f64, f64) = self.object.position.to_coord();
         let pos2: (f64, f64, f64) = other.object.position.to_coord();
+
+        // First perform an accurate collision detection
+        if !self.shape.check_collision(pos1, &other.shape, pos2) {
+            return false;
+        }
 
         // Get collision normal
         if let Some(normal) = self.shape.collision_normal(pos1, &other.shape, pos2) {
             // Calculate combined coefficient of restitution
             let restitution = (self.get_restitution() + other.get_restitution()) / 2.0;
 
-            let correction_percentage = 0.8; // How much to correct penetration
-            let correction_threshold = 0.01; // Minimum penetration to correct
+            // Calculate better impact point based on shape types
+            let impact_point = PhysicalObject3D::calculate_impact_point(&self, &other, normal);
 
-            // Handle linear collision
-            let _ = crate::interactions::elastic_collision_3d(
-                &crate::utils::DEFAULT_PHYSICS_CONSTANTS,
-                &mut self.object,
-                &mut other.object,
-                normal,
-                dt,
-                0.1, // Drag coefficient
-                1.0  // Cross-sectional area
-            );
-
-            // Calculate impact point (approximation at the midpoint between objects)
-            let impact_point: (f64, f64, f64) = (
-                (pos1.0 + pos2.0) / 2.0,
-                (pos1.1 + pos2.1) / 2.0,
-                (pos1.2 + pos2.2) / 2.0
-            );
-
-            // Calculate relative position vectors from center to impact point
-            let r1: (f64, f64, f64) = (
+            // Calculate relative vectors from centers to impact point
+            let r1 = (
                 impact_point.0 - pos1.0,
                 impact_point.1 - pos1.1,
                 impact_point.2 - pos1.2
             );
 
-            let r2: (f64, f64, f64) = (
+            let r2 = (
                 impact_point.0 - pos2.0,
                 impact_point.1 - pos2.1,
                 impact_point.2 - pos2.2
             );
 
-            // Calculate relative velocity at impact point
-            let v1: (f64, f64, f64) = (
-                self.object.velocity.x +
-                    self.angular_velocity.1 * r1.2 - self.angular_velocity.2 * r1.1,
-                self.object.velocity.y +
-                    self.angular_velocity.2 * r1.0 - self.angular_velocity.0 * r1.2,
-                self.object.velocity.z +
-                    self.angular_velocity.0 * r1.1 - self.angular_velocity.1 * r1.0
-            );
+            // Calculate point velocities including rotation
+            let v1 = PhysicalObject3D::calculate_point_velocity(self, r1);
+            let v2 = PhysicalObject3D::calculate_point_velocity(other, r2);
 
-            let v2: (f64, f64, f64) = (
-                other.object.velocity.x +
-                    other.angular_velocity.1 * r2.2 - other.angular_velocity.2 * r2.1,
-                other.object.velocity.y +
-                    other.angular_velocity.2 * r2.0 - other.angular_velocity.0 * r2.2,
-                other.object.velocity.z +
-                    other.angular_velocity.0 * r2.1 - other.angular_velocity.1 * r2.0
-            );
-
-            // Calculate relative velocity
-            let vrel: (f64, f64, f64) = (
+            // Relative velocity at impact point
+            let vrel = (
                 v1.0 - v2.0,
                 v1.1 - v2.1,
                 v1.2 - v2.2
             );
 
-            // Calculate impulse magnitude (simplified)
-            let impulse_mag = (-(1.0 + restitution) * dot_product(vrel, normal)) /
-                (1.0 / self.object.mass + 1.0 / other.object.mass);
+            // Calculate normal component of relative velocity
+            let vrel_n = dot_product(vrel, normal);
 
-            // Apply impulse to angular velocities
-            let impulse: (f64, f64, f64) = (
-                normal.0 * impulse_mag,
-                normal.1 * impulse_mag,
-                normal.2 * impulse_mag
-            );
-
-            // Calculate torque from impulse
-            let torque1: (f64, f64, f64) = cross_product(r1, impulse);
-            let torque2: (f64, f64, f64) = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
-
-            // Get moments of inertia
-            let inertia1: [f64; 6] = self.shape.moment_of_inertia(self.object.mass);
-            let inertia2: [f64; 6] = other.shape.moment_of_inertia(other.object.mass);
-
-            // Calculate penetration depth
-            let penetration = match (&self.shape, &other.shape) {
-                (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
-                    let w1_half = w1 / 2.0;
-                    let h1_half = h1 / 2.0;
-                    let d1_half = d1 / 2.0;
-
-                    let w2_half = w2 / 2.0;
-                    let h2_half = h2 / 2.0;
-                    let d2_half = d2 / 2.0;
-
-                    // Vector from obj1 to obj2
-                    let dx = pos2.0 - pos1.0;
-                    let dy = pos2.1 - pos1.1;
-                    let dz = pos2.2 - pos1.2;
-
-                    // Calculate overlap in each axis
-                    let overlap_x = (w1_half + w2_half) - dx.abs();
-                    let overlap_y = (h1_half + h2_half) - dy.abs();
-                    let overlap_z = (d1_half + d2_half) - dz.abs();
-
-                    // Find minimum overlap
-                    overlap_x.min(overlap_y).min(overlap_z)
-                },
-                _ => 0.0, // No correction for other shapes
-            };
-
-            if penetration > correction_threshold {
-                let correction = penetration * correction_percentage;
-                let correction_vector = (
-                    normal.0 * correction,
-                    normal.1 * correction,
-                    normal.2 * correction
+            // Only proceed with collision response if objects are moving toward each other
+            if vrel_n < 0.0 {
+                // Use the existing calculate_collision_impulse function
+                let impulse_mag = PhysicalObject3D::calculate_collision_impulse(
+                    self, other, vrel, normal, restitution, r1, r2
                 );
 
-                // Apply correction inversely proportional to mass
-                let total_mass = self.object.mass + other.object.mass;
-                let self_ratio = other.object.mass / total_mass;
-                let other_ratio = self.object.mass / total_mass;
+                // Apply impulse to linear velocities
+                PhysicalObject3D::apply_linear_impulse(self, other, normal, impulse_mag);
 
-                // Move both objects apart
-                self.object.position.x -= correction_vector.0 * self_ratio;
-                self.object.position.y -= correction_vector.1 * self_ratio;
-                self.object.position.z -= correction_vector.2 * self_ratio;
+                // Apply impulse to angular velocities
+                PhysicalObject3D::apply_angular_impulse(self, other, normal, impulse_mag, r1, r2, dt);
 
-                other.object.position.x += correction_vector.0 * other_ratio;
-                other.object.position.y += correction_vector.1 * other_ratio;
-                other.object.position.z += correction_vector.2 * other_ratio;
+                // Resolve penetration
+                PhysicalObject3D::resolve_penetration(self, other, normal);
+
+                return true;
             }
-
-            // Update angular velocities
-            let angular_response_factor = 0.8; // Increase this for more dramatic rotation
-
-            self.angular_velocity.0 += torque1.0 / inertia1[0] * dt * angular_response_factor;
-            self.angular_velocity.1 += torque1.1 / inertia1[1] * dt * angular_response_factor;
-            self.angular_velocity.2 += torque1.2 / inertia1[2] * dt * angular_response_factor;
-
-            other.angular_velocity.0 += torque2.0 / inertia2[0] * dt * angular_response_factor;
-            other.angular_velocity.1 += torque2.1 / inertia2[1] * dt * angular_response_factor;
-            other.angular_velocity.2 += torque2.2 / inertia2[2] * dt * angular_response_factor;
-
-            let random_factor = 0.05;
-            self.angular_velocity.0 += rand::rng().random_range(-random_factor..random_factor);
-            self.angular_velocity.1 += rand::rng().random_range(-random_factor..random_factor);
-            self.angular_velocity.2 += rand::rng().random_range(-random_factor..random_factor);
-
-            return true;
         }
+
         false
+    }
+
+    fn calculate_impact_point(
+        obj1: &PhysicalObject3D,
+        obj2: &PhysicalObject3D,
+        normal: (f64, f64, f64)
+    ) -> (f64, f64, f64) {
+        let pos1 = obj1.object.position.to_coord();
+        let pos2 = obj2.object.position.to_coord();
+
+        // Default to midpoint if we can't determine better point
+        let mut impact = (
+            (pos1.0 + pos2.0) / 2.0,
+            (pos1.1 + pos2.1) / 2.0,
+            (pos1.2 + pos2.2) / 2.0
+        );
+
+        match (&obj1.shape, &obj2.shape) {
+            // For sphere-sphere, impact point is along the line connecting centers
+            (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
+                // Calculate distance between centers
+                let dx = pos2.0 - pos1.0;
+                let dy = pos2.1 - pos1.1;
+                let dz = pos2.2 - pos1.2;
+                let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+
+                if dist > 0.001 {
+                    // Impact point is at surface of first sphere along line to second sphere
+                    impact = (
+                        pos1.0 + dx/dist * r1,
+                        pos1.1 + dy/dist * r1,
+                        pos1.2 + dz/dist * r1
+                    );
+                }
+            },
+
+            // For cuboid collisions, find the closest points on each cuboid
+            (Shape3D::Cuboid(_, _, _), Shape3D::Cuboid(_, _, _)) |
+            (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::BeveledCuboid(_, _, _, _)) |
+            (Shape3D::Cuboid(_, _, _), Shape3D::BeveledCuboid(_, _, _, _)) |
+            (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Cuboid(_, _, _)) => {
+                // For cuboids, the closest corners can give a better impact point
+                // Get world corners of both shapes
+                let corners1 = obj1.get_corner_positions();
+                let corners2 = obj2.get_corner_positions();
+
+                if !corners1.is_empty() && !corners2.is_empty() {
+                    // Find pair of corners with smallest distance
+                    let mut min_dist = f64::MAX;
+                    let mut closest_pair = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+
+                    for c1 in &corners1 {
+                        for c2 in &corners2 {
+                            let dx = c2.0 - c1.0;
+                            let dy = c2.1 - c1.1;
+                            let dz = c2.2 - c1.2;
+                            let dist_sq = dx*dx + dy*dy + dz*dz;
+
+                            if dist_sq < min_dist {
+                                min_dist = dist_sq;
+                                closest_pair = (*c1, *c2);
+                            }
+                        }
+                    }
+
+                    // Impact point is midway between closest corners
+                    impact = (
+                        (closest_pair.0.0 + closest_pair.1.0) / 2.0,
+                        (closest_pair.0.1 + closest_pair.1.1) / 2.0,
+                        (closest_pair.0.2 + closest_pair.1.2) / 2.0
+                    );
+                }
+            },
+
+            // For sphere-cuboid, impact is on sphere surface nearest cuboid
+            (Shape3D::Sphere(radius), Shape3D::Cuboid(_, _, _)) |
+            (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(_, _, _, _)) => {
+                // Impact point is along normal direction from sphere center
+                impact = (
+                    pos1.0 + normal.0 * radius,
+                    pos1.1 + normal.1 * radius,
+                    pos1.2 + normal.2 * radius
+                );
+            },
+
+            (Shape3D::Cuboid(_, _, _), Shape3D::Sphere(radius)) |
+            (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Sphere(radius)) => {
+                // Impact point is along normal direction from sphere center (opposite direction)
+                impact = (
+                    pos2.0 - normal.0 * radius,
+                    pos2.1 - normal.1 * radius,
+                    pos2.2 - normal.2 * radius
+                );
+            },
+
+            // Default case - use midpoint between centers
+            _ => { /* impact already set to midpoint */ }
+        }
+
+        impact
+    }
+
+    // Helper function to calculate velocity at a point on object
+    fn calculate_point_velocity(
+        obj: &PhysicalObject3D,
+        r: (f64, f64, f64)
+    ) -> (f64, f64, f64) {
+        // Linear velocity
+        let v_linear = (
+            obj.object.velocity.x,
+            obj.object.velocity.y,
+            obj.object.velocity.z
+        );
+
+        // Angular contribution: v_angular = ω × r
+        let v_angular = (
+            obj.angular_velocity.1 * r.2 - obj.angular_velocity.2 * r.1,
+            obj.angular_velocity.2 * r.0 - obj.angular_velocity.0 * r.2,
+            obj.angular_velocity.0 * r.1 - obj.angular_velocity.1 * r.0
+        );
+
+        // Total velocity at point
+        (
+            v_linear.0 + v_angular.0,
+            v_linear.1 + v_angular.1,
+            v_linear.2 + v_angular.2
+        )
+    }
+
+    // Helper function to apply linear impulse
+    fn apply_linear_impulse(
+        obj1: &mut PhysicalObject3D,
+        obj2: &mut PhysicalObject3D,
+        normal: (f64, f64, f64),
+        impulse_mag: f64
+    ) {
+        let impulse = (
+            normal.0 * impulse_mag,
+            normal.1 * impulse_mag,
+            normal.2 * impulse_mag
+        );
+
+        // Apply to first object
+        obj1.object.velocity.x += impulse.0 / obj1.object.mass;
+        obj1.object.velocity.y += impulse.1 / obj1.object.mass;
+        obj1.object.velocity.z += impulse.2 / obj1.object.mass;
+
+        // Apply to second object (opposite direction)
+        obj2.object.velocity.x -= impulse.0 / obj2.object.mass;
+        obj2.object.velocity.y -= impulse.1 / obj2.object.mass;
+        obj2.object.velocity.z -= impulse.2 / obj2.object.mass;
+    }
+
+    // Helper function to apply angular impulse
+    fn apply_angular_impulse(
+        obj1: &mut PhysicalObject3D,
+        obj2: &mut PhysicalObject3D,
+        normal: (f64, f64, f64),
+        impulse_mag: f64,
+        r1: (f64, f64, f64),
+        r2: (f64, f64, f64),
+        dt: f64
+    ) {
+        let impulse = (
+            normal.0 * impulse_mag,
+            normal.1 * impulse_mag,
+            normal.2 * impulse_mag
+        );
+
+        // Calculate torque from impulse
+        let torque1 = cross_product(r1, impulse);
+        let torque2 = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
+
+        // Get moments of inertia
+        let inertia1 = obj1.shape.moment_of_inertia(obj1.object.mass);
+        let inertia2 = obj2.shape.moment_of_inertia(obj2.object.mass);
+
+        // Apply angular impulse with appropriate scaling
+        let angular_response_factor = 0.8;
+
+        obj1.angular_velocity.0 += torque1.0 / inertia1[0] * dt * angular_response_factor;
+        obj1.angular_velocity.1 += torque1.1 / inertia1[1] * dt * angular_response_factor;
+        obj1.angular_velocity.2 += torque1.2 / inertia1[2] * dt * angular_response_factor;
+
+        obj2.angular_velocity.0 += torque2.0 / inertia2[0] * dt * angular_response_factor;
+        obj2.angular_velocity.1 += torque2.1 / inertia2[1] * dt * angular_response_factor;
+        obj2.angular_velocity.2 += torque2.2 / inertia2[2] * dt * angular_response_factor;
+
+        // Add small random perturbation to prevent "stuck" scenarios
+        let random_factor = 0.05;
+        let mut rng = rand::rng();
+
+        if impulse_mag > 0.1 {  // Only add randomness for significant collisions
+            obj1.angular_velocity.0 += rng.random_range(-random_factor..random_factor);
+            obj1.angular_velocity.1 += rng.random_range(-random_factor..random_factor);
+            obj1.angular_velocity.2 += rng.random_range(-random_factor..random_factor);
+        }
+    }
+
+    // Helper function to resolve penetration
+    fn resolve_penetration(
+        obj1: &mut PhysicalObject3D,
+        obj2: &mut PhysicalObject3D,
+        normal: (f64, f64, f64)
+    ) {
+        let pos1 = obj1.object.position.to_coord();
+        let pos2 = obj2.object.position.to_coord();
+
+        // Calculate penetration based on shape types
+        let penetration = match (&obj1.shape, &obj2.shape) {
+            (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
+            (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2)) |
+            (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) |
+            (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
+                let w1_half = w1 / 2.0;
+                let h1_half = h1 / 2.0;
+                let d1_half = d1 / 2.0;
+
+                let w2_half = w2 / 2.0;
+                let h2_half = h2 / 2.0;
+                let d2_half = d2 / 2.0;
+
+                // Vector from obj1 to obj2
+                let dx = pos2.0 - pos1.0;
+                let dy = pos2.1 - pos1.1;
+                let dz = pos2.2 - pos1.2;
+
+                // Calculate overlap in each axis
+                let overlap_x = (w1_half + w2_half) - dx.abs();
+                let overlap_y = (h1_half + h2_half) - dy.abs();
+                let overlap_z = (d1_half + d2_half) - dz.abs();
+
+                // Find minimum overlap
+                overlap_x.min(overlap_y).min(overlap_z)
+            },
+
+            (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
+                // Calculate distance between centers
+                let dx = pos2.0 - pos1.0;
+                let dy = pos2.1 - pos1.1;
+                let dz = pos2.2 - pos1.2;
+                let distance = (dx*dx + dy*dy + dz*dz).sqrt();
+
+                // Penetration is overlap amount
+                (r1 + r2) - distance
+            },
+
+            // For other shape combinations, use a small default value
+            _ => 0.01
+        };
+
+        // Apply correction only if there is actual penetration
+        let correction_threshold = 0.001;
+        let correction_percentage = 0.8;
+
+        if penetration > correction_threshold {
+            let correction = penetration * correction_percentage;
+            let correction_vector = (
+                normal.0 * correction,
+                normal.1 * correction,
+                normal.2 * correction
+            );
+
+            // Apply correction inversely proportional to mass
+            let total_mass = obj1.object.mass + obj2.object.mass;
+            let self_ratio = obj2.object.mass / total_mass;
+            let other_ratio = obj1.object.mass / total_mass;
+
+            // Move both objects apart
+            obj1.object.position.x -= correction_vector.0 * self_ratio;
+            obj1.object.position.y -= correction_vector.1 * self_ratio;
+            obj1.object.position.z -= correction_vector.2 * self_ratio;
+
+            obj2.object.position.x += correction_vector.0 * other_ratio;
+            obj2.object.position.y += correction_vector.1 * other_ratio;
+            obj2.object.position.z += correction_vector.2 * other_ratio;
+        }
     }
 
     /// Gets the vertices of the shape in world space
