@@ -1561,7 +1561,7 @@ impl PhysicalObject3D {
         )
     }
     /// Helper method to get all corner positions in world space
-    fn get_corner_positions(&self) -> Vec<(f64, f64, f64)> {
+    pub fn get_corner_positions(&self) -> Vec<(f64, f64, f64)> {
         if let Shape3D::BeveledCuboid(width, height, depth, _) = self.shape {
             let half_w = width / 2.0;
             let half_h = height / 2.0;
