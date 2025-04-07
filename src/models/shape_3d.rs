@@ -610,16 +610,99 @@ impl Shape3D {
                 ]
             },
             Shape3D::BeveledCuboid(_, _, _, _) => {
-                // This is a simplified representation with just the base faces
-                // For actual rendering with beveled edges, more faces would be needed
-                vec![
-                    vec![0, 1, 2, 3], // Bottom
-                    vec![4, 5, 6, 7], // Top
-                    vec![0, 4, 7, 3], // Left
-                    vec![1, 5, 6, 2], // Right
-                    vec![0, 1, 5, 4], // Front
-                    vec![3, 2, 6, 7]  // Back
-                ]
+                let mut faces = Vec::new();
+                let vertices = self.create_vertices();
+
+                // Based on the vertex generation in your implementation:
+                // 1. The last 6 vertices are the face centers
+                let num_vertices = vertices.len();
+                let face_centers_start = num_vertices - 6;
+
+                // Find and collect vertices for each face
+                // This requires knowing the pattern in which vertices were generated
+
+                // For each face center, identify the surrounding vertices
+                // that form the face plane, and connect them
+                for face_idx in 0..6 {
+                    let center_idx = face_centers_start + face_idx;
+                    let center = vertices[center_idx];
+
+                    // Find vertices that belong to this face by checking their coordinates
+                    // against the center's position and the face normal
+                    let mut face_vertices = Vec::new();
+
+                    // Determine face normal based on face index
+                    let face_normal = match face_idx {
+                        0 => (0.0, -1.0, 0.0), // Bottom
+                        1 => (0.0, 1.0, 0.0),  // Top
+                        2 => (1.0, 0.0, 0.0),  // Right
+                        3 => (-1.0, 0.0, 0.0), // Left
+                        4 => (0.0, 0.0, -1.0), // Front
+                        5 => (0.0, 0.0, 1.0),  // Back
+                        _ => unreachable!()
+                    };
+
+                    // Find vertices that are on this face plane
+                    for (i, &vertex) in vertices.iter().enumerate() {
+                        // Skip the center vertex itself
+                        if i == center_idx {
+                            continue;
+                        }
+
+                        // Calculate vector from center to vertex
+                        let vec = (
+                            vertex.0 - center.0,
+                            vertex.1 - center.1,
+                            vertex.2 - center.2
+                        );
+
+                        // Calculate dot product with normal
+                        let dot = vec.0 * face_normal.0 + vec.1 * face_normal.1 + vec.2 * face_normal.2;
+
+                        // If dot product is close to zero, vertex is on the face plane
+                        if dot.abs() < 0.01 {
+                            // Calculate distance from center in face plane
+                            let dist_sq =
+                                vec.0 * vec.0 +
+                                    vec.1 * vec.1 +
+                                    vec.2 * vec.2 -
+                                    dot * dot;
+
+                            // If within face bounds, add to face vertices
+                            if dist_sq < 0.25 { // Adjust this threshold as needed
+                                face_vertices.push(i);
+                            }
+                        }
+                    }
+
+                    // Sort face vertices in circular order around the center
+                    // (This is complex but necessary for proper face triangulation)
+                    face_vertices.sort_by(|&a, &b| {
+                        let va = vertices[a];
+                        let vb = vertices[b];
+
+                        // Calculate vectors from center to each vertex
+                        let vec_a = (va.0 - center.0, va.1 - center.1, va.2 - center.2);
+                        let vec_b = (vb.0 - center.0, vb.1 - center.1, vb.2 - center.2);
+
+                        // Calculate angles in the face plane
+                        let angle_a = vec_a.0.atan2(vec_a.1);
+                        let angle_b = vec_b.0.atan2(vec_b.1);
+
+                        angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    // Create triangular faces by connecting center to each pair of adjacent vertices
+                    for i in 0..face_vertices.len() {
+                        let next_i = (i + 1) % face_vertices.len();
+                        faces.push(vec![
+                            center_idx,
+                            face_vertices[i],
+                            face_vertices[next_i]
+                        ]);
+                    }
+                }
+                faces
             },
             Shape3D::Cylinder(_, _) => {
                 let num_segments = 16;
@@ -977,7 +1060,7 @@ impl Shape3D {
         orientation: (f64, f64, f64)
     ) -> (f64, f64, f64) {
         // First rotate the point
-        let rotated = rotate_point(local_point, orientation);
+        let rotated: (f64, f64, f64) = rotate_point(local_point, orientation);
 
         // Then translate to world space
         (
@@ -1101,8 +1184,8 @@ impl PhysicalObject3D {
 
     /// Checks for collision with another physical object
     pub fn collides_with(&self, other: &PhysicalObject3D) -> bool {
-        let pos1 = self.object.position.to_coord();
-        let pos2 = other.object.position.to_coord();
+        let pos1: (f64, f64, f64) = self.object.position.to_coord();
+        let pos2: (f64, f64, f64) = other.object.position.to_coord();
 
         self.shape.check_collision(pos1, &other.shape, pos2)
     }
@@ -1113,8 +1196,8 @@ impl PhysicalObject3D {
         other: &mut PhysicalObject3D,
         dt: f64
     ) -> bool {
-        let pos1 = self.object.position.to_coord();
-        let pos2 = other.object.position.to_coord();
+        let pos1: (f64, f64, f64) = self.object.position.to_coord();
+        let pos2: (f64, f64, f64) = other.object.position.to_coord();
 
         // Get collision normal
         if let Some(normal) = self.shape.collision_normal(pos1, &other.shape, pos2) {
@@ -1190,12 +1273,12 @@ impl PhysicalObject3D {
             );
 
             // Calculate torque from impulse
-            let torque1 = cross_product(r1, impulse);
-            let torque2 = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
+            let torque1: (f64, f64, f64) = cross_product(r1, impulse);
+            let torque2: (f64, f64, f64) = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
 
             // Get moments of inertia
-            let inertia1 = self.shape.moment_of_inertia(self.object.mass);
-            let inertia2 = other.shape.moment_of_inertia(other.object.mass);
+            let inertia1: [f64; 6] = self.shape.moment_of_inertia(self.object.mass);
+            let inertia2: [f64; 6] = other.shape.moment_of_inertia(other.object.mass);
 
             // Update angular velocities
             self.angular_velocity.0 += torque1.0 / inertia1[0] * dt;
