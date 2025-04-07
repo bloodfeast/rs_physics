@@ -3,6 +3,7 @@ use crate::materials::Material;
 use crate::models::{ObjectIn3D, ToCoordinates};
 use crate::rotational_dynamics::{calculate_moment_of_inertia, ObjectShape};
 use std::f64::consts::PI;
+use rand::Rng;
 
 /// Represents different types of 3D shapes for physics simulations
 #[derive(Debug, Clone)]
@@ -1277,17 +1278,24 @@ impl PhysicalObject3D {
             let torque2: (f64, f64, f64) = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
 
             // Get moments of inertia
-            let inertia1: [f64; 6] = self.shape.moment_of_inertia(self.object.mass);
-            let inertia2: [f64; 6] = other.shape.moment_of_inertia(other.object.mass);
+            let inertia1 = self.shape.moment_of_inertia(self.object.mass);
+            let inertia2 = other.shape.moment_of_inertia(other.object.mass);
 
             // Update angular velocities
-            self.angular_velocity.0 += torque1.0 / inertia1[0] * dt;
-            self.angular_velocity.1 += torque1.1 / inertia1[1] * dt;
-            self.angular_velocity.2 += torque1.2 / inertia1[2] * dt;
+            let angular_response_factor = 2.5; // Increase this for more dramatic rotation
 
-            other.angular_velocity.0 += torque2.0 / inertia2[0] * dt;
-            other.angular_velocity.1 += torque2.1 / inertia2[1] * dt;
-            other.angular_velocity.2 += torque2.2 / inertia2[2] * dt;
+            self.angular_velocity.0 += torque1.0 / inertia1[0] * dt * angular_response_factor;
+            self.angular_velocity.1 += torque1.1 / inertia1[1] * dt * angular_response_factor;
+            self.angular_velocity.2 += torque1.2 / inertia1[2] * dt * angular_response_factor;
+
+            other.angular_velocity.0 += torque2.0 / inertia2[0] * dt * angular_response_factor;
+            other.angular_velocity.1 += torque2.1 / inertia2[1] * dt * angular_response_factor;
+            other.angular_velocity.2 += torque2.2 / inertia2[2] * dt * angular_response_factor;
+
+            let random_factor = 0.05;
+            self.angular_velocity.0 += rand::rng().random_range(-random_factor..random_factor);
+            self.angular_velocity.1 += rand::rng().random_range(-random_factor..random_factor);
+            self.angular_velocity.2 += rand::rng().random_range(-random_factor..random_factor);
 
             return true;
         }
