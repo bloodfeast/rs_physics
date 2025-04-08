@@ -292,6 +292,43 @@ impl Material {
         ).expect("Failed to create polyurethane material")
     }
 
+    /// Creates a new Material instance with properties of wood (hardwood).
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of hardwood:
+    /// * Density: 700 kg/m³
+    /// * Young's modulus: 12 GPa
+    /// * Poisson's ratio: 0.3
+    /// * Friction coefficient: 0.5
+    /// * Restitution coefficient: 0.5
+    /// * Thermal conductivity: 0.15 W/(m·K)
+    /// * Specific heat capacity: 1700 J/(kg·K)
+    /// * Yield strength: 40 MPa
+    /// * Ultimate strength: 70 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let wood = Material::wood();
+    /// assert_eq!(wood.density, 700.0);
+    /// ```
+    pub fn wood() -> Self {
+        Self::new(
+            700.0,             // density (kg/m³)
+            12.0e9,            // Young's modulus (Pa)
+            0.3,               // Poisson's ratio
+            0.5,               // friction coefficient
+            0.5,               // restitution coefficient
+            0.15,              // thermal conductivity (W/(m·K))
+            1700.0,            // specific heat capacity (J/(kg·K))
+            40.0e6,            // yield strength (Pa)
+            70.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create wood material")
+    }
+
     /// Calculates the shear modulus of the material.
     ///
     /// The shear modulus (G) is calculated from Young's modulus (E) and

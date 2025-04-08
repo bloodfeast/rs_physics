@@ -88,6 +88,30 @@ fn test_polyurethane_material() {
 }
 
 #[test]
+fn test_wood_material() {
+    let wood = Material::wood();
+
+    // Check properties
+    assert_float_eq(wood.density, 700.0, 1e-6, Some("Wood density"));
+    assert_float_eq(wood.youngs_modulus, 12.0e9, 1e-6, Some("Wood Young's modulus"));
+    assert_float_eq(wood.poisson_ratio, 0.3, 1e-6, Some("Wood Poisson's ratio"));
+    assert_float_eq(wood.restitution_coefficient, 0.5, 1e-6, Some("Wood restitution"));
+
+    // Compare with other materials
+    let steel = Material::steel();
+    let rubber = Material::rubber();
+
+    // Wood should be between steel and rubber in terms of stiffness
+    assert!(wood.youngs_modulus < steel.youngs_modulus);
+    assert!(wood.youngs_modulus > rubber.youngs_modulus);
+
+    // Wood should be less dense than aluminum and steel
+    let aluminum = Material::aluminum();
+    assert!(wood.density < aluminum.density);
+    assert!(wood.density < steel.density);
+}
+
+#[test]
 fn test_elastic_region() {
     let steel = Material::steel();
     let yield_strain = steel.yield_strength / steel.youngs_modulus;
