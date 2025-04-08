@@ -18,6 +18,43 @@ pub enum Shape3D {
     /// Custom polyhedron with vertices and faces (indices)
     Polyhedron(Vec<(f64, f64, f64)>, Vec<Vec<usize>>),
 }
+/// Represents an orientation using Euler angles (roll, pitch, yaw) in radians.
+#[derive(Debug, Clone, Copy)]
+pub struct Orientation { pub roll: f64, pub pitch: f64, pub yaw: f64, }
+impl Orientation {
+    /// Creates a new Orientation with the given angles.
+    pub fn new(roll: f64, pitch: f64, yaw: f64) -> Self {
+        Orientation { roll, pitch, yaw }
+    }
+
+    /// Normalizes each angle to the range [0, 2π).
+    pub fn normalize(self) -> Orientation {
+        Orientation {
+            roll: normalize_angle(self.roll),
+            pitch: normalize_angle(self.pitch),
+            yaw: normalize_angle(self.yaw),
+        }
+    }
+
+    /// Returns the orientation as a tuple for compatibility with functions expecting (f64, f64, f64).
+    pub fn to_tuple(self) -> (f64, f64, f64) {
+        (self.roll, self.pitch, self.yaw)
+    }
+
+    pub fn from_tuple(t: (f64, f64, f64)) -> Orientation {
+        Orientation {
+            roll: t.0,
+            pitch: t.1,
+            yaw: t.2
+        }
+    }
+}
+pub struct VelocityVector(pub f64, pub f64, pub f64);
+impl VelocityVector {
+    pub fn length_squared(&mut self) -> f64 {
+        (self.0 * self.0) + (self.1 * self.1) + (self.2 * self.2)
+    }
+}
 
 impl Shape3D {
     /// Creates a new sphere with the given radius
@@ -889,7 +926,7 @@ pub struct PhysicalObject3D {
     /// Angular velocity in radians per second (around x, y, z axes)
     pub angular_velocity: (f64, f64, f64),
     /// Orientation as Euler angles in radians (roll, pitch, yaw)
-    pub orientation: (f64, f64, f64),
+    pub orientation: Orientation,
     pub physics_constants: PhysicsConstants
 }
 
@@ -905,6 +942,7 @@ impl PhysicalObject3D {
         orientation: (f64, f64, f64),
         physics_constants: PhysicsConstants
     ) -> Self {
+        let orientation = Orientation::from_tuple(orientation);
         PhysicalObject3D {
             object: ObjectIn3D::new(
                 mass,
@@ -955,6 +993,11 @@ impl PhysicalObject3D {
         )
     }
 
+    /// Returns a tuple of the directional velocities
+    pub fn velocity(&mut self) -> VelocityVector {
+        VelocityVector(self.object.velocity.x, self.object.velocity.y, self.object.velocity.z)
+    }
+
     /// Applies a torque (rotational force) to the object
     pub fn apply_torque(&mut self, torque: (f64, f64, f64), duration: f64) {
         // Get the moment of inertia tensor
@@ -978,7 +1021,7 @@ impl PhysicalObject3D {
     /// Transform point from local to world space
     fn transform_point_to_world(&self, local_point: (f64, f64, f64)) -> (f64, f64, f64) {
         // Rotate using current orientation
-        let rotated: (f64, f64, f64) = rotate_point(local_point, self.orientation);
+        let rotated: (f64, f64, f64) = rotate_point(local_point, self.orientation.to_tuple());
 
         // Translate to world position
         (
@@ -1033,7 +1076,7 @@ impl PhysicalObject3D {
 
         // Transform local vertices to world space
         local_vertices.iter()
-            .map(|v| self.shape.transform_point(*v, position, self.orientation))
+            .map(|v| self.shape.transform_point(*v, position, self.orientation.to_tuple()))
             .collect()
     }
 
@@ -1047,7 +1090,7 @@ impl PhysicalObject3D {
         faces.iter().map(|face| {
             face.iter().map(|&idx| {
                 let vertex = local_vertices[idx];
-                self.shape.transform_point(vertex, position, self.orientation)
+                self.shape.transform_point(vertex, position, self.orientation.to_tuple())
             }).collect()
         }).collect()
     }
@@ -1061,9 +1104,9 @@ impl PhysicalObject3D {
 
             // Transform the up vector to object space (inverse of orientation)
             let inverted_orientation: (f64, f64, f64) = (
-                -self.orientation.0,
-                -self.orientation.1,
-                -self.orientation.2
+                -self.orientation.roll,
+                -self.orientation.pitch,
+                -self.orientation.yaw
             );
 
             let obj_up: (f64, f64, f64) = rotate_point(up, inverted_orientation);

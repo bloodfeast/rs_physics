@@ -693,7 +693,7 @@ pub fn handle_collision(
     let pos2 = obj2.object.position.to_coord();
 
     // First perform collision detection
-    if !check_collision(&obj1.shape, pos1, &obj2.shape, pos2) {
+    if !check_collision_objects(&obj1, &obj2) {
         return false;
     }
 
@@ -924,7 +924,7 @@ pub fn handle_cylinder_ground_collision(
         // For a cylinder, the friction depends on whether it's on its side or its end
 
         // Calculate the up vector in world space
-        let cylinder_up = rotate_point((0.0, 1.0, 0.0), obj.orientation);
+        let cylinder_up = rotate_point((0.0, 1.0, 0.0), obj.orientation.to_tuple());
         let up_dot_world_up = cylinder_up.1; // Dot product with world up (0,1,0)
 
         // If cylinder is more vertical (on its end)
@@ -944,7 +944,7 @@ pub fn handle_cylinder_ground_collision(
             obj.object.velocity.z *= 1.0 - friction * dt;
 
             // Calculate rolling axis (perpendicular to both cylinder axis and ground normal)
-            let cylinder_axis = rotate_point((0.0, 1.0, 0.0), obj.orientation);
+            let cylinder_axis = rotate_point((0.0, 1.0, 0.0), obj.orientation.to_tuple());
             let ground_normal = (0.0, 1.0, 0.0);
 
             let roll_axis = cross_product(cylinder_axis, ground_normal);
@@ -1115,14 +1115,14 @@ pub fn update_physics(obj: &mut PhysicalObject3D, dt: f64) {
     obj.object.position.z += obj.object.velocity.z * dt;
 
     // Update orientation based on angular velocity
-    obj.orientation.0 += obj.angular_velocity.0 * dt;
-    obj.orientation.1 += obj.angular_velocity.1 * dt;
-    obj.orientation.2 += obj.angular_velocity.2 * dt;
+    obj.orientation.roll += obj.angular_velocity.0 * dt;
+    obj.orientation.pitch += obj.angular_velocity.1 * dt;
+    obj.orientation.yaw += obj.angular_velocity.2 * dt;
 
     // Normalize angles to [0, 2π)
-    obj.orientation.0 = normalize_angle(obj.orientation.0);
-    obj.orientation.1 = normalize_angle(obj.orientation.1);
-    obj.orientation.2 = normalize_angle(obj.orientation.2);
+    obj.orientation.roll = normalize_angle(obj.orientation.roll);
+    obj.orientation.pitch = normalize_angle(obj.orientation.pitch);
+    obj.orientation.yaw = normalize_angle(obj.orientation.yaw);
 
     // Handle ground collision based on shape type
     match &obj.shape {
@@ -1192,7 +1192,7 @@ pub fn world_vertices(obj: &PhysicalObject3D) -> Vec<(f64, f64, f64)> {
 
     // Transform local vertices to world space
     local_vertices.iter()
-        .map(|v| obj.shape.transform_point(*v, position, obj.orientation))
+        .map(|v| obj.shape.transform_point(*v, position, obj.orientation.to_tuple()))
         .collect()
 }
 
@@ -1215,7 +1215,7 @@ pub fn world_faces(obj: &PhysicalObject3D) -> Vec<Vec<(f64, f64, f64)>> {
     faces.iter().map(|face| {
         face.iter().map(|&idx| {
             let vertex = local_vertices[idx];
-            obj.shape.transform_point(vertex, position, obj.orientation)
+            obj.shape.transform_point(vertex, position, obj.orientation.to_tuple())
         }).collect()
     }).collect()
 }
@@ -1238,9 +1238,9 @@ pub fn die_face_up(obj: &PhysicalObject3D) -> Option<u8> {
 
         // Transform the up vector to object space (inverse of orientation)
         let inverted_orientation: (f64, f64, f64) = (
-            -obj.orientation.0,
-            -obj.orientation.1,
-            -obj.orientation.2
+            -obj.orientation.roll,
+            -obj.orientation.pitch,
+            -obj.orientation.yaw
         );
 
         let obj_up: (f64, f64, f64) = rotate_point(up, inverted_orientation);
@@ -1442,5 +1442,179 @@ pub fn update_physics_system(objects: &mut [PhysicalObject3D], dt: f64) {
             // Check and handle collision
             handle_collision(obj1, obj2, dt);
         }
+    }
+}
+
+/// Performs collision detection between two physical objects, respecting orientation.
+/// It preserves your bounding-sphere check and specialized sphere/cylinder logic.
+/// For oriented cuboid-cuboid, it calls SAT logic instead of AABB.
+pub fn check_collision_objects(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) -> bool {
+    // Quick bounding-sphere reject
+    let pos1 = obj1.object.position.to_coord();
+    let pos2 = obj2.object.position.to_coord();
+
+    let dx = pos2.0 - pos1.0;
+    let dy = pos2.1 - pos1.1;
+    let dz = pos2.2 - pos1.2;
+    let distance_sq = dx*dx + dy*dy + dz*dz;
+
+    let r1 = obj1.shape.bounding_radius();
+    let r2 = obj2.shape.bounding_radius();
+    if distance_sq > (r1 + r2).powi(2) {
+        return false;
+    }
+
+    // Next do shape-specific logic (sphere-sphere, sphere-cuboid, cylinder-cyl, etc.).
+    // For the "cuboid-cuboid" (or beveled) path, we do the new SAT approach.
+
+    match (&obj1.shape, &obj2.shape) {
+        // ---- Spheres ----
+        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
+            distance_sq <= (r1 + r2).powi(2)
+        },
+
+        // ---- Sphere-cuboid combos (keep your old clamp-based logic) ----
+        (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d))
+        | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
+            let dx_clamp = dx.clamp(-w/2.0, w/2.0);
+            let dy_clamp = dy.clamp(-h/2.0, h/2.0);
+            let dz_clamp = dz.clamp(-d/2.0, d/2.0);
+            let closest_dist_sq =
+                (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
+            closest_dist_sq <= radius.powi(2)
+        },
+
+        // ---- Cuboid-sphere (the reverse) ----
+        (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius))
+        | (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
+            let dx_clamp = dx.clamp(-w/2.0, w/2.0);
+            let dy_clamp = dy.clamp(-h/2.0, h/2.0);
+            let dz_clamp = dz.clamp(-d/2.0, d/2.0);
+            let closest_dist_sq =
+                (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
+            closest_dist_sq <= radius.powi(2)
+        },
+
+        // ---- Cylinder-cylinders remain unchanged (as per your existing code) ----
+        (Shape3D::Cylinder(r1, h1), Shape3D::Cylinder(r2, h2)) => {
+            let half1 = h1/2.0;
+            let half2 = h2/2.0;
+            if dy.abs() > (half1 + half2) {
+                return false;
+            }
+            let xz_sq = dx*dx + dz*dz;
+            xz_sq <= (r1 + r2).powi(2)
+        },
+
+        // ---- Oriented SAT for cuboid-cuboid or beveled combos ----
+        (
+            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..),
+            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..)
+        ) => {
+            sat_cuboid_collision(obj1, obj2)
+        },
+
+        // ---- Fallback for other combos or unhandled shapes ----
+        _ => {
+            // default to `true` if no specialized logic was done, or do a bounding-sphere fallback
+            true
+        }
+    }
+}
+
+/// Returns true if two cuboid-like objects (cuboid or beveled) overlap using SAT.
+pub fn sat_cuboid_collision(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) -> bool {
+    // Collect local vertices
+    let local1 = obj1.shape.create_vertices();
+    let local2 = obj2.shape.create_vertices();
+
+    // Convert them to world coordinates (orientation + position)
+    let world1: Vec<(f64, f64, f64)> = local1.iter()
+        .map(|&p| obj1.shape.transform_point(
+            p,
+            obj1.object.position.to_coord(),
+            obj1.orientation.to_tuple()
+        ))
+        .collect();
+
+    let world2: Vec<(f64, f64, f64)> = local2.iter()
+        .map(|&p| obj2.shape.transform_point(
+            p,
+            obj2.object.position.to_coord(),
+            obj2.orientation.to_tuple()
+        ))
+        .collect();
+
+    // Compute the primary axes (face normals) from each shape
+    // We assume create_vertices() returns at least 8 corners for a cuboid or beveled cuboid.
+    let (ax1, ax2, ax3) = compute_box_axes(&world1);
+    let (ax4, ax5, ax6) = compute_box_axes(&world2);
+
+    // Build candidate axes: each shape's 3 face normals + cross products among them
+    let mut axes = vec![ax1, ax2, ax3, ax4, ax5, ax6];
+    let shape1_axes = [ax1, ax2, ax3];
+    let shape2_axes = [ax4, ax5, ax6];
+
+    for &a in &shape1_axes {
+        for &b in &shape2_axes {
+            let cross = cross_product(a, b);
+            // skip axis if it's nearly zero length
+            if dot_product(cross, cross) > 1e-12 {
+                axes.push(normalize(cross));
+            }
+        }
+    }
+
+    // Check for overlap on each axis
+    for axis in axes {
+        if !check_overlap_along_axis(&world1, &world2, &axis) {
+            // Found a separating axis => no collision
+            return false;
+        }
+    }
+
+    // No separating axis => colliding
+    true
+}
+
+/// Extracts three orthonormal axes from the corner set of a box.
+/// We pick corners[0], corners[1], corners[3], corners[4] to get edges
+/// that emanate from the same corner. If corners are generated consistently,
+/// that yields X, Y, and Z directions (in world space).
+fn compute_box_axes(corners: &[(f64, f64, f64)])
+                    -> ((f64,f64,f64),(f64,f64,f64),(f64,f64,f64))
+{
+    // If something’s off (like not enough corners), return default axes
+    if corners.len() < 5 {
+        return ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0));
+    }
+
+    let edge_x = (
+        corners[1].0 - corners[0].0,
+        corners[1].1 - corners[0].1,
+        corners[1].2 - corners[0].2
+    );
+    let edge_y = (
+        corners[3].0 - corners[0].0,
+        corners[3].1 - corners[0].1,
+        corners[3].2 - corners[0].2
+    );
+    let edge_z = (
+        corners[4].0 - corners[0].0,
+        corners[4].1 - corners[0].1,
+        corners[4].2 - corners[0].2
+    );
+
+    (normalize(edge_x), normalize(edge_y), normalize(edge_z))
+}
+
+/// Normalizes a 3D vector safely, returning (0,0,0) if it’s almost zero-length.
+fn normalize(v: (f64, f64, f64)) -> (f64, f64, f64) {
+    let len_sq = dot_product(v, v);
+    if len_sq < 1e-12 {
+        (0.0, 0.0, 0.0)
+    } else {
+        let inv_len = 1.0 / len_sq.sqrt();
+        (v.0 * inv_len, v.1 * inv_len, v.2 * inv_len)
     }
 }
