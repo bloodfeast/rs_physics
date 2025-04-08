@@ -66,6 +66,28 @@ fn test_predefined_materials() {
 }
 
 #[test]
+fn test_polyurethane_material() {
+    let polyurethane = Material::polyurethane();
+
+    // Check properties
+    assert_float_eq(polyurethane.density, 1200.0, 1e-6, Some("Polyurethane density"));
+    assert_float_eq(polyurethane.youngs_modulus, 0.02e9, 1e-6, Some("Polyurethane Young's modulus"));
+    assert_float_eq(polyurethane.poisson_ratio, 0.45, 1e-6, Some("Polyurethane Poisson's ratio"));
+    assert_float_eq(polyurethane.restitution_coefficient, 0.7, 1e-6, Some("Polyurethane restitution"));
+
+    // Compare with other materials
+    let rubber = Material::rubber();
+
+    // Polyurethane should be stronger than rubber
+    assert!(polyurethane.yield_strength > rubber.yield_strength);
+    assert!(polyurethane.ultimate_strength > rubber.ultimate_strength);
+
+    // But still significantly less stiff than metals
+    let aluminum = Material::aluminum();
+    assert!(polyurethane.youngs_modulus < aluminum.youngs_modulus);
+}
+
+#[test]
 fn test_elastic_region() {
     let steel = Material::steel();
     let yield_strain = steel.yield_strength / steel.youngs_modulus;

@@ -1260,13 +1260,13 @@ impl PhysicalObject3D {
                 let rolling_friction = 0.4;
 
                 // Apply friction to horizontal velocity
-                self.object.velocity.x *= (1.0 - sliding_friction * dt);
-                self.object.velocity.z *= (1.0 - sliding_friction * dt);
+                self.object.velocity.x *= 1.0 - sliding_friction * dt;
+                self.object.velocity.z *= 1.0 - sliding_friction * dt;
 
                 // Apply friction to angular velocity
                 let angular_damping = rolling_friction * dt;
-                self.angular_velocity.0 *= (1.0 - angular_damping);
-                self.angular_velocity.2 *= (1.0 - angular_damping);
+                self.angular_velocity.0 *= 1.0 - angular_damping;
+                self.angular_velocity.2 *= 1.0 - angular_damping;
 
                 // Calculate torque based on impact with ground
                 if self.object.velocity.y.abs() > 0.1 {
@@ -1328,17 +1328,17 @@ impl PhysicalObject3D {
         let r2_cross_n = cross_product(r2, normal);
 
         // Calculate angular terms
-        let angular_term1 = (
+        let angular_term1 =
             r1_cross_n.0 * r1_cross_n.0 / inertia1[0] +
                 r1_cross_n.1 * r1_cross_n.1 / inertia1[1] +
                 r1_cross_n.2 * r1_cross_n.2 / inertia1[2]
-        );
+        ;
 
-        let angular_term2 = (
+        let angular_term2 =
             r2_cross_n.0 * r2_cross_n.0 / inertia2[0] +
                 r2_cross_n.1 * r2_cross_n.1 / inertia2[1] +
                 r2_cross_n.2 * r2_cross_n.2 / inertia2[2]
-        );
+        ;
 
         // Calculate full impulse magnitude with rotational components
         let impulse_denom = 1.0 / obj1.object.mass + 1.0 / obj2.object.mass + angular_term1 + angular_term2;
@@ -1403,15 +1403,15 @@ impl PhysicalObject3D {
             // For a cylinder, the friction depends on whether it's on its side or its end
 
             // Calculate the up vector in world space
-            let cylinder_up = rotate_point((0.0, 1.0, 0.0), self.orientation);
+            let cylinder_up: (f64, f64, f64) = rotate_point((0.0, 1.0, 0.0), self.orientation);
             let up_dot_world_up = cylinder_up.1; // Dot product with world up (0,1,0)
 
             // If cylinder is more vertical (on its end)
             if up_dot_world_up.abs() > 0.7 {
                 // Higher friction (cylinder standing on end doesn't roll well)
                 let friction = 0.8;
-                self.object.velocity.x *= (1.0 - friction * dt);
-                self.object.velocity.z *= (1.0 - friction * dt);
+                self.object.velocity.x *= 1.0 - friction * dt;
+                self.object.velocity.z *= 1.0 - friction * dt;
 
                 // Little angular velocity
                 self.angular_velocity.0 *= 0.9;
@@ -1419,19 +1419,19 @@ impl PhysicalObject3D {
             } else {
                 // Lower friction (cylinder can roll on its side)
                 let friction = 0.3;
-                self.object.velocity.x *= (1.0 - friction * dt);
-                self.object.velocity.z *= (1.0 - friction * dt);
+                self.object.velocity.x *= 1.0 - friction * dt;
+                self.object.velocity.z *= 1.0 - friction * dt;
 
                 // Calculate rolling axis (perpendicular to both cylinder axis and ground normal)
-                let cylinder_axis = rotate_point((0.0, 1.0, 0.0), self.orientation);
-                let ground_normal = (0.0, 1.0, 0.0);
+                let cylinder_axis: (f64, f64, f64) = rotate_point((0.0, 1.0, 0.0), self.orientation);
+                let ground_normal: (f64, f64, f64) = (0.0, 1.0, 0.0);
 
-                let roll_axis = cross_product(cylinder_axis, ground_normal);
+                let roll_axis: (f64, f64, f64) = cross_product(cylinder_axis, ground_normal);
                 let roll_axis_length = (roll_axis.0*roll_axis.0 + roll_axis.1*roll_axis.1 + roll_axis.2*roll_axis.2).sqrt();
 
                 if roll_axis_length > 0.001 {
                     // Normalize roll axis
-                    let roll_dir = (
+                    let roll_dir: (f64, f64, f64) = (
                         roll_axis.0 / roll_axis_length,
                         roll_axis.1 / roll_axis_length,
                         roll_axis.2 / roll_axis_length
@@ -1475,14 +1475,14 @@ impl PhysicalObject3D {
 
             // Apply friction
             let friction = 0.6;
-            self.object.velocity.x *= (1.0 - friction * dt);
-            self.object.velocity.z *= (1.0 - friction * dt);
+            self.object.velocity.x *= 1.0 - friction * dt;
+            self.object.velocity.z *= 1.0 - friction * dt;
 
             // Apply angular damping
             let angular_damping = 0.5 * dt;
-            self.angular_velocity.0 *= (1.0 - angular_damping);
-            self.angular_velocity.1 *= (1.0 - angular_damping);
-            self.angular_velocity.2 *= (1.0 - angular_damping);
+            self.angular_velocity.0 *= 1.0 - angular_damping;
+            self.angular_velocity.1 *= 1.0 - angular_damping;
+            self.angular_velocity.2 *= 1.0 - angular_damping;
 
             // Calculate impact torque if we have ground contact
             if !ground_vertices.is_empty() && self.object.velocity.y.abs() > 0.1 {
@@ -1491,10 +1491,10 @@ impl PhysicalObject3D {
                     (acc.0 + p.0, acc.1 + p.1, acc.2 + p.2)
                 });
                 let count = ground_vertices.len() as f64;
-                let impact_point = (sum.0 / count, sum.1 / count, sum.2 / count);
+                let impact_point: (f64, f64, f64) = (sum.0 / count, sum.1 / count, sum.2 / count);
 
                 // Calculate relative vector from center to impact
-                let r = (
+                let r: (f64, f64, f64) = (
                     impact_point.0 - self.object.position.x,
                     impact_point.1 - self.object.position.y,
                     impact_point.2 - self.object.position.z
@@ -1530,7 +1530,7 @@ impl PhysicalObject3D {
     /// Applies a torque (rotational force) to the object
     pub fn apply_torque(&mut self, torque: (f64, f64, f64), duration: f64) {
         // Get the moment of inertia tensor
-        let inertia = self.shape.moment_of_inertia(self.object.mass);
+        let inertia: [f64; 6] = self.shape.moment_of_inertia(self.object.mass);
 
         // Apply torque (simplified model)
         self.angular_velocity.0 += torque.0 * duration / inertia[0];
@@ -1550,7 +1550,7 @@ impl PhysicalObject3D {
     /// Transform point from local to world space
     fn transform_point_to_world(&self, local_point: (f64, f64, f64)) -> (f64, f64, f64) {
         // Rotate using current orientation
-        let rotated = rotate_point(local_point, self.orientation);
+        let rotated: (f64, f64, f64) = rotate_point(local_point, self.orientation);
 
         // Translate to world position
         (
@@ -1652,27 +1652,27 @@ impl PhysicalObject3D {
             let restitution = (self.get_restitution() + other.get_restitution()) / 2.0;
 
             // Calculate better impact point based on shape types
-            let impact_point = PhysicalObject3D::calculate_impact_point(&self, &other, normal);
+            let impact_point: (f64, f64, f64) = PhysicalObject3D::calculate_impact_point(&self, &other, normal);
 
             // Calculate relative vectors from centers to impact point
-            let r1 = (
+            let r1: (f64, f64, f64) = (
                 impact_point.0 - pos1.0,
                 impact_point.1 - pos1.1,
                 impact_point.2 - pos1.2
             );
 
-            let r2 = (
+            let r2: (f64, f64, f64) = (
                 impact_point.0 - pos2.0,
                 impact_point.1 - pos2.1,
                 impact_point.2 - pos2.2
             );
 
             // Calculate point velocities including rotation
-            let v1 = PhysicalObject3D::calculate_point_velocity(self, r1);
-            let v2 = PhysicalObject3D::calculate_point_velocity(other, r2);
+            let v1: (f64, f64, f64) = PhysicalObject3D::calculate_point_velocity(self, r1);
+            let v2: (f64, f64, f64) = PhysicalObject3D::calculate_point_velocity(other, r2);
 
             // Relative velocity at impact point
-            let vrel = (
+            let vrel: (f64, f64, f64) = (
                 v1.0 - v2.0,
                 v1.1 - v2.1,
                 v1.2 - v2.2
@@ -1709,11 +1709,11 @@ impl PhysicalObject3D {
         obj2: &PhysicalObject3D,
         normal: (f64, f64, f64)
     ) -> (f64, f64, f64) {
-        let pos1 = obj1.object.position.to_coord();
-        let pos2 = obj2.object.position.to_coord();
+        let pos1: (f64, f64, f64) = obj1.object.position.to_coord();
+        let pos2: (f64, f64, f64) = obj2.object.position.to_coord();
 
         // Default to midpoint if we can't determine better point
-        let mut impact = (
+        let mut impact: (f64, f64, f64) = (
             (pos1.0 + pos2.0) / 2.0,
             (pos1.1 + pos2.1) / 2.0,
             (pos1.2 + pos2.2) / 2.0
@@ -1751,7 +1751,7 @@ impl PhysicalObject3D {
                 if !corners1.is_empty() && !corners2.is_empty() {
                     // Find pair of corners with smallest distance
                     let mut min_dist = f64::MAX;
-                    let mut closest_pair = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+                    let mut closest_pair: ((f64, f64, f64), (f64, f64, f64)) = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
 
                     for c1 in &corners1 {
                         for c2 in &corners2 {
@@ -1983,8 +1983,8 @@ impl PhysicalObject3D {
 
     /// Gets the vertices of the shape in world space
     pub fn world_vertices(&self) -> Vec<(f64, f64, f64)> {
-        let local_vertices = self.shape.create_vertices();
-        let position = self.object.position.to_coord();
+        let local_vertices: Vec<(f64, f64, f64)> = self.shape.create_vertices();
+        let position: (f64, f64, f64) = self.object.position.to_coord();
 
         // Transform local vertices to world space
         local_vertices.iter()
@@ -2012,7 +2012,7 @@ impl PhysicalObject3D {
         // Only applicable to beveled cuboids (dice)
         if let Shape3D::BeveledCuboid(_, _, _, _) = self.shape {
             // The up direction in world space
-            let up = (0.0, 1.0, 0.0);
+            let up: (f64, f64, f64) = (0.0, 1.0, 0.0);
 
             // Transform the up vector to object space (inverse of orientation)
             let inverted_orientation: (f64, f64, f64) = (
@@ -2061,8 +2061,8 @@ impl PhysicalObject3D {
         if ground_proximity < 0.1 {
             // Increase damping when close to ground
             let ground_damping = 0.6 * dt;
-            self.angular_velocity.0 *= (1.0 - ground_damping);
-            self.angular_velocity.2 *= (1.0 - ground_damping);
+            self.angular_velocity.0 *= 1.0 - ground_damping;
+            self.angular_velocity.2 *= 1.0 - ground_damping;
         }
     }
 

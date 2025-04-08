@@ -255,6 +255,43 @@ impl Material {
         ).expect("Failed to create rubber material")
     }
 
+    /// Creates a new Material instance with properties of polyurethane.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of polyurethane:
+    /// * Density: 1200 kg/m³
+    /// * Young's modulus: 0.02 GPa
+    /// * Poisson's ratio: 0.45
+    /// * Friction coefficient: 0.8
+    /// * Restitution coefficient: 0.7
+    /// * Thermal conductivity: 0.2 W/(m·K)
+    /// * Specific heat capacity: 1800 J/(kg·K)
+    /// * Yield strength: 35 MPa
+    /// * Ultimate strength: 55 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let polyurethane = Material::polyurethane();
+    /// assert_eq!(polyurethane.density, 1200.0);
+    /// ```
+    pub fn polyurethane() -> Self {
+        Self::new(
+            1200.0,            // density (kg/m³)
+            0.02e9,            // Young's modulus (Pa)
+            0.45,              // Poisson's ratio
+            0.8,               // friction coefficient
+            0.7,               // restitution coefficient
+            0.2,               // thermal conductivity (W/(m·K))
+            1800.0,            // specific heat capacity (J/(kg·K))
+            35.0e6,            // yield strength (Pa)
+            55.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create polyurethane material")
+    }
+
     /// Calculates the shear modulus of the material.
     ///
     /// The shear modulus (G) is calculated from Young's modulus (E) and
