@@ -1,6 +1,6 @@
 // src/constraint_solvers.rs
 
-use rand::Rng;
+use rand::{Rng, rng};
 use std::arch::x86_64::*;
 use crate::utils::PhysicsError;
 use crate::models::Object;
@@ -121,7 +121,6 @@ impl IterativeConstraintSolver {
 
 
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
-        let mut rng = rand::thread_rng();
 
         for iteration in 0..self.max_iterations {
             // Initialize SIMD register for error accumulation inside an unsafe block
@@ -147,8 +146,8 @@ impl IterativeConstraintSolver {
 
                 // Add random perturbations to prevent trivial solutions
                 if let Some(joint) = constraint.as_any().downcast_mut::<Joint>() {
-                    joint.object1.position += rng.gen_range(-0.1..0.1);
-                    joint.object2.position += rng.gen_range(-0.1..0.1);
+                    joint.object1.position += rng().random_range(-0.1..0.1);
+                    joint.object2.position += rng().random_range(-0.1..0.1);
                 }
             }
 

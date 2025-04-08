@@ -1,5 +1,5 @@
 use crate::forces::Force;
-use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, ToCoordinates, Velocity2D};
+use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, Velocity2D};
 use crate::utils::PhysicsConstants;
 
 impl ObjectIn2D {

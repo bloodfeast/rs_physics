@@ -1,7 +1,7 @@
 use log::warn;
 use rayon::prelude::*;
 use crate::forces::Force;
-use crate::models::{ObjectIn2D, Velocity2D};
+use crate::models::ObjectIn2D;
 use crate::utils::PhysicsConstants;
 
 pub struct PhysicsSystem2D {

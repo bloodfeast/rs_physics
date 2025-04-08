@@ -1,5 +1,5 @@
 use crate::forces::Force;
-use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates, Velocity2D};
+use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates};
 
 #[derive(Debug, Clone)]
 pub struct Axis3D {
