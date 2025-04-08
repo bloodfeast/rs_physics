@@ -1199,7 +1199,7 @@ impl PhysicalObject3D {
             },
             Shape3D::Cuboid(_width, _height, _depth) => {
                 // Reuse the same code for regular cuboids
-                let corners: Vec<(f64, f64, f64)> = self.get_corner_positions();
+                let corners: [(f64, f64, f64); 8] = self.get_corner_positions();
                 let min_y = corners.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
 
                 if min_y < self.physics_constants.ground_level {
@@ -1561,14 +1561,14 @@ impl PhysicalObject3D {
         )
     }
     /// Helper method to get all corner positions in world space
-    pub fn get_corner_positions(&self) -> Vec<(f64, f64, f64)> {
+    pub fn get_corner_positions(&self) -> [(f64, f64, f64); 8] {
         if let Shape3D::BeveledCuboid(width, height, depth, _) = self.shape {
             let half_w = width / 2.0;
             let half_h = height / 2.0;
             let half_d = depth / 2.0;
 
             // Local corner positions (object space)
-            let local_corners = [
+            let local_corners: [(f64, f64, f64); 8] = [
                 (-half_w, -half_h, -half_d),
                 (half_w, -half_h, -half_d),
                 (half_w, half_h, -half_d),
@@ -1580,14 +1580,14 @@ impl PhysicalObject3D {
             ];
 
             // Transform to world space
-            local_corners.iter()
+            let corners: [(f64, f64, f64); 8] = local_corners.iter()
                 .map(|&local_pos| {
                     let world_pos = self.transform_point_to_world(local_pos);
                     world_pos
-                })
-                .collect()
+                }).into();
+            corners
         } else {
-            vec![]
+            [(0.0, 0.0, 0.0); 8]
         }
     }
 
@@ -1714,7 +1714,7 @@ impl PhysicalObject3D {
 
         match (&obj1.shape, &obj2.shape) {
             // For sphere-sphere, impact point is along the line connecting centers
-            (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
+            (Shape3D::Sphere(r1), Shape3D::Sphere(_r2)) => {
                 // Calculate distance between centers
                 let dx = pos2.0 - pos1.0;
                 let dy = pos2.1 - pos1.1;
@@ -1738,8 +1738,8 @@ impl PhysicalObject3D {
             (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Cuboid(_, _, _)) => {
                 // For cuboids, the closest corners can give a better impact point
                 // Get world corners of both shapes
-                let corners1 = obj1.get_corner_positions();
-                let corners2 = obj2.get_corner_positions();
+                let corners1: [(f64, f64, f64); 8] = obj1.get_corner_positions();
+                let corners2: [(f64, f64, f64); 8] = obj2.get_corner_positions();
 
                 if !corners1.is_empty() && !corners2.is_empty() {
                     // Find pair of corners with smallest distance
