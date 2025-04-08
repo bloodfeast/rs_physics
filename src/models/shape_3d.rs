@@ -1,7 +1,6 @@
 use crate::interactions::{cross_product, dot_product};
 use crate::materials::Material;
 use crate::models::{ObjectIn3D, ToCoordinates};
-use crate::rotational_dynamics::{apply_torque, calculate_moment_of_inertia, ObjectShape};
 use std::f64::consts::PI;
 use rand::Rng;
 use crate::physics::PhysicsConstants;
@@ -1579,12 +1578,20 @@ impl PhysicalObject3D {
                 (-half_w, half_h, half_d)
             ];
 
+            let mut corners = [(0.0, 0.0, 0.0); 8];
             // Transform to world space
-            let corners: [(f64, f64, f64); 8] = local_corners.iter()
-                .map(|&local_pos| {
+            local_corners
+                .iter()
+                .enumerate()
+                .for_each(|(i, &local_pos)| {
+                    if i > 7 {
+                        eprintln!("Index out of bounds at 'get_corner_positions' -> local_corners");
+                        eprintln!("Bailing out before panic can crash the program");
+                        return;
+                    }
                     let world_pos = self.transform_point_to_world(local_pos);
-                    world_pos
-                }).into();
+                    corners[i] = world_pos;
+                });
             corners
         } else {
             [(0.0, 0.0, 0.0); 8]
