@@ -15,3 +15,4 @@ mod interactions_2d_tests;
 mod interactions_3d_tests;
 #[cfg(test)]
 mod shape_collisions_3d_tests;
+mod gjk_collision_3d;

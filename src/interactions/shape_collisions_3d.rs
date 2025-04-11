@@ -1,7 +1,6 @@
-use rand::{Rng, rng};
 use crate::interactions::{cross_product, dot_product};
-use crate::models::{normalize_angle, PhysicalObject3D, rotate_point, Shape3D, ToCoordinates};
-
+use crate::models::{normalize_angle, rotate_point, PhysicalObject3D, Shape3D, ToCoordinates};
+use rand::{rng, Rng};
 
 /// Checks for collision between two 3D shapes at specified positions
 ///
@@ -43,7 +42,7 @@ pub fn check_collision(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
     shape2: &Shape3D,
-    position2: (f64, f64, f64)
+    position2: (f64, f64, f64),
 ) -> bool {
     // First, do a quick bounding sphere check for early rejection
     let dx = position2.0 - position1.0;
@@ -61,15 +60,13 @@ pub fn check_collision(
     // More specific collision detection based on shape types
     match (shape1, shape2) {
         // Sphere-sphere collision
-        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
-            distance_squared <= (r1 + r2).powi(2)
-        },
+        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => distance_squared <= (r1 + r2).powi(2),
 
         // Cuboid-cuboid collision (AABB)
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2)) |
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
+        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
+        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
+        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _))
+        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
             // Axis-Aligned Bounding Box test
             let w1_half = w1 / 2.0;
             let h1_half = h1 / 2.0;
@@ -80,14 +77,14 @@ pub fn check_collision(
             let d2_half = d2 / 2.0;
 
             // Check overlap in all three axes
-            dx.abs() <= (w1_half + w2_half) &&
-                dy.abs() <= (h1_half + h2_half) &&
-                dz.abs() <= (d1_half + d2_half)
-        },
+            dx.abs() <= (w1_half + w2_half)
+                && dy.abs() <= (h1_half + h2_half)
+                && dz.abs() <= (d1_half + d2_half)
+        }
 
         // Sphere-cuboid collision
-        (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d)) |
-        (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
+        (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d))
+        | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
             // Find the closest point on the cuboid to the sphere
             let w_half = w / 2.0;
             let h_half = h / 2.0;
@@ -100,17 +97,15 @@ pub fn check_collision(
 
             // Calculate squared distance from closest point to sphere center
             let closest_dist_sq =
-                (dx + closest_x).powi(2) +
-                    (dy + closest_y).powi(2) +
-                    (dz + closest_z).powi(2);
+                (dx + closest_x).powi(2) + (dy + closest_y).powi(2) + (dz + closest_z).powi(2);
 
             // Collision if the closest point is within the sphere
             closest_dist_sq <= radius.powi(2)
-        },
+        }
 
         // Cuboid-sphere collision (reverse of above)
-        (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius)) |
-        (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
+        (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius))
+        | (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
             // Just use the same logic with positions reversed
             let w_half = w / 2.0;
             let h_half = h / 2.0;
@@ -121,12 +116,10 @@ pub fn check_collision(
             let closest_z = dz.clamp(-d_half, d_half);
 
             let closest_dist_sq =
-                (dx - closest_x).powi(2) +
-                    (dy - closest_y).powi(2) +
-                    (dz - closest_z).powi(2);
+                (dx - closest_x).powi(2) + (dy - closest_y).powi(2) + (dz - closest_z).powi(2);
 
             closest_dist_sq <= radius.powi(2)
-        },
+        }
 
         // Cylinder collisions
         (Shape3D::Cylinder(r1, h1), Shape3D::Cylinder(r2, h2)) => {
@@ -142,7 +135,7 @@ pub fn check_collision(
             // Then check radius (xz-plane)
             let xz_dist_sq = dx.powi(2) + dz.powi(2);
             xz_dist_sq <= (r1 + r2).powi(2)
-        },
+        }
 
         // For all other combinations, use simpler approximations
         _ => {
@@ -151,7 +144,6 @@ pub fn check_collision(
         }
     }
 }
-
 
 /// Calculates the collision normal vector between two colliding shapes
 ///
@@ -191,7 +183,7 @@ pub fn collision_normal(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
     shape2: &Shape3D,
-    position2: (f64, f64, f64)
+    position2: (f64, f64, f64),
 ) -> Option<(f64, f64, f64)> {
     if !check_collision(shape1, position1, shape2, position2) {
         return None;
@@ -214,13 +206,13 @@ pub fn collision_normal(
         (Shape3D::Sphere(_), Shape3D::Sphere(_)) => {
             let distance = distance_squared.sqrt();
             Some((dx / distance, dy / distance, dz / distance))
-        },
+        }
 
         // For cuboid collisions, find the minimum penetration axis
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2)) |
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
+        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
+        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
+        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _))
+        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) => {
             let w1_half = w1 / 2.0;
             let h1_half = h1 / 2.0;
             let d1_half = d1 / 2.0;
@@ -245,7 +237,7 @@ pub fn collision_normal(
                 // Z-axis has minimum penetration
                 Some((0.0, 0.0, dz.signum()))
             }
-        },
+        }
 
         // For other combinations, use center-to-center as approximation
         _ => {
@@ -271,14 +263,16 @@ pub fn collision_normal(
 pub fn check_overlap_along_axis(
     corners1: &[(f64, f64, f64)],
     corners2: &[(f64, f64, f64)],
-    axis: &(f64, f64, f64)
+    axis: &(f64, f64, f64),
 ) -> bool {
     // Project all corners onto axis
-    let projections1: Vec<f64> = corners1.iter()
+    let projections1: Vec<f64> = corners1
+        .iter()
         .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
         .collect();
 
-    let projections2: Vec<f64> = corners2.iter()
+    let projections2: Vec<f64> = corners2
+        .iter()
         .map(|c| c.0 * axis.0 + c.1 * axis.1 + c.2 * axis.2)
         .collect();
 
@@ -307,7 +301,7 @@ pub fn check_overlap_along_axis(
 pub fn calculate_impact_point(
     obj1: &PhysicalObject3D,
     obj2: &PhysicalObject3D,
-    normal: (f64, f64, f64)
+    normal: (f64, f64, f64),
 ) -> (f64, f64, f64) {
     let pos1 = obj1.object.position.to_coord();
     let pos2 = obj2.object.position.to_coord();
@@ -316,7 +310,7 @@ pub fn calculate_impact_point(
     let mut impact: (f64, f64, f64) = (
         (pos1.0 + pos2.0) / 2.0,
         (pos1.1 + pos2.1) / 2.0,
-        (pos1.2 + pos2.2) / 2.0
+        (pos1.2 + pos2.2) / 2.0,
     );
 
     match (&obj1.shape, &obj2.shape) {
@@ -326,23 +320,23 @@ pub fn calculate_impact_point(
             let dx = pos2.0 - pos1.0;
             let dy = pos2.1 - pos1.1;
             let dz = pos2.2 - pos1.2;
-            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
 
             if dist > 0.001 {
                 // Impact point is at surface of first sphere along line to second sphere
                 impact = (
-                    pos1.0 + dx/dist * r1,
-                    pos1.1 + dy/dist * r1,
-                    pos1.2 + dz/dist * r1
+                    pos1.0 + dx / dist * r1,
+                    pos1.1 + dy / dist * r1,
+                    pos1.2 + dz / dist * r1,
                 );
             }
-        },
+        }
 
         // For cuboid collisions, find the closest points on each cuboid
-        (Shape3D::Cuboid(_, _, _), Shape3D::Cuboid(_, _, _)) |
-        (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::BeveledCuboid(_, _, _, _)) |
-        (Shape3D::Cuboid(_, _, _), Shape3D::BeveledCuboid(_, _, _, _)) |
-        (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Cuboid(_, _, _)) => {
+        (Shape3D::Cuboid(_, _, _), Shape3D::Cuboid(_, _, _))
+        | (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::BeveledCuboid(_, _, _, _))
+        | (Shape3D::Cuboid(_, _, _), Shape3D::BeveledCuboid(_, _, _, _))
+        | (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Cuboid(_, _, _)) => {
             // For cuboids, the closest corners can give a better impact point
             // Get world corners of both shapes
             let corners1 = obj1.get_corner_positions();
@@ -351,14 +345,15 @@ pub fn calculate_impact_point(
             if !corners1.is_empty() && !corners2.is_empty() {
                 // Find pair of corners with smallest distance
                 let mut min_dist = f64::MAX;
-                let mut closest_pair: ((f64, f64, f64), (f64, f64, f64)) = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+                let mut closest_pair: ((f64, f64, f64), (f64, f64, f64)) =
+                    ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
 
                 for c1 in &corners1 {
                     for c2 in &corners2 {
                         let dx = c2.0 - c1.0;
                         let dy = c2.1 - c1.1;
                         let dz = c2.2 - c1.2;
-                        let dist_sq = dx*dx + dy*dy + dz*dz;
+                        let dist_sq = dx * dx + dy * dy + dz * dz;
 
                         if dist_sq < min_dist {
                             min_dist = dist_sq;
@@ -369,33 +364,33 @@ pub fn calculate_impact_point(
 
                 // Impact point is midway between closest corners
                 impact = (
-                    (closest_pair.0.0 + closest_pair.1.0) / 2.0,
-                    (closest_pair.0.1 + closest_pair.1.1) / 2.0,
-                    (closest_pair.0.2 + closest_pair.1.2) / 2.0
+                    (closest_pair.0 .0 + closest_pair.1 .0) / 2.0,
+                    (closest_pair.0 .1 + closest_pair.1 .1) / 2.0,
+                    (closest_pair.0 .2 + closest_pair.1 .2) / 2.0,
                 );
             }
-        },
+        }
 
         // For sphere-cuboid, impact is on sphere surface nearest cuboid
-        (Shape3D::Sphere(radius), Shape3D::Cuboid(_, _, _)) |
-        (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(_, _, _, _)) => {
+        (Shape3D::Sphere(radius), Shape3D::Cuboid(_, _, _))
+        | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(_, _, _, _)) => {
             // Impact point is along normal direction from sphere center
             impact = (
                 pos1.0 + normal.0 * radius,
                 pos1.1 + normal.1 * radius,
-                pos1.2 + normal.2 * radius
+                pos1.2 + normal.2 * radius,
             );
-        },
+        }
 
-        (Shape3D::Cuboid(_, _, _), Shape3D::Sphere(radius)) |
-        (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Sphere(radius)) => {
+        (Shape3D::Cuboid(_, _, _), Shape3D::Sphere(radius))
+        | (Shape3D::BeveledCuboid(_, _, _, _), Shape3D::Sphere(radius)) => {
             // Impact point is along normal direction from sphere center (opposite direction)
             impact = (
                 pos2.0 - normal.0 * radius,
                 pos2.1 - normal.1 * radius,
-                pos2.2 - normal.2 * radius
+                pos2.2 - normal.2 * radius,
             );
-        },
+        }
 
         // Default case - use midpoint between centers
         _ => { /* impact already set to midpoint */ }
@@ -415,29 +410,26 @@ pub fn calculate_impact_point(
 ///
 /// # Returns
 /// The total velocity at the point as (vx, vy, vz)
-pub fn calculate_point_velocity(
-    obj: &PhysicalObject3D,
-    r: (f64, f64, f64)
-) -> (f64, f64, f64) {
+pub fn calculate_point_velocity(obj: &PhysicalObject3D, r: (f64, f64, f64)) -> (f64, f64, f64) {
     // Linear velocity
     let v_linear = (
         obj.object.velocity.x,
         obj.object.velocity.y,
-        obj.object.velocity.z
+        obj.object.velocity.z,
     );
 
     // Angular contribution: v_angular = ω × r
     let v_angular = (
         obj.angular_velocity.1 * r.2 - obj.angular_velocity.2 * r.1,
         obj.angular_velocity.2 * r.0 - obj.angular_velocity.0 * r.2,
-        obj.angular_velocity.0 * r.1 - obj.angular_velocity.1 * r.0
+        obj.angular_velocity.0 * r.1 - obj.angular_velocity.1 * r.0,
     );
 
     // Total velocity at point
     (
         v_linear.0 + v_angular.0,
         v_linear.1 + v_angular.1,
-        v_linear.2 + v_angular.2
+        v_linear.2 + v_angular.2,
     )
 }
 
@@ -463,7 +455,7 @@ pub fn calculate_collision_impulse(
     normal: (f64, f64, f64),
     restitution: f64,
     r1: (f64, f64, f64),
-    r2: (f64, f64, f64)
+    r2: (f64, f64, f64),
 ) -> f64 {
     // Normal component of relative velocity
     let vrel_n = dot_product(vrel, normal);
@@ -477,20 +469,17 @@ pub fn calculate_collision_impulse(
     let r2_cross_n = cross_product(r2, normal);
 
     // Calculate angular terms
-    let angular_term1 =
-        r1_cross_n.0 * r1_cross_n.0 / inertia1[0] +
-            r1_cross_n.1 * r1_cross_n.1 / inertia1[1] +
-            r1_cross_n.2 * r1_cross_n.2 / inertia1[2]
-        ;
+    let angular_term1 = r1_cross_n.0 * r1_cross_n.0 / inertia1[0]
+        + r1_cross_n.1 * r1_cross_n.1 / inertia1[1]
+        + r1_cross_n.2 * r1_cross_n.2 / inertia1[2];
 
-    let angular_term2 =
-        r2_cross_n.0 * r2_cross_n.0 / inertia2[0] +
-            r2_cross_n.1 * r2_cross_n.1 / inertia2[1] +
-            r2_cross_n.2 * r2_cross_n.2 / inertia2[2]
-        ;
+    let angular_term2 = r2_cross_n.0 * r2_cross_n.0 / inertia2[0]
+        + r2_cross_n.1 * r2_cross_n.1 / inertia2[1]
+        + r2_cross_n.2 * r2_cross_n.2 / inertia2[2];
 
     // Calculate full impulse magnitude with rotational components
-    let impulse_denom = 1.0 / obj1.object.mass + 1.0 / obj2.object.mass + angular_term1 + angular_term2;
+    let impulse_denom =
+        1.0 / obj1.object.mass + 1.0 / obj2.object.mass + angular_term1 + angular_term2;
     let impulse_mag = -(1.0 + restitution) * vrel_n / impulse_denom;
 
     impulse_mag
@@ -509,12 +498,12 @@ pub fn apply_linear_impulse(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
     normal: (f64, f64, f64),
-    impulse_mag: f64
+    impulse_mag: f64,
 ) {
     let impulse = (
         normal.0 * impulse_mag,
         normal.1 * impulse_mag,
-        normal.2 * impulse_mag
+        normal.2 * impulse_mag,
     );
 
     // Apply to first object
@@ -547,12 +536,12 @@ pub fn apply_angular_impulse(
     impulse_mag: f64,
     r1: (f64, f64, f64),
     r2: (f64, f64, f64),
-    dt: f64
+    dt: f64,
 ) {
     let impulse = (
         normal.0 * impulse_mag,
         normal.1 * impulse_mag,
-        normal.2 * impulse_mag
+        normal.2 * impulse_mag,
     );
 
     // Calculate torque from impulse
@@ -577,7 +566,8 @@ pub fn apply_angular_impulse(
     // Add small random perturbation to prevent "stuck" scenarios
     let random_factor = 0.05;
 
-    if impulse_mag > 0.1 {  // Only add randomness for significant collisions
+    if impulse_mag > 0.1 {
+        // Only add randomness for significant collisions
         obj1.angular_velocity.0 += rng().random_range(-random_factor..random_factor);
         obj1.angular_velocity.1 += rng().random_range(-random_factor..random_factor);
         obj1.angular_velocity.2 += rng().random_range(-random_factor..random_factor);
@@ -596,17 +586,17 @@ pub fn apply_angular_impulse(
 pub fn resolve_penetration(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
-    normal: (f64, f64, f64)
+    normal: (f64, f64, f64),
 ) {
     let pos1 = obj1.object.position.to_coord();
     let pos2 = obj2.object.position.to_coord();
 
     // Calculate penetration based on shape types
     let penetration = match (&obj1.shape, &obj2.shape) {
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _)) |
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2)) |
-        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2)) |
-        (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
+        (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::BeveledCuboid(w2, h2, d2, _))
+        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::Cuboid(w2, h2, d2))
+        | (Shape3D::BeveledCuboid(w1, h1, d1, _), Shape3D::Cuboid(w2, h2, d2))
+        | (Shape3D::Cuboid(w1, h1, d1), Shape3D::BeveledCuboid(w2, h2, d2, _)) => {
             let w1_half = w1 / 2.0;
             let h1_half = h1 / 2.0;
             let d1_half = d1 / 2.0;
@@ -627,21 +617,21 @@ pub fn resolve_penetration(
 
             // Find minimum overlap
             overlap_x.min(overlap_y).min(overlap_z)
-        },
+        }
 
         (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
             // Calculate distance between centers
             let dx = pos2.0 - pos1.0;
             let dy = pos2.1 - pos1.1;
             let dz = pos2.2 - pos1.2;
-            let distance = (dx*dx + dy*dy + dz*dz).sqrt();
+            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
             // Penetration is overlap amount
             (r1 + r2) - distance
-        },
+        }
 
         // For other shape combinations, use a small default value
-        _ => 0.01
+        _ => 0.01,
     };
 
     // Apply correction only if there is actual penetration
@@ -653,7 +643,7 @@ pub fn resolve_penetration(
         let correction_vector = (
             normal.0 * correction,
             normal.1 * correction,
-            normal.2 * correction
+            normal.2 * correction,
         );
 
         // Apply correction inversely proportional to mass
@@ -684,11 +674,7 @@ pub fn resolve_penetration(
 ///
 /// # Returns
 /// `true` if a collision was detected and handled, `false` otherwise
-pub fn handle_collision(
-    obj1: &mut PhysicalObject3D,
-    obj2: &mut PhysicalObject3D,
-    dt: f64
-) -> bool {
+pub fn handle_collision(obj1: &mut PhysicalObject3D, obj2: &mut PhysicalObject3D, dt: f64) -> bool {
     let pos1 = obj1.object.position.to_coord();
     let pos2 = obj2.object.position.to_coord();
 
@@ -709,13 +695,13 @@ pub fn handle_collision(
         let r1 = (
             impact_point.0 - pos1.0,
             impact_point.1 - pos1.1,
-            impact_point.2 - pos1.2
+            impact_point.2 - pos1.2,
         );
 
         let r2 = (
             impact_point.0 - pos2.0,
             impact_point.1 - pos2.1,
-            impact_point.2 - pos2.2
+            impact_point.2 - pos2.2,
         );
 
         // Calculate point velocities including rotation
@@ -723,11 +709,7 @@ pub fn handle_collision(
         let v2 = calculate_point_velocity(obj2, r2);
 
         // Relative velocity at impact point
-        let vrel = (
-            v1.0 - v2.0,
-            v1.1 - v2.1,
-            v1.2 - v2.2
-        );
+        let vrel = (v1.0 - v2.0, v1.1 - v2.1, v1.2 - v2.2);
 
         // Calculate normal component of relative velocity
         let vrel_n = dot_product(vrel, normal);
@@ -735,7 +717,8 @@ pub fn handle_collision(
         // Only proceed with collision response if objects are moving toward each other
         if vrel_n < 0.0 {
             // Calculate collision impulse
-            let impulse_mag = calculate_collision_impulse(obj1, obj2, vrel, normal, restitution, r1, r2);
+            let impulse_mag =
+                calculate_collision_impulse(obj1, obj2, vrel, normal, restitution, r1, r2);
 
             // Apply impulse to linear velocities
             apply_linear_impulse(obj1, obj2, normal, impulse_mag);
@@ -767,7 +750,7 @@ pub fn handle_cuboid_ground_collision(
     obj: &mut PhysicalObject3D,
     min_y: f64,
     corners: &[(f64, f64, f64)],
-    dt: f64
+    dt: f64,
 ) {
     // Calculate penetration depth
     let penetration = obj.physics_constants.ground_level - min_y;
@@ -778,7 +761,8 @@ pub fn handle_cuboid_ground_collision(
     // Apply bounce physics if moving downward
     if obj.object.velocity.y < 0.0 {
         // Calculate which corners are in contact with the ground
-        let ground_corners: Vec<(f64, f64, f64)> = corners.iter()
+        let ground_corners: Vec<(f64, f64, f64)> = corners
+            .iter()
             .filter(|(_, y, _)| (*y - obj.physics_constants.ground_level).abs() < 0.01)
             .cloned()
             .collect();
@@ -812,14 +796,18 @@ pub fn handle_cuboid_ground_collision(
                     let count = ground_corners.len() as f64;
                     (sum.0 / count, sum.1 / count, sum.2 / count)
                 } else {
-                    (obj.object.position.x, obj.physics_constants.ground_level, obj.object.position.z)
+                    (
+                        obj.object.position.x,
+                        obj.physics_constants.ground_level,
+                        obj.object.position.z,
+                    )
                 };
 
                 // Calculate relative vector from center to impact point
                 let r: (f64, f64, f64) = (
                     impact_point.0 - obj.object.position.x,
                     impact_point.1 - obj.object.position.y,
-                    impact_point.2 - obj.object.position.z
+                    impact_point.2 - obj.object.position.z,
                 );
 
                 // Calculate impact force (simplified as vertical impulse)
@@ -830,11 +818,15 @@ pub fn handle_cuboid_ground_collision(
 
                 // Scale torque effect
                 let torque_factor = 0.2;
-                apply_torque(obj, (
-                    torque.0 * torque_factor,
-                    torque.1 * torque_factor,
-                    torque.2 * torque_factor
-                ), dt);
+                apply_torque(
+                    obj,
+                    (
+                        torque.0 * torque_factor,
+                        torque.1 * torque_factor,
+                        torque.2 * torque_factor,
+                    ),
+                    dt,
+                );
             }
         }
     }
@@ -849,11 +841,7 @@ pub fn handle_cuboid_ground_collision(
 /// * `obj` - Mutable reference to the physical object
 /// * `radius` - The radius of the sphere
 /// * `dt` - The time step duration in seconds
-pub fn handle_sphere_ground_collision(
-    obj: &mut PhysicalObject3D,
-    radius: f64,
-    dt: f64
-) {
+pub fn handle_sphere_ground_collision(obj: &mut PhysicalObject3D, radius: f64, dt: f64) {
     // Calculate penetration depth
     let sphere_bottom = obj.object.position.y - radius;
     let penetration = obj.physics_constants.ground_level - sphere_bottom;
@@ -871,8 +859,8 @@ pub fn handle_sphere_ground_collision(
         let friction = 0.5; // Rolling friction coefficient
 
         // Calculate friction force direction (opposite to velocity)
-        let speed_sq = obj.object.velocity.x * obj.object.velocity.x +
-            obj.object.velocity.z * obj.object.velocity.z;
+        let speed_sq = obj.object.velocity.x * obj.object.velocity.x
+            + obj.object.velocity.z * obj.object.velocity.z;
 
         if speed_sq > 0.001 {
             let speed = speed_sq.sqrt();
@@ -904,7 +892,7 @@ pub fn handle_cylinder_ground_collision(
     obj: &mut PhysicalObject3D,
     radius: f64,
     height: f64,
-    dt: f64
+    dt: f64,
 ) {
     // Calculate penetration depth
     let half_height = height / 2.0;
@@ -948,19 +936,22 @@ pub fn handle_cylinder_ground_collision(
             let ground_normal = (0.0, 1.0, 0.0);
 
             let roll_axis = cross_product(cylinder_axis, ground_normal);
-            let roll_axis_length = (roll_axis.0*roll_axis.0 + roll_axis.1*roll_axis.1 + roll_axis.2*roll_axis.2).sqrt();
+            let roll_axis_length =
+                (roll_axis.0 * roll_axis.0 + roll_axis.1 * roll_axis.1 + roll_axis.2 * roll_axis.2)
+                    .sqrt();
 
             if roll_axis_length > 0.001 {
                 // Normalize roll axis
                 let roll_dir = (
                     roll_axis.0 / roll_axis_length,
                     roll_axis.1 / roll_axis_length,
-                    roll_axis.2 / roll_axis_length
+                    roll_axis.2 / roll_axis_length,
                 );
 
                 // Rolling velocity (scalar)
-                let vel_magnitude = (obj.object.velocity.x*obj.object.velocity.x +
-                    obj.object.velocity.z*obj.object.velocity.z).sqrt();
+                let vel_magnitude = (obj.object.velocity.x * obj.object.velocity.x
+                    + obj.object.velocity.z * obj.object.velocity.z)
+                    .sqrt();
 
                 // Set angular velocity for rolling (proportional to linear velocity)
                 let angular_speed = vel_magnitude / radius;
@@ -984,16 +975,17 @@ pub fn handle_cylinder_ground_collision(
 pub fn handle_polyhedron_ground_collision(
     obj: &mut PhysicalObject3D,
     vertices: &[(f64, f64, f64)],
-    dt: f64
+    dt: f64,
 ) {
     // Find vertices that are in contact with the ground
-    let ground_vertices: Vec<(f64, f64, f64)> = vertices.iter()
+    let ground_vertices: Vec<(f64, f64, f64)> = vertices
+        .iter()
         .filter(|(_, y, _)| (*y - obj.physics_constants.ground_level).abs() < 0.01)
         .cloned()
         .collect();
 
     // Find lowest vertex
-    let min_y = vertices.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+    let min_y = vertices.iter().map(|(_, y, _)| *y).fold(f64::MAX, f64::min);
 
     // Calculate penetration depth
     let penetration = obj.physics_constants.ground_level - min_y;
@@ -1031,7 +1023,7 @@ pub fn handle_polyhedron_ground_collision(
             let r = (
                 impact_point.0 - obj.object.position.x,
                 impact_point.1 - obj.object.position.y,
-                impact_point.2 - obj.object.position.z
+                impact_point.2 - obj.object.position.z,
             );
 
             // Impact force (simplified vertical impulse)
@@ -1042,11 +1034,15 @@ pub fn handle_polyhedron_ground_collision(
 
             // Apply with scaling factor
             let torque_factor = 0.15; // Slightly less torque for polyhedra
-            apply_torque(obj, (
-                torque.0 * torque_factor,
-                torque.1 * torque_factor,
-                torque.2 * torque_factor
-            ), dt);
+            apply_torque(
+                obj,
+                (
+                    torque.0 * torque_factor,
+                    torque.1 * torque_factor,
+                    torque.2 * torque_factor,
+                ),
+                dt,
+            );
         }
     }
 }
@@ -1057,11 +1053,7 @@ pub fn handle_polyhedron_ground_collision(
 /// * `obj` - Mutable reference to the physical object
 /// * `torque` - The torque vector as (tx, ty, tz)
 /// * `dt` - The time step duration in seconds
-pub fn apply_torque(
-    obj: &mut PhysicalObject3D,
-    torque: (f64, f64, f64),
-    dt: f64
-) {
+pub fn apply_torque(obj: &mut PhysicalObject3D, torque: (f64, f64, f64), dt: f64) {
     // Get the moment of inertia tensor
     let inertia = obj.shape.moment_of_inertia(obj.object.mass);
 
@@ -1070,7 +1062,6 @@ pub fn apply_torque(
     obj.angular_velocity.1 += torque.1 * dt / inertia[1];
     obj.angular_velocity.2 += torque.2 * dt / inertia[2];
 }
-
 
 /// Updates the physics state of an object for a single time step
 ///
@@ -1131,22 +1122,22 @@ pub fn update_physics(obj: &mut PhysicalObject3D, dt: f64) {
             let corners: [(f64, f64, f64); 8] = obj.get_corner_positions();
 
             // Find the lowest point (corner closest to the ground)
-            let min_y = corners.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+            let min_y = corners.iter().map(|(_, y, _)| *y).fold(f64::MAX, f64::min);
 
             // If the lowest point is below ground level
             if min_y < obj.physics_constants.ground_level {
                 handle_cuboid_ground_collision(obj, min_y, &corners, dt);
             }
-        },
+        }
         Shape3D::Cuboid(_width, _height, _depth) => {
             // Reuse the same code for regular cuboids
             let corners: [(f64, f64, f64); 8] = obj.get_corner_positions();
-            let min_y = corners.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+            let min_y = corners.iter().map(|(_, y, _)| *y).fold(f64::MAX, f64::min);
 
             if min_y < obj.physics_constants.ground_level {
                 handle_cuboid_ground_collision(obj, min_y, &corners, dt);
             }
-        },
+        }
         Shape3D::Sphere(radius) => {
             // For sphere, just check if the bottom point is below ground
             let sphere_bottom = obj.object.position.y - radius;
@@ -1154,7 +1145,7 @@ pub fn update_physics(obj: &mut PhysicalObject3D, dt: f64) {
             if sphere_bottom < obj.physics_constants.ground_level {
                 handle_sphere_ground_collision(obj, *radius, dt);
             }
-        },
+        }
         Shape3D::Cylinder(radius, height) => {
             // For cylinder, check the bottom rim points
             let half_height = height / 2.0;
@@ -1163,11 +1154,14 @@ pub fn update_physics(obj: &mut PhysicalObject3D, dt: f64) {
             if bottom_y < obj.physics_constants.ground_level {
                 handle_cylinder_ground_collision(obj, *radius, *height, dt);
             }
-        },
+        }
         Shape3D::Polyhedron(_vertices, _) => {
             // For polyhedron, transform all vertices and find lowest point
             let world_vertices: Vec<(f64, f64, f64)> = world_vertices(obj);
-            let min_y = world_vertices.iter().map(|(_,y,_)| *y).fold(f64::MAX, f64::min);
+            let min_y = world_vertices
+                .iter()
+                .map(|(_, y, _)| *y)
+                .fold(f64::MAX, f64::min);
 
             if min_y < obj.physics_constants.ground_level {
                 handle_polyhedron_ground_collision(obj, &world_vertices, dt);
@@ -1191,8 +1185,12 @@ pub fn world_vertices(obj: &PhysicalObject3D) -> Vec<(f64, f64, f64)> {
     let position = obj.object.position.to_coord();
 
     // Transform local vertices to world space
-    local_vertices.iter()
-        .map(|v| obj.shape.transform_point(*v, position, obj.orientation.to_tuple()))
+    local_vertices
+        .iter()
+        .map(|v| {
+            obj.shape
+                .transform_point(*v, position, obj.orientation.to_tuple())
+        })
         .collect()
 }
 
@@ -1212,12 +1210,18 @@ pub fn world_faces(obj: &PhysicalObject3D) -> Vec<Vec<(f64, f64, f64)>> {
     let position = obj.object.position.to_coord();
 
     // Transform faces to world space
-    faces.iter().map(|face| {
-        face.iter().map(|&idx| {
-            let vertex = local_vertices[idx];
-            obj.shape.transform_point(vertex, position, obj.orientation.to_tuple())
-        }).collect()
-    }).collect()
+    faces
+        .iter()
+        .map(|face| {
+            face.iter()
+                .map(|&idx| {
+                    let vertex = local_vertices[idx];
+                    obj.shape
+                        .transform_point(vertex, position, obj.orientation.to_tuple())
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Determines which face of a die is currently facing up
@@ -1240,7 +1244,7 @@ pub fn die_face_up(obj: &PhysicalObject3D) -> Option<u8> {
         let inverted_orientation: (f64, f64, f64) = (
             -obj.orientation.roll,
             -obj.orientation.pitch,
-            -obj.orientation.yaw
+            -obj.orientation.yaw,
         );
 
         let obj_up: (f64, f64, f64) = rotate_point(up, inverted_orientation);
@@ -1297,8 +1301,8 @@ pub fn face_from_normal(shape: &Shape3D, normal: (f64, f64, f64)) -> Option<u8> 
                     Some(3) // Front face
                 }
             }
-        },
-        _ => None // Not applicable for non-die shapes
+        }
+        _ => None, // Not applicable for non-die shapes
     }
 }
 
@@ -1312,7 +1316,12 @@ pub fn face_from_normal(shape: &Shape3D, normal: (f64, f64, f64)) -> Option<u8> 
 /// * `linear_damping` - The linear damping coefficient (0.0 = no damping)
 /// * `angular_damping` - The angular damping coefficient
 /// * `dt` - The time step duration in seconds
-pub fn apply_damping(obj: &mut PhysicalObject3D, linear_damping: f64, angular_damping: f64, dt: f64) {
+pub fn apply_damping(
+    obj: &mut PhysicalObject3D,
+    linear_damping: f64,
+    angular_damping: f64,
+    dt: f64,
+) {
     // Apply linear damping
     let linear_factor = (1.0 - linear_damping * dt).max(0.0);
     obj.object.velocity.x *= linear_factor;
@@ -1374,22 +1383,19 @@ pub fn apply_gravity(obj: &mut PhysicalObject3D, gravity: f64, dt: f64) {
 /// `true` if the object is at rest, `false` otherwise
 pub fn is_at_rest(obj: &PhysicalObject3D, linear_threshold: f64, angular_threshold: f64) -> bool {
     // Calculate linear and angular speed
-    let linear_speed = (
-        obj.object.velocity.x.powi(2) +
-            obj.object.velocity.y.powi(2) +
-            obj.object.velocity.z.powi(2)
-    ).sqrt();
+    let linear_speed = (obj.object.velocity.x.powi(2)
+        + obj.object.velocity.y.powi(2)
+        + obj.object.velocity.z.powi(2))
+    .sqrt();
 
-    let angular_speed = (
-        obj.angular_velocity.0.powi(2) +
-            obj.angular_velocity.1.powi(2) +
-            obj.angular_velocity.2.powi(2)
-    ).sqrt();
+    let angular_speed = (obj.angular_velocity.0.powi(2)
+        + obj.angular_velocity.1.powi(2)
+        + obj.angular_velocity.2.powi(2))
+    .sqrt();
 
     // Check if both are below threshold
     linear_speed < linear_threshold && angular_speed < angular_threshold
 }
-
 
 /// Updates the physics for multiple objects, including inter-object collisions
 ///
@@ -1433,7 +1439,7 @@ pub fn update_physics_system(objects: &mut [PhysicalObject3D], dt: f64) {
 
     // Then check for collisions between objects
     for i in 0..objects.len() {
-        for j in (i+1)..objects.len() {
+        for j in (i + 1)..objects.len() {
             // Need to use split_at_mut to get mutable references to two elements
             let (first, second) = objects.split_at_mut(j);
             let obj1 = &mut first[i];
@@ -1456,7 +1462,7 @@ pub fn check_collision_objects(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D)
     let dx = pos2.0 - pos1.0;
     let dy = pos2.1 - pos1.1;
     let dz = pos2.2 - pos1.2;
-    let distance_sq = dx*dx + dy*dy + dz*dz;
+    let distance_sq = dx * dx + dy * dy + dz * dz;
 
     let r1 = obj1.shape.bounding_radius();
     let r2 = obj2.shape.bounding_radius();
@@ -1469,50 +1475,46 @@ pub fn check_collision_objects(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D)
 
     match (&obj1.shape, &obj2.shape) {
         // ---- Spheres ----
-        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => {
-            distance_sq <= (r1 + r2).powi(2)
-        },
+        (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) => distance_sq <= (r1 + r2).powi(2),
 
-        // ---- Sphere-cuboid combos (keep your old clamp-based logic) ----
+        // ---- Sphere-cuboid combos ----
         (Shape3D::Sphere(radius), Shape3D::Cuboid(w, h, d))
         | (Shape3D::Sphere(radius), Shape3D::BeveledCuboid(w, h, d, _)) => {
-            let dx_clamp = dx.clamp(-w/2.0, w/2.0);
-            let dy_clamp = dy.clamp(-h/2.0, h/2.0);
-            let dz_clamp = dz.clamp(-d/2.0, d/2.0);
+            let dx_clamp = dx.clamp(-w / 2.0, w / 2.0);
+            let dy_clamp = dy.clamp(-h / 2.0, h / 2.0);
+            let dz_clamp = dz.clamp(-d / 2.0, d / 2.0);
             let closest_dist_sq =
                 (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
             closest_dist_sq <= radius.powi(2)
-        },
+        }
 
         // ---- Cuboid-sphere (the reverse) ----
         (Shape3D::Cuboid(w, h, d), Shape3D::Sphere(radius))
         | (Shape3D::BeveledCuboid(w, h, d, _), Shape3D::Sphere(radius)) => {
-            let dx_clamp = dx.clamp(-w/2.0, w/2.0);
-            let dy_clamp = dy.clamp(-h/2.0, h/2.0);
-            let dz_clamp = dz.clamp(-d/2.0, d/2.0);
+            let dx_clamp = dx.clamp(-w / 2.0, w / 2.0);
+            let dy_clamp = dy.clamp(-h / 2.0, h / 2.0);
+            let dz_clamp = dz.clamp(-d / 2.0, d / 2.0);
             let closest_dist_sq =
                 (dx - dx_clamp).powi(2) + (dy - dy_clamp).powi(2) + (dz - dz_clamp).powi(2);
             closest_dist_sq <= radius.powi(2)
-        },
+        }
 
-        // ---- Cylinder-cylinders remain unchanged (as per your existing code) ----
+        // ---- Cylinder-cylinders ----
         (Shape3D::Cylinder(r1, h1), Shape3D::Cylinder(r2, h2)) => {
-            let half1 = h1/2.0;
-            let half2 = h2/2.0;
+            let half1 = h1 / 2.0;
+            let half2 = h2 / 2.0;
             if dy.abs() > (half1 + half2) {
                 return false;
             }
-            let xz_sq = dx*dx + dz*dz;
+            let xz_sq = dx * dx + dz * dz;
             xz_sq <= (r1 + r2).powi(2)
-        },
+        }
 
         // ---- Oriented SAT for cuboid-cuboid or beveled combos ----
         (
             Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..),
-            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..)
-        ) => {
-            sat_cuboid_collision(obj1, obj2)
-        },
+            Shape3D::Cuboid(..) | Shape3D::BeveledCuboid(..),
+        ) => sat_cuboid_collision(obj1, obj2),
 
         // ---- Fallback for other combos or unhandled shapes ----
         _ => {
@@ -1529,20 +1531,26 @@ pub fn sat_cuboid_collision(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) ->
     let local2 = obj2.shape.create_vertices();
 
     // Convert them to world coordinates (orientation + position)
-    let world1: Vec<(f64, f64, f64)> = local1.iter()
-        .map(|&p| obj1.shape.transform_point(
-            p,
-            obj1.object.position.to_coord(),
-            obj1.orientation.to_tuple()
-        ))
+    let world1: Vec<(f64, f64, f64)> = local1
+        .iter()
+        .map(|&p| {
+            obj1.shape.transform_point(
+                p,
+                obj1.object.position.to_coord(),
+                obj1.orientation.to_tuple(),
+            )
+        })
         .collect();
 
-    let world2: Vec<(f64, f64, f64)> = local2.iter()
-        .map(|&p| obj2.shape.transform_point(
-            p,
-            obj2.object.position.to_coord(),
-            obj2.orientation.to_tuple()
-        ))
+    let world2: Vec<(f64, f64, f64)> = local2
+        .iter()
+        .map(|&p| {
+            obj2.shape.transform_point(
+                p,
+                obj2.object.position.to_coord(),
+                obj2.orientation.to_tuple(),
+            )
+        })
         .collect();
 
     // Compute the primary axes (face normals) from each shape
@@ -1581,28 +1589,28 @@ pub fn sat_cuboid_collision(obj1: &PhysicalObject3D, obj2: &PhysicalObject3D) ->
 /// We pick corners[0], corners[1], corners[3], corners[4] to get edges
 /// that emanate from the same corner. If corners are generated consistently,
 /// that yields X, Y, and Z directions (in world space).
-fn compute_box_axes(corners: &[(f64, f64, f64)])
-                    -> ((f64,f64,f64),(f64,f64,f64),(f64,f64,f64))
-{
+fn compute_box_axes(
+    corners: &[(f64, f64, f64)],
+) -> ((f64, f64, f64), (f64, f64, f64), (f64, f64, f64)) {
     // If something’s off (like not enough corners), return default axes
     if corners.len() < 5 {
-        return ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0));
+        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0));
     }
 
     let edge_x = (
         corners[1].0 - corners[0].0,
         corners[1].1 - corners[0].1,
-        corners[1].2 - corners[0].2
+        corners[1].2 - corners[0].2,
     );
     let edge_y = (
         corners[3].0 - corners[0].0,
         corners[3].1 - corners[0].1,
-        corners[3].2 - corners[0].2
+        corners[3].2 - corners[0].2,
     );
     let edge_z = (
         corners[4].0 - corners[0].0,
         corners[4].1 - corners[0].1,
-        corners[4].2 - corners[0].2
+        corners[4].2 - corners[0].2,
     );
 
     (normalize(edge_x), normalize(edge_y), normalize(edge_z))
