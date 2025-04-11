@@ -2,7 +2,13 @@
 
 rs_physics is a Rust library for simulating advanced physics calculations and interactions. 
 It provides a comprehensive set of tools for working with physical constants, performing calculations, and simulating object interactions across various domains of physics.
-
+ - note: This library is still very much a work in progress and is not yet ready for production use.
+ - I have properly tested the following modules in Bevy:
+    - Physics constants
+    - Object interactions
+    - Particle system simulation
+    - (nightly branch) cosmological simulation
+   
 ## Features
 
 - Customizable physical constants
