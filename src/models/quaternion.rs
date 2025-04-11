@@ -162,7 +162,7 @@ impl Quaternion {
 
     /// Spherical linear interpolation between two quaternions
     pub fn slerp(&self, other: &Quaternion, t: f64) -> Quaternion {
-        let mut q1 = self.normalized();
+        let q1 = self.normalized();
         let mut q2 = other.normalized();
 
         // Calculate cosine of angle between quaternions
