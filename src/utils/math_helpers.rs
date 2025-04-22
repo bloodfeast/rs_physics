@@ -104,7 +104,7 @@ pub fn cordic_atan2(y: f32, x: f32) -> f32 {
     }
 
     let mut angle: f32;
-    let mut abs_y = y.abs();
+    let abs_y = y.abs();
 
     // First octant (0 to 45 degrees)
     if x >= 0.0 {
