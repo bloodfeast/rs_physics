@@ -211,3 +211,25 @@ impl AtanLookupTable {
     }
 
 }
+/// Vector utility: dot product
+#[inline]
+pub fn dot_product(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    a.0 * b.0 + a.1 * b.1 + a.2 * b.2
+}
+
+/// Vector utility: magnitude calculation
+#[inline]
+pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
+    (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt()
+}
+
+/// Vector utility: normalization
+#[inline]
+fn normalize_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
+    let mag = crate::interactions::vector_magnitude(v);
+    if mag > 1e-10 {
+        (v.0 / mag, v.1 / mag, v.2 / mag)
+    } else {
+        (1.0, 0.0, 0.0) // Default direction if vector is too small
+    }
+}
