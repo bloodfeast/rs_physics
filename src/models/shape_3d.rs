@@ -256,13 +256,20 @@ impl Shape3D {
     pub fn bounding_radius(&self) -> f64 {
         match self {
             Shape3D::Sphere(radius) => *radius,
-            Shape3D::Cuboid(w, h, d) => {
-                // Half-diagonal of the cuboid
-                (w.powi(2) + h.powi(2) + d.powi(2)).sqrt() / 2.0
+            Shape3D::Cuboid(width, height, depth) => {
+                // Diagonal from center to corner
+                let half_width = width / 2.0;
+                let half_height = height / 2.0;
+                let half_depth = depth / 2.0;
+                (half_width * half_width + half_height * half_height + half_depth * half_depth).sqrt()
             },
-            Shape3D::BeveledCuboid(w, h, d, _) => {
-                // Beveling doesn't significantly change the bounding radius
-                (w.powi(2) + h.powi(2) + d.powi(2)).sqrt() / 2.0
+            Shape3D::BeveledCuboid(width, height, depth, bevel) => {
+                // For a beveled cuboid, the bounding radius is the same as a regular cuboid
+                // The bevels are inward, so they don't increase the bounding radius
+                let half_width = width / 2.0;
+                let half_height = height / 2.0;
+                let half_depth = depth / 2.0;
+                (half_width * half_width + half_height * half_height + half_depth * half_depth).sqrt()
             },
             Shape3D::Cylinder(radius, height) => {
                 // Maximum distance from center to any point

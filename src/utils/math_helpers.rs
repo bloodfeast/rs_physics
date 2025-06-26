@@ -30,18 +30,18 @@ pub fn fast_atan2(y: f32, x: f32) -> f32 {
         } else if y < 0.0 {
             return -std::f32::consts::FRAC_PI_2;
         } else {
-            return 0.0; // Undefined, but return 0.0 as a convention
+            return 0.0; // Both x and y are zero
         }
     }
 
-    // Compute the basic arctangent
+    // Use a more accurate atan implementation
     let z = if x > 0.0 {
-        fast_atan(y / x)
+        minimax_atan(y / x)
     } else if x < 0.0 {
         if y >= 0.0 {
-            fast_atan(y / x) + std::f32::consts::PI
+            minimax_atan(y / x) + std::f32::consts::PI
         } else {
-            fast_atan(y / x) - std::f32::consts::PI
+            minimax_atan(y / x) - std::f32::consts::PI
         }
     } else if y > 0.0 {
         std::f32::consts::FRAC_PI_2
@@ -49,8 +49,13 @@ pub fn fast_atan2(y: f32, x: f32) -> f32 {
         -std::f32::consts::FRAC_PI_2
     };
 
+    // Ensure the result is within the correct range
+    if z.is_nan() {
+        return 0.0; // Fallback for numerical issues
+    }
     z
 }
+
 
 /// Even faster but less accurate arctangent approximation
 /// Max error ~0.01 radians (0.57 degrees)

@@ -19,6 +19,13 @@ impl Quaternion {
             z: 0.0,
         }
     }
+    
+    pub fn is_near_identity(&self, epsilon: f64) -> bool {
+        (self.w - 1.0).abs() < epsilon &&
+            self.x.abs() < epsilon &&
+            self.y.abs() < epsilon &&
+            self.z.abs() < epsilon
+    }
 
     /// Creates a quaternion from axis-angle representation
     pub fn from_axis_angle(axis: (f64, f64, f64), angle: f64) -> Self {
