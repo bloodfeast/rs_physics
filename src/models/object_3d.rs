@@ -1,5 +1,6 @@
 use crate::forces::Force;
-use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates};
+use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates, Shape2DCollider};
+use crate::rotational_dynamics::AngularState2D;
 
 #[derive(Debug, Clone)]
 pub struct Axis3D {
@@ -269,6 +270,8 @@ impl ToObjectIn2D for ObjectIn3D {
             velocity: self.velocity.to_2d(),
             position: self.position.to_2d(),
             forces: self.forces.to_owned(),
+            angular: AngularState2D::default(),
+            shape: Shape2DCollider::default(),
         }
     }
 }

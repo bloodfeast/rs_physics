@@ -1,7 +1,14 @@
-// src/rotational_dynamics.rs
+//! Legacy rotational dynamics module
+//!
+//! This module provides backwards-compatible 1D rotational dynamics.
+//! For new code, consider using `AngularState2D` and `InertiaScalar` directly.
 
 use crate::utils::PhysicsError;
+use super::inertia::{InertiaScalar, Shape2D};
 
+/// Shape types for moment of inertia calculations
+///
+/// Note: For more shapes, see `Shape2D` in the inertia module
 pub enum ObjectShape {
     SolidSphere,
     HollowSphere,
@@ -9,6 +16,9 @@ pub enum ObjectShape {
     Rod,
 }
 
+/// A rotational object with mass, radius, and angular properties
+///
+/// For new code, consider using `AngularState2D` with `InertiaScalar` instead.
 pub struct RotationalObject {
     pub mass: f64,
     pub radius: f64,
@@ -17,13 +27,15 @@ pub struct RotationalObject {
 }
 
 impl RotationalObject {
-
     /// Creates a new `RotationalObject` with the given mass and radius.
+    ///
+    /// The moment of inertia is calculated assuming a solid disk (I = 0.5 * m * r²).
+    ///
     /// # Arguments
     /// * `mass` - The mass of the object in kilograms.
     /// * `radius` - The radius of the object in meters.
     ///
-    /// # Return
+    /// # Returns
     /// Returns a `Result` containing the new `RotationalObject` if successful,
     /// or a `PhysicsError` if the input parameters are invalid.
     ///
@@ -47,22 +59,31 @@ impl RotationalObject {
         if radius <= 0.0 {
             return Err(PhysicsError::InvalidArea);
         }
-        let moment_of_inertia = 0.5 * mass * radius * radius; // For a solid disk
+        // Use the new Shape2D for calculation
+        let inertia = Shape2D::Disk(radius).moment_of_inertia(mass);
         Ok(Self {
             mass,
             radius,
             angular_velocity: 0.0,
-            moment_of_inertia,
+            moment_of_inertia: inertia.value(),
         })
+    }
+
+    /// Get the moment of inertia as an InertiaScalar for use with new APIs
+    pub fn inertia(&self) -> InertiaScalar {
+        InertiaScalar::from(self.moment_of_inertia)
     }
 }
 
 /// Calculates the angular momentum of a rotational object.
+///
+/// Angular momentum L = I * ω
+///
 /// # Arguments
 /// * `obj` - A reference to the `RotationalObject`.
 ///
-/// # Return
-/// Returns the angular momentum in kg⋅m²/s.
+/// # Returns
+/// Returns the angular momentum in kg·m²/s.
 ///
 /// # Examples
 /// ```
@@ -76,10 +97,13 @@ pub fn calculate_angular_momentum(obj: &RotationalObject) -> f64 {
 }
 
 /// Calculates the rotational kinetic energy of a rotational object.
+///
+/// Rotational KE = (1/2) * I * ω²
+///
 /// # Arguments
 /// * `obj` - A reference to the `RotationalObject`.
 ///
-/// # Return
+/// # Returns
 /// Returns the rotational kinetic energy in joules (J).
 ///
 /// # Examples
@@ -94,12 +118,15 @@ pub fn calculate_rotational_kinetic_energy(obj: &RotationalObject) -> f64 {
 }
 
 /// Applies a torque to a rotational object for a given time period.
+///
+/// The angular acceleration α = τ / I, and Δω = α * Δt
+///
 /// # Arguments
 /// * `obj` - A mutable reference to the `RotationalObject`.
-/// * `torque` - The applied torque in newton-meters (N⋅m).
+/// * `torque` - The applied torque in newton-meters (N·m).
 /// * `time` - The duration for which the torque is applied, in seconds.
 ///
-/// # Return
+/// # Returns
 /// Returns `Ok(())` if the torque was successfully applied, or a `PhysicsError` if there was an error.
 ///
 /// # Errors
@@ -123,13 +150,15 @@ pub fn apply_torque(obj: &mut RotationalObject, torque: f64, time: f64) -> Resul
 }
 
 /// Calculates the moment of inertia for various object shapes.
+///
 /// # Arguments
 /// * `shape` - The shape of the object, specified as an `ObjectShape`.
 /// * `mass` - The mass of the object in kilograms.
-/// * `dimension` - The characteristic dimension of the object in meters (e.g., radius for spheres, length for rods).
+/// * `dimension` - The characteristic dimension of the object in meters
+///   (e.g., radius for spheres, length for rods).
 ///
-/// # Return
-/// Returns a `Result` containing the calculated moment of inertia in kg⋅m² if successful,
+/// # Returns
+/// Returns a `Result` containing the calculated moment of inertia in kg·m² if successful,
 /// or a `PhysicsError` if the input parameters are invalid.
 ///
 /// # Errors
@@ -150,13 +179,26 @@ pub fn calculate_moment_of_inertia(shape: &ObjectShape, mass: f64, dimension: f6
     if dimension <= 0.0 {
         return Err(PhysicsError::InvalidDimension);
     }
-    match shape {
-        ObjectShape::SolidSphere => Ok(0.4 * mass * dimension * dimension),
-        ObjectShape::HollowSphere => Ok((2.0 / 3.0) * mass * dimension * dimension),
-        ObjectShape::SolidCylinder => Ok(0.5 * mass * dimension * dimension),
-        ObjectShape::Rod => Ok((1.0 / 12.0) * mass * dimension * dimension),
-        // If we get this far, then we must have forgotten something along the way
-        #[allow(unreachable_patterns)]
-        _ => Err(PhysicsError::UnsupportedShape),
-    }
+
+    // Map to new Shape2D where applicable
+    let result = match shape {
+        ObjectShape::SolidSphere => {
+            // I = (2/5) * m * r² for solid sphere
+            0.4 * mass * dimension * dimension
+        },
+        ObjectShape::HollowSphere => {
+            // I = (2/3) * m * r² for hollow sphere
+            (2.0 / 3.0) * mass * dimension * dimension
+        },
+        ObjectShape::SolidCylinder => {
+            // I = (1/2) * m * r² for solid cylinder (about axis)
+            Shape2D::Disk(dimension).moment_of_inertia(mass).value()
+        },
+        ObjectShape::Rod => {
+            // I = (1/12) * m * L² for rod about center
+            Shape2D::Rod(dimension).moment_of_inertia(mass).value()
+        },
+    };
+
+    Ok(result)
 }

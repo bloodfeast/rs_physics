@@ -11,6 +11,7 @@ readme = "README.md"
 members = [
     ".",
     "rs_physics_wasm",
+    "bevy_visual_tests",
 ]
 
 [lib]
@@ -18,7 +19,7 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["constraints", "materials"]
-all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics", "particles", "particles-cosmological", "avx512-simd"]
+all = ["constraints", "materials", "fluid_simulation", "thermodynamics", "fluid_dynamics", "rotational_dynamics", "particles", "particles-cosmological", "avx512-simd", "gpu"]
 constraints = []
 materials = []
 fluid_simulation = []
@@ -28,6 +29,7 @@ rotational_dynamics = []
 particles = []
 particles-cosmological = []
 avx512-simd = []
+gpu = ["wgpu", "pollster", "bytemuck"]
 
 
 [dependencies]
@@ -36,6 +38,12 @@ log = "0.4"
 env_logger = "0.11"
 rand = "0.9.0-alpha.2"
 approx = "0.5.1"
+crossbeam = "0.8"
+
+# GPU compute (optional)
+wgpu = { version = "23", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1.14", features = ["derive"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

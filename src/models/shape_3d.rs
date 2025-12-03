@@ -3,6 +3,8 @@ use crate::materials::Material;
 use crate::models::{ObjectIn3D, ToCoordinates};
 use std::f64::consts::PI;
 use crate::physics::PhysicsConstants;
+#[cfg(feature = "rotational_dynamics")]
+use crate::rotational_dynamics::InertiaTensor;
 
 /// Represents different types of 3D shapes for physics simulations
 #[derive(Debug, Clone)]
@@ -172,6 +174,7 @@ impl Shape3D {
     }
 
     /// Returns the moment of inertia tensor for the shape around its center of mass
+    /// as a 6-element array [Ixx, Iyy, Izz, Ixy, Ixz, Iyz]
     pub fn moment_of_inertia(&self, mass: f64) -> [f64; 6] {
         match self {
             Shape3D::Sphere(radius) => {
@@ -252,6 +255,13 @@ impl Shape3D {
         }
     }
 
+    /// Returns the moment of inertia as an InertiaTensor type
+    /// This provides a richer API for working with inertia in 3D rotational dynamics
+    #[cfg(feature = "rotational_dynamics")]
+    pub fn inertia_tensor(&self, mass: f64) -> InertiaTensor {
+        InertiaTensor::from_array(self.moment_of_inertia(mass))
+    }
+
     /// Returns the minimum bounding sphere radius
     pub fn bounding_radius(&self) -> f64 {
         match self {
@@ -263,7 +273,7 @@ impl Shape3D {
                 let half_depth = depth / 2.0;
                 (half_width * half_width + half_height * half_height + half_depth * half_depth).sqrt()
             },
-            Shape3D::BeveledCuboid(width, height, depth, bevel) => {
+            Shape3D::BeveledCuboid(width, height, depth, _bevel) => {
                 // For a beveled cuboid, the bounding radius is the same as a regular cuboid
                 // The bevels are inward, so they don't increase the bounding radius
                 let half_width = width / 2.0;

@@ -1,9 +1,7 @@
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 use crate::interactions::{dot_product, cross_product, vector_magnitude, normalize_vector};
-use crate::interactions::gjk_collision_3d::{get_support_point, handle_line_case, handle_triangle_case};
-use crate::models::{PhysicalObject3D, Shape3D, Quaternion, ToCoordinates, Simplex};
+use crate::models::{PhysicalObject3D, Shape3D, Quaternion};
 use crate::utils::PhysicsConstants;
+use crate::utils::vector3::{angular_effective_inv_mass, angular_velocity_delta, negate};
 
 /// Result of a continuous collision detection test
 #[derive(Debug, Clone)]
@@ -44,6 +42,7 @@ const EPSILON: f64 = 1e-6;
 const TINY_EPSILON: f64 = 1e-10;
 
 /// Minimum velocity for restitution to apply (prevents micro-bounces)
+#[allow(dead_code)]
 const MIN_VELOCITY_FOR_RESTITUTION: f64 = 0.1;
 
 /// Separation distance for position correction
@@ -283,6 +282,7 @@ pub fn transform_collision_to_world(
 }
 
 /// Helper function to check collision along a single axis of cuboids
+#[allow(dead_code)]
 fn check_axis_collision(
     pos1_comp: f64,
     pos2_comp: f64,
@@ -394,10 +394,10 @@ fn update_orientation(
 fn calculate_distance_estimate(
     shape1: &Shape3D,
     pos1: (f64, f64, f64),
-    orient1: &Quaternion,
+    _orient1: &Quaternion,
     shape2: &Shape3D,
     pos2: (f64, f64, f64),
-    orient2: &Quaternion
+    _orient2: &Quaternion
 ) -> f64 {
     // For sphere-sphere, use exact calculation
     if let (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) = (shape1, shape2) {
@@ -1121,15 +1121,41 @@ pub fn check_continuous_collision(
     obj2: &PhysicalObject3D,
     dt: f64
 ) -> Option<CcdCollisionResult> {
+    use crate::interactions::gjk_collision_3d::{gjk_collision_detection_ex, epa_contact_points_ex, GjkResult};
+
+    let pos1 = extract_position(obj1);
+    let pos2 = extract_position(obj2);
+    let orient1 = get_orientation_quaternion(obj1);
+    let orient2 = get_orientation_quaternion(obj2);
+
     // First check if objects are already colliding
-    let collision = crate::interactions::gjk_collision_3d::gjk_collision_detection(
-        &obj1.shape, extract_position(obj1), get_orientation_quaternion(obj1),
-        &obj2.shape, extract_position(obj2), get_orientation_quaternion(obj2)
+    let gjk_result = gjk_collision_detection_ex(
+        &obj1.shape, pos1, orient1,
+        &obj2.shape, pos2, orient2
     );
 
-    if collision.is_some() {
-        // Objects already overlapping - this should be handled by discrete collision
-        return None;
+    // If objects are already overlapping, return t=0 collision with contact info
+    match &gjk_result {
+        GjkResult::NoCollision => {
+            // Continue with normal CCD below
+        }
+        GjkResult::SphereSphere { .. } | GjkResult::Collision(_) => {
+            // Objects are already overlapping - get contact info and return t=0 collision
+            if let Some(contact) = epa_contact_points_ex(
+                &obj1.shape, pos1, orient1,
+                &obj2.shape, pos2, orient2,
+                &gjk_result
+            ) {
+                return Some(CcdCollisionResult {
+                    will_collide: true,
+                    time_of_impact: 0.0,  // Already colliding
+                    normal: contact.normal,
+                    point1: contact.point1,
+                    point2: contact.point2,
+                });
+            }
+            // If EPA failed, try to continue with CCD
+        }
     }
 
     // Calculate positions and velocities
@@ -1198,6 +1224,7 @@ pub fn check_continuous_collision(
 //==============================================================================
 
 /// Calculate point velocity based on linear and angular velocity
+#[allow(dead_code)]
 fn calculate_point_velocity(
     linear_vel: (f64, f64, f64),
     angular_vel: (f64, f64, f64),
@@ -1219,11 +1246,12 @@ fn calculate_point_velocity(
 
 /// Calculate collision impulse for a collision response
 /// Normal must point from obj2 to obj1
+#[allow(dead_code)]
 fn calculate_collision_impulse(
     obj1: &PhysicalObject3D,
     obj2: &PhysicalObject3D,
-    r1: (f64, f64, f64),
-    r2: (f64, f64, f64),
+    _r1: (f64, f64, f64),
+    _r2: (f64, f64, f64),
     normal: (f64, f64, f64),
     rel_vel: (f64, f64, f64),
     restitution: f64
@@ -1263,6 +1291,7 @@ fn calculate_collision_impulse(
 
 /// Apply collision impulse to objects
 /// Normal must point from obj2 to obj1
+#[allow(dead_code)]
 fn apply_collision_impulse(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
@@ -1317,6 +1346,7 @@ fn apply_collision_impulse(
 }
 
 /// Apply position correction after collision
+#[allow(dead_code)]
 fn apply_position_correction(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
@@ -1389,6 +1419,90 @@ fn update_object_orientation(obj: &mut PhysicalObject3D, dt: f64) {
     obj.orientation.yaw = yaw;
 }
 
+/// Apply collision response using contact info we already have from CCD
+/// This avoids redundant GJK/EPA calculation
+fn apply_collision_response_with_contact(
+    obj1: &mut PhysicalObject3D,
+    obj2: &mut PhysicalObject3D,
+    result: &CcdCollisionResult,
+    _dt: f64
+) {
+    use crate::interactions::{cross_product, dot_product};
+    use crate::interactions::gjk_collision_3d::{add_vec, sub_vec};
+
+    let normal = result.normal;
+    let point1 = result.point1;
+    let point2 = result.point2;
+
+    // Calculate relative position vectors
+    let pos1 = extract_position(obj1);
+    let pos2 = extract_position(obj2);
+    let r1 = (point1.0 - pos1.0, point1.1 - pos1.1, point1.2 - pos1.2);
+    let r2 = (point2.0 - pos2.0, point2.1 - pos2.1, point2.2 - pos2.2);
+
+    // Calculate velocities at contact points
+    let ang_vel1 = extract_angular_velocity(obj1);
+    let ang_vel2 = extract_angular_velocity(obj2);
+    let v1_at_contact = add_vec(extract_velocity(obj1), cross_product(ang_vel1, r1));
+    let v2_at_contact = add_vec(extract_velocity(obj2), cross_product(ang_vel2, r2));
+
+    // Relative velocity
+    let vrel = sub_vec(v1_at_contact, v2_at_contact);
+    let vrel_normal = dot_product(vrel, normal);
+
+    // Only resolve if objects are approaching
+    if vrel_normal >= 0.0 {
+        return;
+    }
+
+    // Coefficient of restitution
+    let restitution = 0.8;
+
+    // Compute impulse magnitude
+    let m1 = obj1.object.mass;
+    let m2 = obj2.object.mass;
+    let inv_m1 = if m1 > 0.0 { 1.0 / m1 } else { 0.0 };
+    let inv_m2 = if m2 > 0.0 { 1.0 / m2 } else { 0.0 };
+
+    // Angular contribution using shared utilities
+    let inertia1 = obj1.shape.moment_of_inertia(m1);
+    let inertia2 = obj2.shape.moment_of_inertia(m2);
+
+    let angular_factor1 = angular_effective_inv_mass(r1, normal, &inertia1);
+    let angular_factor2 = angular_effective_inv_mass(r2, normal, &inertia2);
+
+    let denom = inv_m1 + inv_m2 + angular_factor1 + angular_factor2;
+    if denom < EPSILON {
+        return;
+    }
+
+    let j = -(1.0 + restitution) * vrel_normal / denom;
+
+    // Apply linear impulse
+    let impulse = (normal.0 * j, normal.1 * j, normal.2 * j);
+    obj1.object.velocity.x += impulse.0 * inv_m1;
+    obj1.object.velocity.y += impulse.1 * inv_m1;
+    obj1.object.velocity.z += impulse.2 * inv_m1;
+
+    obj2.object.velocity.x -= impulse.0 * inv_m2;
+    obj2.object.velocity.y -= impulse.1 * inv_m2;
+    obj2.object.velocity.z -= impulse.2 * inv_m2;
+
+    // Apply angular impulse using shared utilities (no dt multiplication - impulses are instantaneous)
+    let angular_response = 0.8;
+
+    let delta1 = angular_velocity_delta(r1, impulse, &inertia1, angular_response);
+    obj1.angular_velocity.0 += delta1.0;
+    obj1.angular_velocity.1 += delta1.1;
+    obj1.angular_velocity.2 += delta1.2;
+
+    let neg_impulse = negate(impulse);
+    let delta2 = angular_velocity_delta(r2, neg_impulse, &inertia2, angular_response);
+    obj2.angular_velocity.0 += delta2.0;
+    obj2.angular_velocity.1 += delta2.1;
+    obj2.angular_velocity.2 += delta2.2;
+}
+
 /// Applies continuous collision response by updating positions and velocities
 ///
 /// # Arguments
@@ -1445,9 +1559,9 @@ pub fn apply_continuous_collision_response(
         obj2.object.position.z -= normal.2 * sep2;
     }
 
-    // Use the existing collision response system to handle velocity changes
-    // This system already handles restitution, friction, and proper physics
-    crate::interactions::shape_collisions_3d::handle_collision(obj1, obj2, dt);
+    // Apply collision response using the contact info we already have
+    // This avoids redundant GJK/EPA calculation
+    apply_collision_response_with_contact(obj1, obj2, result, dt);
 
     // Continue simulation for remaining time
     let remaining_time = dt - toi;

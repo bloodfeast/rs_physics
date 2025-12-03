@@ -1,7 +1,12 @@
 // src/fluid_dynamics.rs
 
 use crate::utils::PhysicsError;
+use super::validation::validate_positive;
 
+/// Represents a fluid with physical properties for analytical calculations.
+///
+/// This struct is used for calculating Reynolds numbers, drag forces,
+/// buoyant forces, and pressure drops.
 pub struct Fluid {
     pub density: f64,
     pub viscosity: f64,
@@ -30,13 +35,150 @@ impl Fluid {
     /// let water = Fluid::new(1000.0, 0.001).unwrap();
     /// ```
     pub fn new(density: f64, viscosity: f64) -> Result<Self, PhysicsError> {
-        if density <= 0.0 {
-            return Err(PhysicsError::CalculationError("Density must be positive".to_string()));
-        }
-        if viscosity <= 0.0 {
-            return Err(PhysicsError::CalculationError("Viscosity must be positive".to_string()));
-        }
+        validate_positive(density, "density")?;
+        validate_positive(viscosity, "viscosity")?;
         Ok(Self { density, viscosity })
+    }
+
+    /// Creates a `Fluid` representing water at 20°C.
+    ///
+    /// Properties:
+    /// - Density: 998 kg/m³
+    /// - Dynamic viscosity: 0.001 Pa·s (1 mPa·s)
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let water = Fluid::water();
+    /// assert!((water.density - 998.0).abs() < 1.0);
+    /// ```
+    pub fn water() -> Self {
+        Self {
+            density: 998.0,
+            viscosity: 0.001,
+        }
+    }
+
+    /// Creates a `Fluid` representing air at sea level and 20°C.
+    ///
+    /// Properties:
+    /// - Density: 1.225 kg/m³
+    /// - Dynamic viscosity: 1.81×10⁻⁵ Pa·s
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let air = Fluid::air();
+    /// assert!((air.density - 1.225).abs() < 0.01);
+    /// ```
+    pub fn air() -> Self {
+        Self {
+            density: 1.225,
+            viscosity: 1.81e-5,
+        }
+    }
+
+    /// Creates a `Fluid` representing motor oil (SAE 30) at 40°C.
+    ///
+    /// Properties:
+    /// - Density: 876 kg/m³
+    /// - Dynamic viscosity: 0.1 Pa·s (100 mPa·s)
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let oil = Fluid::oil();
+    /// assert!(oil.viscosity > Fluid::water().viscosity);
+    /// ```
+    pub fn oil() -> Self {
+        Self {
+            density: 876.0,
+            viscosity: 0.1,
+        }
+    }
+
+    /// Creates a `Fluid` representing honey at 20°C.
+    ///
+    /// Properties:
+    /// - Density: 1420 kg/m³
+    /// - Dynamic viscosity: 10.0 Pa·s (very viscous)
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let honey = Fluid::honey();
+    /// // Honey is much more viscous than water
+    /// assert!(honey.viscosity > 1000.0 * Fluid::water().viscosity);
+    /// ```
+    pub fn honey() -> Self {
+        Self {
+            density: 1420.0,
+            viscosity: 10.0,
+        }
+    }
+
+    /// Creates a `Fluid` representing seawater at 20°C.
+    ///
+    /// Properties:
+    /// - Density: 1025 kg/m³
+    /// - Dynamic viscosity: 0.00108 Pa·s
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let seawater = Fluid::seawater();
+    /// // Seawater is slightly denser than freshwater
+    /// assert!(seawater.density > Fluid::water().density);
+    /// ```
+    pub fn seawater() -> Self {
+        Self {
+            density: 1025.0,
+            viscosity: 0.00108,
+        }
+    }
+
+    /// Creates a `Fluid` representing glycerin at 20°C.
+    ///
+    /// Properties:
+    /// - Density: 1261 kg/m³
+    /// - Dynamic viscosity: 1.5 Pa·s
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let glycerin = Fluid::glycerin();
+    /// assert!(glycerin.viscosity > Fluid::oil().viscosity);
+    /// ```
+    pub fn glycerin() -> Self {
+        Self {
+            density: 1261.0,
+            viscosity: 1.5,
+        }
+    }
+
+    /// Calculates the kinematic viscosity (ν = μ/ρ).
+    ///
+    /// # Returns
+    /// The kinematic viscosity in m²/s.
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let water = Fluid::water();
+    /// let kinematic = water.kinematic_viscosity();
+    /// // Approximately 1e-6 m²/s for water
+    /// assert!((kinematic - 1e-6).abs() < 1e-7);
+    /// ```
+    #[inline]
+    pub fn kinematic_viscosity(&self) -> f64 {
+        self.viscosity / self.density
     }
 }
 

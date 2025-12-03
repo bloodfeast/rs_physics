@@ -1,6 +1,8 @@
 // src/fluid_simulation.rs
 
 use crate::utils::PhysicsError;
+use super::validation::{validate_dimensions_2d, validate_non_negative, validate_positive, validate_position_2d};
+use super::solver::{SolverConfig, BoundaryType};
 use std::vec::Vec;
 
 /// A 2D grid-based fluid simulation using the Eulerian method.
@@ -18,6 +20,7 @@ use std::vec::Vec;
 /// * `diffusion` - The rate at which quantities diffuse through the fluid
 /// * `viscosity` - The fluid's resistance to flow
 /// * `dt` - The time step for the simulation
+/// * `solver_config` - Configuration for the iterative solver
 pub struct FluidGrid {
     width: usize,
     height: usize,
@@ -27,6 +30,7 @@ pub struct FluidGrid {
     diffusion: f64,
     viscosity: f64,
     dt: f64,
+    solver_config: SolverConfig,
 }
 
 impl FluidGrid {
@@ -61,15 +65,43 @@ impl FluidGrid {
         viscosity: f64,
         dt: f64,
     ) -> Result<Self, PhysicsError> {
-        if width == 0 || height == 0 {
-            return Err(PhysicsError::InvalidArea);
-        }
-        if diffusion < 0.0 || viscosity < 0.0 {
-            return Err(PhysicsError::InvalidCoefficient);
-        }
-        if dt <= 0.0 {
-            return Err(PhysicsError::InvalidTime);
-        }
+        Self::with_solver(width, height, diffusion, viscosity, dt, SolverConfig::default())
+    }
+
+    /// Creates a new fluid simulation grid with custom solver configuration.
+    ///
+    /// # Arguments
+    /// * `width` - The width of the simulation grid
+    /// * `height` - The height of the simulation grid
+    /// * `diffusion` - The rate of diffusion (must be non-negative)
+    /// * `viscosity` - The fluid viscosity (must be non-negative)
+    /// * `dt` - The time step for the simulation (must be positive)
+    /// * `solver_config` - Configuration for the iterative solver
+    ///
+    /// # Returns
+    /// * `Ok(FluidGrid)` - A new fluid simulation grid if all parameters are valid
+    /// * `Err(PhysicsError)` - If any parameters are invalid
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::{FluidGrid, SolverConfig};
+    ///
+    /// // Create a high-quality simulation with more solver iterations
+    /// let config = SolverConfig::high_quality();
+    /// let fluid = FluidGrid::with_solver(100, 100, 0.1, 0.001, 0.016, config).unwrap();
+    /// ```
+    pub fn with_solver(
+        width: usize,
+        height: usize,
+        diffusion: f64,
+        viscosity: f64,
+        dt: f64,
+        solver_config: SolverConfig,
+    ) -> Result<Self, PhysicsError> {
+        validate_dimensions_2d(width, height)?;
+        validate_non_negative(diffusion, "diffusion").map_err(|_| PhysicsError::InvalidCoefficient)?;
+        validate_non_negative(viscosity, "viscosity").map_err(|_| PhysicsError::InvalidCoefficient)?;
+        validate_positive(dt, "dt").map_err(|_| PhysicsError::InvalidTime)?;
 
         let size = width * height;
         Ok(Self {
@@ -81,6 +113,7 @@ impl FluidGrid {
             diffusion,
             viscosity,
             dt,
+            solver_config,
         })
     }
 
@@ -111,9 +144,7 @@ impl FluidGrid {
     /// assert!(fluid.add_density(100, 50, 1.0).is_err());
     /// ```
     pub fn add_density(&mut self, x: usize, y: usize, amount: f64) -> Result<(), PhysicsError> {
-        if x >= self.width || y >= self.height {
-            return Err(PhysicsError::CalculationError("Position out of bounds".to_string()));
-        }
+        validate_position_2d(x, y, self.width, self.height)?;
         let idx = self.get_index(x, y);
         self.density[idx] += amount;
         Ok(())
@@ -147,9 +178,7 @@ impl FluidGrid {
     /// fluid.add_velocity(55, 55, -1.0, -1.0).unwrap();
     /// ```
     pub fn add_velocity(&mut self, x: usize, y: usize, amount_x: f64, amount_y: f64) -> Result<(), PhysicsError> {
-        if x >= self.width || y >= self.height {
-            return Err(PhysicsError::CalculationError("Position out of bounds".to_string()));
-        }
+        validate_position_2d(x, y, self.width, self.height)?;
         let idx = self.get_index(x, y);
         self.velocity_x[idx] += amount_x;
         self.velocity_y[idx] += amount_y;
@@ -195,8 +224,8 @@ impl FluidGrid {
         // Diffuse velocity
         {
             let a = self.dt * self.viscosity * (self.width * self.height) as f64;
-            self.lin_solve(1, &mut velocity_x0, &self.velocity_x, a, 1.0 + 4.0 * a);
-            self.lin_solve(2, &mut velocity_y0, &self.velocity_y, a, 1.0 + 4.0 * a);
+            self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 4.0 * a);
+            self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 4.0 * a);
         }
 
         // Project velocity
@@ -207,8 +236,8 @@ impl FluidGrid {
             let mut next_velocity_x = vec![0.0; size];
             let mut next_velocity_y = vec![0.0; size];
 
-            self.advect(1, &mut next_velocity_x, &velocity_x0, &velocity_x0, &velocity_y0);
-            self.advect(2, &mut next_velocity_y, &velocity_y0, &velocity_x0, &velocity_y0);
+            self.advect(BoundaryType::VelocityX, &mut next_velocity_x, &velocity_x0, &velocity_x0, &velocity_y0);
+            self.advect(BoundaryType::VelocityY, &mut next_velocity_y, &velocity_y0, &velocity_x0, &velocity_y0);
 
             self.velocity_x = next_velocity_x;
             self.velocity_y = next_velocity_y;
@@ -226,13 +255,13 @@ impl FluidGrid {
         // Diffuse density
         {
             let a = self.dt * self.diffusion * (self.width * self.height) as f64;
-            self.lin_solve(0, &mut density0, &self.density, a, 1.0 + 4.0 * a);
+            self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 4.0 * a);
         }
 
         // Advect density
         {
             let mut next_density = vec![0.0; size];
-            self.advect(0, &mut next_density, &density0, &self.velocity_x, &self.velocity_y);
+            self.advect(BoundaryType::Density, &mut next_density, &density0, &self.velocity_x, &self.velocity_y);
             self.density = next_density;
         }
     }
@@ -262,9 +291,7 @@ impl FluidGrid {
     /// assert!(fluid.get_density(100, 50).is_err());
     /// ```
     pub fn get_density(&self, x: usize, y: usize) -> Result<f64, PhysicsError> {
-        if x >= self.width || y >= self.height {
-            return Err(PhysicsError::CalculationError("Position out of bounds".to_string()));
-        }
+        validate_position_2d(x, y, self.width, self.height)?;
         Ok(self.density[self.get_index(x, y)])
     }
 
@@ -295,9 +322,7 @@ impl FluidGrid {
     /// assert_eq!(magnitude, 2.0_f64.sqrt());
     /// ```
     pub fn get_velocity(&self, x: usize, y: usize) -> Result<(f64, f64), PhysicsError> {
-        if x >= self.width || y >= self.height {
-            return Err(PhysicsError::CalculationError("Position out of bounds".to_string()));
-        }
+        validate_position_2d(x, y, self.width, self.height)?;
         let idx = self.get_index(x, y);
         Ok((self.velocity_x[idx], self.velocity_y[idx]))
     }
@@ -339,9 +364,9 @@ impl FluidGrid {
             }
         }
 
-        self.set_boundaries(0, &mut div);
-        self.set_boundaries(0, &mut p);
-        self.lin_solve(0, &mut p, &div, 1.0, 4.0);
+        self.set_boundaries(BoundaryType::Density, &mut div);
+        self.set_boundaries(BoundaryType::Density, &mut p);
+        self.lin_solve(BoundaryType::Density, &mut p, &div, 1.0, 4.0);
 
         // Subtract pressure gradient
         for i in 1..self.width-1 {
@@ -352,17 +377,17 @@ impl FluidGrid {
             }
         }
 
-        self.set_boundaries(1, velocity_x);
-        self.set_boundaries(2, velocity_y);
+        self.set_boundaries(BoundaryType::VelocityX, velocity_x);
+        self.set_boundaries(BoundaryType::VelocityY, velocity_y);
     }
 
     /// Sets the boundary conditions for the fluid simulation.
     ///
     /// # Arguments
-    /// * `b` - The boundary condition type:
-    ///   * 0 for density (no-flux condition)
-    ///   * 1 for x-velocity (no-slip condition)
-    ///   * 2 for y-velocity (no-slip condition)
+    /// * `boundary_type` - The type of boundary condition to apply:
+    ///   * `BoundaryType::Density` - no-flux condition (values continuous at boundary)
+    ///   * `BoundaryType::VelocityX` - no-slip condition for x-velocity (negated at left/right walls)
+    ///   * `BoundaryType::VelocityY` - no-slip condition for y-velocity (negated at top/bottom walls)
     /// * `x` - The field to apply boundary conditions to
     ///
     /// # Note
@@ -370,33 +395,36 @@ impl FluidGrid {
     /// - Fluid cannot flow through walls (no-slip condition)
     /// - Density is conserved at boundaries (no-flux condition)
     /// - Corner values are properly interpolated
-    fn set_boundaries(&self, b: i32, x: &mut Vec<f64>) {
+    fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut Vec<f64>) {
+        // Top and bottom boundaries
         for i in 1..self.width-1 {
-            x[self.get_index(i, 0)] = if b == 2 {
+            x[self.get_index(i, 0)] = if boundary_type == BoundaryType::VelocityY {
                 -x[self.get_index(i, 1)]
             } else {
                 x[self.get_index(i, 1)]
             };
-            x[self.get_index(i, self.height-1)] = if b == 2 {
+            x[self.get_index(i, self.height-1)] = if boundary_type == BoundaryType::VelocityY {
                 -x[self.get_index(i, self.height-2)]
             } else {
                 x[self.get_index(i, self.height-2)]
             };
         }
 
+        // Left and right boundaries
         for j in 1..self.height-1 {
-            x[self.get_index(0, j)] = if b == 1 {
+            x[self.get_index(0, j)] = if boundary_type == BoundaryType::VelocityX {
                 -x[self.get_index(1, j)]
             } else {
                 x[self.get_index(1, j)]
             };
-            x[self.get_index(self.width-1, j)] = if b == 1 {
+            x[self.get_index(self.width-1, j)] = if boundary_type == BoundaryType::VelocityX {
                 -x[self.get_index(self.width-2, j)]
             } else {
                 x[self.get_index(self.width-2, j)]
             };
         }
 
+        // Corner interpolation
         x[self.get_index(0, 0)] = 0.5 * (
             x[self.get_index(1, 0)] +
                 x[self.get_index(0, 1)]
@@ -418,7 +446,7 @@ impl FluidGrid {
     /// Solves a linear system using Gauss-Seidel relaxation.
     ///
     /// # Arguments
-    /// * `b` - The boundary condition type
+    /// * `boundary_type` - The boundary condition type to apply after each iteration
     /// * `x` - The field to solve for
     /// * `x0` - The source field
     /// * `a` - The diffusion/viscosity rate multiplied by dt
@@ -427,10 +455,9 @@ impl FluidGrid {
     /// # Note
     /// This method performs iterative relaxation to solve the diffusion equation:
     /// x = (x0 + a * (left + right + top + bottom)) / c
-    /// The number of iterations affects the accuracy of the solution.
-    fn lin_solve(&self, b: i32, x: &mut Vec<f64>, x0: &Vec<f64>, a: f64, c: f64) {
-        let iter = 4;
-        for _ in 0..iter {
+    /// The number of iterations is controlled by `solver_config.iterations`.
+    fn lin_solve(&self, boundary_type: BoundaryType, x: &mut Vec<f64>, x0: &Vec<f64>, a: f64, c: f64) {
+        for _ in 0..self.solver_config.iterations {
             for i in 1..self.width-1 {
                 for j in 1..self.height-1 {
                     let idx = self.get_index(i, j);
@@ -442,14 +469,14 @@ impl FluidGrid {
                     )) / c;
                 }
             }
-            self.set_boundaries(b, x);
+            self.set_boundaries(boundary_type, x);
         }
     }
 
     /// Performs semi-Lagrangian advection of a quantity through the velocity field.
     ///
     /// # Arguments
-    /// * `b` - The boundary condition type
+    /// * `boundary_type` - The boundary condition type to apply after advection
     /// * `d` - The field to advect (output)
     /// * `d0` - The source field
     /// * `velocity_x` - The x-component of the velocity field
@@ -461,7 +488,7 @@ impl FluidGrid {
     /// 2. Interpolates the source field at the traced positions
     /// 3. Uses bilinear interpolation for smooth results
     /// 4. Ensures particles stay within the grid bounds
-    fn advect(&self, b: i32, d: &mut Vec<f64>, d0: &Vec<f64>, velocity_x: &Vec<f64>, velocity_y: &Vec<f64>) {
+    fn advect(&self, boundary_type: BoundaryType, d: &mut Vec<f64>, d0: &Vec<f64>, velocity_x: &Vec<f64>, velocity_y: &Vec<f64>) {
         let dt0 = self.dt * self.width as f64;
 
         for i in 1..self.width-1 {
@@ -488,7 +515,7 @@ impl FluidGrid {
             }
         }
 
-        self.set_boundaries(b, d);
+        self.set_boundaries(boundary_type, d);
     }
 
     /// Gets the width of the simulation grid.
@@ -529,6 +556,43 @@ impl FluidGrid {
     /// The time step in seconds.
     pub fn get_dt(&self) -> f64 {
         self.dt
+    }
+
+    /// Gets the current solver configuration.
+    ///
+    /// # Returns
+    /// A copy of the solver configuration.
+    pub fn get_solver_config(&self) -> SolverConfig {
+        self.solver_config
+    }
+
+    /// Gets the number of solver iterations.
+    ///
+    /// # Returns
+    /// The number of iterations used in the linear solver.
+    pub fn get_solver_iterations(&self) -> usize {
+        self.solver_config.iterations
+    }
+
+    /// Sets the number of solver iterations.
+    ///
+    /// # Arguments
+    /// * `iterations` - The new number of iterations (must be at least 1)
+    ///
+    /// # Note
+    /// More iterations = more accurate but slower simulation.
+    /// - 2-4: Fast, less accurate (good for real-time)
+    /// - 10-20: High quality (good for offline rendering)
+    pub fn set_solver_iterations(&mut self, iterations: usize) {
+        self.solver_config.iterations = iterations.max(1);
+    }
+
+    /// Sets the solver configuration.
+    ///
+    /// # Arguments
+    /// * `config` - The new solver configuration
+    pub fn set_solver_config(&mut self, config: SolverConfig) {
+        self.solver_config = config;
     }
 
     /// Sets the diffusion rate of the fluid.

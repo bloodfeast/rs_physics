@@ -78,8 +78,9 @@ fn test_epa_sphere_sphere_contact_info() {
 
     // Verify the contact information
     if let Some(info) = contact {
-        // Normal should point from shape2 to shape1 (negative x direction)
-        assert!(info.normal.0 < 0.0, "Contact normal should point from shape2 to shape1");
+        // Normal should point from shape1 to shape2 (positive x direction)
+        // This is the standardized convention: normal FROM shape1 TO shape2
+        assert!(info.normal.0 > 0.0, "Contact normal should point from shape1 to shape2");
 
         // Penetration depth should be approximately (2.0 - 1.5) = 0.5
         assert!((info.penetration - 0.5).abs() < 0.01,
@@ -510,8 +511,9 @@ fn test_epa_cuboid_cuboid_contact_info() {
     // Verify the contact information
     if let Some(info) = contact {
         println!("Contact info: {:?}", info);
-        // Normal should point from shape2 to shape1 (negative x direction)
-        assert!(info.normal.0 < 0.0, "Contact normal should point from shape2 to shape1");
+        // Normal should point from shape1 to shape2 (positive x direction)
+        // This is the standardized convention: normal FROM shape1 TO shape2
+        assert!(info.normal.0 > 0.0, "Contact normal should point from shape1 to shape2");
 
         // Penetration depth should be approximately 0.5
         assert!((info.penetration - 0.5).abs() < 0.1,
@@ -1036,4 +1038,71 @@ fn debug_gjk_false_positives() {
     assert!(support_dot_dir < 0.0,
             "Support dot direction should be negative for non-colliding shapes, got {}",
             support_dot_dir);
+}
+
+#[test]
+fn test_sphere_ground_cuboid_collision() {
+    use crate::interactions::gjk_collision_3d::{gjk_collision_detection_ex, epa_contact_points_ex, GjkResult};
+
+    // Ground: 200x2x200 cuboid at y=-1 (top surface at y=0)
+    let ground_shape = Shape3D::Cuboid(200.0, 2.0, 200.0);
+    let ground_pos = (0.0, -1.0, 0.0);
+    let ground_orient = Quaternion::identity();
+
+    // Sphere: radius 1
+    let sphere_shape = Shape3D::Sphere(1.0);
+    let sphere_orient = Quaternion::identity();
+
+    println!("\n=== Testing sphere-ground collision ===");
+    println!("Ground: Cuboid(200x2x200) at y=-1 (top surface at y=0)");
+
+    // Test 1: Sphere penetrating ground (bottom at y=-0.5)
+    let penetrating_pos = (0.0, 0.5, 0.0);
+    println!("\nTest 1: Sphere at y=0.5 (bottom at y=-0.5, penetrating ground by 0.5)");
+    let result = gjk_collision_detection_ex(
+        &sphere_shape, penetrating_pos, sphere_orient,
+        &ground_shape, ground_pos, ground_orient
+    );
+    match &result {
+        GjkResult::NoCollision => println!("  NO COLLISION - THIS IS A BUG!"),
+        GjkResult::SphereSphere { .. } => println!("  Sphere-sphere (unexpected!)"),
+        GjkResult::Collision(_) => {
+            println!("  Collision detected (correct!)");
+            if let Some(contact) = epa_contact_points_ex(
+                &sphere_shape, penetrating_pos, sphere_orient,
+                &ground_shape, ground_pos, ground_orient,
+                &result
+            ) {
+                println!("  Contact normal: {:?}", contact.normal);
+                println!("  Penetration: {}", contact.penetration);
+            }
+        }
+    }
+    assert!(!matches!(result, GjkResult::NoCollision),
+        "Should detect collision when sphere penetrates ground");
+
+    // Test 2: Sphere above ground (no collision)
+    let above_pos = (0.0, 2.0, 0.0);
+    println!("\nTest 2: Sphere at y=2.0 (bottom at y=1.0, above ground)");
+    let result = gjk_collision_detection_ex(
+        &sphere_shape, above_pos, sphere_orient,
+        &ground_shape, ground_pos, ground_orient
+    );
+    assert!(matches!(result, GjkResult::NoCollision),
+        "Should NOT detect collision when sphere is above ground");
+    println!("  No collision (correct!)");
+
+    // Test 3: Sphere just touching ground (bottom at y=0)
+    let touching_pos = (0.0, 1.0, 0.0);
+    println!("\nTest 3: Sphere at y=1.0 (bottom at y=0, just touching)");
+    let result = gjk_collision_detection_ex(
+        &sphere_shape, touching_pos, sphere_orient,
+        &ground_shape, ground_pos, ground_orient
+    );
+    // At exact touching, collision detection may or may not trigger (edge case)
+    println!("  Result: {:?}", match &result {
+        GjkResult::NoCollision => "No collision",
+        GjkResult::SphereSphere { .. } => "Sphere-sphere",
+        GjkResult::Collision(_) => "Collision",
+    });
 }

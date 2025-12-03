@@ -1,13 +1,32 @@
-use crate::interactions::{cross_product, dot_product, normalize_vector, vector_magnitude};
+use crate::interactions::{cross_product, dot_product, vector_magnitude};
 use crate::models::{Quaternion, Shape3D, Simplex, SupportPoint};
+use std::collections::HashMap;
 
 /// Contact information from collision detection
+/// Normal convention: points FROM shape1 TO shape2
 #[derive(Debug, Clone)]
 pub struct ContactInfo {
     pub point1: (f64, f64, f64),
     pub point2: (f64, f64, f64),
-    pub normal: (f64, f64, f64),
+    pub normal: (f64, f64, f64),  // FROM shape1 TO shape2
     pub penetration: f64,
+}
+
+/// Result of GJK collision detection
+/// Distinguishes between different collision types to avoid degenerate simplexes
+#[derive(Debug, Clone)]
+pub enum GjkResult {
+    /// No collision detected
+    NoCollision,
+    /// Sphere-sphere collision (avoid degenerate simplex)
+    SphereSphere {
+        pos1: (f64, f64, f64),
+        pos2: (f64, f64, f64),
+        r1: f64,
+        r2: f64,
+    },
+    /// General collision with valid simplex for EPA
+    Collision(Simplex),
 }
 
 /// EPA face for contact generation
@@ -18,14 +37,57 @@ pub struct Face {
     distance: f64,
 }
 
-// Production tolerances - tested across thousands of edge cases
+// Production tolerances
 const EPSILON: f64 = 1e-12;
 const GJK_MAX_ITERATIONS: usize = 32;
 const EPA_MAX_ITERATIONS: usize = 64;
 const EPA_TOLERANCE: f64 = 1e-6;
 
-/// Production GJK collision detection
-/// Used in AAA games - handles all edge cases robustly
+/// Production GJK collision detection - returns GjkResult for proper handling
+/// This is the preferred API that distinguishes sphere-sphere from general collisions
+pub fn gjk_collision_detection_ex(
+    shape1: &Shape3D,
+    position1: (f64, f64, f64),
+    orientation1: Quaternion,
+    shape2: &Shape3D,
+    position2: (f64, f64, f64),
+    orientation2: Quaternion
+) -> GjkResult {
+    // Fast path for sphere-sphere (30% of collisions in typical games)
+    // Returns SphereSphere variant to avoid degenerate simplex
+    if let (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) = (shape1, shape2) {
+        let dx = position2.0 - position1.0;
+        let dy = position2.1 - position1.1;
+        let dz = position2.2 - position1.2;
+        let dist_sq = dx*dx + dy*dy + dz*dz;
+        let sum_radii = *r1 + *r2;
+
+        if dist_sq <= sum_radii * sum_radii {
+            return GjkResult::SphereSphere {
+                pos1: position1,
+                pos2: position2,
+                r1: *r1,
+                r2: *r2,
+            };
+        } else {
+            return GjkResult::NoCollision;
+        }
+    }
+
+    // Broad phase culling - saves 60% of GJK calls
+    if !broad_phase_check(shape1, position1, shape2, position2) {
+        return GjkResult::NoCollision;
+    }
+
+    match run_gjk_core(shape1, position1, orientation1, shape2, position2, orientation2) {
+        Some(simplex) => GjkResult::Collision(simplex),
+        None => GjkResult::NoCollision,
+    }
+}
+
+/// Legacy GJK collision detection - returns Option<Simplex> for backwards compatibility
+/// Note: For sphere-sphere collisions, returns a dummy simplex. Use gjk_collision_detection_ex
+/// with epa_contact_points_ex for proper sphere handling.
 pub fn gjk_collision_detection(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
@@ -34,36 +96,10 @@ pub fn gjk_collision_detection(
     position2: (f64, f64, f64),
     orientation2: Quaternion
 ) -> Option<Simplex> {
-    // Fast path for sphere-sphere (30% of collisions in typical games)
-    if let (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) = (shape1, shape2) {
-        return sphere_sphere_check(position1, position2, *r1, *r2);
-    }
-
-    // Broad phase culling - saves 60% of GJK calls
-    if !broad_phase_check(shape1, position1, shape2, position2) {
-        return None;
-    }
-
-    run_gjk_core(shape1, position1, orientation1, shape2, position2, orientation2)
-}
-
-/// Optimized sphere-sphere collision
-fn sphere_sphere_check(
-    pos1: (f64, f64, f64),
-    pos2: (f64, f64, f64),
-    r1: f64,
-    r2: f64
-) -> Option<Simplex> {
-    let dx = pos2.0 - pos1.0;
-    let dy = pos2.1 - pos1.1;
-    let dz = pos2.2 - pos1.2;
-    let dist_sq = dx*dx + dy*dy + dz*dz;
-    let sum_radii_sq = (r1 + r2) * (r1 + r2);
-
-    if dist_sq <= sum_radii_sq {
-        Some(create_collision_simplex())
-    } else {
-        None
+    match gjk_collision_detection_ex(shape1, position1, orientation1, shape2, position2, orientation2) {
+        GjkResult::NoCollision => None,
+        GjkResult::SphereSphere { .. } => Some(create_collision_simplex()),
+        GjkResult::Collision(simplex) => Some(simplex),
     }
 }
 
@@ -349,7 +385,9 @@ pub fn get_support_point_for_shape(
             polyhedron_support(vertices, local_dir)
         },
 
-        _ => (0.0, 0.0, 0.0)
+        Shape3D::Cylinder(radius, height) => {
+            cylinder_support(*radius, *height, local_dir)
+        },
     };
 
     // Transform back to world space
@@ -429,6 +467,28 @@ fn polyhedron_support(vertices: &[(f64, f64, f64)], direction: (f64, f64, f64)) 
     best_vertex
 }
 
+/// Cylinder support function
+/// Cylinder is centered at origin with axis along Y, radius in XZ plane
+fn cylinder_support(radius: f64, height: f64, direction: (f64, f64, f64)) -> (f64, f64, f64) {
+    let half_height = height * 0.5;
+
+    // Project direction onto XZ plane for circular cross-section
+    let xz_length = (direction.0 * direction.0 + direction.2 * direction.2).sqrt();
+
+    let (x, z) = if xz_length > EPSILON {
+        // Normalize and scale by radius
+        (direction.0 / xz_length * radius, direction.2 / xz_length * radius)
+    } else {
+        // Direction is along Y axis - pick arbitrary point on circle
+        (radius, 0.0)
+    };
+
+    // Y component: top or bottom cap
+    let y = if direction.1 >= 0.0 { half_height } else { -half_height };
+
+    (x, y, z)
+}
+
 /// Minkowski difference support point
 pub fn get_support_point(
     shape1: &Shape3D,
@@ -449,7 +509,31 @@ pub fn get_support_point(
     }
 }
 
-/// Production EPA implementation for contact generation
+/// Production EPA implementation for contact generation - uses GjkResult
+/// This is the preferred API that properly handles sphere-sphere without degenerate simplex
+pub fn epa_contact_points_ex(
+    shape1: &Shape3D,
+    position1: (f64, f64, f64),
+    orientation1: Quaternion,
+    shape2: &Shape3D,
+    position2: (f64, f64, f64),
+    orientation2: Quaternion,
+    gjk_result: &GjkResult
+) -> Option<ContactInfo> {
+    match gjk_result {
+        GjkResult::NoCollision => None,
+        GjkResult::SphereSphere { pos1, pos2, r1, r2 } => {
+            sphere_sphere_contact(*pos1, *pos2, *r1, *r2)
+        }
+        GjkResult::Collision(simplex) => {
+            run_epa(shape1, position1, orientation1, shape2, position2, orientation2, simplex)
+        }
+    }
+}
+
+/// Legacy EPA implementation for contact generation - takes simplex directly
+/// Note: For sphere-sphere, this function detects and handles them specially,
+/// but using epa_contact_points_ex with GjkResult is preferred.
 pub fn epa_contact_points(
     shape1: &Shape3D,
     position1: (f64, f64, f64),
@@ -459,7 +543,7 @@ pub fn epa_contact_points(
     orientation2: Quaternion,
     simplex: &Simplex
 ) -> Option<ContactInfo> {
-    // Fast path for spheres
+    // Fast path for spheres - detect and handle directly
     if let (Shape3D::Sphere(r1), Shape3D::Sphere(r2)) = (shape1, shape2) {
         return sphere_sphere_contact(position1, position2, *r1, *r2);
     }
@@ -468,14 +552,15 @@ pub fn epa_contact_points(
     run_epa(shape1, position1, orientation1, shape2, position2, orientation2, simplex)
 }
 
-/// Optimized sphere-sphere contact generation
-fn sphere_sphere_contact(
+/// Direct sphere-sphere contact generation (no simplex needed)
+/// Normal convention: FROM sphere1 TO sphere2
+pub fn sphere_sphere_contact(
     pos1: (f64, f64, f64),
     pos2: (f64, f64, f64),
     r1: f64,
     r2: f64
 ) -> Option<ContactInfo> {
-    let delta = sub_vec(pos2, pos1);
+    let delta = sub_vec(pos2, pos1);  // Vector from sphere1 to sphere2
     let distance = vector_magnitude(delta);
 
     if distance >= r1 + r2 {
@@ -484,14 +569,17 @@ fn sphere_sphere_contact(
 
     let penetration = r1 + r2 - distance;
 
+    // Normal points FROM sphere1 TO sphere2 (standardized convention)
     let normal = if distance > EPSILON {
-        scale_vec(delta, -1.0 / distance) // From shape2 to shape1
+        scale_vec(delta, 1.0 / distance)  // Normalized direction from 1 to 2
     } else {
-        (-1.0, 0.0, 0.0) // Default when centers coincide
+        (1.0, 0.0, 0.0) // Default when centers coincide
     };
 
-    let point1 = add_vec(pos1, scale_vec(normal, -r1));
-    let point2 = add_vec(pos2, scale_vec(normal, r2));
+    // Contact point on sphere1's surface (along normal direction)
+    let point1 = add_vec(pos1, scale_vec(normal, r1));
+    // Contact point on sphere2's surface (opposite to normal direction)
+    let point2 = sub_vec(pos2, scale_vec(normal, r2));
 
     Some(ContactInfo {
         point1,
@@ -607,40 +695,133 @@ fn find_closest_face(faces: &[Face]) -> (usize, f64) {
     (closest_idx, min_distance)
 }
 
-/// Expand polytope with new support point
+/// Expand polytope with new support point using horizon edge algorithm
+/// This properly removes ALL visible faces, not just one
 fn expand_polytope(
     polytope: &mut Vec<SupportPoint>,
     faces: &mut Vec<Face>,
     support: SupportPoint,
-    remove_face_idx: usize
+    _remove_face_idx: usize  // Ignored - we find all visible faces
 ) {
-    let removed_face = faces.remove(remove_face_idx);
-    polytope.push(support);
+    polytope.push(support.clone());
     let new_vertex_idx = polytope.len() - 1;
+    let new_point = support.point;
 
-    // Create new faces from edges
-    let edges = [
-        [removed_face.indices[0], removed_face.indices[1]],
-        [removed_face.indices[1], removed_face.indices[2]],
-        [removed_face.indices[2], removed_face.indices[0]]
-    ];
+    // Find ALL faces visible from the new support point
+    let mut visible_indices: Vec<usize> = Vec::new();
+    for (i, face) in faces.iter().enumerate() {
+        // Face is visible if the new point is in front of it
+        let face_point = polytope[face.indices[0]].point;
+        let to_new_point = sub_vec(new_point, face_point);
+        if dot_product(face.normal, to_new_point) > EPSILON {
+            visible_indices.push(i);
+        }
+    }
 
-    for &edge in &edges {
-        let new_indices = [edge[0], edge[1], new_vertex_idx];
-        if let Some(face) = create_epa_face(polytope, new_indices) {
+    // If no faces are visible, something is wrong - fallback to single face removal
+    if visible_indices.is_empty() {
+        // Use the closest face as fallback
+        let (closest_idx, _) = find_closest_face(faces);
+        visible_indices.push(closest_idx);
+    }
+
+    // Collect all edges from visible faces and count occurrences
+    // Horizon edges appear exactly once; internal edges appear twice
+    let mut edge_count: HashMap<(usize, usize), usize> = HashMap::new();
+
+    for &face_idx in &visible_indices {
+        let face = &faces[face_idx];
+        let edges = [
+            (face.indices[0], face.indices[1]),
+            (face.indices[1], face.indices[2]),
+            (face.indices[2], face.indices[0]),
+        ];
+
+        for (a, b) in edges {
+            // Use canonical edge representation (smaller index first)
+            let edge = if a < b { (a, b) } else { (b, a) };
+            *edge_count.entry(edge).or_insert(0) += 1;
+        }
+    }
+
+    // Horizon edges are those that appear exactly once
+    let horizon_edges: Vec<(usize, usize)> = edge_count
+        .into_iter()
+        .filter(|(_, count)| *count == 1)
+        .map(|(edge, _)| edge)
+        .collect();
+
+    // Remove visible faces (in reverse order to preserve indices)
+    visible_indices.sort_by(|a, b| b.cmp(a));
+    for idx in visible_indices {
+        faces.remove(idx);
+    }
+
+    // Create new faces connecting horizon edges to new point
+    for (a, b) in horizon_edges {
+        // We need to determine correct winding order
+        // Try both orientations and pick the one with outward-pointing normal
+        let indices1 = [a, b, new_vertex_idx];
+        let indices2 = [b, a, new_vertex_idx];
+
+        // Create face with first winding
+        if let Some(face) = create_epa_face_with_orientation(polytope, indices1) {
+            faces.push(face);
+        } else if let Some(face) = create_epa_face_with_orientation(polytope, indices2) {
             faces.push(face);
         }
     }
 }
 
-/// Build final contact information
+/// Create EPA face ensuring normal points away from origin
+fn create_epa_face_with_orientation(polytope: &[SupportPoint], indices: [usize; 3]) -> Option<Face> {
+    let a = polytope[indices[0]].point;
+    let b = polytope[indices[1]].point;
+    let c = polytope[indices[2]].point;
+
+    let ab = sub_vec(b, a);
+    let ac = sub_vec(c, a);
+    let normal = cross_product(ab, ac);
+
+    let normal_length = vector_magnitude(normal);
+    if normal_length < EPSILON {
+        return None;
+    }
+
+    let unit_normal = scale_vec(normal, 1.0 / normal_length);
+
+    // Distance from origin to face plane
+    let distance = dot_product(unit_normal, a);
+
+    // For EPA, we want the normal pointing away from origin (positive distance)
+    if distance >= 0.0 {
+        Some(Face {
+            indices,
+            normal: unit_normal,
+            distance,
+        })
+    } else {
+        // Flip the face winding
+        Some(Face {
+            indices: [indices[0], indices[2], indices[1]],
+            normal: negate_vector(unit_normal),
+            distance: -distance,
+        })
+    }
+}
+
+/// Build final contact information with proper barycentric interpolation
 fn build_contact_info(
     polytope: &[SupportPoint],
     face: &Face,
     penetration: f64
 ) -> Option<ContactInfo> {
-    // Simple barycentric interpolation (production often uses more sophisticated methods)
-    let weights = (1.0/3.0, 1.0/3.0, 1.0/3.0);
+    let a = polytope[face.indices[0]].point;
+    let b = polytope[face.indices[1]].point;
+    let c = polytope[face.indices[2]].point;
+
+    // Project origin onto the face plane to get barycentric coordinates
+    let weights = compute_barycentric_coords((0.0, 0.0, 0.0), a, b, c);
 
     let point1 = interpolate_points(
         polytope[face.indices[0]].point_a,
@@ -656,12 +837,73 @@ fn build_contact_info(
         weights
     );
 
+    // Normal convention: FROM shape1 TO shape2
+    // EPA face normal points away from origin (outward from polytope in A-B space)
+    // This is the direction to push shape1 to separate from shape2
+    // For contact normal pointing FROM shape1 TO shape2, we keep it as-is
+    // (the opposite of the separation direction for shape1)
+    let normal = face.normal;
+
     Some(ContactInfo {
         point1,
         point2,
-        normal: negate_vector(face.normal), // From shape2 to shape1
+        normal,
         penetration,
     })
+}
+
+/// Compute barycentric coordinates for projecting point p onto triangle abc
+/// Returns (u, v, w) where u + v + w = 1
+fn compute_barycentric_coords(
+    p: (f64, f64, f64),
+    a: (f64, f64, f64),
+    b: (f64, f64, f64),
+    c: (f64, f64, f64)
+) -> (f64, f64, f64) {
+    let v0 = sub_vec(b, a);
+    let v1 = sub_vec(c, a);
+    let v2 = sub_vec(p, a);
+
+    let d00 = dot_product(v0, v0);
+    let d01 = dot_product(v0, v1);
+    let d11 = dot_product(v1, v1);
+    let d20 = dot_product(v2, v0);
+    let d21 = dot_product(v2, v1);
+
+    let denom = d00 * d11 - d01 * d01;
+
+    if denom.abs() < EPSILON {
+        // Degenerate triangle - fall back to centroid
+        return (1.0/3.0, 1.0/3.0, 1.0/3.0);
+    }
+
+    let v = (d11 * d20 - d01 * d21) / denom;
+    let w = (d00 * d21 - d01 * d20) / denom;
+    let u = 1.0 - v - w;
+
+    // Clamp to valid barycentric coordinates
+    clamp_barycentric(u, v, w)
+}
+
+/// Clamp barycentric coordinates to ensure they're valid (all >= 0, sum to 1)
+fn clamp_barycentric(u: f64, v: f64, w: f64) -> (f64, f64, f64) {
+    // If all coordinates are valid, return as-is
+    if u >= 0.0 && v >= 0.0 && w >= 0.0 {
+        return (u, v, w);
+    }
+
+    // Clamp negative values to 0 and renormalize
+    let u_clamped = u.max(0.0);
+    let v_clamped = v.max(0.0);
+    let w_clamped = w.max(0.0);
+
+    let sum = u_clamped + v_clamped + w_clamped;
+    if sum < EPSILON {
+        // All negative - return centroid
+        return (1.0/3.0, 1.0/3.0, 1.0/3.0);
+    }
+
+    (u_clamped / sum, v_clamped / sum, w_clamped / sum)
 }
 
 /// Interpolate three points with barycentric weights
@@ -753,10 +995,12 @@ pub fn handle_tetrahedron_case(simplex: &mut Simplex, direction: &mut (f64, f64,
     evolve_tetrahedron(simplex, direction)
 }
 
+/// Legacy function - now uses proper barycentric calculation
 pub fn barycentric_coordinates_of_closest_point(
-    _a: (f64, f64, f64),
-    _b: (f64, f64, f64),
-    _c: (f64, f64, f64)
+    a: (f64, f64, f64),
+    b: (f64, f64, f64),
+    c: (f64, f64, f64)
 ) -> (f64, f64, f64) {
-    (1.0/3.0, 1.0/3.0, 1.0/3.0) // Simplified for compatibility
+    // Project origin onto triangle and get barycentric coords
+    compute_barycentric_coords((0.0, 0.0, 0.0), a, b, c)
 }

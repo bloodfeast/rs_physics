@@ -10,6 +10,10 @@ pub mod thermodynamics;
 pub mod materials;
 pub mod models;
 pub mod particles;
+pub mod world;
+
+#[cfg(feature = "gpu")]
+pub mod gpu;
 
 /// ### General helper function
 /// - Asserts that two floating point numbers are approximately equal.

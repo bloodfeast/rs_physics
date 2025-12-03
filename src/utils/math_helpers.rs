@@ -101,7 +101,7 @@ pub fn minimax_atan(x: f32) -> f32 {
 /// Good for platforms where multiplication is expensive
 #[inline]
 pub fn cordic_atan2(y: f32, x: f32) -> f32 {
-    const QUARTER_PI: f32 = std::f32::consts::FRAC_PI_4;
+    const _QUARTER_PI: f32 = std::f32::consts::FRAC_PI_4;
 
     // Handle special cases
     if x == 0.0 && y == 0.0 {
@@ -216,11 +216,8 @@ impl AtanLookupTable {
     }
 
 }
-/// Vector utility: dot product
-#[inline]
-pub fn dot_product(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
-    a.0 * b.0 + a.1 * b.1 + a.2 * b.2
-}
+
+// NOTE: dot_product is now in crate::utils::vector3
 
 /// Vector utility: magnitude calculation
 #[inline]
@@ -230,6 +227,7 @@ pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
 
 /// Vector utility: normalization
 #[inline]
+#[allow(dead_code)]
 fn normalize_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
     let mag = crate::interactions::vector_magnitude(v);
     if mag > 1e-10 {

@@ -1,5 +1,6 @@
 use crate::forces::Force;
-use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, Velocity2D};
+use crate::models::{Axis2D, Direction2D, FromCoordinates, ObjectIn2D, Velocity2D, Shape2DCollider};
+use crate::rotational_dynamics::AngularState2D;
 use crate::utils::PhysicsConstants;
 
 impl ObjectIn2D {
@@ -28,6 +29,8 @@ impl ObjectIn2D {
             velocity: Velocity2D { x: vx, y: vy },
             position: Axis2D::from_coord(position),
             forces: Vec::new(),
+            angular: AngularState2D::default(),
+            shape: Shape2DCollider::default(),
         }
     }
 
@@ -70,6 +73,8 @@ impl ObjectIn2D {
             },
             position: Axis2D::from_coord(position),
             forces: Vec::new(),
+            angular: AngularState2D::default(),
+            shape: Shape2DCollider::default(),
         }
     }
 

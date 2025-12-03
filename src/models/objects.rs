@@ -1,5 +1,6 @@
 use crate::forces::Force;
-use crate::models::{Axis2D, Axis3D, Velocity2D, Velocity3D, ObjectIn2D, ObjectIn3D, ToObjectIn2D, ToObjectIn3D};
+use crate::models::{Axis2D, Axis3D, Velocity2D, Velocity3D, ObjectIn2D, ObjectIn3D, ToObjectIn2D, ToObjectIn3D, Shape2DCollider};
+use crate::rotational_dynamics::AngularState2D;
 
 pub trait FromCoordinates <T> {
     /// Creates a new instance of the struct from the given coordinates.
@@ -94,6 +95,8 @@ impl ToObjectIn2D for Object {
             velocity: Velocity2D { x: self.velocity, y: 0.0 },
             position: Axis2D { x: self.position, y: 0.0 },
             forces: self.forces.to_owned(),
+            angular: AngularState2D::default(),
+            shape: Shape2DCollider::default(),
         }
     }
 }

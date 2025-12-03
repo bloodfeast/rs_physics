@@ -2,6 +2,9 @@ use crate::forces::Force;
 use crate::models::{Axis3D, Direction3D, FromCoordinates, ObjectIn3D, Velocity3D};
 use crate::utils::PhysicsConstants;
 
+// Re-export vector math from shared utils module for backwards compatibility
+pub use crate::utils::vector3::{cross_product, dot_product, magnitude as vector_magnitude, normalize as normalize_vec};
+
 impl ObjectIn3D {
     /// Creates a new `ObjectIn3D` with the given mass, velocity components, and position.
     ///
@@ -343,76 +346,7 @@ pub fn apply_force_3d(
     Ok(())
 }
 
-/// Calculates the cross product of two 3D vectors.
-///
-/// # Arguments
-/// * `v1` - The first vector as a tuple (x, y, z).
-/// * `v2` - The second vector as a tuple (x, y, z).
-///
-/// # Returns
-/// The cross product vector as a tuple (x, y, z).
-///
-/// # Example
-/// ```
-/// use rs_physics::interactions::cross_product;
-///
-/// let v1 = (1.0, 0.0, 0.0);
-/// let v2 = (0.0, 1.0, 0.0);
-/// let result = cross_product(v1, v2);
-///
-/// assert_eq!(result, (0.0, 0.0, 1.0));
-/// ```
-pub fn cross_product(v1: (f64, f64, f64), v2: (f64, f64, f64)) -> (f64, f64, f64) {
-    (
-        v1.1 * v2.2 - v1.2 * v2.1,
-        v1.2 * v2.0 - v1.0 * v2.2,
-        v1.0 * v2.1 - v1.1 * v2.0
-    )
-}
-
-/// Calculates the dot product of two 3D vectors.
-///
-/// # Arguments
-/// * `v1` - The first vector as a tuple (x, y, z).
-/// * `v2` - The second vector as a tuple (x, y, z).
-///
-/// # Returns
-/// The dot product as a scalar.
-///
-/// # Example
-/// ```
-/// use rs_physics::interactions::dot_product;
-///
-/// let v1 = (1.0, 2.0, 3.0);
-/// let v2 = (4.0, 5.0, 6.0);
-/// let result = dot_product(v1, v2);
-///
-/// assert_eq!(result, 32.0); // 1*4 + 2*5 + 3*6 = 32
-/// ```
-pub fn dot_product(v1: (f64, f64, f64), v2: (f64, f64, f64)) -> f64 {
-    v1.0 * v2.0 + v1.1 * v2.1 + v1.2 * v2.2
-}
-
-/// Calculates the vector magnitude (length) of a 3D vector.
-///
-/// # Arguments
-/// * `v` - The vector as a tuple (x, y, z).
-///
-/// # Returns
-/// The magnitude of the vector.
-///
-/// # Example
-/// ```
-/// use rs_physics::interactions::vector_magnitude;
-///
-/// let v = (3.0, 4.0, 5.0);
-/// let magnitude = vector_magnitude(v);
-///
-/// assert!((magnitude - 7.0710678118654755).abs() < 1e-10);
-/// ```
-pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
-    (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt()
-}
+// NOTE: cross_product, dot_product, and vector_magnitude are now re-exported from crate::utils::vector3
 
 /// Normalizes a 3D vector (makes it a unit vector).
 ///
@@ -437,13 +371,13 @@ pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
 /// assert!((normalized.2 - 0.8).abs() < 1e-10);
 /// ```
 pub fn normalize_vector(v: (f64, f64, f64)) -> Result<(f64, f64, f64), &'static str> {
-    let magnitude = vector_magnitude(v);
+    let mag = vector_magnitude(v);
 
-    if magnitude == 0.0 {
+    if mag == 0.0 {
         return Err("Cannot normalize a zero vector");
     }
 
-    Ok((v.0 / magnitude, v.1 / magnitude, v.2 / magnitude))
+    Ok((v.0 / mag, v.1 / mag, v.2 / mag))
 }
 
 /// Rotates a 3D point around the x-axis.

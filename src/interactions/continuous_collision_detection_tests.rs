@@ -126,9 +126,12 @@ mod continuous_collision_detection_tests {
         let sphere2 = create_sphere((1.5, 0.0, 0.0), (0.0, 0.0, 0.0), 1.0, 1.0);
         let dt = 1.0;
 
-        // Should not report collision (discrete collision system should handle this)
+        // Should report t=0 collision for already-overlapping objects
         let result = check_continuous_collision(&sphere1, &sphere2, dt);
-        assert!(result.is_none());
+        assert!(result.is_some(), "Overlapping objects should return Some collision");
+        let collision = result.unwrap();
+        assert!(collision.time_of_impact.abs() < 1e-6, "TOI should be 0 for overlapping objects");
+        assert!(collision.will_collide, "Should report collision");
     }
 
     #[test]
@@ -319,8 +322,14 @@ mod continuous_collision_detection_tests {
         println!("Sphere 2: {:?}", sphere2);
 
         // Check that velocities are now reversed (elastic collision of equal masses)
-        assert!((sphere1.object.velocity.x - 1.0).abs() < 0.2); // Allow some tolerance for energy loss
-        assert!((sphere2.object.velocity.x + 1.0).abs() < 0.2);
+        // sphere1 started with +1.0, should now be negative (moving left)
+        // sphere2 started with -1.0, should now be positive (moving right)
+        // With restitution ~0.8, expect ~80% of energy conservation
+        assert!(sphere1.object.velocity.x < 0.0, "Sphere1 should be moving left after collision");
+        assert!(sphere2.object.velocity.x > 0.0, "Sphere2 should be moving right after collision");
+        // Allow for energy loss due to restitution coefficient
+        assert!((sphere1.object.velocity.x + 1.0).abs() < 0.3, "Sphere1 velocity should be around -1.0");
+        assert!((sphere2.object.velocity.x - 1.0).abs() < 0.3, "Sphere2 velocity should be around +1.0");
     }
 
     #[test]

@@ -1,0 +1,35 @@
+[package]
+name = "bevy_visual_tests"
+version = "0.1.0"
+edition = "2021"
+description = "Visual tests for rs_physics using Bevy"
+publish = false
+
+[dependencies]
+rs_physics = { path = "..", features = ["gpu", "fluid_simulation"] }
+bevy = { version = "0.15", features = ["wayland"] }
+rand = "0.8"
+
+[[bin]]
+name = "fluid_2d"
+path = "src/bin/fluid_2d.rs"
+
+[[bin]]
+name = "fluid_3d"
+path = "src/bin/fluid_3d.rs"
+
+[[bin]]
+name = "nbody_3d"
+path = "src/bin/nbody_3d.rs"
+
+[[bin]]
+name = "nbody_2d"
+path = "src/bin/nbody_2d.rs"
+
+[[bin]]
+name = "particle_gravity"
+path = "src/bin/particle_gravity.rs"
+
+[[bin]]
+name = "collision_3d"
+path = "src/bin/collision_3d.rs"

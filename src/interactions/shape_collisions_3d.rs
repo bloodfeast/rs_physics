@@ -1,7 +1,7 @@
 use crate::interactions::{cross_product, dot_product};
 use crate::models::{normalize_angle, rotate_point, PhysicalObject3D, Shape3D, ToCoordinates, Quaternion};
-use rand::{rng, Rng};
 use crate::interactions::gjk_collision_3d::{epa_contact_points, gjk_collision_detection};
+use crate::utils::vector3::{point_velocity, angular_effective_inv_mass, angular_velocity_delta, negate};
 
 /// Calculates the impact point between two colliding physical objects
 ///
@@ -128,26 +128,12 @@ pub fn calculate_impact_point(
 /// # Returns
 /// The total velocity at the point as (vx, vy, vz)
 pub fn calculate_point_velocity(obj: &PhysicalObject3D, r: (f64, f64, f64)) -> (f64, f64, f64) {
-    // Linear velocity
-    let v_linear = (
+    let linear_vel = (
         obj.object.velocity.x,
         obj.object.velocity.y,
         obj.object.velocity.z,
     );
-
-    // Angular contribution: v_angular = ω × r
-    let v_angular = (
-        obj.angular_velocity.1 * r.2 - obj.angular_velocity.2 * r.1,
-        obj.angular_velocity.2 * r.0 - obj.angular_velocity.0 * r.2,
-        obj.angular_velocity.0 * r.1 - obj.angular_velocity.1 * r.0,
-    );
-
-    // Total velocity at point
-    (
-        v_linear.0 + v_angular.0,
-        v_linear.1 + v_angular.1,
-        v_linear.2 + v_angular.2,
-    )
+    point_velocity(linear_vel, obj.angular_velocity, r)
 }
 
 /// Calculates the collision impulse magnitude between two physical objects
@@ -177,26 +163,35 @@ pub fn calculate_collision_impulse(
     // Normal component of relative velocity
     let vrel_n = dot_product(vrel, normal);
 
-    // Calculate angular contribution to impulse denominator
+    // Handle infinite mass (static objects): inverse mass = 0
+    let inv_mass1 = if obj1.object.mass.is_infinite() { 0.0 } else { 1.0 / obj1.object.mass };
+    let inv_mass2 = if obj2.object.mass.is_infinite() { 0.0 } else { 1.0 / obj2.object.mass };
+
+    // Calculate angular contribution to impulse denominator using shared utilities
     let inertia1 = obj1.shape.moment_of_inertia(obj1.object.mass);
     let inertia2 = obj2.shape.moment_of_inertia(obj2.object.mass);
 
-    // Calculate r × n for both objects
-    let r1_cross_n = cross_product(r1, normal);
-    let r2_cross_n = cross_product(r2, normal);
+    // Calculate angular terms (0 for static objects)
+    let angular_term1 = if obj1.object.mass.is_infinite() {
+        0.0
+    } else {
+        angular_effective_inv_mass(r1, normal, &inertia1)
+    };
 
-    // Calculate angular terms
-    let angular_term1 = r1_cross_n.0 * r1_cross_n.0 / inertia1[0]
-        + r1_cross_n.1 * r1_cross_n.1 / inertia1[1]
-        + r1_cross_n.2 * r1_cross_n.2 / inertia1[2];
-
-    let angular_term2 = r2_cross_n.0 * r2_cross_n.0 / inertia2[0]
-        + r2_cross_n.1 * r2_cross_n.1 / inertia2[1]
-        + r2_cross_n.2 * r2_cross_n.2 / inertia2[2];
+    let angular_term2 = if obj2.object.mass.is_infinite() {
+        0.0
+    } else {
+        angular_effective_inv_mass(r2, normal, &inertia2)
+    };
 
     // Calculate full impulse magnitude with rotational components
-    let impulse_denom =
-        1.0 / obj1.object.mass + 1.0 / obj2.object.mass + angular_term1 + angular_term2;
+    let impulse_denom = inv_mass1 + inv_mass2 + angular_term1 + angular_term2;
+
+    // Guard against zero denominator (both objects static)
+    if impulse_denom == 0.0 {
+        return 0.0;
+    }
+
     let impulse_mag = -(1.0 + restitution) * vrel_n / impulse_denom;
 
     impulse_mag
@@ -205,6 +200,7 @@ pub fn calculate_collision_impulse(
 /// Applies a linear impulse to two physical objects
 ///
 /// The impulse is applied in opposite directions to maintain momentum conservation.
+/// Static objects (infinite mass) are not affected.
 ///
 /// # Arguments
 /// * `obj1` - Mutable reference to the first physical object
@@ -224,14 +220,20 @@ pub fn apply_linear_impulse(
     );
 
     // Apply to first object - this should make the velocity more negative
-    obj1.object.velocity.x -= impulse.0 / obj1.object.mass;
-    obj1.object.velocity.y -= impulse.1 / obj1.object.mass;
-    obj1.object.velocity.z -= impulse.2 / obj1.object.mass;
+    // Skip if infinite mass (static object)
+    if !obj1.object.mass.is_infinite() {
+        obj1.object.velocity.x -= impulse.0 / obj1.object.mass;
+        obj1.object.velocity.y -= impulse.1 / obj1.object.mass;
+        obj1.object.velocity.z -= impulse.2 / obj1.object.mass;
+    }
 
     // Apply to second object (opposite direction)
-    obj2.object.velocity.x += impulse.0 / obj2.object.mass;
-    obj2.object.velocity.y += impulse.1 / obj2.object.mass;
-    obj2.object.velocity.z += impulse.2 / obj2.object.mass;
+    // Skip if infinite mass (static object)
+    if !obj2.object.mass.is_infinite() {
+        obj2.object.velocity.x += impulse.0 / obj2.object.mass;
+        obj2.object.velocity.y += impulse.1 / obj2.object.mass;
+        obj2.object.velocity.z += impulse.2 / obj2.object.mass;
+    }
 }
 
 /// Applies an angular impulse to two physical objects
@@ -245,7 +247,7 @@ pub fn apply_linear_impulse(
 /// * `impulse_mag` - The magnitude of the impulse
 /// * `r1` - The relative position vector from obj1's center to impact point
 /// * `r2` - The relative position vector from obj2's center to impact point
-/// * `dt` - The time step duration in seconds
+/// * `_dt` - Unused (kept for API compatibility) - impulses are instantaneous
 pub fn apply_angular_impulse(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
@@ -253,7 +255,7 @@ pub fn apply_angular_impulse(
     impulse_mag: f64,
     r1: (f64, f64, f64),
     r2: (f64, f64, f64),
-    dt: f64,
+    _dt: f64,  // dt is NOT used for impulses - they represent instantaneous velocity changes
 ) {
     let impulse = (
         normal.0 * impulse_mag,
@@ -261,34 +263,32 @@ pub fn apply_angular_impulse(
         normal.2 * impulse_mag,
     );
 
-    // Calculate torque from impulse
-    let torque1 = cross_product(r1, impulse);
-    let torque2 = cross_product(r2, (-impulse.0, -impulse.1, -impulse.2));
-
-    // Get moments of inertia
-    let inertia1 = obj1.shape.moment_of_inertia(obj1.object.mass);
-    let inertia2 = obj2.shape.moment_of_inertia(obj2.object.mass);
-
-    // Apply angular impulse with appropriate scaling
+    // Apply angular impulse: Δω = I^(-1) * (r × J)
+    // Note: NO dt multiplication! Impulses directly change velocity.
+    // The 0.8 factor is for energy dissipation in angular response
     let angular_response_factor = 0.8;
 
-    obj1.angular_velocity.0 += torque1.0 / inertia1[0] * dt * angular_response_factor;
-    obj1.angular_velocity.1 += torque1.1 / inertia1[1] * dt * angular_response_factor;
-    obj1.angular_velocity.2 += torque1.2 / inertia1[2] * dt * angular_response_factor;
-
-    obj2.angular_velocity.0 += torque2.0 / inertia2[0] * dt * angular_response_factor;
-    obj2.angular_velocity.1 += torque2.1 / inertia2[1] * dt * angular_response_factor;
-    obj2.angular_velocity.2 += torque2.2 / inertia2[2] * dt * angular_response_factor;
-
-    // Add small random perturbation to prevent "stuck" scenarios
-    let random_factor = 0.05;
-
-    if impulse_mag > 0.1 {
-        // Only add randomness for significant collisions
-        obj1.angular_velocity.0 += rng().random_range(-random_factor..random_factor);
-        obj1.angular_velocity.1 += rng().random_range(-random_factor..random_factor);
-        obj1.angular_velocity.2 += rng().random_range(-random_factor..random_factor);
+    // Skip angular impulse for static objects (infinite mass)
+    if !obj1.object.mass.is_infinite() {
+        let inertia1 = obj1.shape.moment_of_inertia(obj1.object.mass);
+        let delta1 = angular_velocity_delta(r1, impulse, &inertia1, angular_response_factor);
+        obj1.angular_velocity.0 += delta1.0;
+        obj1.angular_velocity.1 += delta1.1;
+        obj1.angular_velocity.2 += delta1.2;
     }
+
+    if !obj2.object.mass.is_infinite() {
+        let inertia2 = obj2.shape.moment_of_inertia(obj2.object.mass);
+        // Opposite direction for obj2
+        let neg_impulse = negate(impulse);
+        let delta2 = angular_velocity_delta(r2, neg_impulse, &inertia2, angular_response_factor);
+        obj2.angular_velocity.0 += delta2.0;
+        obj2.angular_velocity.1 += delta2.1;
+        obj2.angular_velocity.2 += delta2.2;
+    }
+
+    // NOTE: Random perturbations removed - they cause non-deterministic behavior
+    // and hide bugs. If objects get "stuck", fix the root cause instead.
 }
 
 /// Handles a collision between two physical objects
@@ -350,7 +350,14 @@ pub fn handle_collision(obj1: &mut PhysicalObject3D, obj2: &mut PhysicalObject3D
 
             if vrel_n < 0.0 {
                 // Apply collision response
-                let restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                // Use velocity-dependent restitution to prevent jitter in resting contacts
+                let base_restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                const RESTITUTION_VELOCITY_THRESHOLD: f64 = 1.0;
+                let restitution = if vrel_n.abs() < RESTITUTION_VELOCITY_THRESHOLD {
+                    base_restitution * (vrel_n.abs() / RESTITUTION_VELOCITY_THRESHOLD)
+                } else {
+                    base_restitution
+                };
                 let impulse_mag = calculate_collision_impulse(
                     obj1, obj2, vrel, normal, restitution, r1, r2
                 );
@@ -408,11 +415,20 @@ pub fn handle_collision(obj1: &mut PhysicalObject3D, obj2: &mut PhysicalObject3D
             let v1 = calculate_point_velocity(obj1, r1);
             let v2 = calculate_point_velocity(obj2, r2);
 
-            let vrel = (v1.0 - v2.0, v1.1 - v2.1, v1.2 - v2.2);
+            // Relative velocity of obj2 with respect to obj1
+            // If vrel_n < 0, objects are approaching along the normal
+            let vrel = (v2.0 - v1.0, v2.1 - v1.1, v2.2 - v1.2);
             let vrel_n = dot_product(vrel, contact.normal);
 
             if vrel_n < 0.0 {
-                let restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                // Use velocity-dependent restitution to prevent jitter in resting contacts
+                let base_restitution = (obj1.get_restitution() + obj2.get_restitution()) / 2.0;
+                const RESTITUTION_VELOCITY_THRESHOLD: f64 = 1.0;
+                let restitution = if vrel_n.abs() < RESTITUTION_VELOCITY_THRESHOLD {
+                    base_restitution * (vrel_n.abs() / RESTITUTION_VELOCITY_THRESHOLD)
+                } else {
+                    base_restitution
+                };
                 let impulse_mag = calculate_collision_impulse(
                     obj1, obj2, vrel, contact.normal, restitution, r1, r2
                 );
@@ -445,10 +461,23 @@ pub fn resolve_penetration_epa(
         normal.2 * correction
     );
 
-    // Apply correction based on inverse mass ratio
-    let total_mass = obj1.object.mass + obj2.object.mass;
-    let self_ratio = obj2.object.mass / total_mass;
-    let other_ratio = obj1.object.mass / total_mass;
+    // Handle infinite mass (static objects)
+    let m1 = obj1.object.mass;
+    let m2 = obj2.object.mass;
+    let (self_ratio, other_ratio) = if m1.is_infinite() && m2.is_infinite() {
+        // Both static - no correction
+        (0.0, 0.0)
+    } else if m1.is_infinite() {
+        // obj1 is static - only move obj2
+        (0.0, 1.0)
+    } else if m2.is_infinite() {
+        // obj2 is static - only move obj1
+        (1.0, 0.0)
+    } else {
+        // Normal case: distribute based on inverse mass ratio
+        let total_mass = m1 + m2;
+        (m2 / total_mass, m1 / total_mass)
+    };
 
     // Move objects apart
     obj1.object.position.x += correction_vector.0 * self_ratio;
@@ -475,10 +504,23 @@ pub fn resolve_sphere_penetration(
         normal.2 * correction
     );
 
-    // Apply correction based on inverse mass ratio
-    let total_mass = obj1.object.mass + obj2.object.mass;
-    let obj1_ratio = obj1.object.mass / total_mass;
-    let obj2_ratio = obj2.object.mass / total_mass;
+    // Handle infinite mass (static objects)
+    let m1 = obj1.object.mass;
+    let m2 = obj2.object.mass;
+    let (obj1_ratio, obj2_ratio) = if m1.is_infinite() && m2.is_infinite() {
+        // Both static - no correction
+        (0.0, 0.0)
+    } else if m1.is_infinite() {
+        // obj1 is static - only move obj2
+        (1.0, 0.0)
+    } else if m2.is_infinite() {
+        // obj2 is static - only move obj1
+        (0.0, 1.0)
+    } else {
+        // Normal case: distribute based on mass ratio
+        let total_mass = m1 + m2;
+        (m1 / total_mass, m2 / total_mass)
+    };
 
     // Move objects apart - obj1 moves opposite to the normal direction
     obj1.object.position.x -= correction_vector.0 * obj2_ratio;
