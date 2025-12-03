@@ -272,6 +272,7 @@ impl ToObjectIn2D for ObjectIn3D {
             forces: self.forces.to_owned(),
             angular: AngularState2D::default(),
             shape: Shape2DCollider::default(),
+            material: None,
         }
     }
 }

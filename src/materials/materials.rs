@@ -2,23 +2,103 @@
 
 use crate::utils::PhysicsError;
 
-/// Represents different types of material failure
-#[derive(Debug, PartialEq)]
+/// Represents different types of material failure.
+///
+/// This enum categorizes the mode of failure or deformation that occurs
+/// when a material is subjected to stress or strain beyond certain limits.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::materials::{Material, BreakageType};
+///
+/// let steel = Material::steel();
+/// let result = steel.will_break(500e6, 0.003, None);  // High stress
+/// assert_eq!(result.breakage_type, BreakageType::TensileStress);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakageType {
-    None,           // No failure
-    TensileStress,  // Immediate failure due to exceeding ultimate strength
-    TensileStrain,  // Immediate failure due to exceeding ultimate strain
-    Plastic,        // Plastic deformation (yield point exceeded)
-    Fatigue,        // Failure due to cyclic loading
+    /// No failure - material remains in elastic region.
+    /// Stress and strain are below yield point, material will return
+    /// to original shape when load is removed.
+    None,
+    /// Immediate failure due to exceeding ultimate tensile strength.
+    /// The applied stress has exceeded the maximum stress the material
+    /// can withstand, causing catastrophic failure.
+    TensileStress,
+    /// Immediate failure due to exceeding ultimate strain.
+    /// The material has stretched beyond its maximum allowable deformation,
+    /// even if the stress hasn't exceeded the ultimate strength.
+    TensileStrain,
+    /// Plastic deformation (yield point exceeded).
+    /// The material has permanently deformed but hasn't failed completely.
+    /// Material will not return to original shape when load is removed.
+    Plastic,
+    /// Failure due to cyclic loading (fatigue).
+    /// The material fails at stress levels below the yield strength
+    /// due to repeated loading and unloading cycles.
+    Fatigue,
 }
-/// Result of material failure analysis
-#[derive(Debug)]
+
+/// Result of material failure analysis.
+///
+/// This struct contains comprehensive information about whether a material
+/// will fail under given loading conditions and what type of failure would occur.
+///
+/// # Fields
+///
+/// * `will_break` - `true` if the material will catastrophically fail
+/// * `breakage_type` - The mode of failure or deformation
+/// * `safety_factor` - Ratio of allowable stress to applied stress (>1 = safe)
+///
+/// # Examples
+///
+/// ## Checking for safe operation
+///
+/// ```
+/// use rs_physics::materials::{Material, BreakageType};
+///
+/// let steel = Material::steel();
+///
+/// // Check if stress is safe
+/// let result = steel.will_break(100e6, 0.0005, None);
+/// if result.will_break {
+///     println!("Material will fail via {:?}!", result.breakage_type);
+/// } else if result.safety_factor > 2.0 {
+///     println!("Safe with factor of safety: {:.2}", result.safety_factor);
+/// } else {
+///     println!("Marginal safety factor: {:.2}", result.safety_factor);
+/// }
+/// ```
+///
+/// ## Fatigue analysis
+///
+/// ```
+/// use rs_physics::materials::{Material, BreakageType};
+///
+/// let steel = Material::steel();
+///
+/// // Check for fatigue failure after 1 million cycles
+/// let result = steel.will_break(150e6, 0.00075, Some(1_000_000));
+/// match result.breakage_type {
+///     BreakageType::Fatigue => println!("Fatigue failure expected"),
+///     BreakageType::None => println!("Safe for cyclic loading"),
+///     _ => println!("Other failure mode"),
+/// }
+/// ```
+#[derive(Debug, Clone, Copy)]
 pub struct BreakageResult {
-    /// Whether the material will break under given conditions
+    /// Whether the material will break under given conditions.
+    /// `true` indicates catastrophic failure (TensileStress, TensileStrain, or Fatigue).
+    /// `false` means the material survives, though it may have yielded (Plastic).
     pub will_break: bool,
-    /// Type of failure or deformation
+    /// Type of failure or deformation that occurs.
+    /// See [`BreakageType`] for detailed descriptions of each failure mode.
     pub breakage_type: BreakageType,
-    /// Ratio of allowable stress to applied stress
+    /// Ratio of allowable stress to applied stress.
+    /// Values > 1.0 indicate the material is within safe limits.
+    /// Values < 1.0 indicate the material has exceeded its limits.
+    /// Typical engineering designs target safety factors of 1.5 to 3.0.
     pub safety_factor: f64,
 }
 
@@ -33,6 +113,7 @@ pub struct BreakageResult {
 /// * `poisson_ratio` - Ratio of transverse strain to axial strain (dimensionless)
 /// * `friction_coefficient` - Coefficient of friction (dimensionless)
 /// * `restitution_coefficient` - Coefficient of restitution for collisions (dimensionless)
+/// * `rolling_resistance_coefficient` - Coefficient of rolling resistance (dimensionless)
 /// * `thermal_conductivity` - Rate of heat transfer in W/(m·K)
 /// * `specific_heat_capacity` - Energy required to raise temperature in J/(kg·K)
 /// * `yield_strength` - Stress at which material begins to deform plastically in Pascals (Pa)
@@ -49,6 +130,12 @@ pub struct Material {
     pub friction_coefficient: f64,
     /// Coefficient of restitution (dimensionless)
     pub restitution_coefficient: f64,
+    /// Coefficient of rolling resistance (dimensionless)
+    /// Represents energy loss due to deformation at the contact patch during rolling.
+    /// Typical values: 0.001-0.005 for hard materials (steel on steel),
+    /// 0.01-0.03 for medium materials (rubber on concrete),
+    /// 0.1-0.3 for soft materials (rubber on sand).
+    pub rolling_resistance_coefficient: f64,
     /// Thermal conductivity in W/(m·K)
     pub thermal_conductivity: f64,
     /// Specific heat capacity in J/(kg·K)
@@ -69,6 +156,7 @@ impl Material {
     /// * `poisson_ratio` - Ratio of transverse strain to axial strain (dimensionless)
     /// * `friction_coefficient` - Coefficient of friction (dimensionless)
     /// * `restitution_coefficient` - Coefficient of restitution for collisions (dimensionless)
+    /// * `rolling_resistance_coefficient` - Coefficient of rolling resistance (dimensionless)
     /// * `thermal_conductivity` - Rate of heat transfer in W/(m·K)
     /// * `specific_heat_capacity` - Energy required to raise temperature in J/(kg·K)
     /// * `yield_strength` - Stress at which material begins to deform plastically in Pascals (Pa)
@@ -90,6 +178,7 @@ impl Material {
     ///     0.3,      // Poisson's ratio
     ///     0.74,     // friction coefficient
     ///     0.85,     // restitution coefficient
+    ///     0.002,    // rolling resistance coefficient
     ///     43.0,     // thermal conductivity
     ///     490.0,    // specific heat capacity
     ///     250.0e6,  // yield strength
@@ -105,6 +194,7 @@ impl Material {
     /// * Poisson's ratio is not between -1 and 0.5
     /// * Friction coefficient is negative
     /// * Restitution coefficient is not between 0 and 1
+    /// * Rolling resistance coefficient is negative
     /// * Thermal conductivity is negative
     /// * Specific heat capacity is not positive
     /// * Yield strength is negative
@@ -115,6 +205,7 @@ impl Material {
         poisson_ratio: f64,
         friction_coefficient: f64,
         restitution_coefficient: f64,
+        rolling_resistance_coefficient: f64,
         thermal_conductivity: f64,
         specific_heat_capacity: f64,
         yield_strength: f64,
@@ -126,6 +217,7 @@ impl Material {
         if poisson_ratio <= -1.0 || poisson_ratio >= 0.5 { return Err(PhysicsError::CalculationError("Poisson's ratio must be between -1 and 0.5".to_string())); }
         if friction_coefficient < 0.0 { return Err(PhysicsError::InvalidCoefficient); }
         if restitution_coefficient < 0.0 || restitution_coefficient > 1.0 { return Err(PhysicsError::CalculationError("Coefficient of restitution must be between 0 and 1".to_string())); }
+        if rolling_resistance_coefficient < 0.0 { return Err(PhysicsError::CalculationError("Rolling resistance coefficient must be non-negative".to_string())); }
         if thermal_conductivity < 0.0 { return Err(PhysicsError::InvalidCoefficient); }
         if specific_heat_capacity <= 0.0 { return Err(PhysicsError::CalculationError("Specific heat capacity must be positive".to_string())); }
         if yield_strength < 0.0 { return Err(PhysicsError::CalculationError("Yield strength must be non-negative".to_string())); }
@@ -137,6 +229,7 @@ impl Material {
             poisson_ratio,
             friction_coefficient,
             restitution_coefficient,
+            rolling_resistance_coefficient,
             thermal_conductivity,
             specific_heat_capacity,
             yield_strength,
@@ -154,6 +247,7 @@ impl Material {
     /// * Poisson's ratio: 0.3
     /// * Friction coefficient: 0.74
     /// * Restitution coefficient: 0.85
+    /// * Rolling resistance coefficient: 0.002 (steel on steel)
     /// * Thermal conductivity: 43 W/(m·K)
     /// * Specific heat capacity: 490 J/(kg·K)
     /// * Yield strength: 250 MPa
@@ -169,15 +263,16 @@ impl Material {
     /// ```
     pub fn steel() -> Self {
         Self::new(
-            7850.0,                    // density (kg/m³)
+            7850.0,             // density (kg/m³)
             200.0e9,            // Young's modulus (Pa)
-            0.3,                  // Poisson's ratio
-            0.74,             // friction coefficient
-            0.85,           // restitution coefficient
-            43.0,           // thermal conductivity (W/(m·K))
-            490.0,         // specific heat capacity (J/(kg·K))
-            250.0e6,             // yield strength (Pa)
-            400.0e6,          // ultimate strength (Pa)
+            0.3,                // Poisson's ratio
+            0.74,               // friction coefficient
+            0.85,               // restitution coefficient
+            0.002,              // rolling resistance coefficient (steel on steel)
+            43.0,               // thermal conductivity (W/(m·K))
+            490.0,              // specific heat capacity (J/(kg·K))
+            250.0e6,            // yield strength (Pa)
+            400.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create steel material")
     }
 
@@ -191,6 +286,7 @@ impl Material {
     /// * Poisson's ratio: 0.33
     /// * Friction coefficient: 0.61
     /// * Restitution coefficient: 0.75
+    /// * Rolling resistance coefficient: 0.001 (aluminum on aluminum)
     /// * Thermal conductivity: 237 W/(m·K)
     /// * Specific heat capacity: 900 J/(kg·K)
     /// * Yield strength: 95 MPa
@@ -206,15 +302,16 @@ impl Material {
     /// ```
     pub fn aluminum() -> Self {
         Self::new(
-            2700.0,                 // density (kg/m³)
-            69.0e9,          // Young's modulus (Pa)
-            0.33,              // Poisson's ratio
-            0.61,          // friction coefficient
-            0.75,        // restitution coefficient
-            237.0,        // thermal conductivity (W/(m·K))
-            900.0,       // specific heat capacity (J/(kg·K))
-            95.0e6,            // yield strength (Pa)
-            110.0e6,         // ultimate strength (Pa)
+            2700.0,             // density (kg/m³)
+            69.0e9,             // Young's modulus (Pa)
+            0.33,               // Poisson's ratio
+            0.61,               // friction coefficient
+            0.75,               // restitution coefficient
+            0.001,              // rolling resistance coefficient (aluminum on aluminum)
+            237.0,              // thermal conductivity (W/(m·K))
+            900.0,              // specific heat capacity (J/(kg·K))
+            95.0e6,             // yield strength (Pa)
+            110.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create aluminum material")
     }
 
@@ -228,6 +325,7 @@ impl Material {
     /// * Poisson's ratio: 0.49
     /// * Friction coefficient: 0.9
     /// * Restitution coefficient: 0.95
+    /// * Rolling resistance coefficient: 0.02 (rubber deforms significantly)
     /// * Thermal conductivity: 0.16 W/(m·K)
     /// * Specific heat capacity: 2000 J/(kg·K)
     /// * Yield strength: 7 MPa
@@ -243,15 +341,16 @@ impl Material {
     /// ```
     pub fn rubber() -> Self {
         Self::new(
-            1100.0,            // density (kg/m³)
-            0.01e9,            // Young's modulus (Pa)
-            0.49,              // Poisson's ratio
-            0.9,               // friction coefficient
-            0.95,              // restitution coefficient
-            0.16,              // thermal conductivity (W/(m·K))
-            2000.0,            // specific heat capacity (J/(kg·K))
-            7.0e6,             // yield strength (Pa)
-            15.0e6,            // ultimate strength (Pa)
+            1100.0,             // density (kg/m³)
+            0.01e9,             // Young's modulus (Pa)
+            0.49,               // Poisson's ratio
+            0.9,                // friction coefficient
+            0.95,               // restitution coefficient
+            0.02,               // rolling resistance coefficient (rubber deforms significantly)
+            0.16,               // thermal conductivity (W/(m·K))
+            2000.0,             // specific heat capacity (J/(kg·K))
+            7.0e6,              // yield strength (Pa)
+            15.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create rubber material")
     }
 
@@ -265,6 +364,7 @@ impl Material {
     /// * Poisson's ratio: 0.45
     /// * Friction coefficient: 0.8
     /// * Restitution coefficient: 0.7
+    /// * Rolling resistance coefficient: 0.015 (softer than rubber)
     /// * Thermal conductivity: 0.2 W/(m·K)
     /// * Specific heat capacity: 1800 J/(kg·K)
     /// * Yield strength: 35 MPa
@@ -280,15 +380,16 @@ impl Material {
     /// ```
     pub fn polyurethane() -> Self {
         Self::new(
-            1200.0,            // density (kg/m³)
-            0.02e9,            // Young's modulus (Pa)
-            0.45,              // Poisson's ratio
-            0.8,               // friction coefficient
-            0.7,               // restitution coefficient
-            0.2,               // thermal conductivity (W/(m·K))
-            1800.0,            // specific heat capacity (J/(kg·K))
-            35.0e6,            // yield strength (Pa)
-            55.0e6,            // ultimate strength (Pa)
+            1200.0,             // density (kg/m³)
+            0.02e9,             // Young's modulus (Pa)
+            0.45,               // Poisson's ratio
+            0.8,                // friction coefficient
+            0.7,                // restitution coefficient
+            0.015,              // rolling resistance coefficient (softer than rubber)
+            0.2,                // thermal conductivity (W/(m·K))
+            1800.0,             // specific heat capacity (J/(kg·K))
+            35.0e6,             // yield strength (Pa)
+            55.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create polyurethane material")
     }
 
@@ -302,6 +403,7 @@ impl Material {
     /// * Poisson's ratio: 0.3
     /// * Friction coefficient: 0.5
     /// * Restitution coefficient: 0.5
+    /// * Rolling resistance coefficient: 0.01 (wood on wood)
     /// * Thermal conductivity: 0.15 W/(m·K)
     /// * Specific heat capacity: 1700 J/(kg·K)
     /// * Yield strength: 40 MPa
@@ -317,16 +419,324 @@ impl Material {
     /// ```
     pub fn wood() -> Self {
         Self::new(
-            700.0,             // density (kg/m³)
-            12.0e9,            // Young's modulus (Pa)
-            0.3,               // Poisson's ratio
-            0.5,               // friction coefficient
-            0.5,               // restitution coefficient
-            0.15,              // thermal conductivity (W/(m·K))
-            1700.0,            // specific heat capacity (J/(kg·K))
-            40.0e6,            // yield strength (Pa)
-            70.0e6,            // ultimate strength (Pa)
+            700.0,              // density (kg/m³)
+            12.0e9,             // Young's modulus (Pa)
+            0.3,                // Poisson's ratio
+            0.5,                // friction coefficient
+            0.5,                // restitution coefficient
+            0.01,               // rolling resistance coefficient (wood on wood)
+            0.15,               // thermal conductivity (W/(m·K))
+            1700.0,             // specific heat capacity (J/(kg·K))
+            40.0e6,             // yield strength (Pa)
+            70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
+    }
+
+    /// Creates a new Material instance with properties of copper.
+    ///
+    /// Copper is an excellent conductor of heat and electricity, making it
+    /// ideal for thermal and electrical simulations.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of pure copper:
+    /// * Density: 8960 kg/m³
+    /// * Young's modulus: 110 GPa
+    /// * Poisson's ratio: 0.34
+    /// * Friction coefficient: 0.4
+    /// * Restitution coefficient: 0.75
+    /// * Rolling resistance coefficient: 0.002 (copper on copper)
+    /// * Thermal conductivity: 401 W/(m·K) (highest of common metals)
+    /// * Specific heat capacity: 385 J/(kg·K)
+    /// * Yield strength: 70 MPa (annealed)
+    /// * Ultimate strength: 220 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let copper = Material::copper();
+    /// assert_eq!(copper.density, 8960.0);
+    /// assert!(copper.thermal_conductivity > 400.0);  // Excellent conductor
+    /// ```
+    pub fn copper() -> Self {
+        Self::new(
+            8960.0,             // density (kg/m³)
+            110.0e9,            // Young's modulus (Pa)
+            0.34,               // Poisson's ratio
+            0.4,                // friction coefficient
+            0.75,               // restitution coefficient
+            0.002,              // rolling resistance coefficient (copper on copper)
+            401.0,              // thermal conductivity (W/(m·K))
+            385.0,              // specific heat capacity (J/(kg·K))
+            70.0e6,             // yield strength (Pa) - annealed
+            220.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create copper material")
+    }
+
+    /// Creates a new Material instance with properties of titanium (Ti-6Al-4V).
+    ///
+    /// Titanium alloy offers excellent strength-to-weight ratio and corrosion resistance,
+    /// commonly used in aerospace and medical applications.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of Ti-6Al-4V:
+    /// * Density: 4430 kg/m³
+    /// * Young's modulus: 114 GPa
+    /// * Poisson's ratio: 0.34
+    /// * Friction coefficient: 0.36
+    /// * Restitution coefficient: 0.8
+    /// * Rolling resistance coefficient: 0.002 (titanium on titanium)
+    /// * Thermal conductivity: 6.7 W/(m·K)
+    /// * Specific heat capacity: 526 J/(kg·K)
+    /// * Yield strength: 880 MPa
+    /// * Ultimate strength: 950 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let titanium = Material::titanium();
+    /// let steel = Material::steel();
+    ///
+    /// // Titanium is lighter than steel
+    /// assert!(titanium.density < steel.density);
+    /// // But has higher yield strength
+    /// assert!(titanium.yield_strength > steel.yield_strength);
+    /// ```
+    pub fn titanium() -> Self {
+        Self::new(
+            4430.0,             // density (kg/m³)
+            114.0e9,            // Young's modulus (Pa)
+            0.34,               // Poisson's ratio
+            0.36,               // friction coefficient
+            0.8,                // restitution coefficient
+            0.002,              // rolling resistance coefficient (titanium on titanium)
+            6.7,                // thermal conductivity (W/(m·K))
+            526.0,              // specific heat capacity (J/(kg·K))
+            880.0e6,            // yield strength (Pa)
+            950.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create titanium material")
+    }
+
+    /// Creates a new Material instance with properties of concrete.
+    ///
+    /// Concrete is strong in compression but weak in tension.
+    /// Note: The yield and ultimate strengths here represent compressive strength.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of structural concrete:
+    /// * Density: 2400 kg/m³
+    /// * Young's modulus: 30 GPa
+    /// * Poisson's ratio: 0.2
+    /// * Friction coefficient: 0.6
+    /// * Restitution coefficient: 0.2
+    /// * Rolling resistance coefficient: 0.015 (rough surface)
+    /// * Thermal conductivity: 1.7 W/(m·K)
+    /// * Specific heat capacity: 880 J/(kg·K)
+    /// * Yield strength: 25 MPa (compressive)
+    /// * Ultimate strength: 40 MPa (compressive)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let concrete = Material::concrete();
+    /// assert_eq!(concrete.density, 2400.0);
+    /// ```
+    pub fn concrete() -> Self {
+        Self::new(
+            2400.0,             // density (kg/m³)
+            30.0e9,             // Young's modulus (Pa)
+            0.2,                // Poisson's ratio
+            0.6,                // friction coefficient
+            0.2,                // restitution coefficient (low - absorbs energy)
+            0.015,              // rolling resistance coefficient (rough surface)
+            1.7,                // thermal conductivity (W/(m·K))
+            880.0,              // specific heat capacity (J/(kg·K))
+            25.0e6,             // yield strength (Pa) - compressive
+            40.0e6,             // ultimate strength (Pa) - compressive
+        ).expect("Failed to create concrete material")
+    }
+
+    /// Creates a new Material instance with properties of glass (soda-lime).
+    ///
+    /// Glass is a brittle material with no significant plastic deformation.
+    /// It fails catastrophically when stress exceeds the yield point.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of soda-lime glass:
+    /// * Density: 2500 kg/m³
+    /// * Young's modulus: 70 GPa
+    /// * Poisson's ratio: 0.22
+    /// * Friction coefficient: 0.4
+    /// * Restitution coefficient: 0.65
+    /// * Rolling resistance coefficient: 0.003 (smooth, hard surface)
+    /// * Thermal conductivity: 1.0 W/(m·K)
+    /// * Specific heat capacity: 840 J/(kg·K)
+    /// * Yield strength: 33 MPa (practical strength)
+    /// * Ultimate strength: 33 MPa (brittle - no plastic region)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let glass = Material::glass();
+    /// // Glass is brittle - yield equals ultimate (no plastic deformation)
+    /// assert_eq!(glass.yield_strength, glass.ultimate_strength);
+    /// ```
+    pub fn glass() -> Self {
+        Self::new(
+            2500.0,             // density (kg/m³)
+            70.0e9,             // Young's modulus (Pa)
+            0.22,               // Poisson's ratio
+            0.4,                // friction coefficient
+            0.65,               // restitution coefficient
+            0.003,              // rolling resistance coefficient (smooth, hard surface)
+            1.0,                // thermal conductivity (W/(m·K))
+            840.0,              // specific heat capacity (J/(kg·K))
+            33.0e6,             // yield strength (Pa) - practical strength
+            33.0e6,             // ultimate strength (Pa) - same as yield (brittle)
+        ).expect("Failed to create glass material")
+    }
+
+    /// Creates a new Material instance with properties of brass (70/30).
+    ///
+    /// Brass is a copper-zinc alloy with good machinability and corrosion resistance.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of 70/30 brass:
+    /// * Density: 8530 kg/m³
+    /// * Young's modulus: 110 GPa
+    /// * Poisson's ratio: 0.34
+    /// * Friction coefficient: 0.35
+    /// * Restitution coefficient: 0.6
+    /// * Rolling resistance coefficient: 0.002 (brass on brass)
+    /// * Thermal conductivity: 109 W/(m·K)
+    /// * Specific heat capacity: 380 J/(kg·K)
+    /// * Yield strength: 200 MPa
+    /// * Ultimate strength: 400 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let brass = Material::brass();
+    /// let copper = Material::copper();
+    ///
+    /// // Brass has lower thermal conductivity than pure copper
+    /// assert!(brass.thermal_conductivity < copper.thermal_conductivity);
+    /// ```
+    pub fn brass() -> Self {
+        Self::new(
+            8530.0,             // density (kg/m³)
+            110.0e9,            // Young's modulus (Pa)
+            0.34,               // Poisson's ratio
+            0.35,               // friction coefficient
+            0.6,                // restitution coefficient
+            0.002,              // rolling resistance coefficient (brass on brass)
+            109.0,              // thermal conductivity (W/(m·K))
+            380.0,              // specific heat capacity (J/(kg·K))
+            200.0e6,            // yield strength (Pa)
+            400.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create brass material")
+    }
+
+    /// Creates a new Material instance with properties of ice (at 0°C).
+    ///
+    /// Ice is useful for thermal and phase transition simulations.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of ice at 0°C:
+    /// * Density: 917 kg/m³
+    /// * Young's modulus: 9.3 GPa
+    /// * Poisson's ratio: 0.33
+    /// * Friction coefficient: 0.03 (very slippery)
+    /// * Restitution coefficient: 0.3
+    /// * Rolling resistance coefficient: 0.001 (very smooth surface)
+    /// * Thermal conductivity: 2.2 W/(m·K)
+    /// * Specific heat capacity: 2090 J/(kg·K)
+    /// * Yield strength: 1 MPa
+    /// * Ultimate strength: 2 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let ice = Material::ice();
+    /// // Ice has very low friction
+    /// assert!(ice.friction_coefficient < 0.1);
+    /// ```
+    pub fn ice() -> Self {
+        Self::new(
+            917.0,              // density (kg/m³)
+            9.3e9,              // Young's modulus (Pa)
+            0.33,               // Poisson's ratio
+            0.03,               // friction coefficient (very low)
+            0.3,                // restitution coefficient
+            0.001,              // rolling resistance coefficient (very smooth surface)
+            2.2,                // thermal conductivity (W/(m·K))
+            2090.0,             // specific heat capacity (J/(kg·K))
+            1.0e6,              // yield strength (Pa)
+            2.0e6,              // ultimate strength (Pa)
+        ).expect("Failed to create ice material")
+    }
+
+    /// Creates a new Material instance with properties of stainless steel (304).
+    ///
+    /// Stainless steel 304 is the most common stainless steel grade,
+    /// offering good corrosion resistance with slightly different mechanical
+    /// properties than carbon steel.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of 304 stainless steel:
+    /// * Density: 8000 kg/m³
+    /// * Young's modulus: 193 GPa
+    /// * Poisson's ratio: 0.29
+    /// * Friction coefficient: 0.5
+    /// * Restitution coefficient: 0.8
+    /// * Rolling resistance coefficient: 0.002 (stainless steel on stainless steel)
+    /// * Thermal conductivity: 16.2 W/(m·K)
+    /// * Specific heat capacity: 500 J/(kg·K)
+    /// * Yield strength: 215 MPa
+    /// * Ultimate strength: 505 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let stainless = Material::stainless_steel();
+    /// let carbon = Material::steel();
+    ///
+    /// // Stainless has lower thermal conductivity than carbon steel
+    /// assert!(stainless.thermal_conductivity < carbon.thermal_conductivity);
+    /// ```
+    pub fn stainless_steel() -> Self {
+        Self::new(
+            8000.0,             // density (kg/m³)
+            193.0e9,            // Young's modulus (Pa)
+            0.29,               // Poisson's ratio
+            0.5,                // friction coefficient
+            0.8,                // restitution coefficient
+            0.002,              // rolling resistance coefficient (stainless steel on stainless steel)
+            16.2,               // thermal conductivity (W/(m·K))
+            500.0,              // specific heat capacity (J/(kg·K))
+            215.0e6,            // yield strength (Pa)
+            505.0e6,            // ultimate strength (Pa)
+        ).expect("Failed to create stainless steel material")
     }
 
     /// Calculates the shear modulus of the material.
@@ -566,8 +976,44 @@ impl Material {
         (c / corrected_stress.powf(m)) as u64
     }
 
-    /// Helper method to calculate fatigue strength based on number of cycles.
-    fn calculate_fatigue_strength(&self, cycles: u64) -> f64 {
+    /// Calculates the fatigue strength based on number of cycles.
+    ///
+    /// This method implements a simplified S-N (stress-life) curve commonly used
+    /// in fatigue analysis. The fatigue strength decreases logarithmically as
+    /// the number of loading cycles increases.
+    ///
+    /// # Arguments
+    ///
+    /// * `cycles` - The number of loading cycles
+    ///
+    /// # Returns
+    ///
+    /// The fatigue strength in Pascals (Pa)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let steel = Material::steel();
+    ///
+    /// // Low cycle fatigue (< 1000 cycles) - uses ultimate strength
+    /// let low_cycle = steel.calculate_fatigue_strength(500);
+    /// assert_eq!(low_cycle, steel.ultimate_strength);
+    ///
+    /// // High cycle fatigue (> 1,000,000 cycles) - uses endurance limit
+    /// let high_cycle = steel.calculate_fatigue_strength(2_000_000);
+    /// assert!((high_cycle - steel.yield_strength * 0.5).abs() < 1.0);
+    /// ```
+    ///
+    /// # Physics Background
+    ///
+    /// The S-N curve (Wöhler curve) describes the relationship between stress
+    /// amplitude and number of cycles to failure:
+    /// - Low cycle fatigue (N < 10³): Strength approaches ultimate tensile strength
+    /// - High cycle fatigue (N > 10⁶): Strength approaches endurance limit (~0.5 × yield)
+    /// - Transition region: Log-linear interpolation between these limits
+    pub fn calculate_fatigue_strength(&self, cycles: u64) -> f64 {
         // Simplified implementation of the S-N curve
         let endurance_limit = self.yield_strength * 0.5;
         if cycles < 1000 {
@@ -579,6 +1025,320 @@ impl Material {
             let log_cycles = (cycles as f64).log10();
             let factor = (log_cycles - 3.0) / 3.0; // 3.0 represents log10(1000)
             self.ultimate_strength - (self.ultimate_strength - endurance_limit) * factor
+        }
+    }
+
+    /// Calculates the thermal diffusivity of the material.
+    ///
+    /// Thermal diffusivity (α) measures how quickly a material can conduct heat
+    /// relative to how much heat it can store. It is calculated as:
+    /// α = k / (ρ × c)
+    ///
+    /// where:
+    /// - k is thermal conductivity (W/(m·K))
+    /// - ρ is density (kg/m³)
+    /// - c is specific heat capacity (J/(kg·K))
+    ///
+    /// # Returns
+    ///
+    /// The thermal diffusivity in m²/s
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let copper = Material::copper();
+    /// let aluminum = Material::aluminum();
+    ///
+    /// // Copper has higher thermal diffusivity than aluminum
+    /// assert!(copper.thermal_diffusivity() > aluminum.thermal_diffusivity());
+    /// ```
+    ///
+    /// # Physics Background
+    ///
+    /// Higher thermal diffusivity means the material reaches thermal equilibrium faster.
+    /// Metals typically have high diffusivity (10⁻⁵ to 10⁻⁴ m²/s), while insulators
+    /// have low diffusivity (10⁻⁷ to 10⁻⁶ m²/s).
+    pub fn thermal_diffusivity(&self) -> f64 {
+        self.thermal_conductivity / (self.density * self.specific_heat_capacity)
+    }
+}
+
+/// Default implementation for Material.
+///
+/// Returns a steel material as the default, which is a common engineering reference material.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::materials::Material;
+///
+/// let material = Material::default();
+/// assert_eq!(material.density, 7850.0);  // Steel density
+/// ```
+impl Default for Material {
+    fn default() -> Self {
+        Self::steel()
+    }
+}
+
+/// PartialEq implementation for Material.
+///
+/// Compares all fields for approximate equality using a relative tolerance
+/// of 1e-10 for floating point comparisons.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::materials::Material;
+///
+/// let steel1 = Material::steel();
+/// let steel2 = Material::steel();
+/// assert_eq!(steel1, steel2);
+///
+/// let aluminum = Material::aluminum();
+/// assert_ne!(steel1, aluminum);
+/// ```
+impl PartialEq for Material {
+    fn eq(&self, other: &Self) -> bool {
+        const EPSILON: f64 = 1e-10;
+
+        fn approx_eq(a: f64, b: f64) -> bool {
+            if a == b { return true; }
+            let diff = (a - b).abs();
+            let max = a.abs().max(b.abs());
+            if max == 0.0 { return diff < EPSILON; }
+            diff / max < EPSILON
+        }
+
+        approx_eq(self.density, other.density)
+            && approx_eq(self.youngs_modulus, other.youngs_modulus)
+            && approx_eq(self.poisson_ratio, other.poisson_ratio)
+            && approx_eq(self.friction_coefficient, other.friction_coefficient)
+            && approx_eq(self.restitution_coefficient, other.restitution_coefficient)
+            && approx_eq(self.rolling_resistance_coefficient, other.rolling_resistance_coefficient)
+            && approx_eq(self.thermal_conductivity, other.thermal_conductivity)
+            && approx_eq(self.specific_heat_capacity, other.specific_heat_capacity)
+            && approx_eq(self.yield_strength, other.yield_strength)
+            && approx_eq(self.ultimate_strength, other.ultimate_strength)
+    }
+}
+
+/// Builder for creating custom materials with a fluent API.
+///
+/// The builder starts with default values (steel) and allows you to
+/// customize individual properties before building the final material.
+///
+/// # Examples
+///
+/// ## Creating a custom material
+///
+/// ```
+/// use rs_physics::materials::MaterialBuilder;
+///
+/// let custom = MaterialBuilder::new()
+///     .density(5000.0)
+///     .youngs_modulus(150e9)
+///     .friction_coefficient(0.5)
+///     .build()
+///     .unwrap();
+///
+/// assert_eq!(custom.density, 5000.0);
+/// ```
+///
+/// ## Starting from an existing material
+///
+/// ```
+/// use rs_physics::materials::{Material, MaterialBuilder};
+///
+/// // Modify aluminum's friction coefficient
+/// let modified_aluminum = MaterialBuilder::from(Material::aluminum())
+///     .friction_coefficient(0.8)
+///     .build()
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct MaterialBuilder {
+    density: f64,
+    youngs_modulus: f64,
+    poisson_ratio: f64,
+    friction_coefficient: f64,
+    restitution_coefficient: f64,
+    rolling_resistance_coefficient: f64,
+    thermal_conductivity: f64,
+    specific_heat_capacity: f64,
+    yield_strength: f64,
+    ultimate_strength: f64,
+}
+
+impl MaterialBuilder {
+    /// Creates a new MaterialBuilder with default values (steel properties).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::MaterialBuilder;
+    ///
+    /// let builder = MaterialBuilder::new();
+    /// let material = builder.build().unwrap();
+    /// assert_eq!(material.density, 7850.0);  // Steel default
+    /// ```
+    pub fn new() -> Self {
+        // Start with steel as default
+        let steel = Material::steel();
+        Self {
+            density: steel.density,
+            youngs_modulus: steel.youngs_modulus,
+            poisson_ratio: steel.poisson_ratio,
+            friction_coefficient: steel.friction_coefficient,
+            restitution_coefficient: steel.restitution_coefficient,
+            rolling_resistance_coefficient: steel.rolling_resistance_coefficient,
+            thermal_conductivity: steel.thermal_conductivity,
+            specific_heat_capacity: steel.specific_heat_capacity,
+            yield_strength: steel.yield_strength,
+            ultimate_strength: steel.ultimate_strength,
+        }
+    }
+
+    /// Sets the density in kg/m³.
+    pub fn density(mut self, density: f64) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// Sets the Young's modulus in Pascals (Pa).
+    pub fn youngs_modulus(mut self, youngs_modulus: f64) -> Self {
+        self.youngs_modulus = youngs_modulus;
+        self
+    }
+
+    /// Sets the Poisson's ratio (dimensionless, typically -1 to 0.5).
+    pub fn poisson_ratio(mut self, poisson_ratio: f64) -> Self {
+        self.poisson_ratio = poisson_ratio;
+        self
+    }
+
+    /// Sets the friction coefficient (dimensionless, >= 0).
+    pub fn friction_coefficient(mut self, friction_coefficient: f64) -> Self {
+        self.friction_coefficient = friction_coefficient;
+        self
+    }
+
+    /// Sets the restitution coefficient (dimensionless, 0 to 1).
+    pub fn restitution_coefficient(mut self, restitution_coefficient: f64) -> Self {
+        self.restitution_coefficient = restitution_coefficient;
+        self
+    }
+
+    /// Sets the rolling resistance coefficient (dimensionless, >= 0).
+    /// Typical values: 0.001-0.005 for hard materials, 0.01-0.03 for rubber.
+    pub fn rolling_resistance_coefficient(mut self, rolling_resistance_coefficient: f64) -> Self {
+        self.rolling_resistance_coefficient = rolling_resistance_coefficient;
+        self
+    }
+
+    /// Sets the thermal conductivity in W/(m·K).
+    pub fn thermal_conductivity(mut self, thermal_conductivity: f64) -> Self {
+        self.thermal_conductivity = thermal_conductivity;
+        self
+    }
+
+    /// Sets the specific heat capacity in J/(kg·K).
+    pub fn specific_heat_capacity(mut self, specific_heat_capacity: f64) -> Self {
+        self.specific_heat_capacity = specific_heat_capacity;
+        self
+    }
+
+    /// Sets the yield strength in Pascals (Pa).
+    pub fn yield_strength(mut self, yield_strength: f64) -> Self {
+        self.yield_strength = yield_strength;
+        self
+    }
+
+    /// Sets the ultimate strength in Pascals (Pa).
+    pub fn ultimate_strength(mut self, ultimate_strength: f64) -> Self {
+        self.ultimate_strength = ultimate_strength;
+        self
+    }
+
+    /// Builds the Material, validating all properties.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Material)` - A valid Material with the specified properties
+    /// * `Err(PhysicsError)` - If any property violates constraints
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::MaterialBuilder;
+    ///
+    /// // Valid material
+    /// let material = MaterialBuilder::new()
+    ///     .density(5000.0)
+    ///     .build();
+    /// assert!(material.is_ok());
+    ///
+    /// // Invalid material (negative density)
+    /// let invalid = MaterialBuilder::new()
+    ///     .density(-100.0)
+    ///     .build();
+    /// assert!(invalid.is_err());
+    /// ```
+    pub fn build(self) -> Result<Material, PhysicsError> {
+        Material::new(
+            self.density,
+            self.youngs_modulus,
+            self.poisson_ratio,
+            self.friction_coefficient,
+            self.restitution_coefficient,
+            self.rolling_resistance_coefficient,
+            self.thermal_conductivity,
+            self.specific_heat_capacity,
+            self.yield_strength,
+            self.ultimate_strength,
+        )
+    }
+}
+
+impl Default for MaterialBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<Material> for MaterialBuilder {
+    /// Creates a MaterialBuilder from an existing Material.
+    ///
+    /// This allows you to start with a predefined material and modify
+    /// only the properties you want to change.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{Material, MaterialBuilder};
+    ///
+    /// let modified = MaterialBuilder::from(Material::steel())
+    ///     .friction_coefficient(0.9)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// assert_eq!(modified.density, 7850.0);  // Unchanged
+    /// assert_eq!(modified.friction_coefficient, 0.9);  // Modified
+    /// ```
+    fn from(material: Material) -> Self {
+        Self {
+            density: material.density,
+            youngs_modulus: material.youngs_modulus,
+            poisson_ratio: material.poisson_ratio,
+            friction_coefficient: material.friction_coefficient,
+            restitution_coefficient: material.restitution_coefficient,
+            rolling_resistance_coefficient: material.rolling_resistance_coefficient,
+            thermal_conductivity: material.thermal_conductivity,
+            specific_heat_capacity: material.specific_heat_capacity,
+            yield_strength: material.yield_strength,
+            ultimate_strength: material.ultimate_strength,
         }
     }
 }

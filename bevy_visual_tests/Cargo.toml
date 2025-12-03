@@ -6,7 +6,7 @@ description = "Visual tests for rs_physics using Bevy"
 publish = false
 
 [dependencies]
-rs_physics = { path = "..", features = ["gpu", "fluid_simulation"] }
+rs_physics = { path = "..", features = ["gpu", "fluid_simulation", "thermodynamics", "constraints"] }
 bevy = { version = "0.15", features = ["wayland"] }
 rand = "0.8"
 
@@ -33,3 +33,15 @@ path = "src/bin/particle_gravity.rs"
 [[bin]]
 name = "collision_3d"
 path = "src/bin/collision_3d.rs"
+
+[[bin]]
+name = "thermal_2d"
+path = "src/bin/thermal_2d.rs"
+
+[[bin]]
+name = "thermal_3d"
+path = "src/bin/thermal_3d.rs"
+
+[[bin]]
+name = "constraints_3d"
+path = "src/bin/constraints_3d.rs"

@@ -85,7 +85,7 @@ pub fn gjk_collision_detection_ex(
     }
 }
 
-/// Legacy GJK collision detection - returns Option<Simplex> for backwards compatibility
+/// Legacy GJK collision detection - returns `Option<Simplex>` for backwards compatibility
 /// Note: For sphere-sphere collisions, returns a dummy simplex. Use gjk_collision_detection_ex
 /// with epa_contact_points_ex for proper sphere handling.
 pub fn gjk_collision_detection(

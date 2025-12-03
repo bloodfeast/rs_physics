@@ -1,5 +1,6 @@
-use crate::interactions::elastic_collision_2d;
-use crate::models::ObjectIn2D;
+use crate::interactions::{elastic_collision_2d, material_collision_2d};
+use crate::materials::Material;
+use crate::models::{ObjectIn2D, Shape2DCollider};
 use crate::utils::DEFAULT_PHYSICS_CONSTANTS;
 
 #[test]
@@ -125,4 +126,162 @@ fn test_velocity_magnitude_and_direction() {
     let dir = obj.direction();
     assert!((dir.x - 0.6).abs() < 1e-10); // x component should be 3/5 = 0.6
     assert!((dir.y - 0.8).abs() < 1e-10); // y component should be 4/5 = 0.8
+}
+
+// ========== Material-based collision tests ==========
+
+#[test]
+fn test_material_collision_2d_basic() {
+    // Create two objects with materials colliding head-on
+    let mut obj1 = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::steel()
+    );
+    obj1.velocity.x = 5.0;  // Moving right
+
+    let mut obj2 = ObjectIn2D::with_material(
+        1.0, (2.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::steel()
+    );
+    obj2.velocity.x = -5.0;  // Moving left
+
+    // Collision normal pointing from obj1 to obj2 (left direction, toward obj2)
+    // With this convention, relative velocity along normal is negative when approaching
+    let result = material_collision_2d(&obj1, &obj2, (-1.0, 0.0));
+
+    // After collision, velocities should be reversed
+    assert!(result.velocity1.x < 0.0, "Object 1 should now be moving left");
+    assert!(result.velocity2.x > 0.0, "Object 2 should now be moving right");
+}
+
+#[test]
+fn test_material_collision_2d_different_materials() {
+    // Rubber vs Steel - rubber is more bouncy
+    let obj1 = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::rubber()  // High restitution (0.95)
+    );
+
+    let mut obj2 = ObjectIn2D::with_material(
+        1.0, (2.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::concrete()  // Low restitution (0.2)
+    );
+    obj2.velocity.x = -10.0;  // Moving toward obj1
+
+    // Normal points from obj1 toward obj2 (negative x direction)
+    let result = material_collision_2d(&obj1, &obj2, (-1.0, 0.0));
+
+    // The collision should happen and velocities should change
+    assert!(result.velocity2.x != -10.0, "Velocity should change after collision");
+}
+
+#[test]
+fn test_material_collision_2d_high_friction() {
+    // Ice (low friction) vs Rubber (high friction)
+    let mut obj1 = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::ice()
+    );
+    obj1.velocity.x = 5.0;
+    obj1.velocity.y = 3.0;
+
+    let obj2 = ObjectIn2D::with_material(
+        1.0, (2.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::rubber()
+    );
+
+    // Normal points from obj1 toward obj2 (negative x direction)
+    let result = material_collision_2d(&obj1, &obj2, (-1.0, 0.0));
+
+    // Collision should process since objects are approaching
+    assert!(result.velocity1.x != obj1.velocity.x, "Velocity should change");
+}
+
+#[test]
+fn test_material_collision_2d_objects_separating() {
+    // Objects moving apart should not be affected
+    let mut obj1 = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::steel()
+    );
+    obj1.velocity.x = -5.0;  // Moving left (away from obj2)
+
+    let mut obj2 = ObjectIn2D::with_material(
+        1.0, (2.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::steel()
+    );
+    obj2.velocity.x = 5.0;  // Moving right (away from obj1)
+
+    // Normal points from obj1 toward obj2 (negative x direction)
+    // Since objects are separating (obj1 going left, obj2 going right),
+    // relative velocity along this normal will be positive, so no collision processed
+    let result = material_collision_2d(&obj1, &obj2, (-1.0, 0.0));
+
+    // Velocities should be unchanged since objects are separating
+    assert_eq!(result.velocity1.x, obj1.velocity.x);
+    assert_eq!(result.velocity2.x, obj2.velocity.x);
+}
+
+#[test]
+fn test_material_collision_2d_default_coefficients() {
+    // Test with no materials (should use defaults)
+    let mut obj1 = ObjectIn2D::with_shape(1.0, (0.0, 0.0), Shape2DCollider::Circle(1.0));
+    obj1.velocity.x = 5.0;
+
+    let mut obj2 = ObjectIn2D::with_shape(1.0, (2.0, 0.0), Shape2DCollider::Circle(1.0));
+    obj2.velocity.x = -5.0;
+
+    // Normal points from obj1 toward obj2 (negative x direction)
+    let result = material_collision_2d(&obj1, &obj2, (-1.0, 0.0));
+
+    // Collision should process
+    assert!(result.velocity1.x < obj1.velocity.x, "Velocity1 should decrease");
+}
+
+#[test]
+fn test_object_get_friction_with_material() {
+    let obj = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::ice()
+    );
+
+    // Ice has friction of 0.03
+    assert!((obj.get_friction() - 0.03).abs() < 0.001);
+}
+
+#[test]
+fn test_object_get_friction_without_material() {
+    let obj = ObjectIn2D::with_shape(1.0, (0.0, 0.0), Shape2DCollider::Circle(1.0));
+
+    // Default friction is 0.5
+    assert_eq!(obj.get_friction(), 0.5);
+}
+
+#[test]
+fn test_object_get_restitution_with_material() {
+    let obj = ObjectIn2D::with_material(
+        1.0, (0.0, 0.0),
+        Shape2DCollider::Circle(1.0),
+        Material::rubber()
+    );
+
+    // Rubber has restitution of 0.95
+    assert!((obj.get_restitution() - 0.95).abs() < 0.001);
+}
+
+#[test]
+fn test_object_get_restitution_without_material() {
+    let obj = ObjectIn2D::with_shape(1.0, (0.0, 0.0), Shape2DCollider::Circle(1.0));
+
+    // Default restitution is 0.8
+    assert_eq!(obj.get_restitution(), 0.8);
 }

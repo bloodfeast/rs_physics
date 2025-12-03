@@ -1,7 +1,64 @@
 // src/thermodynamics.rs
 
 use crate::utils::PhysicsError;
+use super::constants::R;
+use super::validation::{validate_temperature_kelvin, validate_pressure, validate_volume, validate_moles};
 
+/// Type of ideal gas based on degrees of freedom
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GasType {
+    /// Monatomic gas (He, Ne, Ar) - 3 translational degrees of freedom
+    Monatomic,
+    /// Diatomic gas (N2, O2, H2) - 5 degrees of freedom (3 translational + 2 rotational)
+    Diatomic,
+    /// Polyatomic gas with specified degrees of freedom
+    Polyatomic(usize),
+}
+
+impl GasType {
+    /// Returns the degrees of freedom for this gas type
+    ///
+    /// - Monatomic: 3 (translational only)
+    /// - Diatomic: 5 (translational + rotational)
+    /// - Polyatomic: specified value
+    #[inline]
+    pub fn degrees_of_freedom(&self) -> usize {
+        match self {
+            GasType::Monatomic => 3,
+            GasType::Diatomic => 5,
+            GasType::Polyatomic(f) => *f,
+        }
+    }
+
+    /// Returns the heat capacity ratio (gamma = Cp/Cv)
+    ///
+    /// γ = (f + 2) / f where f is degrees of freedom
+    #[inline]
+    pub fn gamma(&self) -> f64 {
+        let f = self.degrees_of_freedom() as f64;
+        (f + 2.0) / f
+    }
+
+    /// Returns the molar heat capacity at constant volume (Cv)
+    ///
+    /// Cv = (f/2) * R
+    #[inline]
+    pub fn molar_cv(&self) -> f64 {
+        let f = self.degrees_of_freedom() as f64;
+        (f / 2.0) * R
+    }
+
+    /// Returns the molar heat capacity at constant pressure (Cp)
+    ///
+    /// Cp = Cv + R = ((f + 2)/2) * R
+    #[inline]
+    pub fn molar_cp(&self) -> f64 {
+        let f = self.degrees_of_freedom() as f64;
+        ((f + 2.0) / 2.0) * R
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Thermodynamic {
     pub temperature: f64,
     pub pressure: f64,
@@ -203,4 +260,308 @@ pub fn calculate_specific_heat_capacity(mass: f64, temperature_change: f64, heat
         return Err(PhysicsError::CalculationError("Temperature change cannot be zero".to_string()));
     }
     Ok(heat_added / (mass * temperature_change))
+}
+
+// ============================================================================
+// Ideal Gas Law Functions
+// ============================================================================
+
+/// Calculates pressure using the ideal gas law: P = nRT/V
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `temperature` - Temperature in Kelvin
+/// * `volume` - Volume in cubic meters
+///
+/// # Returns
+/// Pressure in Pascals
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::ideal_gas_pressure;
+///
+/// // 1 mole at 300 K in 0.025 m³ ≈ 100 kPa
+/// let p = ideal_gas_pressure(1.0, 300.0, 0.025).unwrap();
+/// assert!((p - 99858.0).abs() < 100.0);
+/// ```
+pub fn ideal_gas_pressure(n: f64, temperature: f64, volume: f64) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+    validate_temperature_kelvin(temperature)?;
+    validate_volume(volume)?;
+
+    Ok(n * R * temperature / volume)
+}
+
+/// Calculates volume using the ideal gas law: V = nRT/P
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `temperature` - Temperature in Kelvin
+/// * `pressure` - Pressure in Pascals
+///
+/// # Returns
+/// Volume in cubic meters
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::ideal_gas_volume;
+///
+/// // 1 mole at 300 K and 101325 Pa ≈ 0.0246 m³
+/// let v = ideal_gas_volume(1.0, 300.0, 101325.0).unwrap();
+/// assert!((v - 0.0246).abs() < 0.001);
+/// ```
+pub fn ideal_gas_volume(n: f64, temperature: f64, pressure: f64) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+    validate_temperature_kelvin(temperature)?;
+    validate_pressure(pressure)?;
+
+    Ok(n * R * temperature / pressure)
+}
+
+/// Calculates temperature using the ideal gas law: T = PV/(nR)
+///
+/// # Arguments
+/// * `pressure` - Pressure in Pascals
+/// * `volume` - Volume in cubic meters
+/// * `n` - Number of moles
+///
+/// # Returns
+/// Temperature in Kelvin
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::ideal_gas_temperature;
+///
+/// let t = ideal_gas_temperature(101325.0, 0.0246, 1.0).unwrap();
+/// assert!((t - 300.0).abs() < 1.0);
+/// ```
+pub fn ideal_gas_temperature(pressure: f64, volume: f64, n: f64) -> Result<f64, PhysicsError> {
+    validate_pressure(pressure)?;
+    validate_volume(volume)?;
+
+    if n <= 0.0 {
+        return Err(PhysicsError::CalculationError(
+            format!("Number of moles must be positive for temperature calculation, got {} mol", n)
+        ));
+    }
+
+    Ok(pressure * volume / (n * R))
+}
+
+/// Calculates the number of moles using the ideal gas law: n = PV/(RT)
+///
+/// # Arguments
+/// * `pressure` - Pressure in Pascals
+/// * `volume` - Volume in cubic meters
+/// * `temperature` - Temperature in Kelvin
+///
+/// # Returns
+/// Number of moles
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::ideal_gas_moles;
+///
+/// let n = ideal_gas_moles(101325.0, 0.0246, 300.0).unwrap();
+/// assert!((n - 1.0).abs() < 0.01);
+/// ```
+pub fn ideal_gas_moles(pressure: f64, volume: f64, temperature: f64) -> Result<f64, PhysicsError> {
+    validate_pressure(pressure)?;
+    validate_volume(volume)?;
+    validate_temperature_kelvin(temperature)?;
+
+    Ok(pressure * volume / (R * temperature))
+}
+
+// ============================================================================
+// Internal Energy Functions
+// ============================================================================
+
+/// Calculates the internal energy of an ideal gas
+///
+/// U = (f/2) * n * R * T
+///
+/// where f is degrees of freedom:
+/// - Monatomic: f = 3
+/// - Diatomic: f = 5
+/// - Polyatomic: f = specified
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `temperature` - Temperature in Kelvin
+/// * `gas_type` - Type of gas (determines degrees of freedom)
+///
+/// # Returns
+/// Internal energy in Joules
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::{internal_energy, GasType};
+///
+/// // 1 mole of monatomic gas at 300 K
+/// let u = internal_energy(1.0, 300.0, GasType::Monatomic).unwrap();
+/// // U = (3/2) * 1 * 8.314 * 300 ≈ 3742 J
+/// assert!((u - 3742.0).abs() < 10.0);
+/// ```
+pub fn internal_energy(n: f64, temperature: f64, gas_type: GasType) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+    validate_temperature_kelvin(temperature)?;
+
+    let f = gas_type.degrees_of_freedom() as f64;
+    Ok((f / 2.0) * n * R * temperature)
+}
+
+/// Calculates the change in internal energy for an ideal gas
+///
+/// ΔU = (f/2) * n * R * ΔT = n * Cv * ΔT
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `delta_t` - Temperature change in Kelvin
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Change in internal energy in Joules
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::{internal_energy_change, GasType};
+///
+/// // 1 mole of diatomic gas, temperature increases by 50 K
+/// let delta_u = internal_energy_change(1.0, 50.0, GasType::Diatomic).unwrap();
+/// // ΔU = (5/2) * 1 * 8.314 * 50 ≈ 1039 J
+/// assert!((delta_u - 1039.0).abs() < 10.0);
+/// ```
+pub fn internal_energy_change(n: f64, delta_t: f64, gas_type: GasType) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+
+    let cv = gas_type.molar_cv();
+    Ok(n * cv * delta_t)
+}
+
+// ============================================================================
+// Enthalpy Functions
+// ============================================================================
+
+/// Calculates the enthalpy of an ideal gas
+///
+/// H = U + PV = U + nRT
+///
+/// For an ideal gas: H = (f/2 + 1) * n * R * T = n * Cp * T
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `temperature` - Temperature in Kelvin
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Enthalpy in Joules
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::{enthalpy, GasType};
+///
+/// // 1 mole of monatomic gas at 300 K
+/// let h = enthalpy(1.0, 300.0, GasType::Monatomic).unwrap();
+/// // H = (5/2) * 1 * 8.314 * 300 ≈ 6236 J
+/// assert!((h - 6236.0).abs() < 10.0);
+/// ```
+pub fn enthalpy(n: f64, temperature: f64, gas_type: GasType) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+    validate_temperature_kelvin(temperature)?;
+
+    let cp = gas_type.molar_cp();
+    Ok(n * cp * temperature)
+}
+
+/// Calculates the change in enthalpy for an ideal gas
+///
+/// ΔH = n * Cp * ΔT
+///
+/// # Arguments
+/// * `n` - Number of moles
+/// * `delta_t` - Temperature change in Kelvin
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Change in enthalpy in Joules
+///
+/// # Examples
+/// ```
+/// use rs_physics::thermodynamics::{enthalpy_change, GasType};
+///
+/// // 1 mole of diatomic gas, temperature increases by 50 K
+/// let delta_h = enthalpy_change(1.0, 50.0, GasType::Diatomic).unwrap();
+/// // ΔH = (7/2) * 1 * 8.314 * 50 ≈ 1455 J
+/// assert!((delta_h - 1455.0).abs() < 10.0);
+/// ```
+pub fn enthalpy_change(n: f64, delta_t: f64, gas_type: GasType) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+
+    let cp = gas_type.molar_cp();
+    Ok(n * cp * delta_t)
+}
+
+/// Calculates the enthalpy from a thermodynamic state
+///
+/// H = U + PV where U = n * Cv * T
+///
+/// # Arguments
+/// * `state` - The thermodynamic state (P, V, T)
+/// * `n` - Number of moles
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Enthalpy in Joules
+pub fn enthalpy_from_state(state: &Thermodynamic, n: f64, gas_type: GasType) -> Result<f64, PhysicsError> {
+    validate_moles(n)?;
+
+    let u = internal_energy(n, state.temperature, gas_type)?;
+    Ok(u + state.pressure * state.volume)
+}
+
+// ============================================================================
+// Heat Capacity Functions
+// ============================================================================
+
+/// Returns the molar heat capacity at constant volume for a given gas type
+///
+/// Cv = (f/2) * R
+///
+/// # Arguments
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Molar heat capacity at constant volume in J/(mol·K)
+#[inline]
+pub fn molar_heat_capacity_cv(gas_type: GasType) -> f64 {
+    gas_type.molar_cv()
+}
+
+/// Returns the molar heat capacity at constant pressure for a given gas type
+///
+/// Cp = Cv + R = ((f+2)/2) * R
+///
+/// # Arguments
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Molar heat capacity at constant pressure in J/(mol·K)
+#[inline]
+pub fn molar_heat_capacity_cp(gas_type: GasType) -> f64 {
+    gas_type.molar_cp()
+}
+
+/// Returns the heat capacity ratio (gamma) for a given gas type
+///
+/// γ = Cp/Cv = (f+2)/f
+///
+/// # Arguments
+/// * `gas_type` - Type of gas
+///
+/// # Returns
+/// Heat capacity ratio (dimensionless)
+#[inline]
+pub fn heat_capacity_ratio(gas_type: GasType) -> f64 {
+    gas_type.gamma()
 }

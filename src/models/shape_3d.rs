@@ -1035,6 +1035,28 @@ impl PhysicalObject3D {
         }
     }
 
+    /// Gets the current friction coefficient for collisions.
+    /// Returns the material's friction if available, otherwise returns a default of 0.5.
+    pub fn get_friction(&self) -> f64 {
+        if let Some(ref material) = self.material {
+            material.friction_coefficient
+        } else {
+            0.5 // Default value
+        }
+    }
+
+    /// Gets the rolling resistance coefficient.
+    /// Rolling resistance arises from deformation at the contact patch during rolling,
+    /// distinct from sliding friction.
+    /// Returns the material's rolling resistance if available, otherwise returns a default of 0.01.
+    pub fn get_rolling_resistance(&self) -> f64 {
+        if let Some(ref material) = self.material {
+            material.rolling_resistance_coefficient
+        } else {
+            0.01 // Default value (typical for rubber on hard surface)
+        }
+    }
+
     /// Transform point from local to world space
     fn transform_point_to_world(&self, local_point: (f64, f64, f64)) -> (f64, f64, f64) {
         // Rotate using current orientation
@@ -1164,8 +1186,11 @@ impl PhysicalObject3D {
         // Apply additional damping when close to ground to simulate rolling resistance
         let ground_proximity = self.object.position.y - self.physics_constants.ground_level;
         if ground_proximity < 0.1 {
-            // Increase damping when close to ground
-            let ground_damping = 0.6 * dt;
+            // Use material's rolling resistance coefficient, scaled for effective damping
+            // Rolling resistance coefficients are typically 0.001-0.03, so we scale by ~30
+            // to get effective damping values in the useful range (0.03-0.9)
+            let rolling_resistance = self.get_rolling_resistance();
+            let ground_damping = (rolling_resistance * 30.0).min(0.9) * dt;
             self.angular_velocity.0 *= 1.0 - ground_damping;
             self.angular_velocity.2 *= 1.0 - ground_damping;
         }

@@ -570,9 +570,10 @@ pub fn handle_cuboid_ground_collision(
             let restitution = obj.get_restitution() * 0.8;
             obj.object.velocity.y = -obj.object.velocity.y * restitution;
 
-            // Friction coefficients
-            let sliding_friction = 0.7;
-            let rolling_friction = 0.4;
+            // Use material friction coefficient, with scaling for sliding vs rolling
+            let base_friction = obj.get_friction();
+            let sliding_friction = base_friction;
+            let rolling_friction = base_friction * 0.6;  // Rolling friction typically lower
 
             // Apply friction to horizontal velocity
             obj.object.velocity.x *= 1.0 - sliding_friction * dt;
@@ -652,8 +653,8 @@ pub fn handle_sphere_ground_collision(obj: &mut PhysicalObject3D, radius: f64, d
         let restitution = obj.get_restitution();
         obj.object.velocity.y = -obj.object.velocity.y * restitution;
 
-        // Apply rolling friction
-        let friction = 0.5; // Rolling friction coefficient
+        // Apply rolling friction using material coefficient
+        let friction = obj.get_friction() * 0.7;  // Rolling friction typically lower
 
         // Calculate friction force direction (opposite to velocity)
         let speed_sq = obj.object.velocity.x * obj.object.velocity.x
@@ -712,10 +713,13 @@ pub fn handle_cylinder_ground_collision(
         let cylinder_up = rotate_point((0.0, 1.0, 0.0), obj.orientation.to_tuple());
         let up_dot_world_up = cylinder_up.1; // Dot product with world up (0,1,0)
 
+        // Get base friction from material
+        let base_friction = obj.get_friction();
+
         // If cylinder is more vertical (on its end)
         if up_dot_world_up.abs() > 0.7 {
             // Higher friction (cylinder standing on end doesn't roll well)
-            let friction = 0.8;
+            let friction = base_friction * 1.2;  // Increase friction when standing
             obj.object.velocity.x *= 1.0 - friction * dt;
             obj.object.velocity.z *= 1.0 - friction * dt;
 
@@ -724,7 +728,7 @@ pub fn handle_cylinder_ground_collision(
             obj.angular_velocity.2 *= 0.9;
         } else {
             // Lower friction (cylinder can roll on its side)
-            let friction = 0.3;
+            let friction = base_friction * 0.5;  // Lower friction when rolling
             obj.object.velocity.x *= 1.0 - friction * dt;
             obj.object.velocity.z *= 1.0 - friction * dt;
 
@@ -796,13 +800,13 @@ pub fn handle_polyhedron_ground_collision(
         let restitution = obj.get_restitution() * 0.7; // Polyhedra tend to bounce less
         obj.object.velocity.y = -obj.object.velocity.y * restitution;
 
-        // Apply friction
-        let friction = 0.6;
+        // Apply friction using material coefficient
+        let friction = obj.get_friction();
         obj.object.velocity.x *= 1.0 - friction * dt;
         obj.object.velocity.z *= 1.0 - friction * dt;
 
-        // Apply angular damping
-        let angular_damping = 0.5 * dt;
+        // Apply angular damping based on friction
+        let angular_damping = friction * dt;
         obj.angular_velocity.0 *= 1.0 - angular_damping;
         obj.angular_velocity.1 *= 1.0 - angular_damping;
         obj.angular_velocity.2 *= 1.0 - angular_damping;
@@ -1146,8 +1150,11 @@ pub fn apply_damping(
     // Apply additional damping when close to ground to simulate rolling resistance
     let ground_proximity = obj.object.position.y - obj.physics_constants.ground_level;
     if ground_proximity < 0.1 {
-        // Increase damping when close to ground
-        let ground_damping = 0.6 * dt;
+        // Use material's rolling resistance coefficient, scaled for effective damping
+        // Rolling resistance coefficients are typically 0.001-0.03, so we scale by ~30
+        // to get effective damping values in the useful range (0.03-0.9)
+        let rolling_resistance = obj.get_rolling_resistance();
+        let ground_damping = (rolling_resistance * 30.0).min(0.9) * dt;
         obj.angular_velocity.0 *= 1.0 - ground_damping;
         obj.angular_velocity.2 *= 1.0 - ground_damping;
     }
