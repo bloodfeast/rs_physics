@@ -393,6 +393,48 @@ impl Material {
         ).expect("Failed to create polyurethane material")
     }
 
+    /// Creates a new Material instance with properties of rope/twine (natural fiber).
+    ///
+    /// Rope material is ideal for cable, rope, and tether constraints. It has
+    /// low restitution for realistic behavior when going taut.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of natural fiber rope:
+    /// * Density: 1500 kg/m³ (dense fiber)
+    /// * Young's modulus: 1 GPa (flexible but strong)
+    /// * Poisson's ratio: 0.35
+    /// * Friction coefficient: 0.6 (rough fiber surface)
+    /// * Restitution coefficient: 0.15 (absorbs energy when taut)
+    /// * Rolling resistance coefficient: 0.05
+    /// * Thermal conductivity: 0.04 W/(m·K)
+    /// * Specific heat capacity: 1400 J/(kg·K)
+    /// * Yield strength: 30 MPa
+    /// * Ultimate strength: 50 MPa
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let rope = Material::rope();
+    /// assert_eq!(rope.restitution_coefficient, 0.15);
+    /// ```
+    pub fn rope() -> Self {
+        Self::new(
+            1500.0,             // density (kg/m³) - dense natural fiber
+            1.0e9,              // Young's modulus (Pa) - flexible but strong
+            0.35,               // Poisson's ratio
+            0.6,                // friction coefficient - rough fiber surface
+            0.15,               // restitution coefficient - absorbs energy when taut
+            0.05,               // rolling resistance coefficient
+            0.04,               // thermal conductivity (W/(m·K)) - poor conductor
+            1400.0,             // specific heat capacity (J/(kg·K))
+            30.0e6,             // yield strength (Pa)
+            50.0e6,             // ultimate strength (Pa)
+        ).expect("Failed to create rope material")
+    }
+
     /// Creates a new Material instance with properties of wood (hardwood).
     ///
     /// # Returns

@@ -44,6 +44,8 @@
 //! | [`Spring3D`] | Elastic constraint with damping (3D) | 3D soft connections |
 //! | [`Rope2D`] | Maximum length constraint (2D) | Ropes, cables, tethers |
 //! | [`Rope3D`] | Maximum length constraint (3D) | Ropes, cables, tethers |
+//! | [`RopeChain2D`] | Multi-segment rope (2D) | Realistic rope rendering |
+//! | [`RopeChain3D`] | Multi-segment rope (3D) | Realistic rope rendering |
 //! | [`Fixed2D`] | Fixed offset constraint (2D) | Weld joints, rigid attachments |
 //! | [`Fixed3D`] | Fixed offset constraint (3D) | Weld joints, rigid attachments |
 //! | [`Hinge3D`] | Revolute constraint (3D) | Doors, wheels, pendulums |

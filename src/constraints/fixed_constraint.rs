@@ -529,6 +529,7 @@ mod tests {
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x, y, z },
             forces: Vec::new(),
+            material: None,
         }
     }
 

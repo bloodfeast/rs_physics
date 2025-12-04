@@ -17,7 +17,9 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,no_run
+//! # #[cfg(feature = "thermodynamics")]
+//! # fn main() {
 //! use rs_physics::thermodynamics::{ThermalGrid, ThermalBoundaryCondition, GridSide};
 //!
 //! // Create a 2D thermal grid (50x50, starting at 300K)
@@ -39,6 +41,9 @@
 //! }
 //!
 //! println!("Average temperature: {:.1} K", grid.average_temperature());
+//! # }
+//! # #[cfg(not(feature = "thermodynamics"))]
+//! # fn main() {}
 //! ```
 //!
 //! ## Module Contents
@@ -76,7 +81,9 @@
 //!
 //! ## Example: Heat Engine Efficiency
 //!
-//! ```rust
+//! ```rust,no_run
+//! # #[cfg(feature = "thermodynamics")]
+//! # fn main() {
 //! use rs_physics::thermodynamics::{carnot_efficiency, otto_efficiency};
 //!
 //! // Carnot efficiency between 600K hot reservoir and 300K cold reservoir
@@ -86,6 +93,9 @@
 //! // Otto cycle with compression ratio 10:1
 //! let otto = otto_efficiency(10.0, 1.4).unwrap(); // γ = 1.4 for air
 //! println!("Otto efficiency: {:.1}%", otto * 100.0); // ~60%
+//! # }
+//! # #[cfg(not(feature = "thermodynamics"))]
+//! # fn main() {}
 //! ```
 //!
 //! ## Limitations

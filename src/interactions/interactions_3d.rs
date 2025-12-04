@@ -33,6 +33,7 @@ impl ObjectIn3D {
             velocity: Velocity3D { x: vx, y: vy, z: vz },
             position: Axis3D::from_coord(position),
             forces: Vec::new(),
+            material: None,
         }
     }
 

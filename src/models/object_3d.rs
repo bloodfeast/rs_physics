@@ -1,4 +1,5 @@
 use crate::forces::Force;
+use crate::materials::Material;
 use crate::models::{FromCoordinates, ObjectIn2D, To2D, ToCoordinates, Shape2DCollider};
 use crate::rotational_dynamics::AngularState2D;
 
@@ -216,6 +217,8 @@ pub struct ObjectIn3D {
     pub velocity: Velocity3D,
     pub position: Axis3D,
     pub forces: Vec<Force>,
+    /// Optional material properties for collision response and constraints
+    pub material: Option<Material>,
 }
 
 impl Default for ObjectIn3D {
@@ -240,7 +243,33 @@ impl Default for ObjectIn3D {
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x: 0.0, y: 0.0, z: 0.0 },
             forces: Vec::new(),
+            material: None,
         }
+    }
+}
+
+impl ObjectIn3D {
+    /// Create a new 3D object with the given mass, position, and material
+    pub fn with_material(mass: f64, position: (f64, f64, f64), material: Material) -> Self {
+        Self {
+            mass,
+            velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
+            position: Axis3D { x: position.0, y: position.1, z: position.2 },
+            forces: Vec::new(),
+            material: Some(material),
+        }
+    }
+
+    /// Get the restitution coefficient for collision response.
+    /// Returns the material's restitution if available, otherwise returns a default of 0.8.
+    pub fn get_restitution(&self) -> f64 {
+        self.material.as_ref().map_or(0.8, |m| m.restitution_coefficient)
+    }
+
+    /// Get the friction coefficient for collision response.
+    /// Returns the material's friction if available, otherwise returns a default of 0.5.
+    pub fn get_friction(&self) -> f64 {
+        self.material.as_ref().map_or(0.5, |m| m.friction_coefficient)
     }
 }
 
@@ -272,7 +301,7 @@ impl ToObjectIn2D for ObjectIn3D {
             forces: self.forces.to_owned(),
             angular: AngularState2D::default(),
             shape: Shape2DCollider::default(),
-            material: None,
+            material: self.material.clone(),
         }
     }
 }

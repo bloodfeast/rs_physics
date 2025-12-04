@@ -22,7 +22,8 @@ use bevy_visual_tests::{
     OrbitCameraPlugin, SimulationInfoText,
 };
 use rs_physics::models::ObjectIn3D;
-use rs_physics::constraints::{Joint3D, Spring3D, Rope3D, Hinge3D};
+use rs_physics::constraints::{Joint3D, Spring3D, Rope3D, Hinge3D, RopeChain3D};
+use rs_physics::materials::Material;
 
 const DT: f32 = 0.016; // 60 FPS timestep
 const SOLVER_ITERATIONS: usize = 20; // Increased for better convergence
@@ -64,8 +65,8 @@ impl Scenario {
         match self {
             Scenario::Pendulum => "Pendulum Chain",
             Scenario::SoftBody => "Soft Body Grid",
-            Scenario::Rope => "Rope Swing",
-            Scenario::Hinge => "Hinge Door",
+            Scenario::Rope => "Rope Drop",
+            Scenario::Hinge => "Trap Door",
         }
     }
 }
@@ -93,6 +94,8 @@ struct SimulationState {
     springs: Vec<Spring3D>,
     ropes: Vec<Rope3D>,
     hinges: Vec<Hinge3D>,
+    // Multi-segment rope chain
+    rope_chain: Option<RopeChain3D>,
     // Track which objects are anchored (infinite mass)
     anchored: Vec<bool>,
     // Spring connections for soft body (stores indices into objects array)
@@ -111,6 +114,7 @@ impl Default for SimulationState {
             springs: Vec::new(),
             ropes: Vec::new(),
             hinges: Vec::new(),
+            rope_chain: None,
             anchored: Vec::new(),
             spring_connections: Vec::new(),
         }
@@ -315,23 +319,66 @@ fn setup_rope_scenario(sim_state: &mut SimulationState) {
     sim_state.ropes.clear();
     sim_state.hinges.clear();
     sim_state.anchored.clear();
+    sim_state.rope_chain = None;
     sim_state.scenario = Scenario::Rope;
 
-    // Create a single anchor and a weight hanging from it
-    // This is simpler and more stable than dual ropes
-    let anchor = ObjectIn3D::new(f64::INFINITY, 0.0, 0.0, 0.0, (0.0, 8.0, 0.0));
-    // Weight starts displaced to the right, so rope will swing
-    let weight = ObjectIn3D::new(2.0, 0.0, 0.0, 0.0, (4.0, 3.0, 0.0));
+    // Create a multi-segment rope chain starting bunched up near the anchor
+    // This simulates someone dropping a coiled rope with dramatic unfolding
+    use rs_physics::models::Velocity3D;
 
-    sim_state.objects.push(anchor.clone());
-    sim_state.objects.push(weight.clone());
-    sim_state.anchored.push(true);
-    sim_state.anchored.push(false);
+    let anchor_pos = (0.0, 8.0, 0.0);
+    let num_segments = 10;
+    let segment_length = 0.6;  // Each segment is 0.6 units (total rope = 6.0)
+    let particle_mass = 0.3;   // Very light particles for more dynamic motion
 
-    // Distance from (0,8,0) to (4,3,0) = sqrt(16+25) = sqrt(41) ≈ 6.4
-    // Set max_length just slightly longer so rope is nearly taut
-    let rope = Rope3D::new(anchor, weight, 6.5).unwrap();
-    sim_state.ropes.push(rope);
+    // Create points tightly bunched in a small ball near the anchor
+    let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(num_segments + 1);
+    points.push(anchor_pos); // Anchor point
+
+    // All particles start in a tiny ball right at the anchor
+    for i in 1..=num_segments {
+        // Very tight initial cluster
+        let angle = (i as f64) * 2.5; // Fast spiral
+        let radius = 0.05 * (i as f64); // Very tight radius
+        let x = anchor_pos.0 + radius * angle.cos();
+        let y = anchor_pos.1 - 0.02 * (i as f64); // Almost at same height
+        let z = anchor_pos.2 + radius * angle.sin();
+        points.push((x, y, z));
+    }
+
+    // Create rope chain from the bunched-up points
+    let mut rope_chain = RopeChain3D::from_points(&points, particle_mass, true).unwrap();
+
+    // Override segment lengths to the desired rope length (dramatic stretch)
+    for i in 0..rope_chain.segment_lengths.len() {
+        rope_chain.segment_lengths[i] = segment_length;
+    }
+
+    // Give particles strong initial velocities for chaotic unfolding
+    for i in 1..rope_chain.particles.len() {
+        let angle = (i as f64) * 1.8;
+        let intensity = 4.0 + (i as f64) * 0.5; // Stronger for particles further down the chain
+        rope_chain.particles[i].velocity = Velocity3D {
+            x: intensity * angle.cos(),  // Strong outward velocity
+            y: -3.0,                      // Strong downward
+            z: intensity * angle.sin(),  // Strong outward velocity
+        };
+    }
+
+    // Populate objects array from rope chain particles (for visual rendering)
+    for (i, particle) in rope_chain.particles.iter().enumerate() {
+        let obj = ObjectIn3D::new(
+            particle.mass,
+            particle.velocity.x,
+            particle.velocity.y,
+            particle.velocity.z,
+            (particle.position.x, particle.position.y, particle.position.z),
+        );
+        sim_state.objects.push(obj);
+        sim_state.anchored.push(i == 0); // First particle is anchored
+    }
+
+    sim_state.rope_chain = Some(rope_chain);
 }
 
 fn setup_hinge_scenario(sim_state: &mut SimulationState) {
@@ -341,25 +388,49 @@ fn setup_hinge_scenario(sim_state: &mut SimulationState) {
     sim_state.ropes.clear();
     sim_state.hinges.clear();
     sim_state.anchored.clear();
+    sim_state.rope_chain = None;
     sim_state.scenario = Scenario::Hinge;
 
-    // Create a door frame (anchor) and door (swinging)
-    let frame = ObjectIn3D::new(f64::INFINITY, 0.0, 0.0, 0.0, (0.0, 3.0, 0.0));
-    // Door starts rotated open
-    let door = ObjectIn3D::new(5.0, 0.0, 0.0, 0.5, (2.0, 3.0, 0.0));
+    // Create a trap door that swings open using true angular dynamics
+    // The hinge is along one edge (X axis), door starts horizontal and falls open
+
+    // Hinge point (fixed anchor along one edge of the trap door)
+    let hinge_pos = (0.0, 4.0, 0.0);
+
+    // Door starts horizontal (lying flat in X-Z plane)
+    // The door extends in the +Z direction from the hinge
+    // Position represents center of mass of the door panel
+    let door_offset = 1.5_f64;  // Distance from hinge to door center
+
+    // Door starts perfectly horizontal: at hinge Y level, offset in +Z
+    let door_x = hinge_pos.0;
+    let door_y = hinge_pos.1;  // Same Y level as hinge
+    let door_z = hinge_pos.2 + door_offset;  // Offset in +Z direction
+
+    let frame = ObjectIn3D::new(f64::INFINITY, 0.0, 0.0, 0.0, hinge_pos);
+    let door = ObjectIn3D::new(5.0, 0.0, 0.0, 0.0, (door_x, door_y, door_z));  // Heavier door for better physics
 
     sim_state.objects.push(frame.clone());
     sim_state.objects.push(door.clone());
     sim_state.anchored.push(true);
     sim_state.anchored.push(false);
 
-    // Create hinge at the frame position, rotating around Y axis
+    // Create hinge along X axis (door swings in Y-Z plane)
+    // The hinge uses true angular dynamics:
+    // - Tracks angle (θ) and angular velocity (ω)
+    // - Computes torque from gravity
+    // - Uses moment of inertia for realistic motion
+    // - Bounces at angle limits with material restitution
+    let steel = Material::steel();
     let hinge = Hinge3D::new(
         frame,
         door,
-        (0.0, 3.0, 0.0),  // anchor point
-        (0.0, 1.0, 0.0),  // Y axis rotation
-    ).unwrap().with_limits(-1.5, 1.5);  // Limit swing angle
+        hinge_pos,        // Anchor point at hinge edge
+        (1.0, 0.0, 0.0),  // X axis rotation - door swings in Y-Z plane
+    ).unwrap()
+        .with_limits(-0.05, std::f64::consts::FRAC_PI_2 - 0.1)  // Nearly closed to ~80 degrees open
+        .with_material(&steel)       // Steel restitution (0.85) for realistic bounce
+        .with_angular_damping(0.02); // Small friction in hinge
 
     sim_state.hinges.push(hinge);
 }
@@ -477,25 +548,40 @@ fn simulation_step(mut sim_state: ResMut<SimulationState>) {
                 }
             }
         }
-        _ => {
-            // Rope and Hinge use external gravity + position integration
-            for i in 0..num_objects {
-                if !sim_state.anchored[i] {
-                    sim_state.objects[i].velocity.y += gravity * dt;
-                }
-            }
-            for i in 0..num_objects {
-                if !sim_state.anchored[i] {
-                    let obj = &mut sim_state.objects[i];
-                    obj.position.x += obj.velocity.x * dt;
-                    obj.position.y += obj.velocity.y * dt;
-                    obj.position.z += obj.velocity.z * dt;
+        Scenario::Rope => {
+            // RopeChain3D handles its own gravity, integration, and constraint solving
+            // Use fewer iterations for more stretchy/bouncy behavior
+            const ROPE_ITERATIONS: usize = 6; // Lower than SOLVER_ITERATIONS for more dynamic rope
+            let particle_data: Vec<_> = if let Some(rope_chain) = &mut sim_state.rope_chain {
+                let _ = rope_chain.step(dt, gravity, ROPE_ITERATIONS, None);  // No damping for dynamic motion
+                rope_chain.particles.iter()
+                    .map(|p| (p.position.clone(), p.velocity.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Copy updated particle positions back to objects for rendering
+            for (i, (pos, vel)) in particle_data.iter().enumerate() {
+                if i < sim_state.objects.len() {
+                    sim_state.objects[i].position.x = pos.x;
+                    sim_state.objects[i].position.y = pos.y;
+                    sim_state.objects[i].position.z = pos.z;
+                    sim_state.objects[i].velocity.x = vel.x;
+                    sim_state.objects[i].velocity.y = vel.y;
+                    sim_state.objects[i].velocity.z = vel.z;
                 }
             }
         }
+        Scenario::Hinge => {
+            // Hinge uses true angular dynamics - it handles gravity and integration internally
+            // Do NOT apply external gravity or position integration here
+            // The hinge's solve() method handles everything
+        }
     }
 
-    let use_external_gravity = !matches!(sim_state.scenario, Scenario::Pendulum | Scenario::SoftBody);
+    // Hinge now handles gravity internally via angular dynamics
+    let use_external_gravity = !matches!(sim_state.scenario, Scenario::Pendulum | Scenario::SoftBody | Scenario::Rope | Scenario::Hinge);
 
     if log_this_frame {
         println!("After gravity+integration, before constraints:");
@@ -529,7 +615,7 @@ fn simulation_step(mut sim_state: ResMut<SimulationState>) {
         let _ = spring.solve(dt);
     }
 
-    // Joint/rope/hinge constraints benefit from multiple iterations
+    // Joint/rope constraints benefit from multiple iterations
     for _ in 0..SOLVER_ITERATIONS {
         for joint in &mut sim_state.joints {
             let _ = joint.solve(dt);
@@ -537,9 +623,14 @@ fn simulation_step(mut sim_state: ResMut<SimulationState>) {
         for rope in &mut sim_state.ropes {
             let _ = rope.solve(dt);
         }
-        for hinge in &mut sim_state.hinges {
-            let _ = hinge.solve(dt);
-        }
+    }
+
+    // Hinge uses true angular dynamics - solve ONCE per frame, not per iteration!
+    // The hinge internally handles gravity, torque, angular velocity integration,
+    // and angle limit bouncing. Calling it multiple times per frame would make
+    // the physics run too fast.
+    for hinge in &mut sim_state.hinges {
+        let _ = hinge.solve(dt);
     }
 
     if log_this_frame && !sim_state.joints.is_empty() {
@@ -749,21 +840,63 @@ fn sync_visuals(
         };
 
         let scale = if sim_state.scenario == Scenario::Hinge && i == 1 {
-            Vec3::new(4.0, 6.0, 0.3) // Door shape
+            Vec3::new(4.0, 0.15, 3.0) // Door shape: wide (X), thin (Y), extends in Z from hinge
         } else if sim_state.anchored[i] {
             Vec3::splat(0.8)
         } else {
             Vec3::splat(1.0)
         };
 
-        commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_translation(Vec3::new(
+        // Calculate rotation for hinge door
+        let rotation = if sim_state.scenario == Scenario::Hinge && i == 1 {
+            // Get hinge angle and rotate around X axis (the hinge axis)
+            if let Some(hinge) = sim_state.hinges.first() {
+                // The door rotates around the X axis by the hinge angle
+                Quat::from_rotation_x(hinge.angle as f32)
+            } else {
+                Quat::IDENTITY
+            }
+        } else {
+            Quat::IDENTITY
+        };
+
+        // Calculate position - for hinge door, position at center of door panel
+        let position = if sim_state.scenario == Scenario::Hinge && i == 1 {
+            // Door mesh is centered at its own origin, but we need it attached at the hinge
+            // The door extends from the hinge in +Z direction (when angle=0)
+            // So the door center should be at hinge + rotated offset
+            if let Some(hinge) = sim_state.hinges.first() {
+                let anchor = Vec3::new(
+                    hinge.anchor.0 as f32,
+                    hinge.anchor.1 as f32,
+                    hinge.anchor.2 as f32,
+                );
+                // Door center is 1.5 units from hinge (half the door width in Z)
+                let door_center_offset = Vec3::new(0.0, 0.0, 1.5);
+                // Rotate the offset by the hinge angle
+                let rotated_offset = rotation * door_center_offset;
+                anchor + rotated_offset
+            } else {
+                Vec3::new(
+                    obj.position.x as f32,
+                    obj.position.y as f32,
+                    obj.position.z as f32,
+                )
+            }
+        } else {
+            Vec3::new(
                 obj.position.x as f32,
                 obj.position.y as f32,
                 obj.position.z as f32,
-            )).with_scale(scale),
+            )
+        };
+
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(position)
+                .with_rotation(rotation)
+                .with_scale(scale),
             PhysicsObject,
         ));
     }
@@ -807,7 +940,25 @@ fn draw_constraint_lines(
         gizmos.line(p1, p2, spring_color);
     }
 
-    // Draw rope lines
+    // Draw rope chain segments (for multi-segment rope)
+    if let Some(rope_chain) = &sim_state.rope_chain {
+        let positions = rope_chain.get_particle_positions();
+        for i in 0..(positions.len() - 1) {
+            let p1 = Vec3::new(
+                positions[i].0 as f32,
+                positions[i].1 as f32,
+                positions[i].2 as f32,
+            );
+            let p2 = Vec3::new(
+                positions[i + 1].0 as f32,
+                positions[i + 1].1 as f32,
+                positions[i + 1].2 as f32,
+            );
+            gizmos.line(p1, p2, rope_color);
+        }
+    }
+
+    // Draw single rope lines (legacy - for simple rope constraints)
     for rope in &sim_state.ropes {
         let p1 = Vec3::new(
             rope.object1.position.x as f32,

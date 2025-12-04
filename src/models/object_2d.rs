@@ -401,6 +401,7 @@ impl ToObjectIn3D for ObjectIn2D {
             velocity: self.velocity.to_3d(),
             position: self.position.to_3d(),
             forces: self.forces.to_owned(),
+            material: self.material.clone(),
         }
     }
 }

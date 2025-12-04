@@ -130,6 +130,7 @@ impl ToObjectIn3D for Object {
             velocity: Velocity3D { x: self.velocity, y: 0.0, z: 0.0 },
             position: Axis3D { x: self.position, y: 0.0, z: 0.0 },
             forces: self.forces.to_owned(),
+            material: None,
         }
     }
 }

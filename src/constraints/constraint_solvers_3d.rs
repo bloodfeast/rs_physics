@@ -367,6 +367,7 @@ mod tests {
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x, y, z },
             forces: Vec::new(),
+            material: None,
         }
     }
 
@@ -470,12 +471,14 @@ mod tests {
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x: 0.0, y: 0.0, z: 0.0 },
             forces: Vec::new(),
+            material: None,
         };
         let obj2 = ObjectIn3D {
             mass: 2.0,
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x: 3.0, y: 0.0, z: 0.0 },
             forces: Vec::new(),
+            material: None,
         };
         let spring = Spring3D::new(obj1, obj2, 100.0, 2.0, 0.0).unwrap();
 

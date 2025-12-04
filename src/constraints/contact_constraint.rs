@@ -112,6 +112,36 @@ impl Contact2D {
         self
     }
 
+    /// Gets the effective restitution coefficient for this contact.
+    /// If both objects have materials, averages their restitution coefficients.
+    /// If one object has a material, uses that.
+    /// Otherwise, falls back to the constraint's default restitution value.
+    pub fn get_effective_restitution(&self) -> f64 {
+        match (&self.object1.material, &self.object2.material) {
+            (Some(m1), Some(m2)) => {
+                // Average the restitution of both materials
+                (m1.restitution_coefficient + m2.restitution_coefficient) / 2.0
+            }
+            (Some(m), None) | (None, Some(m)) => m.restitution_coefficient,
+            (None, None) => self.restitution,
+        }
+    }
+
+    /// Gets the effective friction coefficient for this contact.
+    /// If both objects have materials, averages their friction coefficients.
+    /// If one object has a material, uses that.
+    /// Otherwise, falls back to the constraint's default friction value.
+    pub fn get_effective_friction(&self) -> f64 {
+        match (&self.object1.material, &self.object2.material) {
+            (Some(m1), Some(m2)) => {
+                // Average the friction of both materials
+                (m1.friction_coefficient + m2.friction_coefficient) / 2.0
+            }
+            (Some(m), None) | (None, Some(m)) => m.friction_coefficient,
+            (None, None) => self.friction,
+        }
+    }
+
     /// Returns true if the objects are separating (moving apart).
     pub fn is_separating(&self) -> bool {
         let rel_vx = self.object2.velocity.x - self.object1.velocity.x;
@@ -171,7 +201,8 @@ impl Contact2D {
         // Target relative velocity = -restitution * normal_velocity (bounce back)
         // Change needed = target - current = (-e * vn) - vn = -vn * (1 + e)
         // Plus bias for position correction
-        let delta_v = -normal_velocity * (1.0 + self.restitution) + bias;
+        let effective_restitution = self.get_effective_restitution();
+        let delta_v = -normal_velocity * (1.0 + effective_restitution) + bias;
 
         // Impulse magnitude
         let lambda = delta_v / total_inv_mass;
@@ -188,7 +219,8 @@ impl Contact2D {
         self.object2.velocity.y += lambda * inv_mass2 * ny;
 
         // Friction impulse
-        if self.friction > 0.0 {
+        let effective_friction = self.get_effective_friction();
+        if effective_friction > 0.0 {
             // Recalculate relative velocity after normal impulse
             let rel_vx = self.object2.velocity.x - self.object1.velocity.x;
             let rel_vy = self.object2.velocity.y - self.object1.velocity.y;
@@ -200,7 +232,7 @@ impl Contact2D {
 
             // Friction impulse magnitude
             let friction_impulse = -tangent_velocity / total_inv_mass;
-            let max_friction = self.friction * lambda;
+            let max_friction = effective_friction * lambda;
             let friction_impulse = friction_impulse.clamp(-max_friction, max_friction);
 
             // Apply friction impulse
@@ -335,6 +367,36 @@ impl Contact3D {
         self
     }
 
+    /// Gets the effective restitution coefficient for this contact.
+    /// If both objects have materials, averages their restitution coefficients.
+    /// If one object has a material, uses that.
+    /// Otherwise, falls back to the constraint's default restitution value.
+    pub fn get_effective_restitution(&self) -> f64 {
+        match (&self.object1.material, &self.object2.material) {
+            (Some(m1), Some(m2)) => {
+                // Average the restitution of both materials
+                (m1.restitution_coefficient + m2.restitution_coefficient) / 2.0
+            }
+            (Some(m), None) | (None, Some(m)) => m.restitution_coefficient,
+            (None, None) => self.restitution,
+        }
+    }
+
+    /// Gets the effective friction coefficient for this contact.
+    /// If both objects have materials, averages their friction coefficients.
+    /// If one object has a material, uses that.
+    /// Otherwise, falls back to the constraint's default friction value.
+    pub fn get_effective_friction(&self) -> f64 {
+        match (&self.object1.material, &self.object2.material) {
+            (Some(m1), Some(m2)) => {
+                // Average the friction of both materials
+                (m1.friction_coefficient + m2.friction_coefficient) / 2.0
+            }
+            (Some(m), None) | (None, Some(m)) => m.friction_coefficient,
+            (None, None) => self.friction,
+        }
+    }
+
     /// Returns true if the objects are separating (moving apart).
     pub fn is_separating(&self) -> bool {
         let rel_vx = self.object2.velocity.x - self.object1.velocity.x;
@@ -398,7 +460,8 @@ impl Contact3D {
         // Target relative velocity = -restitution * normal_velocity (bounce back)
         // Change needed = target - current = (-e * vn) - vn = -vn * (1 + e)
         // Plus bias for position correction
-        let delta_v = -normal_velocity * (1.0 + self.restitution) + bias;
+        let effective_restitution = self.get_effective_restitution();
+        let delta_v = -normal_velocity * (1.0 + effective_restitution) + bias;
 
         // Impulse magnitude
         let lambda = delta_v / total_inv_mass;
@@ -417,7 +480,8 @@ impl Contact3D {
         self.object2.velocity.z += lambda * inv_mass2 * nz;
 
         // Friction impulse
-        if self.friction > 0.0 {
+        let effective_friction = self.get_effective_friction();
+        if effective_friction > 0.0 {
             // Recalculate relative velocity after normal impulse
             let rel_vx = self.object2.velocity.x - self.object1.velocity.x;
             let rel_vy = self.object2.velocity.y - self.object1.velocity.y;
@@ -436,7 +500,7 @@ impl Contact3D {
 
                 // Friction impulse magnitude
                 let friction_impulse = -tangent_speed / total_inv_mass;
-                let max_friction = self.friction * lambda;
+                let max_friction = effective_friction * lambda;
                 let friction_impulse = friction_impulse.max(-max_friction).min(max_friction);
 
                 // Apply friction impulse
@@ -631,6 +695,7 @@ mod tests {
             velocity: Velocity3D { x: 0.0, y: 0.0, z: 0.0 },
             position: Axis3D { x, y, z },
             forces: Vec::new(),
+            material: None,
         }
     }
 
@@ -640,6 +705,7 @@ mod tests {
             velocity: Velocity3D { x: vel.0, y: vel.1, z: vel.2 },
             position: Axis3D { x: pos.0, y: pos.1, z: pos.2 },
             forces: Vec::new(),
+            material: None,
         }
     }
 
