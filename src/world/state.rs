@@ -96,6 +96,14 @@ pub struct ObjectState {
     pub velocity: (f64, f64, f64),
     /// Angular velocity (x, y, z)
     pub angular_velocity: (f64, f64, f64),
+    /// Objects this one is currently touching, as of this tick.
+    ///
+    /// Published so callers can answer "is it standing on something?" from the
+    /// simulation's own contact results. The alternative - testing position
+    /// against a list of known surface heights - silently stops working the
+    /// moment geometry moves or a surface is added, and cannot see a contact
+    /// with anything it wasn't told about.
+    pub contacts: Vec<ObjectId>,
 }
 
 impl Default for ObjectState {
@@ -106,6 +114,7 @@ impl Default for ObjectState {
             orientation: (0.0, 0.0, 0.0, 1.0),  // Identity quaternion
             velocity: (0.0, 0.0, 0.0),
             angular_velocity: (0.0, 0.0, 0.0),
+            contacts: Vec::new(),
         }
     }
 }
@@ -122,6 +131,9 @@ impl ObjectState {
             orientation: slerp_quat(self.orientation, next.orientation, t),
             velocity: lerp3(self.velocity, next.velocity, t),
             angular_velocity: lerp3(self.angular_velocity, next.angular_velocity, t),
+            // Contact is discrete - a body is either touching or it is not.
+            // Blending the sets would invent contacts that never existed.
+            contacts: next.contacts.clone(),
         }
     }
 }

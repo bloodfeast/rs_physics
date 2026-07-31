@@ -133,7 +133,11 @@ fn get_shape_bounds(shape: &Shape3D) -> f64 {
                 .map(|v| (v.0*v.0 + v.1*v.1 + v.2*v.2).sqrt())
                 .fold(0.0, f64::max)
         },
-        _ => 2.0 // Conservative fallback
+        // Cylinder and anything added later. A hardcoded constant here silently
+        // rejected any cylinder wider than 2 or taller than 4 before GJK ever
+        // ran - a wrong proxy bound overriding real geometry, which is exactly
+        // what this engine must not do. Shape3D already knows its own extent.
+        other => other.bounding_radius(),
     }
 }
 

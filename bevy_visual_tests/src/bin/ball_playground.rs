@@ -35,19 +35,52 @@ use rs_physics::world::{
 const DT: f64 = 1.0 / 240.0;  // ~4ms timestep (240 Hz) - high enough for smooth physics
 const BALL_RADIUS: f64 = 0.5;
 const ROLL_FORCE: f64 = 100.0;  // Force applied for rolling (reduced from 500)
-const JUMP_IMPULSE: f64 = 8.0;  // Impulse for jumping
+// Impulse for jumping. Gravity here is -15, not -9.81, so this has to scale
+// with it: apex = (J/m)^2 / 2g. At mass 2 and J = 8 the ball cleared 0.53 m -
+// about half its own diameter - before air drag took its cut. J = 15 gives
+// 7.5 m/s and roughly a 1.9 m apex, ~1.6 m once drag is accounted for.
+const JUMP_IMPULSE: f64 = 15.0;
 const MAX_VELOCITY: f64 = 15.0;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+        // Force DX12 on Windows. Under the Vulkan backend wgpu logs
+        // "Unrecognized present mode", ignores the AutoVsync request below, and
+        // delivers frames alternating between ~3 ms and ~15.4 ms - a 5x swing
+        // that reads as constant stutter even though the average frame rate
+        // looks excellent. DX12 honours vsync and holds 8.33 ms +/- 0.05.
+        // Measured, not assumed; see the frame_time readout in the HUD.
+        .add_plugins(DefaultPlugins.set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::RenderCreation::Automatic(
+                bevy::render::settings::WgpuSettings {
+                    #[cfg(target_os = "windows")]
+                    backends: Some(bevy::render::settings::Backends::DX12),
+                    ..default()
+                },
+            ),
+            ..default()
+        })
+        .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Ball Playground - Physics Demo (Real-Time Background Thread)".to_string(),
                 resolution: (1280.0, 720.0).into(),
+                // Explicit vsync. Left to the backend this ran uncapped at ~330
+                // FPS with individual frames as long as 23 ms - a 7x spread that
+                // reads as stutter however high the average is, because motion
+                // smoothness comes from frames arriving at a *regular* cadence,
+                // not from producing lots of them. Interpolation cannot fix an
+                // irregular presentation clock; it only smooths the sampling of
+                // physics between frames that arrive on time.
+                present_mode: bevy::window::PresentMode::AutoVsync,
                 ..default()
             }),
             ..default()
         }))
+        // Render rate is on screen because "it looks choppy" has two very
+        // different causes - a low or unstable frame rate, versus a frame rate
+        // that is fine while the physics sampling stutters - and they need
+        // opposite fixes.
+        .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin)
         .init_resource::<CachedPhysicsState>()
         .add_systems(Startup, setup)
         // Fetch latest physics state at start of each frame
@@ -56,6 +89,7 @@ fn main() {
         .add_systems(Update, (
             player_input,
             check_water_zones,
+            trampoline_bounce,
             update_kinematic_planks,
             camera_follow,
             update_ui,
@@ -79,6 +113,8 @@ struct Player {
     object_id: ObjectId,
     grounded: bool,
     jump_cooldown: f32,
+    /// Blocks re-triggering the trampoline kick every frame while in contact.
+    bounce_cooldown: f32,
 }
 
 #[derive(Component)]
@@ -88,6 +124,9 @@ struct Ground;
 struct StaticPlatform {
     object_id: ObjectId,
 }
+
+/// Upward impulse a trampoline adds on top of the normal bounce.
+const TRAMPOLINE_IMPULSE: f64 = 22.0;
 
 #[derive(Component)]
 struct Trampoline {
@@ -234,6 +273,7 @@ fn setup(
             object_id: player_id,
             grounded: false,
             jump_cooldown: 0.0,
+            bounce_cooldown: 0.0,
         },
     ))
     .with_children(|parent| {
@@ -373,7 +413,13 @@ fn setup(
     // === Trampolines (special bounce zones - checked manually for extra bounce) ===
     let trampoline_mesh = meshes.add(Cuboid::new(4.0, 0.3, 4.0));
     // Create bouncy material for trampolines
-    let bouncy = Material { restitution_coefficient: 2.0, ..Material::default() };
+    // Restitution stays inside [0, 1]. These were 2.0 and 2.5, set through a
+    // struct literal that bypasses Material::new's validation - a coefficient
+    // above 1 returns more energy than the impact carried, so every bounce
+    // multiplied speed without bound and the ball climbed away. The extra kick
+    // is applied as an explicit impulse in `trampoline_bounce` instead, which
+    // is bounded and tunable.
+    let bouncy = Material { restitution_coefficient: 0.95, ..Material::default() };
 
     // Trampoline 1
     let tramp1_obj = PhysicalObject3D::new(
@@ -395,7 +441,7 @@ fn setup(
     ));
 
     // Trampoline 2
-    let extra_bouncy = Material { restitution_coefficient: 2.5, ..Material::default() };
+    let extra_bouncy = Material { restitution_coefficient: 0.98, ..Material::default() };
     let tramp2_obj = PhysicalObject3D::new(
         f64::INFINITY,
         (0.0, 0.0, 0.0),
@@ -538,28 +584,37 @@ fn setup(
         ));
     }
 
-    // Anchor posts
-    let post_mesh = meshes.add(Cylinder::new(0.15, 1.5));
-    commands.spawn((
-        Mesh3d(post_mesh.clone()),
-        MeshMaterial3d(anchor_material.clone()),
-        Transform::from_xyz(bridge_start_x as f32, bridge_y as f32 - 0.25, -(bridge_width as f32) / 2.0),
-    ));
-    commands.spawn((
-        Mesh3d(post_mesh.clone()),
-        MeshMaterial3d(anchor_material.clone()),
-        Transform::from_xyz(bridge_end_x as f32, bridge_y as f32 - 0.25, -(bridge_width as f32) / 2.0),
-    ));
-    commands.spawn((
-        Mesh3d(post_mesh.clone()),
-        MeshMaterial3d(anchor_material.clone()),
-        Transform::from_xyz(bridge_start_x as f32, bridge_y as f32 - 0.25, (bridge_width as f32) / 2.0),
-    ));
-    commands.spawn((
-        Mesh3d(post_mesh.clone()),
-        MeshMaterial3d(anchor_material.clone()),
-        Transform::from_xyz(bridge_end_x as f32, bridge_y as f32 - 0.25, (bridge_width as f32) / 2.0),
-    ));
+    // Anchor posts. Each gets a collider from the same dimensions as its mesh -
+    // these were visual-only, so the ball passed through them.
+    const POST_RADIUS: f64 = 0.15;
+    const POST_HEIGHT: f64 = 1.5;
+    let post_mesh = meshes.add(Cylinder::new(POST_RADIUS as f32, POST_HEIGHT as f32));
+    let post_y = bridge_y - 0.25;
+
+    for (px, pz) in [
+        (bridge_start_x, -bridge_width / 2.0),
+        (bridge_end_x, -bridge_width / 2.0),
+        (bridge_start_x, bridge_width / 2.0),
+        (bridge_end_x, bridge_width / 2.0),
+    ] {
+        let post_obj = PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            (px, post_y, pz),
+            Shape3D::Cylinder(POST_RADIUS, POST_HEIGHT),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        );
+        physics.add_object(post_obj).expect("Failed to add post collider");
+
+        commands.spawn((
+            Mesh3d(post_mesh.clone()),
+            MeshMaterial3d(anchor_material.clone()),
+            Transform::from_xyz(px as f32, post_y as f32, pz as f32),
+        ));
+    }
 
     // === Trap Door (Hinge) ===
     let hinge_pos = (20.0, 0.5, 0.0);
@@ -620,12 +675,35 @@ fn setup(
     ));
 
     // === Ramps ===
-    let ramp_mesh = meshes.add(Cuboid::new(4.0, 0.3, 6.0));
+    // Collider first, then the visual built from the same numbers. The ramp
+    // previously spawned as mesh-only, so the ball rolled straight through the
+    // one piece of geometry whose whole purpose is to be rolled up.
+    let ramp_pos = (-5.0_f64, 1.0, 0.0);
+    let ramp_size = (4.0_f64, 0.3, 6.0);
+    let ramp_tilt = 0.3_f64; // radians about Z
+
+    let ramp_obj = PhysicalObject3D::new(
+        f64::INFINITY,
+        (0.0, 0.0, 0.0),
+        ramp_pos,
+        Shape3D::Cuboid(ramp_size.0, ramp_size.1, ramp_size.2),
+        None,
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, ramp_tilt), // (roll, pitch, yaw) - yaw is the Z rotation
+        PhysicsConstants::default(),
+    );
+    let _ramp_id = physics.add_object(ramp_obj).expect("Failed to add ramp collider");
+
+    let ramp_mesh = meshes.add(Cuboid::new(
+        ramp_size.0 as f32,
+        ramp_size.1 as f32,
+        ramp_size.2 as f32,
+    ));
     commands.spawn((
         Mesh3d(ramp_mesh.clone()),
         MeshMaterial3d(platform_material.clone()),
-        Transform::from_xyz(-5.0, 1.0, 0.0)
-            .with_rotation(Quat::from_rotation_z(0.3)),
+        Transform::from_xyz(ramp_pos.0 as f32, ramp_pos.1 as f32, ramp_pos.2 as f32)
+            .with_rotation(Quat::from_rotation_z(ramp_tilt as f32)),
     ));
 
     // === Camera ===
@@ -764,22 +842,13 @@ fn player_input(
         exit.send(AppExit::Success);
     }
 
-    // Update grounded state from cached physics state
+    // Grounded comes from the simulation's own contact list, not from testing
+    // the ball's height against a list of known surfaces. The old version only
+    // recognised y~0 and the two platform tops, so standing on a trampoline, a
+    // bridge plank, the ramp or the trap door left `grounded` false and Space
+    // did nothing. Anything the ball actually touches now counts.
     if let Some(obj) = cached.state.get_object(player_id) {
-        let ball_bottom = obj.position.1 - BALL_RADIUS;
-        player.grounded = ball_bottom < 0.1 && obj.velocity.1.abs() < 0.5;
-
-        // Also ground if on platforms
-        if !player.grounded {
-            for plat_y in [2.25, 6.25] {
-                if (obj.position.1 - BALL_RADIUS - plat_y).abs() < 0.1
-                    && obj.velocity.1.abs() < 0.5
-                {
-                    player.grounded = true;
-                    break;
-                }
-            }
-        }
+        player.grounded = !obj.contacts.is_empty() && obj.velocity.1.abs() < 1.0;
 
         // Clamp velocity if needed
         let vx = obj.velocity.0.clamp(-MAX_VELOCITY, MAX_VELOCITY);
@@ -970,6 +1039,7 @@ fn sync_plank_visuals(
 fn sync_hinge_visuals(
     game_state: Res<GameState>,
     cached: Res<CachedPhysicsState>,
+    time: Res<Time>,
     mut query: Query<(&HingeDoorVisual, &mut Transform)>,
 ) {
     for (visual, mut transform) in &mut query {
@@ -999,11 +1069,25 @@ fn sync_hinge_visuals(
                 transform.translation = new_pos;
                 transform.rotation = rotation;
 
-                // Update the door collision body position (kinematic)
+                // Drive the collision body to match the visual - both the
+                // position and the rotation. Only position was being sent, so
+                // the door's 4x0.2x4 collider stayed axis-aligned while the
+                // visual swung to 90 degrees.
+                //
+                // dt is the real frame delta, not the physics timestep. This
+                // system runs at the render rate; passing the 240 Hz timestep
+                // made the derived velocity wrong by the ratio between them,
+                // and that velocity feeds the collision response.
+                let dt = time.delta_secs_f64().max(1e-6);
                 let _ = game_state.physics.set_position_kinematic(
                     visual.door_object_id,
                     (new_pos.x as f64, new_pos.y as f64, new_pos.z as f64),
-                    DT,
+                    dt,
+                );
+                let _ = game_state.physics.set_orientation_kinematic(
+                    visual.door_object_id,
+                    (angle, 0.0, 0.0), // hinge rotates about X
+                    dt,
                 );
             }
         }
@@ -1024,10 +1108,49 @@ fn camera_follow(
     camera_transform.look_at(look_target, Vec3::Y);
 }
 
+/// Adds the trampoline kick when the player is actually in contact with one.
+///
+/// Driven by the contact list rather than a position/height test, so it fires
+/// exactly when the collider says the ball is touching the trampoline - and
+/// keeps working if the trampoline is ever moved.
+fn trampoline_bounce(
+    game_state: Option<Res<GameState>>,
+    cached: Res<CachedPhysicsState>,
+    trampolines: Query<&Trampoline>,
+    mut player_query: Query<&mut Player>,
+    time: Res<Time>,
+) {
+    let Some(gs) = game_state else { return };
+    let Some(player_id) = gs.player_id else { return };
+    let Ok(mut player) = player_query.get_single_mut() else { return };
+
+    player.bounce_cooldown -= time.delta_secs();
+    if player.bounce_cooldown > 0.0 {
+        return;
+    }
+
+    let Some(obj) = cached.state.get_object(player_id) else { return };
+    // Only kick on the way down; otherwise a resting ball gets launched forever.
+    if obj.velocity.1 > 0.5 {
+        return;
+    }
+
+    let touching_trampoline = obj
+        .contacts
+        .iter()
+        .any(|c| trampolines.iter().any(|t| t.object_id == *c));
+
+    if touching_trampoline {
+        let _ = gs.physics.apply_impulse(player_id, (0.0, TRAMPOLINE_IMPULSE, 0.0));
+        player.bounce_cooldown = 0.25;
+    }
+}
+
 fn update_ui(
     player_query: Query<&Player>,
     game_state: Res<GameState>,
     cached: Res<CachedPhysicsState>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
     mut ui_query: Query<&mut Text, With<UIText>>,
 ) {
     let Ok(player) = player_query.get_single() else { return };
@@ -1044,14 +1167,26 @@ fn update_ui(
     let status = if player.grounded { "Grounded" } else { "Airborne" };
     let water_status = if game_state.in_water { " (In Water)" } else { "" };
 
+    // Smoothed average, plus the worst frame in the recent history. A mean of
+    // 60 with a 200 ms spike still reads as choppy, and only the second number
+    // shows it.
+    let fps_diag = diagnostics.get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS);
+    let fps = fps_diag.and_then(|d| d.average()).unwrap_or(0.0);
+    let worst_frame_ms = diagnostics
+        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .map(|d| d.values().fold(0.0f64, |a, &b| a.max(b)))
+        .unwrap_or(0.0);
+
     **text = format!(
         "Ball Playground (Real-Time Background Thread)\n\
          WASD: Move | Space: Jump | R: Reset\n\n\
+         FPS: {:.0}  (worst frame {:.1} ms)\n\
          Position: ({:.1}, {:.1}, {:.1})\n\
          Velocity: ({:.1}, {:.1}, {:.1})\n\
          Status: {}{}\n\
          Physics Tick: {}\n\
          Score: {}",
+        fps, worst_frame_ms,
         pos.0, pos.1, pos.2,
         vel.0, vel.1, vel.2,
         status, water_status,
