@@ -52,7 +52,9 @@
 //!
 //! - All calculations use f64 precision
 //! - Units are SI (meters, kilograms, seconds, Kelvin, Pascals)
-//! - No built-in multi-threading (use rayon externally for parallelism)
+//! - The [`world`] module runs the simulation on a background thread and
+//!   communicates with the main thread over channels; the calculation modules
+//!   themselves are single-threaded (use rayon externally for parallelism)
 //! - Collision detection is for convex shapes only (use convex decomposition for concave)
 
 pub mod utils;

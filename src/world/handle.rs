@@ -3,8 +3,11 @@
 use std::sync::{Arc, RwLock};
 use crossbeam::channel::{Sender, Receiver, unbounded};
 use crate::models::PhysicalObject3D;
-use super::state::{ObjectId, WorldState};
+use super::state::{ObjectId, StateBuffer, WorldState};
 use super::physics_world::{ForceId, ContinuousForce};
+
+#[cfg(feature = "constraints")]
+use super::world_constraints::{ConstraintId, WorldConstraint};
 
 /// Commands that can be sent to the physics thread
 #[derive(Debug)]
@@ -113,6 +116,19 @@ pub enum PhysicsCommand {
         duration: Option<f64>,
         response: Sender<ForceId>,
     },
+    // ==================== Kinematic Object Commands ====================
+    /// Set position of a kinematic object (computes velocity from displacement)
+    SetPositionKinematic(ObjectId, (f64, f64, f64), f64), // id, position, dt
+    // ==================== Constraint Commands (requires "constraints" feature) ====================
+    /// Add a constraint to the world, returns ConstraintId through response channel
+    #[cfg(feature = "constraints")]
+    AddConstraint {
+        constraint: WorldConstraint,
+        response: Sender<ConstraintId>,
+    },
+    /// Remove a constraint from the world
+    #[cfg(feature = "constraints")]
+    RemoveConstraint(ConstraintId),
     // ==================== Control Commands ====================
     /// Pause the simulation
     Pause,
@@ -134,8 +150,8 @@ pub struct PhysicsHandle {
     command_sender: Sender<PhysicsCommand>,
     /// Channel to receive state updates (optional, for polling)
     state_receiver: Receiver<WorldState>,
-    /// RwLock for thread-safe access to latest state
-    latest_state: Arc<RwLock<WorldState>>,
+    /// Double-buffered latest state, shared with the physics thread
+    latest_state: Arc<RwLock<StateBuffer>>,
 }
 
 impl PhysicsHandle {
@@ -143,7 +159,7 @@ impl PhysicsHandle {
     pub(crate) fn new(
         command_sender: Sender<PhysicsCommand>,
         state_receiver: Receiver<WorldState>,
-        latest_state: Arc<RwLock<WorldState>>,
+        latest_state: Arc<RwLock<StateBuffer>>,
     ) -> Self {
         Self {
             command_sender,
@@ -152,12 +168,55 @@ impl PhysicsHandle {
         }
     }
 
+    /// Read the shared buffer, tolerating a poisoned lock.
+    ///
+    /// A panic on the physics thread poisons the lock. Unwrapping here would
+    /// turn that into a panic on the render thread every single frame, burying
+    /// the original error. The buffered state is plain data and is still
+    /// readable, so recover it and let the caller notice via a frozen `tick`.
+    fn read_buffer(&self) -> std::sync::RwLockReadGuard<'_, StateBuffer> {
+        self.latest_state.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Get the latest physics state (non-blocking)
     ///
-    /// This is the primary way to read physics state from the render thread.
-    /// It always returns immediately with the most recent state snapshot.
+    /// Returns the most recent snapshot exactly as the simulation produced it,
+    /// with no blending. Use this when you want raw simulation output - logic,
+    /// queries, tests, anything where an interpolated value would be wrong.
+    ///
+    /// For rendering, prefer [`Self::get_interpolated_state`].
     pub fn get_latest_state(&self) -> WorldState {
-        self.latest_state.read().unwrap().clone()
+        self.read_buffer().current().clone()
+    }
+
+    /// Get the physics state blended for the current instant (non-blocking)
+    ///
+    /// This is the primary way to read physics state from a render thread. The
+    /// simulation ticks at a fixed rate that has no relationship to your
+    /// display's refresh rate; sampling it directly means some frames show a
+    /// stale tick and some show a fresh one, which reads as stutter even though
+    /// the simulation is perfectly regular.
+    ///
+    /// This blends between the last two snapshots based on how far into the
+    /// current tick interval we are, so motion is smooth at any refresh rate,
+    /// and stays smooth if the display rate changes mid-run. The cost is one
+    /// tick of latency (4.2 ms at 240 Hz) - the alternative, extrapolating
+    /// forward, overshoots whenever an object stops or bounces and then visibly
+    /// snaps back.
+    ///
+    /// If the physics thread stalls, the blend saturates on the newest snapshot
+    /// rather than drifting away from it.
+    pub fn get_interpolated_state(&self) -> WorldState {
+        self.read_buffer().sample()
+    }
+
+    /// How far the render clock is into the current physics tick, in `[0, 1]`
+    ///
+    /// Exposed for callers doing their own blending - for example interpolating
+    /// only the handful of objects they actually draw, rather than paying for a
+    /// full [`WorldState`] clone every frame.
+    pub fn interpolation_alpha(&self) -> f64 {
+        self.read_buffer().alpha()
     }
 
     /// Try to receive a state update from the channel (non-blocking)
@@ -165,6 +224,12 @@ impl PhysicsHandle {
     /// Returns `Some(state)` if a new state is available, `None` otherwise.
     /// Use this if you want to process every state update rather than
     /// just the latest one.
+    ///
+    /// The channel is bounded. If you do not drain it, the physics thread drops
+    /// updates rather than queueing them forever - see
+    /// [`STATE_CHANNEL_CAPACITY`](super::STATE_CHANNEL_CAPACITY). Callers that
+    /// only ever read the newest state should use [`Self::get_latest_state`] or
+    /// [`Self::get_interpolated_state`] and ignore this channel entirely.
     pub fn try_recv_state(&self) -> Option<WorldState> {
         self.state_receiver.try_recv().ok()
     }
@@ -492,6 +557,47 @@ impl PhysicsHandle {
             response: response_tx,
         })?;
         response_rx.recv().map_err(|_| ())
+    }
+
+    // ==================== Kinematic Object Methods ====================
+
+    /// Set position of a kinematic object (computes velocity from displacement)
+    ///
+    /// This is used for externally-controlled objects (like rope bridge planks)
+    /// that need to move smoothly while still participating in physics.
+    /// ```ignore
+    /// // Update plank position based on rope particle positions
+    /// physics.set_position_kinematic(plank_id, new_pos, dt)?;
+    /// ```
+    pub fn set_position_kinematic(&self, id: ObjectId, position: (f64, f64, f64), dt: f64) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::SetPositionKinematic(id, position, dt))
+    }
+
+    // ==================== Constraint Methods (requires "constraints" feature) ====================
+
+    /// Add a constraint to the world
+    ///
+    /// Returns a ConstraintId that can be used to remove the constraint later.
+    /// ```ignore
+    /// use rs_physics::world::WorldConstraint;
+    ///
+    /// // Add a rope chain constraint
+    /// let constraint_id = physics.add_constraint(WorldConstraint::RopeChain { ... })?;
+    /// ```
+    #[cfg(feature = "constraints")]
+    pub fn add_constraint(&self, constraint: WorldConstraint) -> Result<ConstraintId, ()> {
+        let (response_tx, response_rx) = unbounded();
+        self.send_command(PhysicsCommand::AddConstraint {
+            constraint,
+            response: response_tx,
+        })?;
+        response_rx.recv().map_err(|_| ())
+    }
+
+    /// Remove a constraint from the world
+    #[cfg(feature = "constraints")]
+    pub fn remove_constraint(&self, id: ConstraintId) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::RemoveConstraint(id))
     }
 
     // ==================== Simulation Control ====================
