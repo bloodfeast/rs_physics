@@ -522,6 +522,7 @@ impl RopeParticle {
 /// // Get positions for rendering
 /// let positions = rope.get_particle_positions();
 /// ```
+#[derive(Debug)]
 pub struct RopeChain3D {
     /// The particles making up the rope
     pub particles: Vec<RopeParticle>,

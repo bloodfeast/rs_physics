@@ -271,6 +271,12 @@ impl ObjectIn3D {
     pub fn get_friction(&self) -> f64 {
         self.material.as_ref().map_or(0.5, |m| m.friction_coefficient)
     }
+
+    /// Get the rolling resistance coefficient for collision response.
+    /// Returns the material's rolling resistance if available, otherwise returns a default of 0.01.
+    pub fn get_rolling_resistance(&self) -> f64 {
+        self.material.as_ref().map_or(0.01, |m| m.rolling_resistance_coefficient)
+    }
 }
 
 pub trait ToObjectIn2D {
