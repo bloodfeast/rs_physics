@@ -2,12 +2,164 @@
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 
 use super::config::WorldConfig;
 use super::handle::{PhysicsCommand, PhysicsHandle};
 use super::physics_world::PhysicsWorld;
-use super::state::WorldState;
+use super::state::{StateBuffer, WorldState};
+
+/// Capacity of the state broadcast channel.
+///
+/// The channel exists for subscribers that want every tick rather than just the
+/// newest one. It is bounded because most callers never read it at all - they
+/// use `get_interpolated_state()` instead - and an unbounded channel nobody
+/// drains is an unbounded memory leak that grows for as long as the simulation
+/// runs. When the buffer is full the physics thread drops the update and keeps
+/// stepping; a lagging subscriber must not be able to stall the simulation.
+pub const STATE_CHANNEL_CAPACITY: usize = 64;
+
+/// Raises OS timer resolution for the lifetime of the value.
+///
+/// Windows' default timer granularity is ~15.6 ms. A 240 Hz loop needs 4.2 ms
+/// waits, so at the default granularity every `sleep` overshoots its deadline
+/// and the simulation runs at roughly 64 Hz - irregularly, which is worse for
+/// smoothness than simply running slower. `timeBeginPeriod(1)` drops granularity
+/// to about 1 ms for the process. Without it the pacer below is forced to spin
+/// the entire interval and burn a core.
+///
+/// On other platforms `nanosleep` is already fine-grained and this is a no-op.
+#[cfg(windows)]
+struct TimerResolutionGuard;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+
+#[cfg(windows)]
+impl TimerResolutionGuard {
+    const PERIOD_MS: u32 = 1;
+
+    fn acquire() -> Self {
+        // SAFETY: timeBeginPeriod takes a scalar and has no precondition beyond
+        // being matched by a timeEndPeriod with the same argument, which the
+        // Drop impl below guarantees for every construction of this value.
+        unsafe {
+            timeBeginPeriod(Self::PERIOD_MS);
+        }
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolutionGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with the timeBeginPeriod in `acquire`.
+        unsafe {
+            timeEndPeriod(Self::PERIOD_MS);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct TimerResolutionGuard;
+
+#[cfg(not(windows))]
+impl TimerResolutionGuard {
+    fn acquire() -> Self {
+        Self
+    }
+}
+
+/// Holds a fixed tick rate against wall-clock time.
+///
+/// Two things make this different from `sleep(period - elapsed)`:
+///
+/// 1. **Absolute deadlines.** Each tick targets `start + n * period` rather than
+///    `period` from wherever the last tick happened to finish. Per-tick timing
+///    error would otherwise accumulate, and the simulation would drift away from
+///    real time permanently.
+/// 2. **Measured sleep granularity.** Sleeping the whole remaining interval
+///    overshoots on any OS whose timer is coarser than the interval. The pacer
+///    sleeps in short hops while the remaining time comfortably exceeds the
+///    granularity it has actually observed, then spins out the last fraction.
+struct Pacer {
+    period: Duration,
+    next_deadline: Instant,
+    /// Wall-clock cost of the shortest sleep this OS actually performs.
+    sleep_granularity: Duration,
+    max_catchup: u32,
+}
+
+impl Pacer {
+    fn new(period: Duration, max_catchup: u32) -> Self {
+        Self {
+            period,
+            next_deadline: Instant::now() + period,
+            // Optimistic seed, corrected upward by the first few measurements.
+            sleep_granularity: Duration::from_micros(1_500),
+            max_catchup: max_catchup.max(1),
+        }
+    }
+
+    /// Block until the next tick is due, then claim that deadline.
+    ///
+    /// Returns the number of ticks of debt that were abandoned, which is
+    /// non-zero only when the simulation could not keep up.
+    fn wait_for_next_tick(&mut self) -> u32 {
+        let now = Instant::now();
+
+        // Already past the deadline: the last tick overran. Run the next one
+        // immediately to catch up, unless the backlog is beyond recovery.
+        if now >= self.next_deadline {
+            let debt = now - self.next_deadline;
+            let budget = self.period * self.max_catchup;
+
+            if debt > budget {
+                let dropped = (debt.as_secs_f64() / self.period.as_secs_f64()) as u32;
+                self.next_deadline = now + self.period;
+                return dropped;
+            }
+
+            self.next_deadline += self.period;
+            return 0;
+        }
+
+        loop {
+            let remaining = self.next_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            if remaining > self.sleep_granularity {
+                let before = Instant::now();
+                std::thread::sleep(Duration::from_millis(1));
+                self.observe_sleep(before.elapsed());
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+
+        self.next_deadline += self.period;
+        0
+    }
+
+    /// Update the granularity estimate from an observed sleep.
+    fn observe_sleep(&mut self, actual: Duration) {
+        if actual > self.sleep_granularity {
+            // Rise immediately: underestimating granularity means overshooting
+            // deadlines, which is the failure this whole mechanism exists to avoid.
+            self.sleep_granularity = actual;
+        } else {
+            // Fall slowly, so one lucky sleep on a busy machine does not make
+            // the pacer over-confident and cost it the next deadline.
+            self.sleep_granularity = (self.sleep_granularity * 7 + actual) / 8;
+        }
+    }
+}
 
 /// Spawn a physics simulation on a background thread
 ///
@@ -37,11 +189,16 @@ use super::state::WorldState;
 /// ```
 pub fn spawn_physics_thread(config: WorldConfig) -> PhysicsHandle {
     let (cmd_tx, cmd_rx) = unbounded::<PhysicsCommand>();
-    let (state_tx, state_rx) = unbounded::<WorldState>();
-    let latest_state = Arc::new(RwLock::new(WorldState::default()));
+    let (state_tx, state_rx) = bounded::<WorldState>(STATE_CHANNEL_CAPACITY);
+
+    let broadcast_rate = config.broadcast_rate.max(1);
+    // Readers blend across the gap between published snapshots, which is the
+    // tick interval scaled by how often we actually broadcast - not the tick
+    // interval itself.
+    let broadcast_interval = Duration::from_secs_f64(config.timestep * broadcast_rate as f64);
+    let latest_state = Arc::new(RwLock::new(StateBuffer::new(broadcast_interval)));
 
     let latest_state_clone = latest_state.clone();
-    let broadcast_rate = config.broadcast_rate;
 
     std::thread::Builder::new()
         .name("rs_physics".to_string())
@@ -58,22 +215,33 @@ fn physics_thread_main(
     config: WorldConfig,
     cmd_rx: Receiver<PhysicsCommand>,
     state_tx: Sender<WorldState>,
-    latest_state: Arc<RwLock<WorldState>>,
+    latest_state: Arc<RwLock<StateBuffer>>,
     broadcast_rate: usize,
 ) {
     let mut world = PhysicsWorld::new(config.clone());
     let timestep = config.timestep;
-    let target_frame_time = Duration::from_secs_f64(timestep);
+    let real_time = config.real_time;
+
+    // Held for the life of the thread; restores the OS setting on the way out.
+    let _timer_guard = TimerResolutionGuard::acquire();
+
+    let mut pacer = Pacer::new(
+        Duration::from_secs_f64(timestep),
+        config.max_catchup_ticks,
+    );
 
     let mut tick_counter = 0usize;
     let mut running = true;
 
-    log::info!("Physics thread started with timestep: {:.4}s ({:.1} Hz)",
-               timestep, 1.0 / timestep);
+    if real_time {
+        log::info!("Physics thread started at {:.1} Hz (timestep {:.4}s), paced to wall clock",
+                   1.0 / timestep, timestep);
+    } else {
+        log::info!("Physics thread started at {:.1} Hz (timestep {:.4}s), running unpaced",
+                   1.0 / timestep, timestep);
+    }
 
     while running {
-        let frame_start = Instant::now();
-
         // Process all pending commands
         loop {
             match cmd_rx.try_recv() {
@@ -100,24 +268,34 @@ fn physics_thread_main(
         world.step();
         tick_counter += 1;
 
-        // Broadcast state at configured rate
         if tick_counter % broadcast_rate == 0 {
             let state = world.get_state();
 
-            // Update RwLock for thread-safe reads
-            if let Ok(mut latest) = latest_state.write() {
-                *latest = state.clone();
-            }
+            // Optional per-tick feed. Bounded, so a subscriber that stops
+            // draining loses updates instead of growing the queue forever.
+            let _ = state_tx.try_send(state.clone());
 
-            // Also send through channel for subscribers who want every update
-            // Use try_send to avoid blocking if no one is listening
-            let _ = state_tx.try_send(state);
+            // Publish for readers. A panicking reader poisons the lock, but the
+            // simulation is still valid and other readers still want it, so
+            // recover the guard rather than silently stopping all updates.
+            let mut buffer = latest_state
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            buffer.publish(state);
         }
 
-        // Sleep to maintain target framerate
-        let elapsed = frame_start.elapsed();
-        if elapsed < target_frame_time {
-            std::thread::sleep(target_frame_time - elapsed);
+        // Pace against wall clock. Skipped entirely when unpaced, where the
+        // point is to finish the simulation as fast as the machine allows.
+        if real_time {
+            let dropped = pacer.wait_for_next_tick();
+            if dropped > 0 {
+                log::warn!(
+                    "Physics thread fell {} ticks behind wall clock (>{} allowed); \
+                     abandoning the backlog and resynchronizing",
+                    dropped,
+                    config.max_catchup_ticks,
+                );
+            }
         }
     }
 
@@ -219,6 +397,20 @@ fn process_command(world: &mut PhysicsWorld, cmd: PhysicsCommand) -> bool {
         PhysicsCommand::AddVortex { target, center, axis, strength, duration, response } => {
             let id = world.add_vortex(target, center, axis, strength, duration);
             let _ = response.send(id);
+        }
+        // Kinematic object commands
+        PhysicsCommand::SetPositionKinematic(id, position, dt) => {
+            world.set_position_kinematic(id, position, dt);
+        }
+        // Constraint commands (requires "constraints" feature)
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::AddConstraint { constraint, response } => {
+            let id = world.add_constraint(constraint);
+            let _ = response.send(id);
+        }
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::RemoveConstraint(id) => {
+            world.remove_constraint(id);
         }
         // Simulation control
         PhysicsCommand::Pause => {
@@ -560,13 +752,13 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         let vel1 = physics.get_velocity(id).expect("Should have velocity");
 
-        // Wait more - velocity should stay constant (no forces)
+        // Wait more - velocity should decrease due to damping (no external forces)
         std::thread::sleep(Duration::from_millis(200));
         let vel2 = physics.get_velocity(id).expect("Should have velocity");
 
-        // Velocity should be approximately the same (no acceleration)
-        let vel_diff = (vel2.0 - vel1.0).abs();
-        assert!(vel_diff < 0.5, "Velocity should be constant after force removal. Diff={}", vel_diff);
+        // With damping enabled, velocity should decrease over time (not increase)
+        // The damping causes exponential decay, so vel2 should be less than vel1
+        assert!(vel2.0 <= vel1.0, "Velocity should decrease or stay same due to damping. vel1={}, vel2={}", vel1.0, vel2.0);
 
         physics.shutdown().ok();
     }
@@ -597,6 +789,126 @@ mod tests {
         // Check object 2 moving toward origin (attraction)
         let vel2 = physics.get_velocity(id2).expect("Should have velocity");
         assert!(vel2.0 < 0.0, "Attraction should pull object 2 toward origin. Got vx={}", vel2.0);
+
+        physics.shutdown().ok();
+    }
+
+    /// The simulation must advance at the configured rate in real time.
+    ///
+    /// This is the regression guard for the sleep-granularity bug: naive
+    /// `sleep(period - elapsed)` on Windows quantizes to the ~15.6 ms system
+    /// timer, so a 240 Hz world silently ran at roughly 64 Hz.
+    #[test]
+    fn test_paced_tick_rate_tracks_wall_clock() {
+        const HZ: f64 = 240.0;
+        const RUN: Duration = Duration::from_millis(1000);
+
+        let physics = spawn_physics_thread(WorldConfig::default().with_frequency(HZ));
+
+        // Let the pacer's granularity estimate settle before measuring.
+        std::thread::sleep(Duration::from_millis(200));
+        let start_tick = physics.get_latest_state().tick;
+
+        let started = Instant::now();
+        std::thread::sleep(RUN);
+        let measured = started.elapsed();
+
+        let ticks = physics.get_latest_state().tick - start_tick;
+        physics.shutdown().ok();
+
+        let expected = HZ * measured.as_secs_f64();
+        let ratio = ticks as f64 / expected;
+        eprintln!(
+            "paced rate: {ticks} ticks in {:.3}s = {:.1} Hz (target {HZ} Hz, ratio {ratio:.3})",
+            measured.as_secs_f64(),
+            ticks as f64 / measured.as_secs_f64(),
+        );
+
+        // An empty world is cheap to step, so the only thing under test is
+        // timing. Generous bounds: CI machines are noisy, but the old behaviour
+        // sat near 0.27 and cannot pass this.
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "expected ~{expected:.0} ticks in {:.3}s at {HZ} Hz, got {ticks} (ratio {ratio:.3})",
+            measured.as_secs_f64(),
+        );
+    }
+
+    /// Unpaced mode exists to outrun wall clock; verify it actually does.
+    #[test]
+    fn test_unpaced_mode_outruns_wall_clock() {
+        const HZ: f64 = 240.0;
+
+        let physics = spawn_physics_thread(
+            WorldConfig::default().with_frequency(HZ).with_real_time(false),
+        );
+
+        let started = Instant::now();
+        std::thread::sleep(Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        let ticks = physics.get_latest_state().tick;
+        physics.shutdown().ok();
+
+        let realtime_ticks = HZ * elapsed.as_secs_f64();
+        assert!(
+            ticks as f64 > realtime_ticks * 2.0,
+            "unpaced mode should far outrun {realtime_ticks:.0} real-time ticks, got {ticks}",
+        );
+    }
+
+    /// The state channel must not grow without bound when nobody drains it.
+    ///
+    /// This is the leak: the physics thread broadcasts every tick, and a
+    /// renderer reading via `get_interpolated_state()` never touches the
+    /// channel. Unbounded, that queued a snapshot per tick forever.
+    #[test]
+    fn test_undrained_state_channel_is_bounded() {
+        let physics = spawn_physics_thread(WorldConfig::default().with_frequency(240.0));
+        physics.add_object(create_test_sphere((0.0, 10.0, 0.0), (0.0, 0.0, 0.0)))
+            .expect("Failed to add object");
+
+        // Far more ticks than the channel can hold, with no consumer.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let mut drained = 0usize;
+        while physics.try_recv_state().is_some() {
+            drained += 1;
+            assert!(
+                drained <= STATE_CHANNEL_CAPACITY,
+                "channel exceeded its {STATE_CHANNEL_CAPACITY}-slot bound",
+            );
+        }
+        physics.shutdown().ok();
+
+        assert!(drained > 0, "expected the channel to hold some buffered states");
+    }
+
+    /// Interpolated reads must stay within the bracket of real simulated states.
+    #[test]
+    fn test_interpolated_state_is_bracketed_by_simulation() {
+        let physics = spawn_physics_thread(
+            WorldConfig::default().with_frequency(120.0).with_gravity(0.0, -10.0, 0.0),
+        );
+        let id = physics
+            .add_object(create_test_sphere((0.0, 100.0, 0.0), (0.0, 0.0, 0.0)))
+            .expect("Failed to add object");
+
+        std::thread::sleep(Duration::from_millis(300));
+
+        // Sampled repeatedly across tick boundaries, the blended height must
+        // decrease monotonically - never jump ahead of, or behind, the sim.
+        let mut last = f64::INFINITY;
+        for _ in 0..40 {
+            let y = physics
+                .get_interpolated_state()
+                .get_position(id)
+                .expect("object should exist")
+                .1;
+            assert!(y.is_finite(), "interpolated position must stay finite");
+            assert!(y <= last + 1e-9, "falling object rose: {last} -> {y}");
+            last = y;
+            std::thread::sleep(Duration::from_millis(3));
+        }
 
         physics.shutdown().ok();
     }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use rayon::prelude::*;
+use log::info;
 use crate::models::{PhysicalObject3D, Quaternion, Shape3D};
 use crate::utils::PhysicsConstants;
 use crate::interactions::shape_collisions_3d::{handle_collision, apply_gravity};
@@ -9,8 +10,14 @@ use crate::interactions::gjk_collision_3d::{gjk_collision_detection_ex, epa_cont
 use super::state::{ObjectId, ObjectState, WorldState};
 use super::config::WorldConfig;
 
+#[cfg(feature = "constraints")]
+use super::world_constraints::{ConstraintId, WorldConstraint};
+
 /// Unique identifier for continuous forces
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Ord` matters here: forces are stored in a `HashMap` but must be *applied*
+/// in a stable order, or float accumulation varies between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ForceId(pub u64);
 
 impl ForceId {
@@ -119,7 +126,7 @@ pub enum ContinuousForce {
 /// Collision data collected during parallel detection phase
 /// This allows us to detect collisions in parallel (read-only)
 /// and then apply responses sequentially (write)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct CollisionData {
     /// Index of first object
     i: usize,
@@ -133,6 +140,617 @@ struct CollisionData {
     contact1: (f64, f64, f64),
     /// Contact point on object 2 (local offset from center)
     contact2: (f64, f64, f64),
+}
+
+/// Grid coordinate of a broad-phase cell.
+type CellKey = (i32, i32, i32);
+
+/// Per-phase time accumulator, so optimization targets come from measurement
+/// rather than intuition. Test builds only; `phase!` compiles to nothing else.
+#[cfg(test)]
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct PhaseTimings {
+    pub gravity: std::time::Duration,
+    pub continuous_forces: std::time::Duration,
+    pub pending_forces: std::time::Duration,
+    pub broad_rebuild: std::time::Duration,
+    pub narrow_phase: std::time::Duration,
+    pub response: std::time::Duration,
+    pub constraints: std::time::Duration,
+    pub damping: std::time::Duration,
+    pub integrate: std::time::Duration,
+    pub tunneling: std::time::Duration,
+}
+
+/// Sub-phase timings inside the broad-phase rebuild.
+#[cfg(test)]
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct BroadPhaseTimings {
+    pub fill: std::time::Duration,
+    pub median: std::time::Duration,
+    pub scatter: std::time::Duration,
+    pub collect: std::time::Duration,
+    pub sort_dedup: std::time::Duration,
+}
+
+/// Time a phase into `self.profile`, or expand to just the body outside tests.
+#[cfg(test)]
+macro_rules! phase {
+    ($self:ident, $field:ident, $body:expr) => {{
+        let __start = std::time::Instant::now();
+        let __result = $body;
+        $self.profile.$field += __start.elapsed();
+        __result
+    }};
+}
+
+#[cfg(not(test))]
+macro_rules! phase {
+    ($self:ident, $field:ident, $body:expr) => {
+        $body
+    };
+}
+
+/// Spatial broad phase over packed position/radius data.
+///
+/// Two things make this fast, and they are independent:
+///
+/// **Layout.** A rejection test reads four numbers per object - centre and
+/// bounding radius. Reading those out of `PhysicalObject3D`, which also carries
+/// shape, material, mass, orientation and angular velocity, pulls a cache line
+/// of data the test never looks at, for each of the two objects, with the inner
+/// index striding across the array. The packed arrays here stream instead.
+///
+/// **Algorithm.** Testing every pair is O(n^2): at 4096 objects that is 8.4M
+/// rejections whether or not anything is near anything else. A uniform grid
+/// sized to the objects means each object only considers the cells that could
+/// possibly contain something touching it.
+///
+/// Objects far larger than typical - a ground plane, a wall - would force a
+/// cell size so coarse that the grid degenerates back to one bucket, so they
+/// are pulled out and tested against everything. In practice there are a
+/// handful of these and many small objects, which is the case the split is for.
+///
+/// The grid itself is an open hash table built by counting sort into two flat
+/// arrays, not a `HashMap<CellKey, Vec<u32>>`. The map version cost a SipHash
+/// and a probe per lookup, times 28 lookups per object per step, and scattered
+/// every bucket into its own heap allocation. Here a lookup is an integer hash
+/// and two array reads, and the storage is two buffers reused across steps.
+/// Distinct cells may collide into the same bucket; that only adds candidates,
+/// which the bounding-sphere test rejects, so results are unaffected.
+/// One grid of a [`BroadPhase`], holding objects whose diameter fits `cell_size`.
+#[derive(Default)]
+struct GridLevel {
+    /// Edge length of a cell at this level.
+    cell_size: f64,
+    /// `1.0 / cell_size`, kept to turn a division into a multiply per lookup.
+    inv_cell: f64,
+    /// `table_size - 1`; table size is always a power of two.
+    table_mask: u32,
+    /// Bucket boundaries: bucket `b` owns `items[cell_start[b]..cell_start[b+1]]`.
+    cell_start: Vec<u32>,
+    /// Write cursors used while scattering; kept to avoid a per-step allocation.
+    cursor: Vec<u32>,
+    /// Object indices at this level, grouped by bucket, ascending within a bucket.
+    items: Vec<u32>,
+    /// Cell hash of each entry in `items`, used to reject bucket collisions.
+    item_keys: Vec<u64>,
+    /// One bit per bucket: set means "may hold something", clear means empty.
+    ///
+    /// Most neighbour probes in any non-crowded scene land on empty buckets, and
+    /// discovering that via `cell_start` is a random read into a table far
+    /// larger than L1. This bitset is 1/32nd the size and answers the common
+    /// case without touching it.
+    occupied: Vec<u64>,
+}
+
+#[derive(Default)]
+struct BroadPhase {
+    /// Packed centres, one entry per object, parallel to `PhysicsWorld::objects`.
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    /// Packed bounding radii.
+    radius: Vec<f64>,
+    /// Orientation per object, computed once per step rather than once per pair.
+    orientations: Vec<Quaternion>,
+    /// True for objects handled by the oversized path rather than the grid.
+    is_oversized: Vec<bool>,
+    /// Indices of oversized objects.
+    oversized: Vec<u32>,
+    /// Cell of each object *at its own level*. Oversized entries are unused.
+    cell_coords: Vec<CellKey>,
+    /// Cell hash of each object at its own level; avoids rehashing per pass.
+    cell_hashes: Vec<u64>,
+    /// Which grid level each object belongs to.
+    object_level: Vec<u8>,
+    /// Grids from finest to coarsest. A uniform-radius scene produces exactly
+    /// one, in which case this behaves identically to a single flat grid.
+    levels: Vec<GridLevel>,
+    /// Candidate pairs surviving the broad phase, sorted and deduplicated.
+    ///
+    /// Packed as `(lo << 32) | hi` rather than `(u32, u32)`: sorting compares a
+    /// single register instead of running derived lexicographic comparison on a
+    /// tuple, and packed order is identical to tuple order because `lo < hi`.
+    pairs: Vec<u64>,
+    /// Scratch buffer for the median calculation, kept to avoid a per-step alloc.
+    radius_scratch: Vec<f64>,
+    /// Accumulated sub-phase timings (test builds only)
+    #[cfg(test)]
+    pub(crate) profile: BroadPhaseTimings,
+}
+
+impl BroadPhase {
+    /// A radius this many times the median marks an object as oversized.
+    ///
+    /// This is an outlier test, not a percentile split: in a scene of balls plus
+    /// a ground plane the ground is orders of magnitude larger, while the balls
+    /// cluster near the median. A percentile would misclassify a fixed fraction
+    /// of ordinary objects no matter how uniform they were.
+    ///
+    /// Tied to the level count, because the levels span exactly this ratio of
+    /// radii. Anything the grid can hold belongs in the grid: the oversized path
+    /// is O(k*n), so misrouting even a small *fraction* of objects into it -
+    /// rather than a fixed handful - is quadratic. A scene of 90% debris and 10%
+    /// crates put every crate on that path at the old factor of 4 and cost 40 ms
+    /// a step.
+    const OVERSIZE_FACTOR: f64 = (1u64 << (Self::MAX_LEVELS - 1)) as f64;
+
+    /// Smallest usable cell size, guarding against a world of zero-radius points.
+    const MIN_CELL_SIZE: f64 = 1e-6;
+
+    /// Ceiling on grid levels.
+    ///
+    /// Each level above an object's own costs it a full 27-cell sweep, so the
+    /// levels have to stay few. Four covers a 16x radius span, and the oversized
+    /// path already absorbs true outliers beyond that.
+    const MAX_LEVELS: usize = 4;
+
+    /// The half of the 3x3x3 neighbourhood that is lexicographically after the
+    /// centre cell.
+    ///
+    /// Scanning all 27 neighbours per object visits every cell pair twice and
+    /// then discards half the results. Scanning only the forward half and
+    /// emitting every pair found there covers each unordered cell pair exactly
+    /// once, halving the lookups. The centre cell is handled separately, where
+    /// `j > i` breaks the tie within a single cell.
+    const FORWARD_OFFSETS: [CellKey; 13] = [
+        (0, 0, 1),
+        (0, 1, -1),
+        (0, 1, 0),
+        (0, 1, 1),
+        (1, -1, -1),
+        (1, -1, 0),
+        (1, -1, 1),
+        (1, 0, -1),
+        (1, 0, 0),
+        (1, 0, 1),
+        (1, 1, -1),
+        (1, 1, 0),
+        (1, 1, 1),
+    ];
+
+    /// Hash a cell to 64 bits.
+    ///
+    /// The low bits select the bucket; the full value is stored per item and
+    /// compared on lookup. That comparison is what keeps an empty cell empty:
+    /// without it, a query for a vacant cell returns whatever unrelated objects
+    /// happen to share its bucket, and a sparse scene generates tens of
+    /// thousands of candidates that only the narrow phase can reject.
+    ///
+    /// Two distinct cells colliding across all 64 bits would produce a spurious
+    /// candidate, never a wrong result - the bounding-sphere test still runs.
+    /// Three *independent* multiplies, and nothing after them.
+    ///
+    /// This sits on the critical path 14 times per object per step, so latency
+    /// matters more than avalanche quality. A splitmix-style finalizer chained
+    /// two more dependent multiplies onto the end and measured ~10.6 ns per
+    /// lookup; these three issue in parallel and the xors are free by
+    /// comparison. Bucket selection takes the high bits instead - see
+    /// [`Self::bucket_index`] - which a multiply already mixes well.
+    /// Three *independent* multiplies, and nothing after them.
+    ///
+    /// Z-order (Morton) coding was tried here to make neighbour probes
+    /// cache-local, in two forms: the raw code masked for the bucket, and a
+    /// hybrid passing an 8x8x8 block through untouched while scattering the
+    /// block address above it. Both regressed every scene - raw Morton by 16%
+    /// sparse / 11% dense / 36% clustered, the hybrid by more. The low bits of a
+    /// Morton code only distinguish cells inside a ~25-cell cube, so any
+    /// real-sized scene aliases into long bucket chains, and the scan cost of
+    /// those chains dwarfs the locality it buys. Locality here is worth less
+    /// than distribution; do not re-litigate without measuring all three scenes.
+    #[inline]
+    fn cell_hash(cell: CellKey) -> u64 {
+        let (x, y, z) = cell;
+        (x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ (z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+    }
+
+    /// Select a bucket from a cell hash.
+    ///
+    /// Uses the high half: the low bits of `value * odd_constant` barely move
+    /// (bit 0 is just bit 0 of the input), so masking them directly would pile
+    /// axis-aligned scenes into a handful of buckets.
+    #[inline]
+    fn bucket_index(hash: u64, mask: u32) -> usize {
+        (((hash >> 32) as u32) & mask) as usize
+    }
+
+    /// Recompute all derived data for the current object positions.
+    fn rebuild(&mut self, objects: &[PhysicalObject3D]) {
+        let n = objects.len();
+
+        self.x.clear();
+        self.y.clear();
+        self.z.clear();
+        self.radius.clear();
+        self.orientations.clear();
+        self.is_oversized.clear();
+        self.oversized.clear();
+        self.pairs.clear();
+        self.cell_coords.clear();
+        self.cell_hashes.clear();
+        self.object_level.clear();
+
+        phase!(self, fill, {
+            for obj in objects {
+                self.x.push(obj.object.position.x);
+                self.y.push(obj.object.position.y);
+                self.z.push(obj.object.position.z);
+                self.radius.push(obj.shape.bounding_radius());
+                self.orientations.push(Quaternion::from_euler(
+                    obj.orientation.roll,
+                    obj.orientation.pitch,
+                    obj.orientation.yaw,
+                ));
+            }
+        });
+
+        if n < 2 {
+            return;
+        }
+
+        // Median radius, via selection rather than a full sort.
+        let median = phase!(self, median, {
+            self.radius_scratch.clear();
+            self.radius_scratch.extend_from_slice(&self.radius);
+            let mid = n / 2;
+            self.radius_scratch.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+            self.radius_scratch[mid]
+        });
+
+        let oversize_threshold = if median > 0.0 {
+            median * Self::OVERSIZE_FACTOR
+        } else {
+            // Degenerate: mostly zero-radius objects. Nothing is an outlier;
+            // fall through to a single coarse grid rather than divide by zero.
+            f64::INFINITY
+        };
+
+        let mut max_gridded_radius: f64 = 0.0;
+        self.is_oversized.reserve(n);
+        for i in 0..n {
+            let r = self.radius[i];
+            let oversized = r > oversize_threshold;
+            self.is_oversized.push(oversized);
+            if oversized {
+                self.oversized.push(i as u32);
+            } else {
+                max_gridded_radius = max_gridded_radius.max(r);
+            }
+        }
+
+        // A single grid must size its cells to the largest object it holds, so
+        // one big object coarsens the grid for every small one - they pile up
+        // many per cell and each neighbourhood sweep returns dozens of
+        // candidates that are nowhere near touching. Instead, bin objects by
+        // size into levels whose cell sizes double, so every object sits in a
+        // grid scaled to itself.
+        let mut min_gridded_radius = f64::INFINITY;
+        for i in 0..n {
+            if !self.is_oversized[i] {
+                min_gridded_radius = min_gridded_radius.min(self.radius[i]);
+            }
+        }
+        if !min_gridded_radius.is_finite() {
+            min_gridded_radius = 0.0;
+        }
+
+        // One level per doubling of radius. Uniform radii give a span of 1 and
+        // therefore exactly one level, identical to a flat grid.
+        let span = if min_gridded_radius > 0.0 {
+            max_gridded_radius / min_gridded_radius
+        } else {
+            f64::INFINITY
+        };
+        let level_count = if span.is_finite() {
+            ((span.log2().ceil().max(0.0) as usize) + 1).clamp(1, Self::MAX_LEVELS)
+        } else {
+            Self::MAX_LEVELS
+        };
+
+        // The coarsest level fits the largest gridded object exactly; each level
+        // below it halves. An object joins the finest level whose cells are at
+        // least its diameter, which is what bounds every query to +/-1 cell.
+        let top_cell = (2.0 * max_gridded_radius).max(Self::MIN_CELL_SIZE);
+        self.levels.resize_with(level_count, GridLevel::default);
+        for (l, level) in self.levels.iter_mut().enumerate() {
+            level.cell_size = top_cell / (1u64 << (level_count - 1 - l)) as f64;
+            level.inv_cell = 1.0 / level.cell_size;
+            level.items.clear();
+            level.item_keys.clear();
+        }
+
+        for i in 0..n {
+            let needed = 2.0 * self.radius[i];
+            let mut l = 0usize;
+            while l + 1 < level_count && self.levels[l].cell_size < needed {
+                l += 1;
+            }
+            self.object_level.push(l as u8);
+            let cell =
+                Self::cell_of(self.x[i], self.y[i], self.z[i], self.levels[l].inv_cell);
+            self.cell_coords.push(cell);
+            self.cell_hashes.push(Self::cell_hash(cell));
+        }
+
+        #[cfg(test)]
+        let scatter_start = std::time::Instant::now();
+
+        for l in 0..level_count {
+            // Load factor near 0.125. A sparser table means shorter bucket
+            // chains - which the Morton experiment showed is what this phase is
+            // actually bound on - and more probes resolving in the occupancy
+            // bitset without touching `cell_start` at all.
+            let members = (0..n)
+                .filter(|&i| !self.is_oversized[i] && self.object_level[i] as usize == l)
+                .count();
+            let table_size = (members.saturating_mul(8).max(16)).next_power_of_two();
+
+            let level = &mut self.levels[l];
+            level.table_mask = (table_size - 1) as u32;
+            level.cell_start.clear();
+            level.cell_start.resize(table_size + 1, 0);
+            level.occupied.clear();
+            level.occupied.resize(table_size / 64 + 1, 0);
+            level.items.resize(members, 0);
+            level.item_keys.resize(members, 0);
+
+            // Counting sort: tally, prefix-sum, then scatter in ascending object
+            // order so bucket contents stay ordered and reproducible.
+            for i in 0..n {
+                if self.is_oversized[i] || self.object_level[i] as usize != l {
+                    continue;
+                }
+                let b = Self::bucket_index(self.cell_hashes[i], level.table_mask);
+                level.cell_start[b + 1] += 1;
+                level.occupied[b >> 6] |= 1u64 << (b & 63);
+            }
+            for b in 0..table_size {
+                level.cell_start[b + 1] += level.cell_start[b];
+            }
+
+            level.cursor.clear();
+            level.cursor.extend_from_slice(&level.cell_start[..table_size]);
+
+            for i in 0..n {
+                if self.is_oversized[i] || self.object_level[i] as usize != l {
+                    continue;
+                }
+                let hash = self.cell_hashes[i];
+                let b = Self::bucket_index(hash, level.table_mask);
+                let slot = level.cursor[b] as usize;
+                level.items[slot] = i as u32;
+                level.item_keys[slot] = hash;
+                level.cursor[b] += 1;
+            }
+        }
+
+        #[cfg(test)]
+        {
+            self.profile.scatter += scatter_start.elapsed();
+        }
+
+        self.collect_pairs(n);
+    }
+
+    /// Range within `items` for the bucket belonging to `hash`.
+    ///
+    /// Returns indices rather than a slice so the caller keeps `items` and
+    /// `pairs` as separate field borrows; a `&self` method would borrow both.
+    /// Entries in the range still have to be checked against `hash` via
+    /// `item_keys` - the bucket may hold unrelated cells.
+    #[inline]
+    fn bucket_range(cell_start: &[u32], mask: u32, hash: u64) -> (usize, usize) {
+        let b = Self::bucket_index(hash, mask);
+        (cell_start[b] as usize, cell_start[b + 1] as usize)
+    }
+
+    /// Pack an ordered index pair into one sortable word.
+    #[inline]
+    fn pack_pair(lo: u32, hi: u32) -> u64 {
+        ((lo as u64) << 32) | hi as u64
+    }
+
+    /// Cheap "definitely empty" test, answered from the bitset.
+    #[inline]
+    fn bucket_is_empty(occupied: &[u64], mask: u32, hash: u64) -> bool {
+        let b = Self::bucket_index(hash, mask);
+        occupied[b >> 6] & (1u64 << (b & 63)) == 0
+    }
+
+    /// Map a position to its grid cell.
+    ///
+    /// A non-finite coordinate - a NaN that leaked in from a degenerate
+    /// collision - would otherwise produce an unpredictable cell. Bucket those
+    /// at the origin so they stay visible to collision detection, which rejects
+    /// them properly, instead of silently vanishing from the broad phase.
+    #[inline]
+    fn cell_of(x: f64, y: f64, z: f64, inv_cell: f64) -> CellKey {
+        let q = |v: f64| -> i32 {
+            if v.is_finite() {
+                // `as` saturates rather than wrapping. Clamp one short of the
+                // limits so the +/-1 neighbour scan cannot overflow: an object
+                // flung to 1e12 by a bad impulse must not panic the simulation.
+                (v * inv_cell).floor().clamp(
+                    (i32::MIN + 1) as f64,
+                    (i32::MAX - 1) as f64,
+                ) as i32
+            } else {
+                0
+            }
+        };
+        (q(x), q(y), q(z))
+    }
+
+    /// Build the candidate pair list.
+    ///
+    /// Iterates objects, not cells.
+    ///
+    /// Hoisting the thirteen neighbourhood probes to once per *cell* was tried,
+    /// grouping the bucket-ordered `items` into runs that share a cell. It
+    /// measured 12% worse on the dense scene - at 1.06-1.07 objects per occupied
+    /// cell, which is what uniform radii produce, run detection is pure overhead
+    /// with nothing to amortize - and 20% better only on the mixed-radii scene,
+    /// where it is swamped by candidate volume anyway. Net effect on totals was
+    /// inside noise, so the simpler form stays.
+    fn collect_pairs(&mut self, n: usize) {
+        #[cfg(test)]
+        let collect_start = std::time::Instant::now();
+
+        // Split the field borrows so the level tables can be read while `pairs`
+        // is written.
+        let BroadPhase {
+            x, y, z, cell_coords, cell_hashes, object_level, is_oversized, levels, pairs, ..
+        } = self;
+
+        for i in 0..n {
+            if is_oversized[i] {
+                continue;
+            }
+            let iu = i as u32;
+            let own_level = object_level[i] as usize;
+
+            // --- The object's own level ---
+            //
+            // Both objects of a same-level pair run this sweep, so the ordering
+            // tests below are what keep each pair to a single emission.
+            {
+                let level = &levels[own_level];
+                let (cx, cy, cz) = cell_coords[i];
+                let own_hash = cell_hashes[i];
+
+                // Own cell: `j > i` picks each within-cell pair once.
+                let (lo, hi) = Self::bucket_range(&level.cell_start, level.table_mask, own_hash);
+                for k in lo..hi {
+                    if level.item_keys[k] != own_hash {
+                        continue;
+                    }
+                    let j = level.items[k];
+                    if j > iu {
+                        pairs.push(Self::pack_pair(iu, j));
+                    }
+                }
+
+                // Forward half of the neighbourhood: every pair found is new, so
+                // there is no ordering test to apply here.
+                for &(dx, dy, dz) in &Self::FORWARD_OFFSETS {
+                    let hash = Self::cell_hash((cx + dx, cy + dy, cz + dz));
+                    if Self::bucket_is_empty(&level.occupied, level.table_mask, hash) {
+                        continue;
+                    }
+                    let (lo, hi) = Self::bucket_range(&level.cell_start, level.table_mask, hash);
+                    for k in lo..hi {
+                        if level.item_keys[k] != hash {
+                            continue;
+                        }
+                        let j = level.items[k];
+                        pairs.push(Self::pack_pair(iu.min(j), iu.max(j)));
+                    }
+                }
+            }
+
+            // --- Coarser levels ---
+            //
+            // Only the finer object of a cross-level pair looks upward, so these
+            // sweeps need no ordering test and must cover all 27 cells rather
+            // than the forward half. Radius still bounds the search to +/-1 cell:
+            // both objects fit within half a cell of this level, so their centres
+            // cannot be a full cell apart and still touch.
+            for coarser in levels.iter().skip(own_level + 1) {
+                if coarser.items.is_empty() {
+                    continue;
+                }
+                let (cx, cy, cz) = Self::cell_of(x[i], y[i], z[i], coarser.inv_cell);
+
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        for dz in -1..=1 {
+                            let hash = Self::cell_hash((cx + dx, cy + dy, cz + dz));
+                            if Self::bucket_is_empty(
+                                &coarser.occupied,
+                                coarser.table_mask,
+                                hash,
+                            ) {
+                                continue;
+                            }
+                            let (lo, hi) = Self::bucket_range(
+                                &coarser.cell_start,
+                                coarser.table_mask,
+                                hash,
+                            );
+                            for k in lo..hi {
+                                if coarser.item_keys[k] != hash {
+                                    continue;
+                                }
+                                let j = coarser.items[k];
+                                pairs.push(Self::pack_pair(iu.min(j), iu.max(j)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Oversized objects against everything else...
+        for &o in &self.oversized {
+            for k in 0..n as u32 {
+                if k == o || self.is_oversized[k as usize] {
+                    continue;
+                }
+                self.pairs.push(Self::pack_pair(o.min(k), o.max(k)));
+            }
+        }
+
+        // ...and against each other.
+        for a in 0..self.oversized.len() {
+            for b in (a + 1)..self.oversized.len() {
+                let (i, j) = (self.oversized[a], self.oversized[b]);
+                self.pairs.push(Self::pack_pair(i.min(j), i.max(j)));
+            }
+        }
+
+        // Sorting is not just tidiness. Collision response is applied in list
+        // order and mutates objects, so the order decides the result. Sorting
+        // by (i, j) reproduces exactly the order the old all-pairs loop
+        // produced, which keeps this a pure optimization and keeps results
+        // reproducible run to run.
+        #[cfg(test)]
+        {
+            self.profile.collect += collect_start.elapsed();
+        }
+
+        #[cfg(test)]
+        #[cfg(test)]
+        let sort_start = std::time::Instant::now();
+        self.pairs.sort_unstable();
+        self.pairs.dedup();
+        #[cfg(test)]
+        {
+            self.profile.sort_dedup += sort_start.elapsed();
+        }
+    }
 }
 
 /// The main physics simulation world
@@ -170,6 +788,25 @@ pub struct PhysicsWorld {
 
     /// Continuous forces that persist across steps
     continuous_forces: HashMap<ForceId, ContinuousForce>,
+
+    /// Constraints between objects (requires "constraints" feature)
+    #[cfg(feature = "constraints")]
+    constraints: HashMap<ConstraintId, WorldConstraint>,
+
+    /// Number of constraint solver iterations per step
+    #[cfg(feature = "constraints")]
+    constraint_iterations: usize,
+
+    /// Active contacts from the last physics step (object pairs that are touching)
+    /// Key is the object ID, value is a list of all objects it's currently in contact with
+    active_contacts: HashMap<ObjectId, Vec<ObjectId>>,
+
+    /// Spatial acceleration structure, rebuilt each step and reused across steps
+    broad_phase: BroadPhase,
+
+    /// Accumulated per-phase timings (test builds only)
+    #[cfg(test)]
+    pub(crate) profile: PhaseTimings,
 }
 
 impl PhysicsWorld {
@@ -186,6 +823,14 @@ impl PhysicsWorld {
             paused: false,
             pending_forces: HashMap::new(),
             continuous_forces: HashMap::new(),
+            #[cfg(feature = "constraints")]
+            constraints: HashMap::new(),
+            #[cfg(feature = "constraints")]
+            constraint_iterations: 8, // Default iterations for Gauss-Seidel solver
+            active_contacts: HashMap::new(),
+            broad_phase: BroadPhase::default(),
+            #[cfg(test)]
+            profile: PhaseTimings::default(),
         }
     }
 
@@ -254,6 +899,59 @@ impl PhysicsWorld {
         self.objects.len()
     }
 
+    // ========================================================================
+    // Collision Query API
+    // ========================================================================
+
+    /// Get a list of all objects currently in contact with the given object.
+    ///
+    /// Returns the ObjectIds of all objects that collided with this object
+    /// during the last physics step. The list is empty if no contacts occurred.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ball_id = world.add_object(ball);
+    /// world.step();
+    /// let contacts = world.get_contacts(ball_id);
+    /// for other_id in contacts {
+    ///     println!("Ball is touching object {:?}", other_id);
+    /// }
+    /// ```
+    pub fn get_contacts(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.active_contacts
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Check if two objects are currently in contact.
+    ///
+    /// Returns true if the objects collided during the last physics step.
+    pub fn are_in_contact(&self, id1: ObjectId, id2: ObjectId) -> bool {
+        self.active_contacts
+            .get(&id1)
+            .map(|contacts| contacts.contains(&id2))
+            .unwrap_or(false)
+    }
+
+    /// Check if an object has any contacts.
+    ///
+    /// Returns true if the object is touching any other object.
+    pub fn has_contacts(&self, id: ObjectId) -> bool {
+        self.active_contacts
+            .get(&id)
+            .map(|contacts| !contacts.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Get the number of objects currently in contact with the given object.
+    pub fn contact_count(&self, id: ObjectId) -> usize {
+        self.active_contacts
+            .get(&id)
+            .map(|contacts| contacts.len())
+            .unwrap_or(0)
+    }
+
     /// Set the simulation timestep
     pub fn set_timestep(&mut self, dt: f64) {
         self.config.timestep = dt;
@@ -305,6 +1003,42 @@ impl PhysicsWorld {
                 obj.object.velocity.y += impulse.1 / mass;
                 obj.object.velocity.z += impulse.2 / mass;
             }
+        }
+    }
+
+    // ==================== Kinematic Object Methods ====================
+
+    /// Set position for a kinematic object (externally controlled).
+    ///
+    /// This method:
+    /// - Sets the object's position directly
+    /// - Computes velocity from the position change (for proper collision response)
+    ///
+    /// Use this for objects like planks that follow rope particles or
+    /// platforms that move along paths. The object should have infinite mass
+    /// so it's not affected by forces, but can push other objects.
+    ///
+    /// # Arguments
+    /// * `id` - The object ID
+    /// * `new_pos` - The new position (x, y, z)
+    /// * `dt` - Time step (used to compute velocity from position change)
+    pub fn set_position_kinematic(
+        &mut self,
+        id: ObjectId,
+        new_pos: (f64, f64, f64),
+        dt: f64,
+    ) {
+        if let Some(obj) = self.get_object_mut(id) {
+            // Compute velocity from position change
+            if dt > 0.0 {
+                obj.object.velocity.x = (new_pos.0 - obj.object.position.x) / dt;
+                obj.object.velocity.y = (new_pos.1 - obj.object.position.y) / dt;
+                obj.object.velocity.z = (new_pos.2 - obj.object.position.z) / dt;
+            }
+            // Set new position directly
+            obj.object.position.x = new_pos.0;
+            obj.object.position.y = new_pos.1;
+            obj.object.position.z = new_pos.2;
         }
     }
 
@@ -431,13 +1165,27 @@ impl PhysicsWorld {
     }
 
     /// Apply torque to rotate an object
+    ///
+    /// Torque is converted to angular acceleration using moment of inertia,
+    /// then integrated over the timestep to get change in angular velocity:
+    /// Δω = τ * dt / I
     pub fn apply_torque(&mut self, id: ObjectId, torque: (f64, f64, f64)) {
+        let dt = self.config.timestep;
         if let Some(obj) = self.get_object_mut(id) {
-            // Simplified: assume unit moment of inertia
-            // In a full implementation, this would use the object's inertia tensor
-            obj.angular_velocity.0 += torque.0;
-            obj.angular_velocity.1 += torque.1;
-            obj.angular_velocity.2 += torque.2;
+            // Get moment of inertia from shape
+            // Returns [Ixx, Iyy, Izz, Ixy, Ixz, Iyz]
+            let inertia = obj.shape.moment_of_inertia(obj.object.mass);
+
+            // Angular acceleration α = τ / I
+            // Change in angular velocity: Δω = α * dt = τ * dt / I
+            // Using diagonal elements (Ixx, Iyy, Izz) for principal axes
+            let ixx = inertia[0].max(0.001); // Prevent division by zero
+            let iyy = inertia[1].max(0.001);
+            let izz = inertia[2].max(0.001);
+
+            obj.angular_velocity.0 += torque.0 * dt / ixx;
+            obj.angular_velocity.1 += torque.1 * dt / iyy;
+            obj.angular_velocity.2 += torque.2 * dt / izz;
         }
     }
 
@@ -590,6 +1338,68 @@ impl PhysicsWorld {
         })
     }
 
+    // ==================== Constraint Methods ====================
+
+    /// Add a constraint to the world
+    ///
+    /// Returns the ConstraintId assigned to the constraint.
+    #[cfg(feature = "constraints")]
+    pub fn add_constraint(&mut self, constraint: WorldConstraint) -> ConstraintId {
+        let id = ConstraintId::new();
+        self.constraints.insert(id, constraint);
+        id
+    }
+
+    /// Remove a constraint from the world
+    ///
+    /// Returns true if the constraint was found and removed.
+    #[cfg(feature = "constraints")]
+    pub fn remove_constraint(&mut self, id: ConstraintId) -> bool {
+        self.constraints.remove(&id).is_some()
+    }
+
+    /// Get a reference to a constraint by ID
+    #[cfg(feature = "constraints")]
+    pub fn get_constraint(&self, id: ConstraintId) -> Option<&WorldConstraint> {
+        self.constraints.get(&id)
+    }
+
+    /// Get a mutable reference to a constraint by ID
+    #[cfg(feature = "constraints")]
+    pub fn get_constraint_mut(&mut self, id: ConstraintId) -> Option<&mut WorldConstraint> {
+        self.constraints.get_mut(&id)
+    }
+
+    /// Get the number of constraints in the world
+    #[cfg(feature = "constraints")]
+    pub fn constraint_count(&self) -> usize {
+        self.constraints.len()
+    }
+
+    /// Set the number of constraint solver iterations
+    #[cfg(feature = "constraints")]
+    pub fn set_constraint_iterations(&mut self, iterations: usize) {
+        self.constraint_iterations = iterations;
+    }
+
+    /// Get the current constraint solver iteration count
+    #[cfg(feature = "constraints")]
+    pub fn constraint_iterations(&self) -> usize {
+        self.constraint_iterations
+    }
+
+    /// Get an iterator over all constraint IDs
+    #[cfg(feature = "constraints")]
+    pub fn constraint_ids(&self) -> impl Iterator<Item = ConstraintId> + '_ {
+        self.constraints.keys().copied()
+    }
+
+    /// Clear all constraints from the world
+    #[cfg(feature = "constraints")]
+    pub fn clear_constraints(&mut self) {
+        self.constraints.clear();
+    }
+
     /// Set the velocity of an object
     pub fn set_velocity(&mut self, id: ObjectId, velocity: (f64, f64, f64)) {
         if let Some(obj) = self.get_object_mut(id) {
@@ -635,6 +1445,27 @@ impl PhysicsWorld {
         steps
     }
 
+    /// Size at which the determinism tests exercise a realistically large world.
+    #[cfg(test)]
+    const LARGE_WORLD: usize = 192;
+
+    /// Apply an independent per-object update.
+    ///
+    /// These stages were parallelized with `par_iter_mut` and measured slower at
+    /// every size from 64 to 4096 objects (+121% at n=64, +0.4% at n=4096): the
+    /// per-object work is a handful of multiply-adds, so rayon's fixed fork-join
+    /// cost per parallel section exceeds the work being scheduled, and the step
+    /// is dominated by the O(n^2) narrow phase regardless. Kept sequential
+    /// deliberately - see `bench_step_cost` to re-check that decision.
+    ///
+    /// `f` must only touch the object it is given.
+    fn for_each_object<F>(objects: &mut [PhysicalObject3D], f: F)
+    where
+        F: Fn(&mut PhysicalObject3D),
+    {
+        objects.iter_mut().for_each(f);
+    }
+
     /// Perform a single physics step
     pub fn step(&mut self) {
         if !self.paused {
@@ -651,32 +1482,57 @@ impl PhysicsWorld {
 
         // 1. Apply gravity to all objects (skip static objects with infinite/very high mass)
         const STATIC_MASS_THRESHOLD: f64 = 1e20; // Objects heavier than this are treated as static
-        for obj in &mut self.objects {
+        phase!(self, gravity, {
+        Self::for_each_object(&mut self.objects, |obj| {
             if obj.object.mass < STATIC_MASS_THRESHOLD && !obj.object.mass.is_infinite() {
                 apply_gravity(obj, gravity, dt);
             }
-        }
+        });
+        });
 
         // 2. Apply continuous forces and collect expired ones
-        let forces_to_remove = self.apply_continuous_forces(dt, world_gravity);
-        for force_id in forces_to_remove {
-            self.continuous_forces.remove(&force_id);
-        }
+        phase!(self, continuous_forces, {
+            let forces_to_remove = self.apply_continuous_forces(dt, world_gravity);
+            for force_id in forces_to_remove {
+                self.continuous_forces.remove(&force_id);
+            }
+        });
 
         // 3. Apply pending one-shot forces and integrate velocities
-        for (idx, obj) in self.objects.iter_mut().enumerate() {
-            // Find the ObjectId for this index
-            if let Some(&id) = self.index_to_id.get(&idx) {
-                if let Some(forces) = self.pending_forces.get(&id) {
-                    let mass = obj.object.mass;
-                    if mass > 0.0 {
-                        for force in forces {
-                            obj.object.velocity.x += force.0 / mass * dt;
-                            obj.object.velocity.y += force.1 / mass * dt;
-                            obj.object.velocity.z += force.2 / mass * dt;
-                        }
-                    }
+        //
+        // Each object reads only its own force list, and that list is a Vec, so
+        // the accumulation order within an object is fixed regardless of how the
+        // objects are distributed across threads.
+        // Nothing pending is the common case, and the loop below would still do
+        // a HashMap lookup per object to discover that.
+        if !self.pending_forces.is_empty() {
+            // Split the borrows so the object slice can be handed to rayon while
+            // the lookup tables stay readable.
+            let index_to_id = &self.index_to_id;
+            let pending_forces = &self.pending_forces;
+
+            let apply_pending = |(idx, obj): (usize, &mut PhysicalObject3D)| {
+                let Some(&id) = index_to_id.get(&idx) else { return };
+                let Some(forces) = pending_forces.get(&id) else { return };
+
+                let mass = obj.object.mass;
+                if mass <= 0.0 {
+                    return;
                 }
+                for force in forces {
+                    obj.object.velocity.x += force.0 / mass * dt;
+                    obj.object.velocity.y += force.1 / mass * dt;
+                    obj.object.velocity.z += force.2 / mass * dt;
+                }
+            };
+
+            #[cfg(test)]
+            #[cfg(test)]
+            let start = std::time::Instant::now();
+            self.objects.iter_mut().enumerate().for_each(apply_pending);
+            #[cfg(test)]
+            {
+                self.profile.pending_forces += start.elapsed();
             }
         }
         // Clear all pending one-shot forces
@@ -685,8 +1541,38 @@ impl PhysicsWorld {
         // 4. Collision detection and response
         self.resolve_collisions(dt);
 
+        // 4.5. Apply gravity to constraint-owned particles and solve constraints
+        #[cfg(feature = "constraints")]
+        phase!(self, constraints, self.solve_constraints(dt, gravity));
+
+        // 4.6. Apply damping (air resistance and angular friction)
+        // Using exponential decay for frame-rate independence
+        // damping_factor = (1 - damping)^dt approximated as e^(-damping * dt)
+        const LINEAR_DAMPING: f64 = 0.1;   // Linear velocity damping coefficient
+        const ANGULAR_DAMPING: f64 = 2.0;  // Angular velocity damping coefficient (increased for faster spin decay)
+
+        let linear_decay = (-LINEAR_DAMPING * dt).exp();
+        let angular_decay = (-ANGULAR_DAMPING * dt).exp();
+
+        phase!(self, damping, Self::for_each_object(&mut self.objects, |obj| {
+            // Skip static objects
+            if obj.object.mass.is_infinite() || obj.object.mass <= 0.0 {
+                return;
+            }
+
+            // Apply linear damping (air resistance)
+            obj.object.velocity.x *= linear_decay;
+            obj.object.velocity.y *= linear_decay;
+            obj.object.velocity.z *= linear_decay;
+
+            // Apply angular damping (rotational friction)
+            obj.angular_velocity.0 *= angular_decay;
+            obj.angular_velocity.1 *= angular_decay;
+            obj.angular_velocity.2 *= angular_decay;
+        }));
+
         // 5. Integrate positions
-        for obj in &mut self.objects {
+        phase!(self, integrate, Self::for_each_object(&mut self.objects, |obj| {
             obj.object.position.x += obj.object.velocity.x * dt;
             obj.object.position.y += obj.object.velocity.y * dt;
             obj.object.position.z += obj.object.velocity.z * dt;
@@ -695,14 +1581,14 @@ impl PhysicsWorld {
             obj.orientation.roll += obj.angular_velocity.0 * dt;
             obj.orientation.pitch += obj.angular_velocity.1 * dt;
             obj.orientation.yaw += obj.angular_velocity.2 * dt;
-        }
+        }));
 
         // 6. Anti-tunneling: Check if any fast-moving objects have passed through the ground
         // This is a simple safeguard for objects that tunnel through the ground plane at y=0
-        for obj in &mut self.objects {
+        phase!(self, tunneling, Self::for_each_object(&mut self.objects, |obj| {
             // Skip static objects
             if obj.object.mass.is_infinite() || obj.object.mass <= 0.0 {
-                continue;
+                return;
             }
 
             // Get the object's lowest point based on its shape
@@ -724,7 +1610,7 @@ impl PhysicsWorld {
                     obj.object.velocity.y = -obj.object.velocity.y * restitution;
                 }
             }
-        }
+        }));
 
         // 6. Update time tracking
         self.tick += 1;
@@ -929,6 +1815,13 @@ impl PhysicsWorld {
         }
 
         // Apply the computed forces
+        // `continuous_forces` is a HashMap, so the collection order above varies
+        // between process runs. These are float accumulations into velocity, and
+        // float addition is not associative - two forces on the same object
+        // would sum differently run to run, and the simulation would diverge.
+        // Sorting by ForceId (monotonic, unique) pins a stable order.
+        force_updates.sort_unstable_by_key(|&(force_id, ..)| force_id);
+
         for (_force_id, target_id, force, _) in force_updates {
             if let Some(&idx) = self.object_ids.get(&target_id) {
                 let obj = &mut self.objects[idx];
@@ -944,12 +1837,36 @@ impl PhysicsWorld {
         to_remove
     }
 
+    /// Solve all constraints using iterative Gauss-Seidel solver
+    #[cfg(feature = "constraints")]
+    fn solve_constraints(&mut self, dt: f64, gravity: f64) {
+        if self.constraints.is_empty() {
+            return;
+        }
+
+        // First pass: Apply gravity to constraint-owned particles (RopeChain, etc.)
+        for constraint in self.constraints.values_mut() {
+            constraint.apply_gravity(gravity, dt);
+        }
+
+        // Iterative constraint solving (Gauss-Seidel)
+        let iterations = self.constraint_iterations;
+        for _ in 0..iterations {
+            for constraint in self.constraints.values_mut() {
+                constraint.solve(&self.object_ids, &mut self.objects, dt);
+            }
+        }
+    }
+
     /// Resolve collisions between all object pairs using parallel detection
     ///
     /// This uses a two-phase approach:
     /// 1. Parallel detection: Find all colliding pairs and compute contact data (read-only)
     /// 2. Sequential response: Apply impulses and position corrections (write)
     fn resolve_collisions(&mut self, dt: f64) {
+        // Clear contacts from last frame
+        self.active_contacts.clear();
+
         let n = self.objects.len();
         if n < 2 {
             return;
@@ -961,12 +1878,34 @@ impl PhysicsWorld {
             return;
         }
 
-        // Phase 1: Parallel collision detection (read-only)
-        let collisions = self.detect_collisions_parallel();
+        // Phase 0: Rebuild the spatial index for the positions produced by
+        // integration earlier in this step.
+        phase!(self, broad_rebuild, {
+            let objects = &self.objects;
+            self.broad_phase.rebuild(objects);
+        });
 
-        // Phase 2: Sequential collision response (write)
-        for collision in collisions {
-            self.apply_collision_response(&collision, dt);
+        // Phase 1: Parallel collision detection (read-only)
+        let collisions = phase!(self, narrow_phase, self.detect_collisions_parallel());
+
+        // Phase 2: Sequential collision response (write) and contact tracking
+        #[cfg(test)]
+        #[cfg(test)]
+        let response_start = std::time::Instant::now();
+        for collision in &collisions {
+            // Track contacts bidirectionally
+            if let (Some(&id1), Some(&id2)) = (
+                self.index_to_id.get(&collision.i),
+                self.index_to_id.get(&collision.j),
+            ) {
+                self.active_contacts.entry(id1).or_default().push(id2);
+                self.active_contacts.entry(id2).or_default().push(id1);
+            }
+            self.apply_collision_response(collision, dt);
+        }
+        #[cfg(test)]
+        {
+            self.profile.response += response_start.elapsed();
         }
     }
 
@@ -975,6 +1914,19 @@ impl PhysicsWorld {
         let n = self.objects.len();
         for i in 0..n {
             for j in (i + 1)..n {
+                // First detect if there's a collision
+                if let Some(_collision) = self.detect_collision_pair_live(i, j) {
+                    // Track contacts bidirectionally
+                    if let (Some(&id1), Some(&id2)) = (
+                        self.index_to_id.get(&i),
+                        self.index_to_id.get(&j),
+                    ) {
+                        self.active_contacts.entry(id1).or_default().push(id2);
+                        self.active_contacts.entry(id2).or_default().push(id1);
+                    }
+                }
+
+                // Then do collision response (handle_collision does its own detection)
                 let (first, second) = self.objects.split_at_mut(j);
                 let obj1 = &mut first[i];
                 let obj2 = &mut second[0];
@@ -984,51 +1936,89 @@ impl PhysicsWorld {
     }
 
     /// Parallel collision detection - returns collision data without mutating objects
+    ///
+    /// Assumes `self.broad_phase` has already been rebuilt for the current
+    /// positions. The candidate list is sorted by `(i, j)`, and rayon's indexed
+    /// `collect` preserves input order, so the result is identical - in content
+    /// and order - to testing every pair.
     fn detect_collisions_parallel(&self) -> Vec<CollisionData> {
-        let n = self.objects.len();
-
-        // Generate all pair indices
-        let pairs: Vec<(usize, usize)> = (0..n)
-            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-            .collect();
-
-        // Parallel collision detection
-        pairs.par_iter()
-            .filter_map(|&(i, j)| self.detect_collision_pair(i, j))
+        self.broad_phase
+            .pairs
+            .par_iter()
+            .filter_map(|&packed| {
+                let (i, j) = ((packed >> 32) as usize, (packed as u32) as usize);
+                self.detect_collision_pair(i, j)
+            })
             .collect()
     }
 
-    /// Detect collision between a single pair of objects (read-only)
+    /// Detect collision between a pair, reading the packed broad-phase arrays.
+    ///
+    /// The rejection test - the overwhelming majority of calls - touches four
+    /// contiguous arrays instead of two fat structs, and the orientations were
+    /// computed once per object during the rebuild rather than once per pair.
+    ///
+    /// Requires `self.broad_phase` to match the current object positions.
     fn detect_collision_pair(&self, i: usize, j: usize) -> Option<CollisionData> {
+        let bp = &self.broad_phase;
+        self.detect_collision_with(
+            i,
+            j,
+            (bp.x[i], bp.y[i], bp.z[i]),
+            (bp.x[j], bp.y[j], bp.z[j]),
+            bp.radius[i],
+            bp.radius[j],
+            bp.orientations[i],
+            bp.orientations[j],
+        )
+    }
+
+    /// Detect collision between a pair, reading live object state.
+    ///
+    /// The sequential path mutates objects as it goes, so the packed arrays go
+    /// stale mid-loop; it reads through here instead. Only used for small
+    /// worlds, where the layout advantage would not have paid anyway.
+    fn detect_collision_pair_live(&self, i: usize, j: usize) -> Option<CollisionData> {
         let obj1 = &self.objects[i];
         let obj2 = &self.objects[j];
 
-        let pos1 = (obj1.object.position.x, obj1.object.position.y, obj1.object.position.z);
-        let pos2 = (obj2.object.position.x, obj2.object.position.y, obj2.object.position.z);
+        self.detect_collision_with(
+            i,
+            j,
+            (obj1.object.position.x, obj1.object.position.y, obj1.object.position.z),
+            (obj2.object.position.x, obj2.object.position.y, obj2.object.position.z),
+            obj1.shape.bounding_radius(),
+            obj2.shape.bounding_radius(),
+            Quaternion::from_euler(obj1.orientation.roll, obj1.orientation.pitch, obj1.orientation.yaw),
+            Quaternion::from_euler(obj2.orientation.roll, obj2.orientation.pitch, obj2.orientation.yaw),
+        )
+    }
 
+    /// Shared narrow-phase body for both detection entry points.
+    #[allow(clippy::too_many_arguments)]
+    fn detect_collision_with(
+        &self,
+        i: usize,
+        j: usize,
+        pos1: (f64, f64, f64),
+        pos2: (f64, f64, f64),
+        r1: f64,
+        r2: f64,
+        orientation1: Quaternion,
+        orientation2: Quaternion,
+    ) -> Option<CollisionData> {
         // Quick bounding-sphere rejection test
         let dx = pos2.0 - pos1.0;
         let dy = pos2.1 - pos1.1;
         let dz = pos2.2 - pos1.2;
         let distance_sq = dx * dx + dy * dy + dz * dz;
 
-        let r1 = obj1.shape.bounding_radius();
-        let r2 = obj2.shape.bounding_radius();
         if distance_sq > (r1 + r2).powi(2) {
             return None;
         }
 
-        // Get orientations
-        let orientation1 = Quaternion::from_euler(
-            obj1.orientation.roll,
-            obj1.orientation.pitch,
-            obj1.orientation.yaw
-        );
-        let orientation2 = Quaternion::from_euler(
-            obj2.orientation.roll,
-            obj2.orientation.pitch,
-            obj2.orientation.yaw
-        );
+        let obj1 = &self.objects[i];
+        let obj2 = &self.objects[j];
 
         // Run GJK collision detection
         let gjk_result = gjk_collision_detection_ex(
@@ -1102,7 +2092,7 @@ impl PhysicsWorld {
     }
 
     /// Apply collision response for a detected collision
-    fn apply_collision_response(&mut self, collision: &CollisionData, _dt: f64) {
+    fn apply_collision_response(&mut self, collision: &CollisionData, dt: f64) {
         let (first, second) = self.objects.split_at_mut(collision.j);
         let obj1 = &mut first[collision.i];
         let obj2 = &mut second[0];
@@ -1179,7 +2169,7 @@ impl PhysicsWorld {
             obj2.object.velocity.z += normal.2 * impulse_over_m2;
         }
 
-        // Apply angular impulse (simplified, skip for static objects)
+        // Apply angular impulse from normal force (simplified, skip for static objects)
         let torque_scale = 0.1; // Reduced angular response
         if !m1_static {
             let torque1 = cross_product(r1, (normal.0 * j, normal.1 * j, normal.2 * j));
@@ -1192,6 +2182,193 @@ impl PhysicsWorld {
             obj2.angular_velocity.0 += torque2.0 * torque_scale;
             obj2.angular_velocity.1 += torque2.1 * torque_scale;
             obj2.angular_velocity.2 += torque2.2 * torque_scale;
+        }
+
+        // =====================================================================
+        // FRICTION IMPULSE (Coulomb friction model)
+        // =====================================================================
+        // Calculate tangential velocity at contact point (perpendicular to normal)
+        let tangent_vel = (
+            vrel.0 - vrel_n * normal.0,
+            vrel.1 - vrel_n * normal.1,
+            vrel.2 - vrel_n * normal.2,
+        );
+        let tangent_speed = (tangent_vel.0.powi(2) + tangent_vel.1.powi(2) + tangent_vel.2.powi(2)).sqrt();
+
+        if tangent_speed > 1e-6 {
+            // Normalize tangent direction
+            let tangent = (
+                tangent_vel.0 / tangent_speed,
+                tangent_vel.1 / tangent_speed,
+                tangent_vel.2 / tangent_speed,
+            );
+
+            // Get friction coefficient (geometric mean of both objects)
+            // NOTE: Use obj1.get_friction() not obj1.object.get_friction()
+            // because PhysicalObject3D.material is separate from ObjectIn3D.material
+            let friction1 = obj1.get_friction();
+            let friction2 = obj2.get_friction();
+            let friction = (friction1 * friction2).sqrt();
+
+            // Calculate friction impulse magnitude
+            // Coulomb model: friction_impulse <= friction * normal_force
+            // For resting contacts, use weight-based normal force since collision impulse is ~0
+            let gravity = self.config.gravity;
+            let gravity_mag = (gravity.0.powi(2) + gravity.1.powi(2) + gravity.2.powi(2)).sqrt();
+
+            let weight_impulse = if gravity_mag > 1e-10 {
+                let gravity_dir = (gravity.0 / gravity_mag, gravity.1 / gravity_mag, gravity.2 / gravity_mag);
+                // How much is gravity pushing obj1 into obj2?
+                // normal points from obj1 to obj2, gravity pushes obj1 in gravity_dir
+                // alignment is positive when gravity pushes obj1 into obj2 (into the surface)
+                let alignment = gravity_dir.0 * normal.0 + gravity_dir.1 * normal.1 + gravity_dir.2 * normal.2;
+
+                if alignment > 0.0 {
+                    // Weight component pressing into surface
+                    // Use the lighter object's mass contribution to normal force
+                    let effective_mass = if m2_static {
+                        m1  // Ball on static ground: ball's weight creates normal force
+                    } else if m1_static {
+                        m2  // Object on static surface from above
+                    } else {
+                        (m1 * m2) / (m1 + m2)  // Reduced mass for two dynamic objects
+                    };
+
+                    effective_mass * gravity_mag * dt * alignment
+                } else {
+                    0.0  // Not pressing into surface (e.g., hitting from below)
+                }
+            } else {
+                0.0  // No gravity
+            };
+
+            // Use the larger of collision impulse or weight-based impulse
+            let max_friction_impulse = friction * j.abs().max(weight_impulse);
+
+            // The impulse needed to stop tangential motion
+            let friction_impulse_needed = tangent_speed / inv_mass_sum;
+
+            // Apply the smaller of the two (clamped Coulomb friction)
+            let friction_j = friction_impulse_needed.min(max_friction_impulse);
+
+            // DEBUG: Log friction values (rate-limited to once per second at 240Hz)
+            static DEBUG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count % 240 == 0 && tangent_speed > 0.01 {
+                log::info!(
+                    "[FRICTION] µ1={:.2} µ2={:.2} µ={:.2} | j={:.4} weight={:.4} max_fric={:.4} | tan_spd={:.3} fric_j={:.4} | ω=({:.2},{:.2},{:.2})",
+                    friction1, friction2, friction,
+                    j.abs(), weight_impulse, max_friction_impulse,
+                    tangent_speed, friction_j,
+                    obj1.angular_velocity.0, obj1.angular_velocity.1, obj1.angular_velocity.2
+                );
+            }
+
+            // Apply friction linear impulse (opposes tangential motion)
+            // tangent points in direction of obj1's sliding relative to obj2
+            // Friction opposes this: subtract from obj1, add to obj2
+            if !m1_static {
+                let friction_impulse_over_m1 = friction_j / m1;
+                obj1.object.velocity.x -= tangent.0 * friction_impulse_over_m1;
+                obj1.object.velocity.y -= tangent.1 * friction_impulse_over_m1;
+                obj1.object.velocity.z -= tangent.2 * friction_impulse_over_m1;
+            }
+            if !m2_static {
+                let friction_impulse_over_m2 = friction_j / m2;
+                obj2.object.velocity.x += tangent.0 * friction_impulse_over_m2;
+                obj2.object.velocity.y += tangent.1 * friction_impulse_over_m2;
+                obj2.object.velocity.z += tangent.2 * friction_impulse_over_m2;
+            }
+
+            // Apply friction torque (creates rolling motion)
+            // Angular impulse L = r × J_friction
+            // Change in angular velocity: Δω = L / I (moment of inertia)
+            // For solid sphere: I = 0.4 * m * r²
+            if !m1_static {
+                let r1_len = (r1.0.powi(2) + r1.1.powi(2) + r1.2.powi(2)).sqrt().max(0.1);
+                let moment_of_inertia1 = 0.4 * m1 * r1_len * r1_len;
+                let angular_impulse1 = cross_product(r1, (-tangent.0 * friction_j, -tangent.1 * friction_j, -tangent.2 * friction_j));
+
+                // Δω = L / I
+                obj1.angular_velocity.0 += angular_impulse1.0 / moment_of_inertia1;
+                obj1.angular_velocity.1 += angular_impulse1.1 / moment_of_inertia1;
+                obj1.angular_velocity.2 += angular_impulse1.2 / moment_of_inertia1;
+            }
+            if !m2_static {
+                let r2_len = (r2.0.powi(2) + r2.1.powi(2) + r2.2.powi(2)).sqrt().max(0.1);
+                let moment_of_inertia2 = 0.4 * m2 * r2_len * r2_len;
+                let angular_impulse2 = cross_product(r2, (tangent.0 * friction_j, tangent.1 * friction_j, tangent.2 * friction_j));
+
+                obj2.angular_velocity.0 += angular_impulse2.0 / moment_of_inertia2;
+                obj2.angular_velocity.1 += angular_impulse2.1 / moment_of_inertia2;
+                obj2.angular_velocity.2 += angular_impulse2.2 / moment_of_inertia2;
+            }
+        }
+
+        // Rolling resistance - opposes angular velocity proportional to normal force
+        // This makes rolling objects slow down naturally based on their material properties
+        let rolling_resistance1 = obj1.object.get_rolling_resistance();
+        let rolling_resistance2 = obj2.object.get_rolling_resistance();
+        let rolling_resistance = (rolling_resistance1 * rolling_resistance2).sqrt();
+
+        // Normal force: use the larger of collision impulse or weight-based impulse
+        // This ensures rolling resistance works for resting contacts where j ≈ 0
+        let gravity = self.config.gravity;
+        let gravity_mag = (gravity.0.powi(2) + gravity.1.powi(2) + gravity.2.powi(2)).sqrt();
+        let weight_normal_force = if gravity_mag > 1e-10 {
+            let gravity_dir = (gravity.0 / gravity_mag, gravity.1 / gravity_mag, gravity.2 / gravity_mag);
+            // For ground contact: gravity_dir=(0,-1,0), normal=(0,-1,0) → dot=+1
+            // Positive alignment means gravity is pushing object against surface
+            let alignment = gravity_dir.0 * normal.0 + gravity_dir.1 * normal.1 + gravity_dir.2 * normal.2;
+            if alignment > 0.0 {
+                let effective_mass = if m2_static { m1 } else if m1_static { m2 } else { (m1 * m2) / (m1 + m2) };
+                effective_mass * gravity_mag * dt * alignment
+            } else { 0.0 }
+        } else { 0.0 };
+        let normal_force = j.abs().max(weight_normal_force);
+
+        // Apply rolling resistance torque (opposes angular velocity)
+        if !m1_static && rolling_resistance > 0.0 {
+            let omega1_mag = (obj1.angular_velocity.0.powi(2) + obj1.angular_velocity.1.powi(2) + obj1.angular_velocity.2.powi(2)).sqrt();
+            if omega1_mag > 1e-6 {
+                // Rolling resistance: angular_impulse = Crr * N * r
+                // To convert to Δω, divide by moment of inertia
+                // Approximate as solid sphere: I = 0.4 * m * r²
+                let r1_len = (r1.0.powi(2) + r1.1.powi(2) + r1.2.powi(2)).sqrt().max(0.1);
+                let angular_impulse = rolling_resistance * normal_force * r1_len;
+
+                // Moment of inertia approximation (solid sphere: 0.4, hollow sphere: 0.67)
+                let moment_of_inertia = 0.4 * m1 * r1_len * r1_len;
+                let resistance_magnitude = angular_impulse / moment_of_inertia.max(0.01);
+
+                // Clamp to not reverse angular velocity
+                let max_reduction = omega1_mag * 0.5; // Don't reduce by more than half per collision
+                let actual_resistance = resistance_magnitude.min(max_reduction);
+
+                // Apply as impulse opposing angular velocity
+                obj1.angular_velocity.0 -= (obj1.angular_velocity.0 / omega1_mag) * actual_resistance;
+                obj1.angular_velocity.1 -= (obj1.angular_velocity.1 / omega1_mag) * actual_resistance;
+                obj1.angular_velocity.2 -= (obj1.angular_velocity.2 / omega1_mag) * actual_resistance;
+            }
+        }
+
+        if !m2_static && rolling_resistance > 0.0 {
+            let omega2_mag = (obj2.angular_velocity.0.powi(2) + obj2.angular_velocity.1.powi(2) + obj2.angular_velocity.2.powi(2)).sqrt();
+            if omega2_mag > 1e-6 {
+                let r2_len = (r2.0.powi(2) + r2.1.powi(2) + r2.2.powi(2)).sqrt().max(0.1);
+                let angular_impulse = rolling_resistance * normal_force * r2_len;
+
+                // Moment of inertia approximation (solid sphere: 0.4)
+                let moment_of_inertia = 0.4 * m2 * r2_len * r2_len;
+                let resistance_magnitude = angular_impulse / moment_of_inertia.max(0.01);
+
+                let max_reduction = omega2_mag * 0.5;
+                let actual_resistance = resistance_magnitude.min(max_reduction);
+
+                obj2.angular_velocity.0 -= (obj2.angular_velocity.0 / omega2_mag) * actual_resistance;
+                obj2.angular_velocity.1 -= (obj2.angular_velocity.1 / omega2_mag) * actual_resistance;
+                obj2.angular_velocity.2 -= (obj2.angular_velocity.2 / omega2_mag) * actual_resistance;
+            }
         }
 
         // Resolve penetration
@@ -1287,7 +2464,64 @@ impl PhysicsWorld {
             tick: self.tick,
             time: self.time,
             objects,
+            #[cfg(feature = "constraints")]
+            constraints: self.collect_constraint_states(),
         }
+    }
+
+    /// Collect constraint states for snapshots
+    #[cfg(feature = "constraints")]
+    fn collect_constraint_states(&self) -> Vec<super::state::ConstraintState> {
+        use super::state::*;
+
+        self.constraints
+            .iter()
+            .map(|(&id, constraint)| match constraint {
+                WorldConstraint::Joint(j) => ConstraintState::Joint(JointState {
+                    id,
+                    object1: j.object1,
+                    object2: j.object2,
+                    anchor: j.anchor,
+                    distance: j.distance,
+                }),
+                WorldConstraint::Spring(s) => ConstraintState::Spring(SpringState {
+                    id,
+                    object1: s.object1,
+                    object2: s.object2,
+                    anchor: s.anchor,
+                    stiffness: s.stiffness,
+                    rest_length: s.rest_length,
+                }),
+                WorldConstraint::Rope(r) => ConstraintState::Rope(RopeState {
+                    id,
+                    object1: r.object1,
+                    object2: r.object2,
+                    anchor: r.anchor,
+                    max_length: r.max_length,
+                }),
+                WorldConstraint::RopeChain(chain) => {
+                    // Get anchor position from first particle
+                    let anchor_pos = &chain.particles[0].position;
+                    ConstraintState::RopeChain(RopeChainState {
+                        id,
+                        anchor: (anchor_pos.x, anchor_pos.y, anchor_pos.z),
+                        particle_positions: chain.get_particle_positions(),
+                        segment_length: chain.segment_lengths.first().copied().unwrap_or(0.0),
+                    })
+                },
+                WorldConstraint::Hinge(hinge) => ConstraintState::Hinge(HingeState {
+                    id,
+                    anchor: hinge.anchor,
+                    axis: hinge.axis,
+                    angle: hinge.angle,
+                    angular_velocity: hinge.angular_velocity,
+                    limits: match (hinge.angle_min, hinge.angle_max) {
+                        (Some(min), Some(max)) => Some((min, max)),
+                        _ => None,
+                    },
+                }),
+            })
+            .collect()
     }
 
     /// Get physics constants
@@ -1927,5 +3161,474 @@ mod tests {
         // Velocities should have reversed (approximately)
         assert!(obj1.object.velocity.x < 0.0, "Sphere 1 should bounce back. Got vx={}", obj1.object.velocity.x);
         assert!(obj2.object.velocity.x > 0.0, "Sphere 2 should bounce back. Got vx={}", obj2.object.velocity.x);
+    }
+
+    // ========================================================================
+    // Broad phase
+    //
+    // The grid is only an optimization if it selects exactly the pairs the
+    // all-pairs loop would have tested to a positive result. A broad phase that
+    // silently misses contacts produces objects that sink through each other,
+    // and it does so intermittently, which is close to undebuggable. These
+    // tests compare against brute force directly.
+    // ========================================================================
+
+    /// Deterministic pseudo-random source; avoids a dependency and keeps
+    /// failures reproducible.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+
+        fn range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + self.next_f64() * (hi - lo)
+        }
+    }
+
+    fn sphere_of(radius: f64, position: (f64, f64, f64)) -> PhysicalObject3D {
+        PhysicalObject3D::new(
+            1.0,
+            (0.0, 0.0, 0.0),
+            position,
+            Shape3D::Sphere(radius),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        )
+    }
+
+    /// Every pair, tested through the same narrow phase the grid path uses.
+    fn brute_force_collisions(world: &PhysicsWorld) -> Vec<CollisionData> {
+        let n = world.objects.len();
+        let mut out = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if let Some(c) = world.detect_collision_pair(i, j) {
+                    out.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    fn assert_broad_phase_matches_brute_force(world: &mut PhysicsWorld, label: &str) {
+        world.broad_phase.rebuild(&world.objects);
+
+        let expected = brute_force_collisions(world);
+        let actual = world.detect_collisions_parallel();
+
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "{label}: broad phase found {} collisions, brute force found {}",
+            actual.len(),
+            expected.len(),
+        );
+        assert_eq!(
+            expected, actual,
+            "{label}: broad phase and brute force disagree in content or order",
+        );
+        assert!(
+            !expected.is_empty(),
+            "{label}: scene produced no collisions at all - the test proves nothing",
+        );
+    }
+
+    #[test]
+    fn test_broad_phase_matches_brute_force_uniform_sizes() {
+        let mut rng = Lcg(0x1234_5678);
+        let mut world = PhysicsWorld::default_world();
+
+        // Dense enough that plenty of pairs genuinely overlap.
+        for _ in 0..400 {
+            world.add_object(sphere_of(
+                0.5,
+                (rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)),
+            ));
+        }
+        assert_broad_phase_matches_brute_force(&mut world, "uniform");
+    }
+
+    #[test]
+    fn test_broad_phase_matches_brute_force_mixed_sizes() {
+        let mut rng = Lcg(0xdead_beef);
+        let mut world = PhysicsWorld::default_world();
+
+        // Radii spanning an order of magnitude: the grid is sized from the
+        // largest gridded object, so this checks nothing escapes its cells.
+        for _ in 0..300 {
+            world.add_object(sphere_of(
+                rng.range(0.2, 2.0),
+                (rng.range(-12.0, 12.0), rng.range(-12.0, 12.0), rng.range(-12.0, 12.0)),
+            ));
+        }
+        assert_broad_phase_matches_brute_force(&mut world, "mixed sizes");
+    }
+
+    #[test]
+    fn test_broad_phase_matches_brute_force_bimodal_sizes() {
+        // Two distinct size populations, both inside the grid. This is the case
+        // that exercises cross-level pairing: a small object must find a large
+        // one by sweeping the coarser level, and each such pair must be emitted
+        // exactly once, by the finer object only.
+        let mut rng = Lcg(0xb1_40da1);
+        let mut world = PhysicsWorld::default_world();
+
+        for _ in 0..400 {
+            let radius = if rng.next_f64() < 0.85 { 0.25 } else { 1.5 };
+            world.add_object(sphere_of(
+                radius,
+                (rng.range(-8.0, 8.0), rng.range(-8.0, 8.0), rng.range(-8.0, 8.0)),
+            ));
+        }
+
+        assert!(
+            world.broad_phase.levels.len() > 1
+                || {
+                    world.broad_phase.rebuild(&world.objects);
+                    world.broad_phase.levels.len() > 1
+                },
+            "scene should span multiple grid levels or it proves nothing",
+        );
+        assert_broad_phase_matches_brute_force(&mut world, "bimodal");
+    }
+
+    #[test]
+    fn test_broad_phase_matches_brute_force_with_oversized_objects() {
+        let mut rng = Lcg(0x0bad_f00d);
+        let mut world = PhysicsWorld::default_world();
+
+        // A ground plane and two walls: exactly the case that would collapse a
+        // naive grid into a single bucket, and the reason for the oversized path.
+        world.add_object(PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0),
+            Shape3D::Cuboid(200.0, 2.0, 200.0),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        ));
+        world.add_object(PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            (-15.0, 5.0, 0.0),
+            Shape3D::Cuboid(2.0, 60.0, 120.0),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        ));
+
+        for _ in 0..250 {
+            world.add_object(sphere_of(
+                rng.range(0.3, 0.8),
+                (rng.range(-14.0, 14.0), rng.range(-0.5, 8.0), rng.range(-14.0, 14.0)),
+            ));
+        }
+        assert_broad_phase_matches_brute_force(&mut world, "oversized");
+    }
+
+    #[test]
+    fn test_broad_phase_handles_coincident_and_extreme_positions() {
+        let mut world = PhysicsWorld::default_world();
+
+        // Coincident centres, a far-flung outlier, and a cluster - the cases
+        // where cell arithmetic tends to go wrong.
+        world.add_object(sphere_of(1.0, (0.0, 0.0, 0.0)));
+        world.add_object(sphere_of(1.0, (0.0, 0.0, 0.0)));
+        world.add_object(sphere_of(1.0, (0.5, 0.0, 0.0)));
+        world.add_object(sphere_of(1.0, (1e12, 0.0, 0.0)));
+        world.add_object(sphere_of(1.0, (-1e12, 0.0, 0.0)));
+        for i in 0..20 {
+            world.add_object(sphere_of(1.0, (i as f64 * 0.3, 0.0, 0.0)));
+        }
+
+        world.broad_phase.rebuild(&world.objects);
+        let expected = brute_force_collisions(&world);
+        let actual = world.detect_collisions_parallel();
+        assert_eq!(expected, actual, "degenerate placement diverged from brute force");
+    }
+
+    #[test]
+    fn test_broad_phase_actually_culls() {
+        // The point of the grid is to test far fewer pairs. If it ever stops
+        // culling, the perf work has silently regressed while staying correct.
+        let mut world = PhysicsWorld::default_world();
+        for i in 0..1000 {
+            let f = i as f64;
+            world.add_object(sphere_of(0.5, (f * 10.0, 0.0, 0.0)));
+        }
+        world.broad_phase.rebuild(&world.objects);
+
+        let all_pairs = 1000 * 999 / 2;
+        let candidates = world.broad_phase.pairs.len();
+        assert!(
+            candidates * 100 < all_pairs,
+            "broad phase kept {candidates} of {all_pairs} pairs; expected a >100x reduction",
+        );
+    }
+
+    // ========================================================================
+    // Determinism
+    //
+    // Narrow-phase collision detection runs on a rayon pool, and the continuous
+    // forces live in a HashMap. Both are places where iteration or completion
+    // order can leak into float accumulation. These tests pin the property that
+    // repeated runs of an identical setup stay bit-identical - not merely close
+    // - which is what replays, lockstep networking and reproducible bug reports
+    // all depend on.
+    // ========================================================================
+
+    /// Build a reasonably large world, spread out so objects fall freely rather
+    /// than colliding.
+    fn build_parallel_sized_world() -> PhysicsWorld {
+        let count = PhysicsWorld::LARGE_WORLD;
+        let mut world = PhysicsWorld::default_world();
+
+        for i in 0..count {
+            let f = i as f64;
+            world.add_object(create_test_sphere(
+                (f * 5.0, 50.0 + f * 0.25, f * 3.0),
+                (f * 0.01, 0.0, -f * 0.02),
+            ));
+        }
+        world
+    }
+
+    fn fingerprint(world: &PhysicsWorld) -> Vec<(u64, u64, u64, u64, u64, u64)> {
+        // Compare raw bit patterns: "approximately equal" would hide exactly the
+        // last-bit divergence that breaks replays and lockstep networking.
+        world
+            .objects
+            .iter()
+            .map(|o| {
+                (
+                    o.object.position.x.to_bits(),
+                    o.object.position.y.to_bits(),
+                    o.object.position.z.to_bits(),
+                    o.object.velocity.x.to_bits(),
+                    o.object.velocity.y.to_bits(),
+                    o.object.velocity.z.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    /// Timing harness for the per-object stages. Run with:
+    /// `cargo test --release --lib bench_step_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing measurement, not a pass/fail assertion"]
+    fn bench_step_cost() {
+        // Sparse is a broad phase's best case; dense is its worst, because most
+        // candidate pairs are genuinely near and reach the narrow phase. Report
+        // both, or the speedup is measured on the flattering scene only.
+        // Three shapes of scene, because a spatial index can be tuned to look
+        // good on any one of them:
+        //   sparse  - objects strung far apart. Note x == z exactly, which is a
+        //             worst case for any locality scheme keyed on interleaved
+        //             coordinate bits.
+        //   dense   - a packed lattice; nearly every probe finds neighbours.
+        //   cluster - pseudo-random inside a compact box. Closest to a real
+        //             scene, and the case locality optimizations should win on.
+        //   mixed   - varying radii packed tightly. Cell size follows the
+        //             largest object, so many small ones share a cell; this is
+        //             the only scene where per-cell work can be amortized.
+        //   bimodal - lots of small debris plus a minority of large crates. The
+        //             realistic heterogeneous case, and the one a size-binned
+        //             grid should actually win on.
+        let scenes: [(&str, u8); 5] = [
+            ("sparse ", 0), ("dense  ", 1), ("cluster", 2), ("mixed  ", 3), ("bimodal", 4),
+        ];
+
+        for (label, kind) in scenes {
+        for &count in &[64usize, 256, 1024, 2048, 4096] {
+            let mut world = PhysicsWorld::default_world();
+            let side = (count as f64).cbrt().ceil() as usize;
+            let mut rng = Lcg(0x5eed_1234);
+            let box_side = 4.0 * (count as f64).cbrt();
+
+            for i in 0..count {
+                let f = i as f64;
+                let position = match kind {
+                    // Lattice at ~1.2 diameters: every object has neighbours in
+                    // range, so the grid cannot cull much.
+                    1 => {
+                        let (ix, iy, iz) = (i % side, (i / side) % side, i / (side * side));
+                        (ix as f64 * 1.2, 20.0 + iy as f64 * 1.2, iz as f64 * 1.2)
+                    }
+                    2 => (
+                        rng.range(-box_side, box_side),
+                        20.0 + rng.range(0.0, box_side),
+                        rng.range(-box_side, box_side),
+                    ),
+                    3 => {
+                        let s = 0.75 * (count as f64).cbrt();
+                        (rng.range(-s, s), 20.0 + rng.range(0.0, s), rng.range(-s, s))
+                    }
+                    4 => {
+                        let s = 0.95 * (count as f64).cbrt();
+                        (rng.range(-s, s), 20.0 + rng.range(0.0, s), rng.range(-s, s))
+                    }
+                    _ => (f * 50.0, 50.0 + f * 0.25, f * 50.0),
+                };
+
+                if kind == 3 {
+                    // Radii within 4x of the median, so none are classified
+                    // oversized and all go through the grid.
+                    world.add_object(sphere_of(rng.range(0.3, 1.2), position));
+                } else if kind == 4 {
+                    // 90% debris, 10% crates - a 6x size split.
+                    let radius = if rng.next_f64() < 0.9 { 0.25 } else { 1.5 };
+                    world.add_object(sphere_of(radius, position));
+                } else {
+                    world.add_object(create_test_sphere(position, (f * 0.01, 0.0, -f * 0.02)));
+                }
+            }
+
+            for _ in 0..50 {
+                world.step();
+            }
+            // Warmup must not pollute the breakdown; it is divided by the
+            // measured iteration count only.
+            world.profile = PhaseTimings::default();
+            world.broad_phase.profile = BroadPhaseTimings::default();
+
+            // Narrow phase is O(n^2); keep total runtime bounded as n grows.
+            let iterations = (500 * 256 / count).max(20);
+            let started = std::time::Instant::now();
+            for _ in 0..iterations {
+                world.step();
+            }
+            let elapsed = started.elapsed();
+
+            eprintln!(
+                "{label}  n={count:5}  {:9.1} us/step  {:8.1} ns/object/step  {:8} candidate pairs",
+                elapsed.as_secs_f64() * 1e6 / iterations as f64,
+                elapsed.as_secs_f64() * 1e9 / (iterations * count) as f64,
+                world.broad_phase.pairs.len(),
+            );
+
+            if count == 4096 {
+                let p = world.profile;
+                let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / iterations as f64;
+                eprintln!(
+                    "        breakdown us/step: grav {:.1}  contforce {:.1}  pending {:.1}  \
+                     broad {:.1}  narrow {:.1}  response {:.1}  constr {:.1}  damp {:.1}  \
+                     integ {:.1}  tunnel {:.1}",
+                    per(p.gravity), per(p.continuous_forces), per(p.pending_forces),
+                    per(p.broad_rebuild), per(p.narrow_phase), per(p.response),
+                    per(p.constraints), per(p.damping), per(p.integrate), per(p.tunneling),
+                );
+                let b = world.broad_phase.profile;
+                // Objects per occupied cell decides whether hoisting work to the
+                // cell level can pay at all: at 1.0 there is nothing to amortize.
+                let occupied: u32 = world
+                    .broad_phase
+                    .levels
+                    .iter()
+                    .flat_map(|l| l.occupied.iter())
+                    .map(|w| w.count_ones())
+                    .sum();
+                let gridded: usize =
+                    world.broad_phase.levels.iter().map(|l| l.items.len()).sum();
+                eprintln!(
+                    "        broad phase us/step: fill {:.1}  median {:.1}  scatter {:.1}  \
+                     collect {:.1}  sort+dedup {:.1}   [{} levels, {:.2} objects/occupied cell]",
+                    per(b.fill), per(b.median), per(b.scatter), per(b.collect), per(b.sort_dedup),
+                    world.broad_phase.levels.len(),
+                    gridded as f64 / occupied.max(1) as f64,
+                );
+            }
+        }
+        }
+    }
+
+    #[test]
+    fn test_parallel_step_is_bit_identical_across_runs() {
+        let mut a = build_parallel_sized_world();
+        let mut b = build_parallel_sized_world();
+        assert!(
+            a.objects.len() >= PhysicsWorld::LARGE_WORLD,
+            "test must exercise the parallel path",
+        );
+
+        for _ in 0..120 {
+            a.step();
+            b.step();
+        }
+
+        assert_eq!(
+            fingerprint(&a),
+            fingerprint(&b),
+            "identical setups diverged; the parallel path is not deterministic",
+        );
+    }
+
+    #[test]
+    fn test_continuous_force_application_order_is_stable() {
+        // Several forces on one object: the sum is order-dependent because float
+        // addition is not associative, and they live in a HashMap.
+        fn run() -> (u64, u64, u64) {
+            let mut world = PhysicsWorld::default_world();
+            let id = world.add_object(create_test_sphere((0.0, 100.0, 0.0), (0.0, 0.0, 0.0)));
+
+            world.add_constant_force(id, (0.1, 0.0, 0.0));
+            world.add_constant_force(id, (0.02, 0.0, 0.0));
+            world.add_constant_force(id, (0.003, 0.0, 0.0));
+            world.add_constant_force(id, (0.0004, 0.0, 0.0));
+            world.add_constant_force(id, (0.00005, 0.0, 0.0));
+
+            for _ in 0..200 {
+                world.step();
+            }
+            let v = &world.objects[0].object.velocity;
+            (v.x.to_bits(), v.y.to_bits(), v.z.to_bits())
+        }
+
+        let first = run();
+        for attempt in 1..8 {
+            assert_eq!(
+                first,
+                run(),
+                "continuous-force accumulation diverged on attempt {attempt}; \
+                 HashMap iteration order is leaking into the result",
+            );
+        }
+    }
+
+    #[test]
+    fn test_pending_forces_hit_the_right_object_when_parallel() {
+        // `par_iter_mut().enumerate()` must pair each object with its own index;
+        // an off-by-one here would silently push the wrong body.
+        // Compare against an identical unpushed world rather than against the
+        // pre-step state: damping and gravity move every object each tick, so
+        // "changed at all" is not evidence of anything.
+        let mut pushed = build_parallel_sized_world();
+        let mut control = build_parallel_sized_world();
+
+        let target_idx = PhysicsWorld::LARGE_WORLD / 2 + 7;
+        let target_id = *pushed.index_to_id.get(&target_idx).expect("index should map");
+
+        pushed.apply_force(target_id, (1000.0, 0.0, 0.0));
+        pushed.step();
+        control.step();
+
+        let (a, b) = (fingerprint(&pushed), fingerprint(&control));
+        for (i, (p, c)) in a.iter().zip(b.iter()).enumerate() {
+            if i == target_idx {
+                assert_ne!(p, c, "the targeted object should have moved differently");
+            } else {
+                assert_eq!(
+                    p, c,
+                    "object {i} was affected, but only object {target_idx} was pushed",
+                );
+            }
+        }
     }
 }

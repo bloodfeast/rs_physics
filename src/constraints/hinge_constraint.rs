@@ -47,6 +47,7 @@ use super::solver::Constraint3D;
 ///     .expect("Valid hinge")
 ///     .with_limits(0.0, 1.57);  // 0 to 90 degrees
 /// ```
+#[derive(Debug)]
 pub struct Hinge3D {
     /// First object connected by the hinge (typically fixed anchor)
     pub object1: ObjectIn3D,

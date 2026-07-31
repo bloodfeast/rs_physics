@@ -493,7 +493,9 @@ fn sync_physics(
     mut query: Query<(&PhysicsEntity, &mut Transform)>,
 ) {
     if let Some(ref physics) = sim_state.physics {
-        let state = physics.get_latest_state();
+        // Interpolated: this drives transforms, so it must be smooth at our
+        // refresh rate rather than snapping to the physics tick rate.
+        let state = physics.get_interpolated_state();
 
         // Debug: log number of objects in physics world every 120 ticks
         if state.tick % 120 == 0 && state.tick > 0 {
