@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use log::info;
 use crate::models::{PhysicalObject3D, Quaternion, Shape3D};
 use crate::utils::PhysicsConstants;
-use crate::interactions::shape_collisions_3d::{handle_collision, apply_gravity};
+use crate::interactions::shape_collisions_3d::apply_gravity;
 use crate::interactions::gjk_collision_3d::{gjk_collision_detection_ex, epa_contact_points_ex, GjkResult};
 use super::state::{ObjectId, ObjectState, WorldState};
 use super::config::WorldConfig;
@@ -1042,6 +1042,32 @@ impl PhysicsWorld {
         }
     }
 
+    /// Set orientation for a kinematic object (externally controlled).
+    ///
+    /// Angles are Euler `(roll, pitch, yaw)` in radians. Without this, a body
+    /// driven externally could be moved but never turned, so a swinging door's
+    /// collider stayed axis-aligned while its visual rotated - the collider and
+    /// the thing the player can see describing different worlds.
+    pub fn set_orientation_kinematic(
+        &mut self,
+        id: ObjectId,
+        orientation: (f64, f64, f64),
+        dt: f64,
+    ) {
+        if let Some(obj) = self.get_object_mut(id) {
+            if dt > 0.0 {
+                obj.angular_velocity = (
+                    (orientation.0 - obj.orientation.roll) / dt,
+                    (orientation.1 - obj.orientation.pitch) / dt,
+                    (orientation.2 - obj.orientation.yaw) / dt,
+                );
+            }
+            obj.orientation.roll = orientation.0;
+            obj.orientation.pitch = orientation.1;
+            obj.orientation.yaw = orientation.2;
+        }
+    }
+
     // ==================== Ergonomic Force Methods ====================
 
     /// Apply a force in a specific direction with given magnitude
@@ -1284,7 +1310,15 @@ impl PhysicsWorld {
             stiffness,
             damping,
             min_displacement: 0.05,
-            min_velocity: 0.05,
+            // A settled spring removes itself, so the residual velocity it
+            // tolerates has to be small enough that the coast afterwards stays
+            // inside min_displacement. Only LINEAR_DAMPING (0.1) acts once the
+            // spring is gone, and an object at velocity v coasts v / 0.1 = 10v
+            // before stopping. At the previous 0.05 that was a 0.5 m drift -
+            // ten times the displacement the removal check had just verified,
+            // so the object quietly wandered off the rest position it had
+            // reached. 0.005 bounds the coast to 0.05.
+            min_velocity: 0.005,
         })
     }
 
@@ -1548,8 +1582,16 @@ impl PhysicsWorld {
         // 4.6. Apply damping (air resistance and angular friction)
         // Using exponential decay for frame-rate independence
         // damping_factor = (1 - damping)^dt approximated as e^(-damping * dt)
+        // Decay per second: exp(-coefficient). Linear 0.1 sheds ~9.5%/s.
+        //
+        // Angular was 2.0, which sheds ~86.5%/s - twenty times the linear rate,
+        // so a ball lost most of its spin within a second even in mid-air, where
+        // nothing should be removing angular momentum. That reads as rotation
+        // decoupled from motion. 0.3 sheds ~26%/s: still above the linear rate,
+        // which is defensible because rolling resistance is real, without the
+        // spin visibly dying on its own.
         const LINEAR_DAMPING: f64 = 0.1;   // Linear velocity damping coefficient
-        const ANGULAR_DAMPING: f64 = 2.0;  // Angular velocity damping coefficient (increased for faster spin decay)
+        const ANGULAR_DAMPING: f64 = 0.3;  // Angular velocity damping coefficient
 
         let linear_decay = (-LINEAR_DAMPING * dt).exp();
         let angular_decay = (-ANGULAR_DAMPING * dt).exp();
@@ -1583,34 +1625,36 @@ impl PhysicsWorld {
             obj.orientation.yaw += obj.angular_velocity.2 * dt;
         }));
 
-        // 6. Anti-tunneling: Check if any fast-moving objects have passed through the ground
-        // This is a simple safeguard for objects that tunnel through the ground plane at y=0
-        phase!(self, tunneling, Self::for_each_object(&mut self.objects, |obj| {
-            // Skip static objects
-            if obj.object.mass.is_infinite() || obj.object.mass <= 0.0 {
-                return;
-            }
-
-            // Get the object's lowest point based on its shape
-            let min_y = match &obj.shape {
-                Shape3D::Sphere(radius) => obj.object.position.y - radius,
-                Shape3D::Cuboid(_, h, _) => obj.object.position.y - h / 2.0,
-                Shape3D::Cylinder(_radius, height) => obj.object.position.y - height / 2.0,
-                _ => obj.object.position.y - obj.shape.bounding_radius(),
-            };
-
-            // If the object has tunneled below the ground (y=0), correct it
-            if min_y < 0.0 {
-                let penetration = -min_y;
-                obj.object.position.y += penetration;
-
-                // If moving downward, bounce with reduced restitution
-                if obj.object.velocity.y < 0.0 {
-                    let restitution = obj.get_restitution() * 0.5; // Reduced for tunneling recovery
-                    obj.object.velocity.y = -obj.object.velocity.y * restitution;
+        // 6. Optional implicit floor, for worlds with no ground collider.
+        //    Off by default - see WorldConfig::ground_plane for why.
+        if let Some(floor) = self.config.ground_plane {
+            phase!(self, tunneling, Self::for_each_object(&mut self.objects, |obj| {
+                // Skip static objects
+                if obj.object.mass.is_infinite() || obj.object.mass <= 0.0 {
+                    return;
                 }
-            }
-        }));
+
+                // Lowest point of the object. Note the cuboid case ignores
+                // orientation, so a rotated box reports its unrotated extent;
+                // another reason this is a net rather than a collider.
+                let min_y = match &obj.shape {
+                    Shape3D::Sphere(radius) => obj.object.position.y - radius,
+                    Shape3D::Cuboid(_, h, _) => obj.object.position.y - h / 2.0,
+                    Shape3D::Cylinder(_radius, height) => obj.object.position.y - height / 2.0,
+                    _ => obj.object.position.y - obj.shape.bounding_radius(),
+                };
+
+                if min_y < floor {
+                    obj.object.position.y += floor - min_y;
+
+                    // If moving downward, bounce with reduced restitution
+                    if obj.object.velocity.y < 0.0 {
+                        let restitution = obj.get_restitution() * 0.5; // Reduced for tunneling recovery
+                        obj.object.velocity.y = -obj.object.velocity.y * restitution;
+                    }
+                }
+            }));
+        }
 
         // 6. Update time tracking
         self.tick += 1;
@@ -1872,14 +1916,17 @@ impl PhysicsWorld {
             return;
         }
 
-        // For small object counts, use sequential path (overhead of parallelism not worth it)
-        if n < 8 {
-            self.resolve_collisions_sequential(dt);
-            return;
-        }
+        // There used to be a separate sequential path here for n < 8, on the
+        // theory that the broad phase wasn't worth its overhead for a handful of
+        // objects. It cost a few hundred nanoseconds and bought a second,
+        // divergent collision-response implementation - which had an inverted
+        // penetration correction that drove objects *through* surfaces instead
+        // of out of them. Two implementations of the same physics is a bug
+        // factory; the broad phase handles small worlds fine.
 
-        // Phase 0: Rebuild the spatial index for the positions produced by
-        // integration earlier in this step.
+        // Phase 0: Rebuild the spatial index. Note this runs before position
+        // integration (step 5), so contacts are resolved against the positions
+        // this tick started with.
         phase!(self, broad_rebuild, {
             let objects = &self.objects;
             self.broad_phase.rebuild(objects);
@@ -1909,31 +1956,6 @@ impl PhysicsWorld {
         }
     }
 
-    /// Sequential collision detection for small object counts
-    fn resolve_collisions_sequential(&mut self, dt: f64) {
-        let n = self.objects.len();
-        for i in 0..n {
-            for j in (i + 1)..n {
-                // First detect if there's a collision
-                if let Some(_collision) = self.detect_collision_pair_live(i, j) {
-                    // Track contacts bidirectionally
-                    if let (Some(&id1), Some(&id2)) = (
-                        self.index_to_id.get(&i),
-                        self.index_to_id.get(&j),
-                    ) {
-                        self.active_contacts.entry(id1).or_default().push(id2);
-                        self.active_contacts.entry(id2).or_default().push(id1);
-                    }
-                }
-
-                // Then do collision response (handle_collision does its own detection)
-                let (first, second) = self.objects.split_at_mut(j);
-                let obj1 = &mut first[i];
-                let obj2 = &mut second[0];
-                handle_collision(obj1, obj2, dt);
-            }
-        }
-    }
 
     /// Parallel collision detection - returns collision data without mutating objects
     ///
@@ -2196,11 +2218,20 @@ impl PhysicsWorld {
         let tangent_speed = (tangent_vel.0.powi(2) + tangent_vel.1.powi(2) + tangent_vel.2.powi(2)).sqrt();
 
         if tangent_speed > 1e-6 {
-            // Normalize tangent direction
+            // `vrel = v2 - v1`, so `tangent_vel` points along obj2's motion
+            // relative to obj1 - the opposite of obj1's slide direction.
+            // Negating here makes `tangent` point along obj1's slide, so the
+            // `-=` on obj1 and `+=` on obj2 below each oppose their own motion.
+            //
+            // Without this negation every application was inverted: friction
+            // accelerated each body along the direction it was already sliding,
+            // which grew the next tick's tangential impulse. A ball dropped
+            // straight down onto a static surface spun up to 35 rad/s and was
+            // flung off it, manufacturing mechanical energy from nothing.
             let tangent = (
-                tangent_vel.0 / tangent_speed,
-                tangent_vel.1 / tangent_speed,
-                tangent_vel.2 / tangent_speed,
+                -tangent_vel.0 / tangent_speed,
+                -tangent_vel.1 / tangent_speed,
+                -tangent_vel.2 / tangent_speed,
             );
 
             // Get friction coefficient (geometric mean of both objects)
@@ -2455,6 +2486,11 @@ impl PhysicsWorld {
                             obj.object.velocity.z
                         ),
                         angular_velocity: obj.angular_velocity,
+                        contacts: self
+                            .active_contacts
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default(),
                     }
                 })
             })
@@ -2772,7 +2808,6 @@ mod tests {
         // Drag should have been auto-removed
         assert_eq!(world.continuous_force_count(), 0, "Drag should auto-remove when velocity < threshold");
     }
-
     #[test]
     fn test_continuous_spring() {
         let mut world = PhysicsWorld::new(WorldConfig::zero_gravity());
@@ -3161,6 +3196,148 @@ mod tests {
         // Velocities should have reversed (approximately)
         assert!(obj1.object.velocity.x < 0.0, "Sphere 1 should bounce back. Got vx={}", obj1.object.velocity.x);
         assert!(obj2.object.velocity.x > 0.0, "Sphere 2 should bounce back. Got vx={}", obj2.object.velocity.x);
+    }
+
+    // ========================================================================
+    // Contact physics
+    //
+    // These assert what a player sees rather than what the code does: a ball
+    // dropped on a surface comes to rest on it and stays put, and a sliding
+    // ball slows down. That catches an inverted friction impulse, an inverted
+    // penetration correction, and a contact that never runs - none of which the
+    // broad-phase equivalence tests below can see, because those compare pair
+    // *selection* and these are all failures of response.
+    //
+    // Surfaces here sit well above y = 0 deliberately, so the real collider is
+    // what responds rather than any implicit ground handling.
+    // ========================================================================
+
+    fn static_box(
+        position: (f64, f64, f64),
+        (w, h, d): (f64, f64, f64),
+    ) -> PhysicalObject3D {
+        PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            position,
+            Shape3D::Cuboid(w, h, d),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        )
+    }
+
+    fn contact_world() -> PhysicsWorld {
+        PhysicsWorld::new(
+            WorldConfig::default()
+                .with_frequency(240.0)
+                .with_gravity(0.0, -15.0, 0.0),
+        )
+    }
+
+    #[test]
+    fn test_ball_dropped_straight_down_comes_to_rest_on_surface() {
+        const SURFACE_TOP: f64 = 5.0;
+        const RADIUS: f64 = 0.5;
+
+        let mut world = contact_world();
+        world.add_object(static_box((0.0, SURFACE_TOP - 0.25, 0.0), (20.0, 0.5, 20.0)));
+        world.add_object(sphere_of(RADIUS, (0.0, 8.0, 0.0)));
+
+        for _ in 0..1440 {
+            world.step();
+        }
+
+        let ball = &world.objects[1];
+        let (p, v, w) = (&ball.object.position, &ball.object.velocity, ball.angular_velocity);
+        let expected_y = SURFACE_TOP + RADIUS;
+
+        assert!(
+            (p.y - expected_y).abs() < 1e-3,
+            "ball should rest on the surface at y={expected_y}, got {} \
+             (below means it sank through, above means it never settled)",
+            p.y,
+        );
+        assert!(
+            v.x.abs() < 0.05 && v.z.abs() < 0.05,
+            "ball fell straight down with no lateral input; it must not acquire \
+             horizontal velocity from contact. got vx={}, vz={}",
+            v.x, v.z,
+        );
+        let spin = (w.0 * w.0 + w.1 * w.1 + w.2 * w.2).sqrt();
+        assert!(
+            spin < 0.5,
+            "ball fell straight down; contact must not spin it up. got |w|={spin}",
+        );
+    }
+
+    #[test]
+    fn test_sliding_ball_loses_tangential_speed() {
+        const SURFACE_TOP: f64 = 5.0;
+        const START_VX: f64 = 5.0;
+
+        let mut world = contact_world();
+        world.add_object(static_box((0.0, SURFACE_TOP - 0.25, 0.0), (400.0, 0.5, 400.0)));
+
+        let mut ball = sphere_of(0.5, (0.0, SURFACE_TOP + 0.5, 0.0));
+        ball.object.velocity.x = START_VX;
+        world.add_object(ball);
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        let v = &world.objects[1].object.velocity;
+        assert!(
+            v.x < START_VX,
+            "friction must oppose sliding, never drive it. vx went {START_VX} -> {} \
+             (an increase means the tangential impulse is applied along the slide \
+             instead of against it, which manufactures energy every contact)",
+            v.x,
+        );
+        assert!(
+            v.x > -START_VX,
+            "friction must not reverse the slide outright, got vx={}",
+            v.x,
+        );
+    }
+
+    #[test]
+    fn test_sliding_ball_starts_rolling() {
+        // Rolling is not scripted anywhere - it has to emerge from a tangential
+        // friction impulse applied at the contact point, which torques the body.
+        // A ball given pure lateral velocity must therefore spin up, and spin in
+        // the direction that *reduces* slip. If contact applies no torque (or
+        // the wrong one) this stays at zero and the ball skids forever.
+        const SURFACE_TOP: f64 = 5.0;
+        const RADIUS: f64 = 0.5;
+
+        let mut world = contact_world();
+        world.add_object(static_box((0.0, SURFACE_TOP - 0.25, 0.0), (400.0, 0.5, 400.0)));
+
+        let mut ball = sphere_of(RADIUS, (0.0, SURFACE_TOP + RADIUS, 0.0));
+        ball.object.velocity.x = 5.0;
+        world.add_object(ball);
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        let b = &world.objects[1];
+        let vx = b.object.velocity.x;
+        let wz = b.angular_velocity.2;
+
+        assert!(
+            wz.abs() > 0.5,
+            "contact must torque a sliding ball into rotation, got wz={wz}",
+        );
+        // Rolling without slipping about +x travel is wz = -vx / r.
+        let slip = vx + wz * RADIUS;
+        assert!(
+            slip.abs() < vx.abs(),
+            "friction must reduce slip, not increase it. vx={vx}, wz={wz}, slip={slip}",
+        );
     }
 
     // ========================================================================

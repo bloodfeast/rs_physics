@@ -118,7 +118,9 @@ pub enum PhysicsCommand {
     },
     // ==================== Kinematic Object Commands ====================
     /// Set position of a kinematic object (computes velocity from displacement)
-    SetPositionKinematic(ObjectId, (f64, f64, f64), f64), // id, position, dt
+    SetPositionKinematic(ObjectId, (f64, f64, f64), f64),
+    /// Set the orientation of a kinematic object (roll, pitch, yaw), with dt for velocity
+    SetOrientationKinematic(ObjectId, (f64, f64, f64), f64),
     // ==================== Constraint Commands (requires "constraints" feature) ====================
     /// Add a constraint to the world, returns ConstraintId through response channel
     #[cfg(feature = "constraints")]
@@ -571,6 +573,17 @@ impl PhysicsHandle {
     /// ```
     pub fn set_position_kinematic(&self, id: ObjectId, position: (f64, f64, f64), dt: f64) -> Result<(), ()> {
         self.send_command(PhysicsCommand::SetPositionKinematic(id, position, dt))
+    }
+
+    /// Set orientation of a kinematic object, as Euler `(roll, pitch, yaw)`
+    ///
+    /// Pass the real elapsed time as `dt` so the derived angular velocity is
+    /// right; the collision response reads it. A body driven only by
+    /// [`Self::set_position_kinematic`] can be moved but never turned, which
+    /// leaves a rotating visual and an axis-aligned collider describing
+    /// different worlds.
+    pub fn set_orientation_kinematic(&self, id: ObjectId, orientation: (f64, f64, f64), dt: f64) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::SetOrientationKinematic(id, orientation, dt))
     }
 
     // ==================== Constraint Methods (requires "constraints" feature) ====================

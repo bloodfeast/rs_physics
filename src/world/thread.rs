@@ -402,6 +402,9 @@ fn process_command(world: &mut PhysicsWorld, cmd: PhysicsCommand) -> bool {
         PhysicsCommand::SetPositionKinematic(id, position, dt) => {
             world.set_position_kinematic(id, position, dt);
         }
+        PhysicsCommand::SetOrientationKinematic(id, orientation, dt) => {
+            world.set_orientation_kinematic(id, orientation, dt);
+        }
         // Constraint commands (requires "constraints" feature)
         #[cfg(feature = "constraints")]
         PhysicsCommand::AddConstraint { constraint, response } => {

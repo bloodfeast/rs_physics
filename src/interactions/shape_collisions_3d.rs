@@ -479,14 +479,18 @@ pub fn resolve_penetration_epa(
         (m2 / total_mass, m1 / total_mass)
     };
 
-    // Move objects apart
-    obj1.object.position.x += correction_vector.0 * self_ratio;
-    obj1.object.position.y += correction_vector.1 * self_ratio;
-    obj1.object.position.z += correction_vector.2 * self_ratio;
+    // Move objects apart. The normal runs FROM obj1 TO obj2, so obj1 must move
+    // against it and obj2 along it - matching `resolve_sphere_penetration`
+    // below. These two signs were reversed, which pushed each body 0.8 *
+    // penetration *deeper* every tick; the overlap compounded at ~1.8x per tick
+    // until the object passed through the surface entirely.
+    obj1.object.position.x -= correction_vector.0 * self_ratio;
+    obj1.object.position.y -= correction_vector.1 * self_ratio;
+    obj1.object.position.z -= correction_vector.2 * self_ratio;
 
-    obj2.object.position.x -= correction_vector.0 * other_ratio;
-    obj2.object.position.y -= correction_vector.1 * other_ratio;
-    obj2.object.position.z -= correction_vector.2 * other_ratio;
+    obj2.object.position.x += correction_vector.0 * other_ratio;
+    obj2.object.position.y += correction_vector.1 * other_ratio;
+    obj2.object.position.z += correction_vector.2 * other_ratio;
 }
 
 /// Resolves penetration for sphere-sphere collisions

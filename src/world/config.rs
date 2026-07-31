@@ -47,6 +47,24 @@ pub struct WorldConfig {
     /// Default: true
     pub real_time: bool,
 
+    /// Optional implicit floor, as a world-space Y height.
+    ///
+    /// When `Some(y)`, any object whose lowest point falls below `y` is pushed
+    /// back up and bounced. This is a last-resort net for worlds that have no
+    /// ground collider at all - it is not a substitute for one.
+    ///
+    /// Default: `None`, because colliders should be the colliders.
+    ///
+    /// This used to be an unconditional clamp at y = 0. If a scene's ground
+    /// collider had its top face at exactly y = 0 - the obvious place to put it
+    /// - the clamp parked every object at precisely zero penetration, which GJK
+    /// correctly reports as no collision. The real ground collider was starved
+    /// of contact and never ran, so the main play surface had no friction and
+    /// applied no torque: balls slid across it without ever rolling. An implicit
+    /// plane that isn't an object in the world should not be able to out-vote
+    /// one that is.
+    pub ground_plane: Option<f64>,
+
     /// Maximum ticks the simulation will run back-to-back to catch up after
     /// falling behind wall clock (real-time mode only).
     ///
@@ -72,6 +90,7 @@ impl Default for WorldConfig {
             enable_ccd: true,
             ccd_velocity_threshold: 1.0,
             real_time: true,
+            ground_plane: None,
             max_catchup_ticks: 4,
         }
     }
@@ -125,6 +144,14 @@ impl WorldConfig {
     /// complete as fast as the machine allows. See [`WorldConfig::real_time`].
     pub fn with_real_time(mut self, enabled: bool) -> Self {
         self.real_time = enabled;
+        self
+    }
+
+    /// Builder pattern: enable the implicit floor at `y`
+    ///
+    /// See [`WorldConfig::ground_plane`]. Prefer adding a static collider.
+    pub fn with_ground_plane(mut self, y: f64) -> Self {
+        self.ground_plane = Some(y);
         self
     }
 
