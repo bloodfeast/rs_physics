@@ -131,6 +131,18 @@ pub enum PhysicsCommand {
     /// Remove a constraint from the world
     #[cfg(feature = "constraints")]
     RemoveConstraint(ConstraintId),
+    /// Apply a force to one particle of a particle-owning constraint (e.g. a rope chain)
+    #[cfg(feature = "constraints")]
+    ApplyForceToConstraintParticle(ConstraintId, usize, (f64, f64, f64)),
+    /// Set a hinge constraint's angular limits at runtime (latch / release a door)
+    #[cfg(feature = "constraints")]
+    SetHingeLimits(ConstraintId, f64, f64),
+    /// Apply an angular impulse to a hinge (collision feedback into the constraint)
+    #[cfg(feature = "constraints")]
+    ApplyHingeImpulse(ConstraintId, f64),
+    /// Make contacts with an object push a constraint particle (two-way coupling)
+    #[cfg(feature = "constraints")]
+    AttachObjectToConstraint(ObjectId, ConstraintId, usize),
     // ==================== Control Commands ====================
     /// Pause the simulation
     Pause,
@@ -611,6 +623,68 @@ impl PhysicsHandle {
     #[cfg(feature = "constraints")]
     pub fn remove_constraint(&self, id: ConstraintId) -> Result<(), ()> {
         self.send_command(PhysicsCommand::RemoveConstraint(id))
+    }
+
+    /// Apply a force to one particle of a particle-owning constraint
+    ///
+    /// Rope chains own their particles, so objects resting on a rope bridge
+    /// cannot press on it by colliding - the load has to be handed over
+    /// explicitly. Without this the bridge hangs in the same curve whether
+    /// anything is standing on it or not.
+    #[cfg(feature = "constraints")]
+    pub fn apply_force_to_constraint_particle(
+        &self,
+        id: ConstraintId,
+        particle_index: usize,
+        force: (f64, f64, f64),
+    ) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::ApplyForceToConstraintParticle(
+            id,
+            particle_index,
+            force,
+        ))
+    }
+
+    /// Set a hinge's angular limits at runtime
+    ///
+    /// Use this to latch and release a door. A hinge with a wide range and
+    /// nothing holding it falls to its limit within a fraction of a second and
+    /// stays there, which looks like a door that never moves rather than one
+    /// that opens. Collapsing the range around the current angle holds it shut;
+    /// widening it lets go.
+    #[cfg(feature = "constraints")]
+    pub fn set_hinge_limits(&self, id: ConstraintId, min: f64, max: f64) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::SetHingeLimits(id, min, max))
+    }
+
+    /// Apply an angular impulse to a hinge, in kg*m^2/s
+    ///
+    /// A hinge drives a kinematic body, so collisions with it cannot push back
+    /// on their own. Use this to hand the hinge the impulse an impact should
+    /// have delivered, so a door reacts to being hit rather than swinging on its
+    /// own schedule.
+    #[cfg(feature = "constraints")]
+    pub fn apply_hinge_impulse(&self, id: ConstraintId, angular_impulse: f64) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::ApplyHingeImpulse(id, angular_impulse))
+    }
+
+    /// Make contacts with `object` push a constraint particle
+    ///
+    /// Kinematic bodies driven by a constraint are infinite-mass, so they bounce
+    /// things off without ever reacting. Registering one here hands the contact
+    /// impulse to the constraint instead of discarding it. The transfer happens
+    /// inside the physics step, where the impulse is computed - doing it from a
+    /// render loop misses most contacts, which last only a few ticks.
+    #[cfg(feature = "constraints")]
+    pub fn attach_object_to_constraint(
+        &self,
+        object: ObjectId,
+        constraint: ConstraintId,
+        particle_index: usize,
+    ) -> Result<(), ()> {
+        self.send_command(PhysicsCommand::AttachObjectToConstraint(
+            object, constraint, particle_index,
+        ))
     }
 
     // ==================== Simulation Control ====================

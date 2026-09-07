@@ -801,6 +801,11 @@ pub struct PhysicsWorld {
     /// Key is the object ID, value is a list of all objects it's currently in contact with
     active_contacts: HashMap<ObjectId, Vec<ObjectId>>,
 
+    /// Objects that stand in for a constraint particle, so contacts with them
+    /// push the constraint. See [`PhysicsWorld::attach_object_to_constraint`].
+    #[cfg(feature = "constraints")]
+    attachments: HashMap<ObjectId, Vec<(ConstraintId, usize)>>,
+
     /// Spatial acceleration structure, rebuilt each step and reused across steps
     broad_phase: BroadPhase,
 
@@ -828,6 +833,8 @@ impl PhysicsWorld {
             #[cfg(feature = "constraints")]
             constraint_iterations: 8, // Default iterations for Gauss-Seidel solver
             active_contacts: HashMap::new(),
+            #[cfg(feature = "constraints")]
+            attachments: HashMap::new(),
             broad_phase: BroadPhase::default(),
             #[cfg(test)]
             profile: PhaseTimings::default(),
@@ -1392,6 +1399,95 @@ impl PhysicsWorld {
         self.constraints.remove(&id).is_some()
     }
 
+    /// Set the angular limits of a hinge constraint at runtime.
+    ///
+    /// A hinge with a wide range and nothing holding it simply falls to its
+    /// limit and stays there - a trap door built that way is open a quarter of a
+    /// second after the world starts and never moves again. Narrowing the range
+    /// to the current angle latches it; widening it releases. Returns false if
+    /// the constraint does not exist or is not a hinge.
+    #[cfg(feature = "constraints")]
+    pub fn set_hinge_limits(&mut self, id: ConstraintId, min: f64, max: f64) -> bool {
+        match self.constraints.get_mut(&id) {
+            Some(WorldConstraint::Hinge(hinge)) => {
+                hinge.angle_min = Some(min.min(max));
+                hinge.angle_max = Some(max.max(min));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Make contacts with `object` push a constraint particle.
+    ///
+    /// A rope bridge or a hinged door is usually built as a kinematic,
+    /// infinite-mass body positioned *from* the constraint each step. That is
+    /// one-way: the constraint moves the body, but the body swallows every
+    /// impulse without moving, so nothing that hits it can push back. The bridge
+    /// behaves like a trampoline - it bounces things off while never reacting.
+    ///
+    /// Registering the body here closes the loop. When a collision resolves, the
+    /// normal impulse it would have delivered is handed to the constraint
+    /// particle instead of being discarded.
+    ///
+    /// This has to happen inside the step. Doing it from a render loop samples
+    /// contacts at frame rate, and a bounce lasts only a few physics ticks - at
+    /// 240 Hz against a 120 Hz renderer, most contacts are missed entirely.
+    #[cfg(feature = "constraints")]
+    pub fn attach_object_to_constraint(
+        &mut self,
+        object: ObjectId,
+        constraint: ConstraintId,
+        particle_index: usize,
+    ) {
+        self.attachments
+            .entry(object)
+            .or_default()
+            .push((constraint, particle_index));
+    }
+
+    /// Apply an angular impulse to a hinge constraint, in kg*m^2/s.
+    ///
+    /// A hinge drives a kinematic, infinite-mass body, so nothing that collides
+    /// with that body can push back on the hinge - a door swings on its own
+    /// schedule no matter what hits it. This is the return path: hand the hinge
+    /// the angular impulse the collision should have delivered.
+    ///
+    /// Returns false if the constraint does not exist or is not a hinge.
+    #[cfg(feature = "constraints")]
+    pub fn apply_hinge_impulse(&mut self, id: ConstraintId, angular_impulse: f64) -> bool {
+        match self.constraints.get_mut(&id) {
+            Some(WorldConstraint::Hinge(hinge)) => {
+                if hinge.moment_of_inertia > 1e-12 {
+                    hinge.angular_velocity += angular_impulse / hinge.moment_of_inertia;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a force to one particle of a constraint that owns particles.
+    ///
+    /// Rope chains simulate their own particles, so nothing outside the
+    /// constraint can push on them. Without this a rope bridge bears no load:
+    /// it settles into the curve gravity alone gives it and stays there,
+    /// however heavy the thing standing on it. Returns false if the constraint
+    /// does not exist, owns no particles, or the index is out of range.
+    #[cfg(feature = "constraints")]
+    pub fn apply_force_to_constraint_particle(
+        &mut self,
+        id: ConstraintId,
+        particle_index: usize,
+        force: (f64, f64, f64),
+    ) -> bool {
+        let dt = self.config.timestep;
+        self.constraints
+            .get_mut(&id)
+            .map(|c| c.apply_particle_force(particle_index, force, dt))
+            .unwrap_or(false)
+    }
+
     /// Get a reference to a constraint by ID
     #[cfg(feature = "constraints")]
     pub fn get_constraint(&self, id: ConstraintId) -> Option<&WorldConstraint> {
@@ -1579,22 +1675,17 @@ impl PhysicsWorld {
         #[cfg(feature = "constraints")]
         phase!(self, constraints, self.solve_constraints(dt, gravity));
 
-        // 4.6. Apply damping (air resistance and angular friction)
-        // Using exponential decay for frame-rate independence
-        // damping_factor = (1 - damping)^dt approximated as e^(-damping * dt)
-        // Decay per second: exp(-coefficient). Linear 0.1 sheds ~9.5%/s.
-        //
-        // Angular was 2.0, which sheds ~86.5%/s - twenty times the linear rate,
-        // so a ball lost most of its spin within a second even in mid-air, where
-        // nothing should be removing angular momentum. That reads as rotation
-        // decoupled from motion. 0.3 sheds ~26%/s: still above the linear rate,
-        // which is defensible because rolling resistance is real, without the
-        // spin visibly dying on its own.
-        const LINEAR_DAMPING: f64 = 0.1;   // Linear velocity damping coefficient
-        const ANGULAR_DAMPING: f64 = 0.3;  // Angular velocity damping coefficient
+        // 4.6. Aerodynamic drag, plus any non-physical damping the caller asked
+        //      for. Drag comes from air density, frontal area and mass rather
+        //      than a global constant - see WorldConfig::aerodynamic_drag.
+        let air_density = self.config.constants.air_density;
+        let aerodynamic_drag = self.config.aerodynamic_drag && air_density > 0.0;
 
-        let linear_decay = (-LINEAR_DAMPING * dt).exp();
-        let angular_decay = (-ANGULAR_DAMPING * dt).exp();
+        // Exponential decay keeps the artificial term frame-rate independent.
+        let linear_decay = (-self.config.artificial_linear_damping * dt).exp();
+        let angular_decay = (-self.config.artificial_angular_damping * dt).exp();
+        let any_artificial = self.config.artificial_linear_damping > 0.0
+            || self.config.artificial_angular_damping > 0.0;
 
         phase!(self, damping, Self::for_each_object(&mut self.objects, |obj| {
             // Skip static objects
@@ -1602,12 +1693,45 @@ impl PhysicsWorld {
                 return;
             }
 
-            // Apply linear damping (air resistance)
+            if aerodynamic_drag {
+                let (vx, vy, vz) = (
+                    obj.object.velocity.x,
+                    obj.object.velocity.y,
+                    obj.object.velocity.z,
+                );
+                let speed_sq = vx * vx + vy * vy + vz * vz;
+
+                if speed_sq > 1e-12 {
+                    let speed = speed_sq.sqrt();
+                    let area = obj.shape.cross_sectional_area();
+                    let cd = obj.shape.drag_coefficient();
+
+                    // dv/dt = -k v^2 integrates exactly to v / (1 + k*v*dt).
+                    //
+                    // Stepping this explicitly instead - v -= k*v^2*dt - is
+                    // unstable: quadratic drag is stiff, and once k*v*dt exceeds
+                    // 1 the step overshoots zero and accelerates the object
+                    // backwards. Clamping that overshoot only trades a reversal
+                    // for an abrupt stop. The closed form is the same cost, is
+                    // unconditionally stable at any speed or timestep, and can
+                    // neither reverse the object nor zero it outright.
+                    let k = 0.5 * air_density * cd * area / obj.object.mass;
+                    let scale = 1.0 / (1.0 + k * speed * dt);
+
+                    obj.object.velocity.x = vx * scale;
+                    obj.object.velocity.y = vy * scale;
+                    obj.object.velocity.z = vz * scale;
+                }
+            }
+
+            if !any_artificial {
+                return;
+            }
+
             obj.object.velocity.x *= linear_decay;
             obj.object.velocity.y *= linear_decay;
             obj.object.velocity.z *= linear_decay;
 
-            // Apply angular damping (rotational friction)
             obj.angular_velocity.0 *= angular_decay;
             obj.angular_velocity.1 *= angular_decay;
             obj.angular_velocity.2 *= angular_decay;
@@ -1897,7 +2021,7 @@ impl PhysicsWorld {
         let iterations = self.constraint_iterations;
         for _ in 0..iterations {
             for constraint in self.constraints.values_mut() {
-                constraint.solve(&self.object_ids, &mut self.objects, dt);
+                constraint.solve(&self.object_ids, &mut self.objects, dt, gravity);
             }
         }
     }
@@ -1948,7 +2072,82 @@ impl PhysicsWorld {
                 self.active_contacts.entry(id1).or_default().push(id2);
                 self.active_contacts.entry(id2).or_default().push(id1);
             }
-            self.apply_collision_response(collision, dt);
+            let normal_impulse = self.apply_collision_response(collision, dt);
+
+            // Feed the impulse back into any constraint standing behind a
+            // kinematic body, so the bridge or door actually reacts to the hit.
+            #[cfg(feature = "constraints")]
+            if normal_impulse.abs() > 1e-9 {
+                let n = collision.normal;
+                // The normal runs from object i to object j, so i receives the
+                // impulse along -n and j along +n.
+                for (idx, sign) in [(collision.i, -1.0), (collision.j, 1.0)] {
+                    let Some(&id) = self.index_to_id.get(&idx) else { continue };
+                    let Some(targets) = self.attachments.get(&id).cloned() else { continue };
+
+                    // Mass of the body that actually hit us, for the scaling
+                    // below. The attached body itself is infinite-mass by
+                    // construction, so it tells us nothing.
+                    let other_idx = if idx == collision.i { collision.j } else { collision.i };
+                    let other_mass = self
+                        .objects
+                        .get(other_idx)
+                        .map(|o| o.object.mass)
+                        .unwrap_or(f64::INFINITY);
+
+                    // Split the reaction across every constraint the body
+                    // stands in for - a bridge plank bears on two ropes.
+                    let share = 1.0 / targets.len() as f64;
+
+                    for (constraint_id, particle) in targets {
+                        // Scale by what a *movable* body would have absorbed.
+                        //
+                        // The solver computed this impulse against an infinite
+                        // mass, which is correct for the other body but wildly
+                        // wrong for the light particle behind the proxy: a 2 kg
+                        // ball at 5 m/s yields ~19.5 N.s, and dumping that into
+                        // an 0.08 kg rope particle is 244 m/s. Handing over an
+                        // impulse derived from "immovable" while also letting
+                        // the target move manufactures energy - the bridge
+                        // reached y = 52 before this scaling existed.
+                        //
+                        // For a real two-body contact the impulse carries a
+                        // factor m_p / (m_p + m_other); apply that here.
+                        // If the proxy carries a real mass, the solver already
+                        // sized the impulse correctly - the ball rebounded off
+                        // something light rather than off a wall - so hand it
+                        // over whole. Only an infinite-mass proxy needs the
+                        // correction, because there the solver answered a
+                        // different question than the one being asked here.
+                        let proxy_mass = self
+                            .objects
+                            .get(idx)
+                            .map(|o| o.object.mass)
+                            .unwrap_or(f64::INFINITY);
+
+                        let scale = if proxy_mass.is_finite() {
+                            1.0
+                        } else {
+                            self.constraints
+                                .get(&constraint_id)
+                                .and_then(|c| c.particle_mass(particle))
+                                .filter(|m| m.is_finite() && *m > 0.0)
+                                .map(|m_p| {
+                                    if other_mass.is_finite() {
+                                        m_p / (m_p + other_mass)
+                                    } else {
+                                        1.0
+                                    }
+                                })
+                                .unwrap_or(0.0)
+                        };
+
+                        let k = sign * normal_impulse / dt * share * scale;
+                        let force = (n.0 * k, n.1 * k, n.2 * k);
+                        self.apply_force_to_constraint_particle(constraint_id, particle, force);
+                    }
+                }
+            }
         }
         #[cfg(test)]
         {
@@ -2114,7 +2313,13 @@ impl PhysicsWorld {
     }
 
     /// Apply collision response for a detected collision
-    fn apply_collision_response(&mut self, collision: &CollisionData, dt: f64) {
+    /// Applies the contact response, returning the normal impulse magnitude.
+    ///
+    /// The caller needs that magnitude to feed impulses back into constraints
+    /// that drive kinematic bodies - see `attachments`. An infinite-mass body
+    /// swallows an impulse without moving, so unless the value is handed back
+    /// there is no way for anything to push on a rope bridge or a hinged door.
+    fn apply_collision_response(&mut self, collision: &CollisionData, dt: f64) -> f64 {
         let (first, second) = self.objects.split_at_mut(collision.j);
         let obj1 = &mut first[collision.i];
         let obj2 = &mut second[0];
@@ -2143,7 +2348,7 @@ impl PhysicsWorld {
         if vrel_n >= 0.0 {
             // Still need to resolve penetration
             self.resolve_penetration(collision);
-            return;
+            return 0.0;
         }
 
         // Calculate impulse magnitude
@@ -2172,10 +2377,11 @@ impl PhysicsWorld {
         let inv_mass_sum = inv_mass1 + inv_mass2;
 
         if inv_mass_sum < 1e-10 {
-            return; // Both objects have infinite mass
+            return 0.0; // Both objects have infinite mass
         }
 
         let j = -(1.0 + restitution) * vrel_n / inv_mass_sum;
+        let normal_impulse = j;
 
         // Apply linear impulse (skip for static objects)
         if !m1_static {
@@ -2338,8 +2544,13 @@ impl PhysicsWorld {
 
         // Rolling resistance - opposes angular velocity proportional to normal force
         // This makes rolling objects slow down naturally based on their material properties
-        let rolling_resistance1 = obj1.object.get_rolling_resistance();
-        let rolling_resistance2 = obj2.object.get_rolling_resistance();
+        // Read the material off PhysicalObject3D, not the inner ObjectIn3D.
+        // ObjectIn3D.material is None for objects built through this world, so
+        // this always returned the 0.01 default and rubber's 0.02 or concrete's
+        // 0.015 never took effect - the same distinction the friction lookup
+        // above already gets right.
+        let rolling_resistance1 = obj1.get_rolling_resistance();
+        let rolling_resistance2 = obj2.get_rolling_resistance();
         let rolling_resistance = (rolling_resistance1 * rolling_resistance2).sqrt();
 
         // Normal force: use the larger of collision impulse or weight-based impulse
@@ -2404,6 +2615,8 @@ impl PhysicsWorld {
 
         // Resolve penetration
         self.resolve_penetration(collision);
+
+        normal_impulse
     }
 
     /// Resolve penetration between two objects
@@ -3337,6 +3550,447 @@ mod tests {
         assert!(
             slip.abs() < vx.abs(),
             "friction must reduce slip, not increase it. vx={vx}, wz={wz}, slip={slip}",
+        );
+    }
+
+    /// A rope must carry load applied from outside the constraint.
+    ///
+    /// Rope chains own their particles, so an object resting on a rope bridge
+    /// cannot press on it by colliding - the plank bodies are kinematic and
+    /// infinite-mass, and drive the rope rather than being driven by it. Unless
+    /// load can be handed to a particle explicitly, the rope only ever
+    /// simulates its own weight: it settles into one catenary and stays in it
+    /// no matter what is standing on it, which is exactly a static row of
+    /// platforms wearing a rope's shape.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_rope_particle_accepts_external_load() {
+        use crate::constraints::RopeChain3D;
+
+        let points: Vec<(f64, f64, f64)> = (0..=8)
+            .map(|i| (i as f64 * 0.5, 5.0, 0.0))
+            .collect();
+        let mut rope = RopeChain3D::from_points(&points, 0.5, true).expect("valid rope");
+        // Anchor both ends, as a bridge would be.
+        rope.particles[0].mass = f64::INFINITY;
+        rope.particles[8].mass = f64::INFINITY;
+
+        let mut world = PhysicsWorld::new(WorldConfig::default().with_frequency(240.0));
+        let rope_id = world.add_constraint(WorldConstraint::RopeChain(rope));
+
+        // Let it settle under its own weight first, so we measure the response
+        // to load rather than the initial sag.
+        for _ in 0..480 {
+            world.step();
+        }
+        let settled = world
+            .get_constraint(rope_id)
+            .and_then(|c| c.get_particle_positions())
+            .expect("rope should report particles")[4]
+            .1;
+
+        // Now stand on the middle of it.
+        for _ in 0..240 {
+            assert!(
+                world.apply_force_to_constraint_particle(rope_id, 4, (0.0, -200.0, 0.0)),
+                "applying force to a valid rope particle should succeed",
+            );
+            world.step();
+        }
+        let loaded = world
+            .get_constraint(rope_id)
+            .and_then(|c| c.get_particle_positions())
+            .expect("rope should report particles")[4]
+            .1;
+
+        assert!(
+            loaded < settled - 0.05,
+            "the rope must sag further under load: settled at y={settled}, \
+             loaded at y={loaded}",
+        );
+
+        // Out-of-range and unknown ids report failure rather than panicking.
+        assert!(!world.apply_force_to_constraint_particle(rope_id, 999, (0.0, -1.0, 0.0)));
+    }
+
+    /// A rope must stay finite and bounded over a long run.
+    ///
+    /// The position-based solver corrects positions but not velocity, so gravity
+    /// adds velocity the constraint cannot remove. Left uncorrected that grows
+    /// without bound and reaches NaN within seconds - and one NaN escapes the
+    /// rope into every object driven from it, so the whole world goes to NaN at
+    /// once. That is the failure this pins.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_rope_stays_finite_and_bounded_under_sustained_load() {
+        use crate::constraints::RopeChain3D;
+
+        let points: Vec<(f64, f64, f64)> = (0..=16)
+            .map(|i| (i as f64 * 0.6, 5.0, 0.0))
+            .collect();
+        let mut rope = RopeChain3D::from_points(&points, 0.5, true).expect("valid rope");
+        rope.particles[0].mass = f64::INFINITY;
+        rope.particles[16].mass = f64::INFINITY;
+
+        let mut world = PhysicsWorld::new(WorldConfig::default().with_frequency(240.0));
+        let rope_id = world.add_constraint(WorldConstraint::RopeChain(rope));
+
+        // Thirty seconds of simulation, with something heavy standing on it.
+        for _ in 0..7200 {
+            world.apply_force_to_constraint_particle(rope_id, 8, (0.0, -300.0, 0.0));
+            world.step();
+        }
+
+        let positions = world
+            .get_constraint(rope_id)
+            .and_then(|c| c.get_particle_positions())
+            .expect("rope should report particles");
+
+        for (i, p) in positions.iter().enumerate() {
+            assert!(
+                p.0.is_finite() && p.1.is_finite() && p.2.is_finite(),
+                "particle {i} went non-finite: {p:?}",
+            );
+            // Anchors are 9.6 apart; nothing should be flung to infinity.
+            assert!(
+                p.1 > -100.0 && p.1 < 100.0 && p.0.abs() < 100.0,
+                "particle {i} left any plausible bound: {p:?}",
+            );
+        }
+    }
+
+    /// An attached kinematic proxy must transfer load without inventing energy.
+    ///
+    /// The contact solver computes its impulse against an infinite mass, which
+    /// is right for the colliding body and far too large for the light particle
+    /// standing behind the proxy. Handing that impulse over unscaled, while also
+    /// letting the target move, creates energy: a ball landing on a bridge sent
+    /// the rope to y = 52 from a rest height of 1.5.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_attached_proxy_transfers_load_without_exploding() {
+        use crate::constraints::RopeChain3D;
+
+        let points: Vec<(f64, f64, f64)> = (0..=8)
+            .map(|i| (i as f64 * 0.5, 5.0, 0.0))
+            .collect();
+        let mut rope = RopeChain3D::from_points(&points, 0.08, true).expect("valid rope");
+        rope.particles[0].mass = f64::INFINITY;
+        rope.particles[8].mass = f64::INFINITY;
+
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default().with_frequency(240.0).with_gravity(0.0, -15.0, 0.0),
+        );
+        let rope_id = world.add_constraint(WorldConstraint::RopeChain(rope));
+
+        // Kinematic plank standing in for the middle particle.
+        let plank = PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            (2.0, 5.0, 0.0),
+            Shape3D::Cuboid(0.4, 0.08, 1.4),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        );
+        let plank_id = world.add_object(plank);
+        world.attach_object_to_constraint(plank_id, rope_id, 4);
+
+        // Drop a ball onto it, hard.
+        let mut ball = sphere_of(0.5, (2.0, 9.0, 0.0));
+        ball.object.velocity.y = -8.0;
+        world.add_object(ball);
+
+        for tick in 0..2400 {
+            let mid = world
+                .get_constraint(rope_id)
+                .and_then(|c| c.get_particle_positions())
+                .expect("rope should report particles")[4];
+            world.set_position_kinematic(plank_id, mid, 1.0 / 240.0);
+            world.step();
+
+            assert!(
+                mid.1.is_finite() && mid.1 > -50.0 && mid.1 < 20.0,
+                "rope particle left any plausible bound at tick {tick}: y={}",
+                mid.1,
+            );
+        }
+    }
+
+    /// A hinged door held out horizontally must swing down under gravity.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_hinge_swings_under_gravity() {
+        use crate::constraints::Hinge3D;
+        use crate::models::ObjectIn3D;
+
+        let anchor = (0.0, 5.0, 0.0);
+        let frame = ObjectIn3D::new(f64::INFINITY, 0.0, 0.0, 0.0, anchor);
+        // Door hangs out along +z from the hinge, so gravity has a moment arm.
+        let door = ObjectIn3D::new(3.0, 0.0, 0.0, 0.0, (anchor.0, anchor.1, anchor.2 + 1.0));
+
+        let hinge = Hinge3D::new(frame, door, anchor, (1.0, 0.0, 0.0))
+            .expect("valid hinge")
+            .with_limits(-0.1, std::f64::consts::FRAC_PI_2);
+
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default().with_frequency(240.0).with_gravity(0.0, -15.0, 0.0),
+        );
+        let hinge_id = world.add_constraint(WorldConstraint::Hinge(hinge));
+
+        let angle_of = |w: &PhysicsWorld| -> f64 {
+            match w.get_constraint(hinge_id) {
+                Some(WorldConstraint::Hinge(h)) => h.angle,
+                _ => panic!("hinge should exist"),
+            }
+        };
+
+        let start = angle_of(&world);
+        for _ in 0..240 {
+            world.step();
+        }
+        let after = angle_of(&world);
+
+        assert!(
+            (after - start).abs() > 0.05,
+            "a horizontal door on a hinge must fall under gravity: angle went \
+             {start} -> {after}",
+        );
+    }
+
+    /// A rope must sag downwards under gravity.
+    ///
+    /// There are two `apply_gravity` functions with opposite sign conventions:
+    /// the one for objects subtracts (so it wants a positive-down magnitude),
+    /// and `RopeChain3D`'s adds (so it wants a signed value). The world computes
+    /// one number and hands it to both, so whichever disagrees accelerates
+    /// upwards. That is invisible while the rope is never integrated, and
+    /// becomes an unbounded energy source the moment it is.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_rope_sags_downward_under_gravity() {
+        use crate::constraints::RopeChain3D;
+
+        const START_Y: f64 = 5.0;
+        let points: Vec<(f64, f64, f64)> = (0..=8)
+            .map(|i| (i as f64 * 0.5, START_Y, 0.0))
+            .collect();
+        let mut rope = RopeChain3D::from_points(&points, 0.5, true).expect("valid rope");
+        rope.particles[0].mass = f64::INFINITY;
+        rope.particles[8].mass = f64::INFINITY;
+
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default().with_frequency(240.0).with_gravity(0.0, -9.81, 0.0),
+        );
+        let rope_id = world.add_constraint(WorldConstraint::RopeChain(rope));
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        let mid_y = world
+            .get_constraint(rope_id)
+            .and_then(|c| c.get_particle_positions())
+            .expect("rope should report particles")[4]
+            .1;
+
+        assert!(
+            mid_y < START_Y,
+            "gravity points down, so the middle of a rope must fall below its \
+             anchors. started at y={START_Y}, ended at y={mid_y}",
+        );
+    }
+
+    /// Landing on a rope-driven plank must not blow the simulation up.
+    ///
+    /// This is the demo's bridge in miniature: a rope chain, a thin kinematic
+    /// plank positioned from it every step, and a ball dropped on top. The plank
+    /// is infinite-mass, so its velocity enters the contact response while
+    /// nothing can push back on it - which makes any error in that derived
+    /// velocity a one-way energy source aimed at whatever lands on it.
+    #[cfg(feature = "constraints")]
+    #[test]
+    fn test_ball_landing_on_rope_driven_plank_stays_finite() {
+        use crate::constraints::RopeChain3D;
+
+        const STEP: f64 = 1.0 / 240.0;
+        let points: Vec<(f64, f64, f64)> = (0..=16)
+            .map(|i| (3.0 + i as f64 * 0.5625, 2.5, 0.0))
+            .collect();
+        let mut rope = RopeChain3D::from_points(&points, 0.5, true).expect("valid rope");
+        rope.particles[0].mass = f64::INFINITY;
+        rope.particles[16].mass = f64::INFINITY;
+
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default().with_frequency(240.0).with_gravity(0.0, -15.0, 0.0),
+        );
+        let rope_id = world.add_constraint(WorldConstraint::RopeChain(rope));
+
+        // Thin plank, as the bridge uses.
+        let plank = PhysicalObject3D::new(
+            f64::INFINITY,
+            (0.0, 0.0, 0.0),
+            (points[8].0, points[8].1, points[8].2),
+            Shape3D::Cuboid(0.15, 0.08, 1.4),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        );
+        let plank_id = world.add_object(plank);
+
+        let ball_id = world.add_object(sphere_of(0.5, (points[8].0, 5.0, 0.0)));
+
+        for tick in 0..2400 {
+            // Drive the plank from the rope as the demo does - from the render
+            // loop, which runs slower than physics. The elapsed time passed here
+            // has to be the interval since the *last update*, not the physics
+            // timestep; using the latter overstates the derived velocity by the
+            // ratio between the two rates, and the plank is infinite-mass, so
+            // that velocity pushes on the ball while nothing pushes back.
+            const RENDER_EVERY: u32 = 2;
+            if tick % RENDER_EVERY == 0 {
+                let mid = world
+                    .get_constraint(rope_id)
+                    .and_then(|c| c.get_particle_positions())
+                    .expect("rope should report particles")[8];
+                world.set_position_kinematic(plank_id, mid, STEP * RENDER_EVERY as f64);
+            }
+            world.step();
+
+            let ball = world.get_object(ball_id).expect("ball should exist");
+            let p = &ball.object.position;
+            let v = &ball.object.velocity;
+            assert!(
+                p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+                    && v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+                "ball went non-finite at tick {tick}: pos=({}, {}, {}) vel=({}, {}, {})",
+                p.x, p.y, p.z, v.x, v.y, v.z,
+            );
+            assert!(
+                v.x.abs() < 1e4 && v.y.abs() < 1e4 && v.z.abs() < 1e4,
+                "ball velocity exploded at tick {tick}: ({}, {}, {})",
+                v.x, v.y, v.z,
+            );
+        }
+    }
+
+    // ========================================================================
+    // Aerodynamic drag
+    //
+    // The property that matters is that drag depends on the object, not just
+    // its velocity. The exponential decay this replaced multiplied velocity
+    // directly, so a cannonball and a beach ball shed speed at exactly the same
+    // rate - and that is the one thing air resistance most obviously does not do.
+    // ========================================================================
+
+    fn drag_world() -> PhysicsWorld {
+        PhysicsWorld::new(
+            WorldConfig::default()
+                .with_frequency(240.0)
+                .with_gravity(0.0, 0.0, 0.0), // isolate drag from gravity
+        )
+    }
+
+    fn sphere_with_mass(radius: f64, mass: f64, vx: f64) -> PhysicalObject3D {
+        let mut o = PhysicalObject3D::new(
+            mass,
+            (vx, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            Shape3D::Sphere(radius),
+            None,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            PhysicsConstants::default(),
+        );
+        o.object.velocity.x = vx;
+        o
+    }
+
+    #[test]
+    fn test_drag_depends_on_area_to_mass_ratio() {
+        // Same speed, same shape, wildly different ballistic coefficient.
+        let mut world = drag_world();
+        world.add_object(sphere_with_mass(0.05, 10.0, 40.0)); // dense slug
+        world.add_object(sphere_with_mass(0.50, 0.2, 40.0));  // light beach ball
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        let slug = world.objects[0].object.velocity.x;
+        let ball = world.objects[1].object.velocity.x;
+
+        assert!(
+            slug > ball * 2.0,
+            "a dense, small object must keep far more speed than a light, large \
+             one. slug={slug}, beach ball={ball}",
+        );
+        assert!(ball > 0.0, "drag must not reverse the object, got {ball}");
+    }
+
+    #[test]
+    fn test_drag_is_stable_at_absurd_speed() {
+        // Quadratic drag is stiff: stepped explicitly, k*v*dt exceeds 1 here and
+        // the object would be flung backwards. The closed form cannot do that.
+        let mut world = drag_world();
+        world.add_object(sphere_with_mass(0.5, 1.0, 50_000.0));
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        let v = world.objects[0].object.velocity.x;
+        assert!(v > 0.0, "drag reversed the object: vx={v}");
+        assert!(v < 50_000.0, "drag did not slow the object: vx={v}");
+        assert!(v.is_finite(), "drag produced a non-finite velocity: {v}");
+    }
+
+    #[test]
+    fn test_drag_can_be_disabled_and_is_the_only_default_damping() {
+        // With drag off and no artificial damping, an object in a vacuum with no
+        // gravity must coast forever. Any decay left over is a hidden constant.
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default()
+                .with_frequency(240.0)
+                .with_gravity(0.0, 0.0, 0.0)
+                .without_aerodynamic_drag(),
+        );
+        world.add_object(sphere_with_mass(0.5, 1.0, 10.0));
+
+        for _ in 0..2400 {
+            world.step();
+        }
+
+        let v = world.objects[0].object.velocity.x;
+        assert!(
+            (v - 10.0).abs() < 1e-9,
+            "nothing should slow an object in a vacuum, got vx={v}",
+        );
+    }
+
+    #[test]
+    fn test_artificial_damping_is_opt_in() {
+        let mut world = PhysicsWorld::new(
+            WorldConfig::default()
+                .with_frequency(240.0)
+                .with_gravity(0.0, 0.0, 0.0)
+                .without_aerodynamic_drag()
+                .with_artificial_damping(2.0, 0.0),
+        );
+        world.add_object(sphere_with_mass(0.5, 1.0, 10.0));
+
+        for _ in 0..240 {
+            world.step();
+        }
+
+        // exp(-2.0) over one second.
+        let v = world.objects[0].object.velocity.x;
+        let expected = 10.0 * (-2.0f64).exp();
+        assert!(
+            (v - expected).abs() < 0.05,
+            "artificial damping should decay exponentially to {expected}, got {v}",
         );
     }
 

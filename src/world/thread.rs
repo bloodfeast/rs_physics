@@ -415,6 +415,22 @@ fn process_command(world: &mut PhysicsWorld, cmd: PhysicsCommand) -> bool {
         PhysicsCommand::RemoveConstraint(id) => {
             world.remove_constraint(id);
         }
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::ApplyForceToConstraintParticle(id, particle_index, force) => {
+            world.apply_force_to_constraint_particle(id, particle_index, force);
+        }
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::SetHingeLimits(id, min, max) => {
+            world.set_hinge_limits(id, min, max);
+        }
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::ApplyHingeImpulse(id, angular_impulse) => {
+            world.apply_hinge_impulse(id, angular_impulse);
+        }
+        #[cfg(feature = "constraints")]
+        PhysicsCommand::AttachObjectToConstraint(object, constraint, particle) => {
+            world.attach_object_to_constraint(object, constraint, particle);
+        }
         // Simulation control
         PhysicsCommand::Pause => {
             world.pause();

@@ -274,8 +274,8 @@ fn test_object_get_restitution_with_material() {
         Material::rubber()
     );
 
-    // Rubber has restitution of 0.95
-    assert!((obj.get_restitution() - 0.95).abs() < 0.001);
+    // Rubber has restitution of 0.7 (realistic value for ball physics)
+    assert!((obj.get_restitution() - 0.7).abs() < 0.001);
 }
 
 #[test]

@@ -94,6 +94,48 @@ impl Shape3D {
         Shape3D::Polyhedron(vertices, faces)
     }
 
+    /// Frontal area presented to a flow, in m^2.
+    ///
+    /// Orientation-averaged: a tumbling cuboid presents anywhere from its
+    /// smallest face to its diagonal cross-section, and resolving that per tick
+    /// would cost more than the drag term is worth. The mean of the three
+    /// principal faces is within about 15% of the true value for any
+    /// orientation of a box, which is well inside the uncertainty on the drag
+    /// coefficient itself.
+    pub fn cross_sectional_area(&self) -> f64 {
+        match self {
+            Shape3D::Sphere(radius) => PI * radius * radius,
+            Shape3D::Cuboid(w, h, d) => (w * h + h * d + w * d) / 3.0,
+            Shape3D::BeveledCuboid(w, h, d, _) => (w * h + h * d + w * d) / 3.0,
+            // Mean of the circular end (pi r^2) and the rectangular side (2rh).
+            Shape3D::Cylinder(radius, height) => {
+                (PI * radius * radius + 2.0 * radius * height) / 2.0
+            }
+            // No cheap exact answer for an arbitrary hull. A sphere of equal
+            // volume is a reasonable stand-in and never returns zero.
+            Shape3D::Polyhedron(..) => {
+                let r = (3.0 * self.volume() / (4.0 * PI)).max(0.0).cbrt();
+                PI * r * r
+            }
+        }
+    }
+
+    /// Dimensionless drag coefficient for flow past this shape.
+    ///
+    /// Standard values for the turbulent regime that ordinary objects at
+    /// ordinary speeds sit in (Reynolds number 10^4 to 10^6). Below that the
+    /// coefficient rises sharply, so these are wrong for very small or very
+    /// slow objects - which is the same regime where drag barely matters.
+    pub fn drag_coefficient(&self) -> f64 {
+        match self {
+            Shape3D::Sphere(_) => 0.47,
+            Shape3D::Cuboid(..) => 1.05,
+            Shape3D::BeveledCuboid(..) => 0.9, // rounded edges shed less wake
+            Shape3D::Cylinder(..) => 0.82,
+            Shape3D::Polyhedron(..) => 0.8,
+        }
+    }
+
     /// Returns the volume of the shape
     pub fn volume(&self) -> f64 {
         match self {

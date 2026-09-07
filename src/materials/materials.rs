@@ -345,7 +345,7 @@ impl Material {
             0.01e9,             // Young's modulus (Pa)
             0.49,               // Poisson's ratio
             0.9,                // friction coefficient
-            0.95,               // restitution coefficient
+            0.7,                // restitution coefficient (reduced from 0.95)
             0.02,               // rolling resistance coefficient (rubber deforms significantly)
             0.16,               // thermal conductivity (W/(m·K))
             2000.0,             // specific heat capacity (J/(kg·K))

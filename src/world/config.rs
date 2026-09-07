@@ -47,6 +47,46 @@ pub struct WorldConfig {
     /// Default: true
     pub real_time: bool,
 
+    /// Derive aerodynamic drag from air density, shape and mass.
+    ///
+    /// When `true` (the default), each object is decelerated by
+    /// `a = (rho * Cd * A / 2m) * |v| * v`, with `rho` from
+    /// [`PhysicsConstants::air_density`], `A` and `Cd` from its [`Shape3D`].
+    ///
+    /// This replaced a pair of hardcoded exponential decay constants. Those
+    /// were not merely unparameterized, they were the wrong shape: exponential
+    /// decay of velocity is equivalent to `F = -k*m*v`, i.e. Stokes drag, which
+    /// holds at very low Reynolds number. An ordinary object at ordinary speed
+    /// sits at Re ~ 10^5, where drag goes as `v^2`. And because the decay
+    /// multiplied velocity directly, deceleration came out independent of both
+    /// mass and size - a cannonball and a beach ball shed speed at exactly the
+    /// same rate, when the ratio of frontal area to mass is precisely what
+    /// separates them.
+    ///
+    /// [`PhysicsConstants::air_density`]: crate::utils::PhysicsConstants::air_density
+    /// [`Shape3D`]: crate::models::Shape3D
+    pub aerodynamic_drag: bool,
+
+    /// Extra velocity damping that is not physics, in units of 1/s.
+    ///
+    /// Applied as exponential decay on top of any aerodynamic drag, for game
+    /// feel - a deliberately syrupy world, or bleeding off energy a stiff
+    /// constraint setup injects. Default `0.0`, so simulation results are
+    /// physical unless you opt out.
+    pub artificial_linear_damping: f64,
+
+    /// Extra angular damping that is not physics, in units of 1/s.
+    ///
+    /// Default `0.0`. Note that the thing this most often gets reached for -
+    /// a ball that should stop rolling - is rolling resistance, which depends
+    /// on contact normal force and is applied in the collision response from
+    /// [`Material::rolling_resistance_coefficient`]. Damping spin globally also
+    /// slows objects in mid-air, where nothing should be removing angular
+    /// momentum.
+    ///
+    /// [`Material::rolling_resistance_coefficient`]: crate::materials::Material::rolling_resistance_coefficient
+    pub artificial_angular_damping: f64,
+
     /// Optional implicit floor, as a world-space Y height.
     ///
     /// When `Some(y)`, any object whose lowest point falls below `y` is pushed
@@ -90,6 +130,9 @@ impl Default for WorldConfig {
             enable_ccd: true,
             ccd_velocity_threshold: 1.0,
             real_time: true,
+            aerodynamic_drag: true,
+            artificial_linear_damping: 0.0,
+            artificial_angular_damping: 0.0,
             ground_plane: None,
             max_catchup_ticks: 4,
         }
@@ -144,6 +187,21 @@ impl WorldConfig {
     /// complete as fast as the machine allows. See [`WorldConfig::real_time`].
     pub fn with_real_time(mut self, enabled: bool) -> Self {
         self.real_time = enabled;
+        self
+    }
+
+    /// Builder pattern: set non-physical damping for game feel (1/s)
+    ///
+    /// See [`WorldConfig::artificial_linear_damping`].
+    pub fn with_artificial_damping(mut self, linear: f64, angular: f64) -> Self {
+        self.artificial_linear_damping = linear.max(0.0);
+        self.artificial_angular_damping = angular.max(0.0);
+        self
+    }
+
+    /// Builder pattern: disable derived aerodynamic drag
+    pub fn without_aerodynamic_drag(mut self) -> Self {
+        self.aerodynamic_drag = false;
         self
     }
 

@@ -185,11 +185,19 @@ impl WorldConstraint {
     /// * `objects` - Map from ObjectId to index in objects vector
     /// * `object_data` - The objects vector
     /// * `dt` - Timestep in seconds
+    /// Advances this constraint by one step.
+    ///
+    /// `gravity` is a positive-downward magnitude, as elsewhere in this module.
+    /// It is threaded through because `Hinge3D::solve` otherwise falls back to a
+    /// hardcoded -9.81 - its own documentation says to prefer
+    /// `solve_with_gravity` with the simulation's real value - so a door in a
+    /// world with stronger gravity swung open in slow motion.
     pub fn solve(
         &mut self,
         object_ids: &HashMap<ObjectId, usize>,
         objects: &mut [PhysicalObject3D],
         dt: f64,
+        gravity: f64,
     ) {
         match self {
             WorldConstraint::Joint(joint) => {
@@ -202,21 +210,32 @@ impl WorldConstraint {
                 solve_rope(rope, object_ids, objects, dt);
             }
             WorldConstraint::RopeChain(chain) => {
-                // RopeChain has its own internal particles, solve directly
-                let _ = chain.solve(dt, 1);
+                solve_rope_chain(chain, dt);
             }
             WorldConstraint::Hinge(hinge) => {
                 // Hinge has its own internal objects, solve directly
-                let _ = hinge.solve(dt);
+                let _ = hinge.solve_with_gravity(dt, -gravity);
             }
         }
     }
 
     /// Applies gravity to constraint-owned particles (for RopeChain, Hinge).
+    /// Applies gravity to constraint-owned particles.
+    ///
+    /// `gravity` is a positive-downward magnitude, matching
+    /// [`crate::interactions::shape_collisions_3d::apply_gravity`], which the
+    /// world uses for ordinary objects and which subtracts it from velocity.
+    ///
+    /// `RopeChain3D::apply_gravity` uses the opposite convention - it *adds* to
+    /// velocity, so it wants a signed value - and the world was handing the same
+    /// positive number to both. Objects fell and ropes rose. While the rope was
+    /// never integrated that was invisible; once it was, it became an unbounded
+    /// energy source that flung the bridge upward and blew up anything colliding
+    /// with it.
     pub fn apply_gravity(&mut self, gravity: f64, dt: f64) {
         match self {
             WorldConstraint::RopeChain(chain) => {
-                chain.apply_gravity(gravity, dt);
+                chain.apply_gravity(-gravity, dt);
             }
             WorldConstraint::Hinge(_hinge) => {
                 // Hinge applies torque from gravity internally
@@ -229,9 +248,95 @@ impl WorldConstraint {
     pub fn get_particle_positions(&self) -> Option<Vec<(f64, f64, f64)>> {
         match self {
             WorldConstraint::RopeChain(chain) => Some(chain.get_particle_positions()),
+
             _ => None,
         }
     }
+
+    /// Mass of one constraint-owned particle, if this constraint has any.
+    ///
+    /// Needed to scale impulses handed back from collisions: the contact solver
+    /// computes them against an infinite-mass proxy, which is the right answer
+    /// for the *other* body but far too large for the light particle standing
+    /// behind it.
+    pub fn particle_mass(&self, index: usize) -> Option<f64> {
+        match self {
+            WorldConstraint::RopeChain(chain) => chain.get_particle(index).map(|p| p.mass),
+            _ => None,
+        }
+    }
+
+    /// Applies a force to one constraint-owned particle, if this constraint has any.
+    ///
+    /// Returns `false` if the constraint has no particles or the index is out of
+    /// range. A rope's particles are internal to the constraint, so nothing
+    /// outside it can push on them - which means a rope bridge carries no load
+    /// from the objects resting on it and hangs in the same curve whether it is
+    /// bearing weight or not.
+    pub fn apply_particle_force(
+        &mut self,
+        index: usize,
+        force: (f64, f64, f64),
+        dt: f64,
+    ) -> bool {
+        match self {
+            WorldConstraint::RopeChain(chain) => {
+                if index >= chain.particle_count() {
+                    return false;
+                }
+                chain.apply_force(index, force, dt);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Advances a rope chain by one step: integrate, project, then correct velocity.
+///
+/// Two things were missing here, and the second only bites once the first is
+/// fixed.
+///
+/// Integration was never called. Gravity added velocity and the segment
+/// constraints were solved, but nothing moved the particles by that velocity, so
+/// the rope stayed frozen in whatever shape it was built with - it looked like a
+/// hanging rope and behaved like a rigid one.
+///
+/// Adding integration alone then diverges to NaN within seconds. The solver is
+/// position-based: it corrects positions to satisfy the segment lengths but
+/// never touches velocity. Gravity therefore keeps adding velocity that the
+/// constraint has no way to remove, and it grows without bound while the solver
+/// fights to hold the positions. The fix is the standard PBD velocity update -
+/// after projection, velocity is *defined* by how far the particle actually
+/// moved. A taut segment then removes velocity along its own direction, which is
+/// what a rope physically does.
+#[cfg(feature = "constraints")]
+fn solve_rope_chain(chain: &mut RopeChain3D, dt: f64) {
+    if dt <= 0.0 {
+        return;
+    }
+
+    let before = chain.get_particle_positions();
+    chain.integrate(dt);
+
+    // A single iteration leaves visible stretch on a loaded rope; the segments
+    // are solved sequentially, so corrections need a few passes to propagate
+    // from the anchors to the middle.
+    let _ = chain.solve(dt, 4);
+
+    let after = chain.get_particle_positions();
+    for i in 0..after.len().min(before.len()) {
+        let Some(particle) = chain.get_particle_mut(i) else { continue };
+        if particle.inv_mass() <= 0.0 {
+            continue;
+        }
+        particle.velocity.x = (after[i].0 - before[i].0) / dt;
+        particle.velocity.y = (after[i].1 - before[i].1) / dt;
+        particle.velocity.z = (after[i].2 - before[i].2) / dt;
+    }
+
+    // Small bleed, so a plucked bridge settles instead of ringing forever.
+    chain.apply_damping(0.02);
 }
 
 /// Solves a joint constraint between world objects.
