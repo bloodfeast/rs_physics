@@ -1,1 +1,13 @@
 /target
+.claude/agents/
+.claude/
+
+# Editor and tooling state
+/.idea
+/.codegraph
+
+# Scratch: a one-off rustc invocation leaves its objects beside the source, and
+# a `> NUL` typed into a POSIX shell on Windows creates a file called `nul`.
+/nul
+/test_ground_collision.*
+/fix_raft.ps1
