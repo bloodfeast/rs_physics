@@ -320,3 +320,85 @@ pub fn calculate_pressure_drop(fluid: &Fluid, pipe_length: f64, pipe_diameter: f
     }
     Ok(friction_factor * (pipe_length / pipe_diameter) * 0.5 * fluid.density * velocity * velocity)
 }
+/// Upward acceleration of a parcel of fluid hotter than its surroundings, by the
+/// Boussinesq approximation.
+///
+/// ```text
+///   a = g * (T - T_ambient) / T_ambient
+/// ```
+///
+/// This is why flames rise, why smoke climbs, and why a plume narrows as it goes: hot
+/// gas is less dense than the air around it, and the buoyant acceleration is
+/// proportional to how much hotter it is. Deriving a flame's rise from its
+/// temperature rather than assigning it a speed means the two cannot disagree — a
+/// cooler flame is automatically a slower one, and a dying fire visibly sags.
+///
+/// The Boussinesq approximation treats density as constant except in the buoyancy
+/// term itself. It is accurate while the temperature difference is small relative to
+/// the absolute temperature and increasingly optimistic beyond that; for a flame at
+/// three or four times ambient it overstates the acceleration somewhat, which for
+/// rendering is a forgiving direction to be wrong in.
+///
+/// Temperatures are absolute (kelvin). Returns m/s^2, positive upward.
+///
+/// # Errors
+///
+/// Returns an error if either temperature is at or below absolute zero.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::fluid_dynamics::thermal_buoyancy;
+///
+/// // A flame at 1500 K in 290 K air accelerates upward hard.
+/// let flame = thermal_buoyancy(1500.0, 290.0, 9.81).unwrap();
+/// assert!(flame > 30.0);
+///
+/// // Gas at ambient temperature does not rise at all.
+/// let neutral = thermal_buoyancy(290.0, 290.0, 9.81).unwrap();
+/// assert!(neutral.abs() < 1e-12);
+///
+/// // And something colder than its surroundings sinks.
+/// let cold = thermal_buoyancy(250.0, 290.0, 9.81).unwrap();
+/// assert!(cold < 0.0);
+/// ```
+pub fn thermal_buoyancy(
+    temperature: f64,
+    ambient: f64,
+    gravity: f64,
+) -> Result<f64, PhysicsError> {
+    if temperature <= 0.0 || ambient <= 0.0 {
+        return Err(PhysicsError::CalculationError(
+            "temperatures must be absolute and above zero".to_string(),
+        ));
+    }
+    Ok(gravity * (temperature - ambient) / ambient)
+}
+
+#[cfg(test)]
+mod buoyancy_tests {
+    use super::*;
+
+    #[test]
+    fn hotter_gas_rises_faster() {
+        let warm = thermal_buoyancy(600.0, 290.0, 9.81).unwrap();
+        let hot = thermal_buoyancy(1500.0, 290.0, 9.81).unwrap();
+        assert!(hot > warm && warm > 0.0);
+    }
+
+    /// The property that makes a dying fire sag rather than stopping abruptly: rise
+    /// falls away continuously with temperature, reaching zero exactly at ambient.
+    #[test]
+    fn buoyancy_falls_to_zero_at_ambient_and_reverses_below_it() {
+        assert!(thermal_buoyancy(291.0, 290.0, 9.81).unwrap() > 0.0);
+        assert_eq!(thermal_buoyancy(290.0, 290.0, 9.81).unwrap(), 0.0);
+        assert!(thermal_buoyancy(289.0, 290.0, 9.81).unwrap() < 0.0);
+    }
+
+    #[test]
+    fn absolute_zero_is_rejected_rather_than_dividing_by_it() {
+        assert!(thermal_buoyancy(1000.0, 0.0, 9.81).is_err());
+        assert!(thermal_buoyancy(0.0, 290.0, 9.81).is_err());
+        assert!(thermal_buoyancy(-5.0, 290.0, 9.81).is_err());
+    }
+}

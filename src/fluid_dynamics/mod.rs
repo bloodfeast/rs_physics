@@ -123,6 +123,15 @@ mod particle_coupling;
 #[cfg(feature = "fluid_simulation")]
 pub use particle_coupling::*;
 
+// Smoothed-particle hydrodynamics: a Lagrangian solver where the particles *are*
+// the fluid, rather than solids moving through one. Fills the gap between the
+// Eulerian grid (too coarse for droplets) and particle coupling (no interaction
+// between particles at all).
+#[cfg(feature = "fluid_simulation")]
+mod sph;
+#[cfg(feature = "fluid_simulation")]
+pub use sph::*;
+
 #[cfg(test)]
 #[cfg(feature = "fluid_dynamics")]
 mod fluid_dynamics_tests;
