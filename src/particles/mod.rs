@@ -1,12 +1,22 @@
 #[cfg(feature = "particles")]
 mod particle;
 #[cfg(feature = "particles")]
+mod particle_backend;
+#[cfg(feature = "particles")]
+mod particle_effects;
+#[cfg(feature = "particles")]
 mod particle_simulation;
 #[cfg(feature = "particles")]
 mod particle_interactions_barnes_hut;
 
 #[cfg(feature = "particles")]
 pub use particle::*;
+
+#[cfg(feature = "particles")]
+pub use particle_backend::*;
+
+#[cfg(feature = "particles")]
+pub use particle_effects::*;
 
 #[cfg(feature = "particles")]
 pub use particle_simulation::*;
