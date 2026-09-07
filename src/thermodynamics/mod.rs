@@ -141,6 +141,14 @@ mod heat_transfer;
 #[cfg(feature = "thermodynamics")]
 pub use heat_transfer::*;
 
+// Colour of thermal radiation — Planck's law evaluated for rendering, so anything
+// that glows because it is hot can be coloured from its temperature rather than
+// from a hand-authored gradient.
+#[cfg(feature = "thermodynamics")]
+mod radiation_colour;
+#[cfg(feature = "thermodynamics")]
+pub use radiation_colour::*;
+
 // Thermodynamic processes (isothermal, adiabatic, isobaric, isochoric)
 #[cfg(feature = "thermodynamics")]
 mod processes;
