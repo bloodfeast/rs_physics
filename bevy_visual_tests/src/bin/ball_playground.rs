@@ -41,6 +41,32 @@ const ROLL_FORCE: f64 = 100.0;  // Force applied for rolling (reduced from 500)
 // 7.5 m/s and roughly a 1.9 m apex, ~1.6 m once drag is accounted for.
 const JUMP_IMPULSE: f64 = 15.0;
 const MAX_VELOCITY: f64 = 15.0;
+const BALL_MASS: f64 = 2.0;
+const GRAVITY_MAGNITUDE: f64 = 15.0;
+
+/// Sag of the rope bridge at build time, as `t(1-t) * BRIDGE_SAG`.
+///
+/// This is really a slack control. The rope solver only resists *stretching*,
+/// so a rope whose length barely exceeds the distance between its anchors is
+/// already taut and physically cannot deflect - it hangs in a fixed curve and
+/// behaves like a girder. At the previous 1.5 the bridge carried 0.46%% slack
+/// over its 9 m span, which is why it never reacted to anything. 5.0 gives a
+/// 1.25 m sag and about 5%% slack, which is enough to visibly take up load.
+const BRIDGE_SAG: f64 = 2.0;
+
+/// Extra rope length beyond the distance its particles actually span.
+///
+/// This, not the initial curve, is what lets the bridge move: the solver only
+/// resists stretching, so a rope can deflect exactly as far as its rest length
+/// exceeds the straight path.
+///
+/// It is also what decides how far the bridge hangs, and the two pull against
+/// each other. Sag depth is roughly `span * sqrt(3 * slack / 8)`, so over this
+/// 9 m span 6% slack drops the middle to y = 1.0 - well below the y = 2.25
+/// platforms it connects, leaving a bridge you sail over or roll underneath
+/// rather than walk across. 1.5% sags 0.67 m to y = 1.83, which reads as a rope
+/// bridge and is still walkable from either end.
+const BRIDGE_SLACK: f64 = 1.015;
 
 fn main() {
     App::new()
@@ -82,6 +108,7 @@ fn main() {
         // opposite fixes.
         .add_plugins(bevy::diagnostic::FrameTimeDiagnosticsPlugin)
         .init_resource::<CachedPhysicsState>()
+        .init_resource::<Diag>()
         .add_systems(Startup, setup)
         // Fetch latest physics state at start of each frame
         .add_systems(First, fetch_physics_state)
@@ -90,6 +117,9 @@ fn main() {
             player_input,
             check_water_zones,
             trampoline_bounce,
+            load_rope_bridge,
+            release_trap_door,
+            diagnostics,
             update_kinematic_planks,
             camera_follow,
             update_ui,
@@ -127,6 +157,16 @@ struct StaticPlatform {
 
 /// Upward impulse a trampoline adds on top of the normal bounce.
 const TRAMPOLINE_IMPULSE: f64 = 22.0;
+
+/// Trap door dimensions, shared by the collider, the visual, and the sync system
+/// so they cannot drift apart.
+///
+/// `DOOR_LENGTH` must not exceed the hinge height above the ground, or a 90
+/// degree swing drives the far edge through the floor collider.
+const DOOR_LENGTH: f64 = 2.0;
+const DOOR_THICKNESS: f64 = 0.2;
+/// Top face of platform 2 (centre y = 2.0, height 0.5).
+const PLATFORM2_TOP: f64 = 2.25;
 
 #[derive(Component)]
 struct Trampoline {
@@ -257,8 +297,9 @@ fn setup(
 
     let player_id = physics.add_object(player_obj).expect("Failed to add player object");
 
-    // Add continuous drag to the player (air resistance)
-    let _ = physics.add_drag(player_id, 0.3);
+    // No explicit drag force: the world now derives air resistance from
+    // air density, the ball's frontal area and its mass. Adding this on top
+    // would damp the ball twice.
 
     // === Player Ball Visual ===
     let ball_mesh = meshes.add(Sphere::new(BALL_RADIUS as f32));
@@ -484,7 +525,7 @@ fn setup(
     for i in 0..=num_segments {
         let t = i as f64 / num_segments as f64;
         let x = bridge_start_x + (bridge_end_x - bridge_start_x) * t;
-        let y = bridge_y - (t * (1.0 - t) * 1.5);
+        let y = bridge_y - (t * (1.0 - t) * BRIDGE_SAG);
         let z = -bridge_width / 2.0;
         left_rope_points.push((x, y, z));
     }
@@ -494,14 +535,48 @@ fn setup(
     for i in 0..=num_segments {
         let t = i as f64 / num_segments as f64;
         let x = bridge_start_x + (bridge_end_x - bridge_start_x) * t;
-        let y = bridge_y - (t * (1.0 - t) * 1.5);
+        let y = bridge_y - (t * (1.0 - t) * BRIDGE_SAG);
         let z = bridge_width / 2.0;
         right_rope_points.push((x, y, z));
     }
 
     // Create rope chains
-    let mut left_rope = RopeChain3D::from_points(&left_rope_points, 0.3, true).unwrap();
-    let mut right_rope = RopeChain3D::from_points(&right_rope_points, 0.3, true).unwrap();
+    // Real rope stretches a little under load; XPBD models that with compliance,
+    // the inverse of stiffness in m/N. It defaults to 0.0 - a perfectly
+    // inextensible cable - so a bridge built without it can only ever deflect by
+    // taking up slack, never by giving.
+    //
+    // 1e-5 m/N means roughly a centimetre of stretch per kN across a segment:
+    // firm, like a static line rather than a bungee, but enough that standing on
+    // the bridge visibly loads it even where the rope is already taut.
+    // Particle mass matters more than it looks. At 0.3 kg the two ropes weighed
+    // 10.2 kg - 1.13 kg/m, heavier than mooring line - so the 2 kg ball was only
+    // a fifth of the load they were already carrying and moved the middle by
+    // about a centimetre. Measured. 0.08 kg puts the pair at 2.7 kg, so the ball
+    // is comparable to the bridge and standing on it actually shows.
+    let mut left_rope = RopeChain3D::from_points(&left_rope_points, 0.08, true)
+        .unwrap()
+        .with_compliance(1e-5);
+    let mut right_rope = RopeChain3D::from_points(&right_rope_points, 0.08, true)
+        .unwrap()
+        .with_compliance(1e-5);
+
+    // Give the rope real slack.
+    //
+    // `from_points` derives each segment's rest length from the points you hand
+    // it, so a rope built in a sagging shape is *taut in that shape* - its rest
+    // length already equals the curve it is sitting on. Deepening the initial
+    // curve therefore just hangs it lower while leaving it every bit as rigid,
+    // which is why the bridge never deflected: measured over 30 s, the middle
+    // particle moved 0.033 m at startup and then not at all.
+    //
+    // Slack has to come from the rest lengths exceeding the actual spacing.
+    for len in left_rope.segment_lengths.iter_mut() {
+        *len *= BRIDGE_SLACK;
+    }
+    for len in right_rope.segment_lengths.iter_mut() {
+        *len *= BRIDGE_SLACK;
+    }
 
     // Anchor both ends
     left_rope.particles[0].mass = f64::INFINITY;
@@ -565,7 +640,13 @@ fn setup(
 
         // Create physics object for this plank (kinematic - infinite mass, externally positioned)
         let plank_obj = PhysicalObject3D::new(
-            f64::INFINITY,  // Kinematic object
+            // Infinite mass. A finite-mass plank falls under gravity between
+            // kinematic updates and is then teleported back onto the rope, and
+            // that snap-back yields an enormous derived velocity - the bridge
+            // shook itself to y = 19 and y = -10 with the ball parked on the
+            // ground, untouched. A body whose position is dictated externally
+            // must not also be integrated.
+            f64::INFINITY,
             (0.0, 0.0, 0.0),
             (mid_x, mid_y, mid_z),
             Shape3D::Cuboid(plank_width, plank_height, plank_depth),
@@ -575,6 +656,13 @@ fn setup(
             PhysicsConstants::default(),
         );
         let plank_id = physics.add_object(plank_obj).unwrap();
+
+        // NOTE: deliberately *not* attached to the ropes.
+        //
+        // `attach_object_to_constraint` feeds contact impulses back into the
+        // rope, which is what a reactive bridge needs - but combined with a
+        // kinematically-driven proxy it is an energy source, and every variant
+        // tried so far diverged. See the comment on `load_rope_bridge`.
 
         commands.spawn((
             Mesh3d(plank_mesh.clone()),
@@ -617,8 +705,19 @@ fn setup(
     }
 
     // === Trap Door (Hinge) ===
-    let hinge_pos = (20.0, 0.5, 0.0);
-    let door_offset = 2.0_f64;
+    //
+    // Hinged on the +z lip of platform 2 (centre (15, 2, 0), 6x0.5x6, so its top
+    // face is y = 2.25 and its edge is z = 3), not floating in mid-air.
+    //
+    // The door length is what makes this work. A hinge at height h can only
+    // swing a door of length L through 90 degrees if L <= h, or the far edge
+    // sweeps below y = 0 and through the ground collider - and a static body
+    // intersecting another static body is exactly the "bounces off nothing"
+    // artefact. The previous version hinged a 4-long door at y = 0.5, so it
+    // swung to y = -3.5, more than three units inside the floor.
+    // Sit the door on the platform surface rather than half-buried in it.
+    let hinge_pos = (15.0, PLATFORM2_TOP + DOOR_THICKNESS / 2.0, 3.0);
+    let door_offset = DOOR_LENGTH / 2.0;
 
     let frame = ObjectIn3D::new(
         f64::INFINITY, 0.0, 0.0, 0.0,
@@ -636,7 +735,12 @@ fn setup(
         (hinge_pos.0 as f64, hinge_pos.1 as f64, hinge_pos.2 as f64),
         (1.0, 0.0, 0.0),
     ).unwrap()
-        .with_limits(-0.1, std::f64::consts::FRAC_PI_2)
+        // Latched shut. A hinge with a wide range and nothing holding it just
+        // falls to its limit in about a quarter of a second and stays there -
+        // measured - so the "trap door" was already hanging open before the
+        // first frame you ever saw, and never moved again. `release_trap_door`
+        // widens this once the ball is standing on it.
+        .with_limits(0.0, 0.0)
         .with_material(&steel)
         .with_angular_damping(0.05);
 
@@ -649,20 +753,28 @@ fn setup(
         f64::INFINITY,  // Kinematic object
         (0.0, 0.0, 0.0),
         (hinge_pos.0 as f64, hinge_pos.1 as f64, hinge_pos.2 as f64 + door_offset),
-        Shape3D::Cuboid(4.0, 0.2, 4.0),  // Same size as visual
-        None,
+        Shape3D::Cuboid(4.0, DOOR_THICKNESS, DOOR_LENGTH),
+        // Wood, not None. An unspecified material takes the 0.5 default
+        // restitution, and against a 0.95 rubber ball that is a springboard -
+        // the ball bounced on the door instead of resting on it long enough for
+        // the hinge to give way.
+        Some(Material::wood()),
         (0.0, 0.0, 0.0),
         (0.0, 0.0, 0.0),
         PhysicsConstants::default(),
     );
     let door_object_id = physics.add_object(door_collision).unwrap();
 
-    // Door visual
-    let door_mesh = meshes.add(Cuboid::new(4.0, 0.2, 4.0));
+    // Door visual, built from the same numbers as the collider above.
+    let door_mesh = meshes.add(Cuboid::new(4.0, DOOR_THICKNESS as f32, DOOR_LENGTH as f32));
     commands.spawn((
         Mesh3d(door_mesh),
         MeshMaterial3d(door_material),
-        Transform::from_xyz(hinge_pos.0, hinge_pos.1, hinge_pos.2 + 2.0),
+        Transform::from_xyz(
+            hinge_pos.0 as f32,
+            hinge_pos.1 as f32,
+            (hinge_pos.2 + door_offset) as f32,
+        ),
         HingeDoorVisual { hinge_index: 0, door_object_id },
     ));
 
@@ -670,7 +782,7 @@ fn setup(
     commands.spawn((
         Mesh3d(post_mesh.clone()),
         MeshMaterial3d(anchor_material.clone()),
-        Transform::from_xyz(hinge_pos.0, hinge_pos.1, hinge_pos.2)
+        Transform::from_xyz(hinge_pos.0 as f32, hinge_pos.1 as f32, hinge_pos.2 as f32)
             .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
     ));
 
@@ -963,15 +1075,207 @@ fn sync_rope_visuals(
 }
 
 /// Update kinematic plank physics positions based on rope positions
+// ===================== TEMPORARY DIAGNOSTIC HARNESS =====================
+// Drives the ball across the bridge and logs the state of everything the
+// player reported as broken. Remove once the behaviour is confirmed.
+
+#[derive(Resource, Default)]
+struct Diag {
+    t: f32,
+    next_log: f32,
+}
+
+fn diagnostics(
+    game_state: Option<Res<GameState>>,
+    cached: Res<CachedPhysicsState>,
+    time: Res<Time>,
+    mut d: ResMut<Diag>,
+) {
+    let Some(gs) = game_state else { return };
+    let Some(pid) = gs.player_id else { return };
+    let Some(ball) = cached.state.get_object(pid) else { return };
+
+    d.t += time.delta_secs();
+
+    if d.t < d.next_log {
+        return;
+    }
+    d.next_log = d.t + 0.5;
+
+    let nan = !ball.position.0.is_finite()
+        || !ball.position.1.is_finite()
+        || !ball.position.2.is_finite();
+
+    let rope_mid = gs
+        .rope_constraint_ids
+        .first()
+        .and_then(|id| cached.state.get_rope_chain_particles(*id))
+        .map(|p| p[p.len() / 2].1)
+        .unwrap_or(f64::NAN);
+
+    let hinge_angle = gs
+        .hinge_constraint_ids
+        .first()
+        .and_then(|id| cached.state.get_hinge_state(*id))
+        .map(|(a, _)| a)
+        .unwrap_or(f64::NAN);
+
+    info!(
+        "DIAG t={:.1} ball=({:.2},{:.2},{:.2}) v=({:.2},{:.2},{:.2}) contacts={} \
+         rope_mid_y={:.3} hinge={:.3} NAN={}",
+        d.t,
+        ball.position.0, ball.position.1, ball.position.2,
+        ball.velocity.0, ball.velocity.1, ball.velocity.2,
+        ball.contacts.len(),
+        rope_mid,
+        hinge_angle,
+        nan,
+    );
+}
+
+/// Releases the trap door once the ball is standing on it, and re-latches it
+/// after the ball leaves.
+///
+/// The hinge is built latched (`limits = 0..0`) because an unlatched one has no
+/// closed state at all: gravity swings it to its limit in a fraction of a second
+/// and it stays there for the rest of the run. Driving the limits from contact
+/// gives the door the behaviour its name implies - shut until stood on, then it
+/// gives way.
+fn release_trap_door(
+    game_state: Res<GameState>,
+    cached: Res<CachedPhysicsState>,
+    doors: Query<&HingeDoorVisual>,
+) {
+    let Some(player_id) = game_state.player_id else { return };
+    let Some(ball) = cached.state.get_object(player_id) else { return };
+
+    for door in &doors {
+        let Some(&hinge_id) = game_state.hinge_constraint_ids.get(door.hinge_index) else {
+            continue;
+        };
+        if ball.contacts.contains(&door.door_object_id) {
+            // Let go. Gravity plus the ball's weight swings it open.
+            let _ = game_state.physics.set_hinge_limits(
+                hinge_id,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+
+            // And hand the hinge the impulse the impact should have delivered.
+            // The door is an infinite-mass kinematic body, so a collision with
+            // it cannot move the hinge on its own - without this the door swings
+            // on its own schedule no matter how hard you hit it, and cannot be
+            // knocked at all from underneath.
+            //
+            // Torque is force times the moment arm from the hinge; half the door
+            // length is a fair average contact point. Sign follows the ball's
+            // vertical travel, so hitting it from below pushes the door up.
+            const IMPACT_TIME: f64 = 0.08;
+            let arm = DOOR_LENGTH / 2.0;
+            let weight = BALL_MASS * GRAVITY_MAGNITUDE;
+            let impact = BALL_MASS * ball.velocity.1.abs() / IMPACT_TIME;
+
+            // Opening is +angle, and gravity opens it, so a downward hit adds
+            // and an upward hit subtracts.
+            let direction = if ball.velocity.1 <= 0.0 { 1.0 } else { -1.0 };
+            let angular_impulse = direction * (weight + impact) * arm * IMPACT_TIME;
+
+            let _ = game_state.physics.apply_hinge_impulse(hinge_id, angular_impulse);
+        } else if let Some((angle, _)) = cached.state.get_hinge_state(hinge_id) {
+            // Only re-latch once it has swung most of the way back, or the door
+            // would freeze halfway the instant the ball rolls off.
+            if angle < 0.05 {
+                let _ = game_state.physics.set_hinge_limits(hinge_id, 0.0, 0.0);
+            }
+        }
+    }
+}
+
+/// Transfers the player's weight into the rope when standing on a plank.
+///
+/// The planks are infinite-mass kinematic bodies driven *from* the rope, so
+/// colliding with one applies no load back to it. Without this the bridge
+/// simulates only its own weight: it settles into a fixed catenary and stays
+/// there regardless of what is on it, which is indistinguishable from a static
+/// row of platforms.
+///
+/// The load is split between the left and right ropes and shared across the two
+/// particles bounding the plank, so it sags where the ball actually is.
+fn load_rope_bridge(
+    game_state: Res<GameState>,
+    cached: Res<CachedPhysicsState>,
+    planks: Query<&BridgePlank>,
+) {
+    if game_state.rope_constraint_ids.len() < 2 {
+        return;
+    }
+    let Some(player_id) = game_state.player_id else { return };
+    let Some(ball) = cached.state.get_object(player_id) else { return };
+    if ball.contacts.is_empty() {
+        return;
+    }
+
+    // Which plank, if any, is the ball resting on?
+    let Some(plank) = planks.iter().find(|p| ball.contacts.contains(&p.object_id)) else {
+        return;
+    };
+
+    // Which side of the bridge is the ball on, and how fast is it closing?
+    //
+    // Pushing purely downward only models standing on top, so hitting the
+    // bridge from underneath did nothing at all. The contact should transfer
+    // momentum whichever way the ball is travelling: the rope gets shoved away
+    // from the ball, and harder the faster the ball is closing on it.
+    let plank_y = cached
+        .state
+        .get_object(plank.object_id)
+        .map(|p| p.position.1)
+        .unwrap_or(ball.position.1);
+
+    // +1 when the ball is beneath the bridge (push it up), -1 when on top.
+    let side = if ball.position.1 < plank_y { 1.0 } else { -1.0 };
+
+    // Closing speed along the push direction; zero when moving away or rolling
+    // along the surface, so travelling across the bridge does not shove it.
+    let closing = (ball.velocity.1 * side).max(0.0);
+
+    // Weight only bears on the rope when the ball is resting on top of it.
+    let weight = if side < 0.0 { GRAVITY_MAGNITUDE } else { 0.0 };
+
+    // Momentum spread over a plausible contact time rather than one tick, so
+    // the impulse does not depend on frame rate.
+    const IMPACT_TIME: f64 = 0.08;
+    let impact = BALL_MASS * (weight + closing / IMPACT_TIME);
+    let per_rope = side * impact / 2.0;
+
+    let particles = game_state.rope_particle_counts.first().copied().unwrap_or(0);
+    for rope_id in game_state.rope_constraint_ids.iter().take(2) {
+        for idx in [plank.particle_index, plank.particle_index + 1] {
+            // Skip the anchored end particles; pushing on an infinite mass is
+            // wasted work, not a bug.
+            if idx == 0 || idx + 1 >= particles {
+                continue;
+            }
+            let _ = game_state.physics.apply_force_to_constraint_particle(
+                *rope_id,
+                idx,
+                (0.0, per_rope / 2.0, 0.0),
+            );
+        }
+    }
+}
+
 fn update_kinematic_planks(
     game_state: Res<GameState>,
     cached: Res<CachedPhysicsState>,
+    time: Res<Time>,
     query: Query<&BridgePlank>,
 ) {
     if game_state.rope_constraint_ids.len() < 2 {
         return;
     }
 
+    let frame_dt = time.delta_secs_f64().max(1e-6);
     let left_rope_id = game_state.rope_constraint_ids[0];
     let right_rope_id = game_state.rope_constraint_ids[1];
 
@@ -988,11 +1292,16 @@ fn update_kinematic_planks(
                 let mid_y = (cl[i].1 + cr[i].1) / 2.0;
                 let mid_z = (cl[i].2 + cr[i].2) / 2.0;
 
-                // Update kinematic physics object position
+                // Real frame delta, not the physics timestep. This system runs
+                // at the render rate, so passing DT (1/240) scaled the derived
+                // plank velocity by the ratio between the two - and a plank is
+                // infinite-mass, so that velocity enters the contact response
+                // while nothing can push back on it. Overstating it injects
+                // energy into whatever lands on the bridge.
                 let _ = game_state.physics.set_position_kinematic(
                     plank.object_id,
                     (mid_x, mid_y, mid_z),
-                    DT,
+                    frame_dt,
                 );
             }
         }
@@ -1062,7 +1371,7 @@ fn sync_hinge_visuals(
                 };
 
                 let rotation = Quat::from_rotation_x(angle as f32);
-                let door_offset = Vec3::new(0.0, 0.0, 2.0);
+                let door_offset = Vec3::new(0.0, 0.0, DOOR_LENGTH as f32 / 2.0);
                 let rotated_offset = rotation * door_offset;
 
                 let new_pos = anchor + rotated_offset;
