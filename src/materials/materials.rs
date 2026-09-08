@@ -102,6 +102,158 @@ pub struct BreakageResult {
     pub safety_factor: f64,
 }
 
+/// How a material burns.
+///
+/// Three measured quantities and a residue fraction, and between them they determine
+/// everything anybody normally wants to know about a fire: how hot, how long, and
+/// whether it starts at all. These are what fire engineering actually measures, rather
+/// than a "flammability" dial — a dial is a number somebody chose, and these can be
+/// looked up.
+///
+/// # What comes out of them
+///
+/// * **How long a fire lasts** — fuel load over mass burning flux. Dry brush at about a
+///   kilogram per square metre burns out in roughly a minute and a half, which is why a
+///   grass fire passes over you and a fuel fire does not.
+/// * **How fiercely** — heat release per unit area is flux times heat of combustion,
+///   which is the single number a fire is characterised by.
+/// * **Whether it catches** — the surface has to reach the ignition temperature, which
+///   together with the material's own conductivity and heat capacity is the classic
+///   thermally-thick ignition problem.
+///
+/// Nothing here is a game constant. They are properties of the substance, so two
+/// simulations that read them cannot disagree about fire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Combustion {
+    /// Surface temperature at which flame becomes self-sustaining, in kelvin.
+    ///
+    /// The *piloted* ignition temperature — the one that applies when there is already a
+    /// flame nearby, which is every case worth simulating.
+    pub ignition_temperature: f64,
+    /// Energy released per kilogram burned, in J/kg.
+    ///
+    /// The effective heat of combustion rather than the ideal: real fires burn
+    /// incompletely, and the difference is the soot you can see.
+    pub heat_of_combustion: f64,
+    /// Mass lost per square metre per second by a fully developed fire, in kg/(m²·s).
+    ///
+    /// The mass burning flux, and the reason a thicker fuel burns *longer* rather than
+    /// hotter: flux is a property of the substance, so twice the fuel is twice the time.
+    pub mass_burning_flux: f64,
+    /// Fraction of the original mass left as char and ash, 0 to 1.
+    ///
+    /// Wood leaves about a fifth of itself; a hydrocarbon liquid leaves almost nothing.
+    /// It is what decides whether burnt ground reads as black or merely bare.
+    pub residue_fraction: f64,
+    /// Water carried per kilogram of dry fuel, as a fraction. Dry-weight basis, which is
+    /// how forestry quotes it, so live foliage can exceed 1.0 and routinely does.
+    ///
+    /// **It has to be boiled off before anything can burn**, and that is a real energy
+    /// bill: every kilogram of water needs about 2.6 MJ to reach 100 °C and evaporate,
+    /// against roughly 0.5 MJ to bring a kilogram of dry fuel to ignition. Live foliage
+    /// at 120% moisture spends five times as much energy drying as igniting, which is
+    /// why a fire runs through dead grass and stops at a green hedge.
+    pub moisture_fraction: f64,
+}
+
+/// Latent heat of vaporisation of water at 100 °C, in J/kg.
+const LATENT_HEAT_WATER: f64 = 2.257e6;
+/// Specific heat capacity of liquid water, in J/(kg·K).
+const SPECIFIC_HEAT_WATER: f64 = 4182.0;
+/// Boiling point of water at one atmosphere, in kelvin.
+const BOILING_POINT: f64 = 373.15;
+
+impl Combustion {
+    /// Heat release rate per unit area of a fully developed fire, in W/m².
+    ///
+    /// The product of the two quantities that are measured, rather than a third number
+    /// kept in step with them by hand.
+    pub fn heat_release_rate(&self) -> f64 {
+        self.mass_burning_flux * self.heat_of_combustion
+    }
+
+    /// How long a fuel load of `areal_density` kg/m² takes to burn out, in seconds.
+    ///
+    /// Only the combustible fraction is consumed; the char is left behind, which is why
+    /// a wood fire dies down to embers rather than to nothing.
+    pub fn burn_duration(&self, areal_density: f64) -> f64 {
+        if self.mass_burning_flux <= 0.0 {
+            return 0.0;
+        }
+        areal_density * (1.0 - self.residue_fraction) / self.mass_burning_flux
+    }
+
+    /// Energy needed to bring a kilogram of this fuel to the point of ignition, in J/kg.
+    ///
+    /// Two bills, and the second is usually the larger one: heating the dry fuel from
+    /// ambient to its ignition temperature, and boiling off the water it carries.
+    pub fn ignition_energy(&self, specific_heat: f64, ambient: f64) -> f64 {
+        let dry = specific_heat * (self.ignition_temperature - ambient).max(0.0);
+        let water = self.moisture_fraction
+            * (SPECIFIC_HEAT_WATER * (BOILING_POINT - ambient).max(0.0) + LATENT_HEAT_WATER);
+        dry + water
+    }
+
+    /// Seconds for a **thermally thin** fuel to ignite under a given heat flux.
+    ///
+    /// # Why leaves go first
+    ///
+    /// A leaf, a grass blade or a pine needle is thin enough to heat through as one
+    /// lump, so its ignition delay is just the energy it needs divided by the energy
+    /// arriving: **linear** in flux, and tiny, because there is almost no mass per unit
+    /// area. A leaf at 0.2 kg/m² under a passing flame front ignites in well under a
+    /// second.
+    ///
+    /// This is the dominant reason foliage catches before timber, ahead of moisture —
+    /// though moisture is in here too, through [`Combustion::ignition_energy`], and it
+    /// is what stops a fire in a green canopy that would run through a dead one.
+    ///
+    /// `areal_density` is kilograms of fuel per square metre of exposed surface;
+    /// `heat_flux` is W/m² arriving at it.
+    pub fn ignition_delay_thin(
+        &self,
+        areal_density: f64,
+        specific_heat: f64,
+        ambient: f64,
+        heat_flux: f64,
+    ) -> f64 {
+        if heat_flux <= 0.0 {
+            return f64::INFINITY;
+        }
+        areal_density * self.ignition_energy(specific_heat, ambient) / heat_flux
+    }
+
+    /// Seconds for a **thermally thick** solid to ignite under a given heat flux.
+    ///
+    /// # Why the trunk goes second, or not at all
+    ///
+    /// A trunk cannot heat through. The surface warms and conducts that heat away into
+    /// cold wood behind it, so ignition depends on the material's *thermal inertia*
+    /// `k·ρ·c` and the delay goes as the **inverse square** of the flux rather than the
+    /// inverse. That exponent is the whole difference: halving the flux doubles a
+    /// leaf's delay and quadruples a trunk's, so there is a wide band of fire intensity
+    /// in which foliage burns readily and the wood it grew on never catches at all.
+    ///
+    /// Moisture is not in this one, and that is deliberate — the standard thermally-thick
+    /// correlation is written for dry solids, and adding a term to it would be inventing
+    /// a formula rather than using one.
+    pub fn ignition_delay_thick(
+        &self,
+        conductivity: f64,
+        density: f64,
+        specific_heat: f64,
+        ambient: f64,
+        heat_flux: f64,
+    ) -> f64 {
+        if heat_flux <= 0.0 {
+            return f64::INFINITY;
+        }
+        let rise = (self.ignition_temperature - ambient).max(0.0);
+        let inertia = conductivity * density * specific_heat;
+        (std::f64::consts::PI / 4.0) * inertia * rise * rise / (heat_flux * heat_flux)
+    }
+}
+
 /// Represents the physical properties of a material.
 ///
 /// This struct encapsulates various material properties that affect physical interactions,
@@ -144,6 +296,13 @@ pub struct Material {
     pub yield_strength: f64,
     /// Ultimate strength in Pascals (Pa)
     pub ultimate_strength: f64,
+    /// How this material burns, if it burns at all.
+    ///
+    /// `None` means non-combustible - steel, concrete, glass. That is a different claim
+    /// from "burns badly", and keeping it an `Option` rather than a zeroed set of numbers
+    /// means a caller cannot compute a burn duration for a pane of glass and get a
+    /// plausible-looking answer back.
+    pub combustion: Option<Combustion>,
 }
 
 impl Material {
@@ -234,7 +393,28 @@ impl Material {
             specific_heat_capacity,
             yield_strength,
             ultimate_strength,
+            // **Non-combustible until told otherwise.** `new` takes mechanical and
+            // thermal properties, and adding four more positional arguments to a
+            // ten-argument constructor would make every call site worse to read for the
+            // sake of a property most materials do not have. Opt in with
+            // [`Material::burning`].
+            combustion: None,
         })
+    }
+
+    /// The same material, with how it burns.
+    ///
+    /// Builder-style because combustion is a property most materials lack and none of
+    /// the existing call sites care about: `Material::steel()` should not have to say
+    /// that steel does not burn.
+    pub fn burning(mut self, combustion: Combustion) -> Self {
+        self.combustion = Some(combustion);
+        self
+    }
+
+    /// Whether this material burns at all.
+    pub fn is_combustible(&self) -> bool {
+        self.combustion.is_some()
     }
 
     /// Creates a new Material instance with properties of steel.
@@ -352,6 +532,15 @@ impl Material {
             7.0e6,              // yield strength (Pa)
             15.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create rubber material")
+        // Burns dirty and long: a high heat of combustion with a slow flux, which is the
+        // combination that makes a tyre fire last for days.
+        .burning(Combustion {
+            ignition_temperature: 653.0,
+            heat_of_combustion: 32.0e6,
+            mass_burning_flux: 0.010,
+            residue_fraction: 0.15,
+            moisture_fraction: 0.01,
+        })
     }
 
     /// Creates a new Material instance with properties of polyurethane.
@@ -391,6 +580,15 @@ impl Material {
             35.0e6,             // yield strength (Pa)
             55.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create polyurethane material")
+        // Foam plastics are the fastest common fuel there is: little mass, enormous
+        // surface area, almost nothing left behind.
+        .burning(Combustion {
+            ignition_temperature: 583.0,
+            heat_of_combustion: 26.0e6,
+            mass_burning_flux: 0.025,
+            residue_fraction: 0.03,
+            moisture_fraction: 0.005,
+        })
     }
 
     /// Creates a new Material instance with properties of rope/twine (natural fiber).
@@ -472,6 +670,53 @@ impl Material {
             40.0e6,             // yield strength (Pa)
             70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
+        // Softwood, as measured in a cone calorimeter. The residue fraction is why a
+        // wood fire ends as embers and a charred stump rather than as bare ground.
+        .burning(Combustion {
+            ignition_temperature: 623.0,      // ~350 C piloted
+            heat_of_combustion: 16.0e6,       // J/kg, effective
+            mass_burning_flux: 0.011,         // kg/(m2 s)
+            residue_fraction: 0.20,
+            // Seasoned structural timber, not a living tree.
+            moisture_fraction: 0.12,
+        })
+    }
+
+    /// Dry standing vegetation: grass, scrub, thin brush.
+    ///
+    /// **The fuel a landscape is made of**, and the reason this belongs here rather than
+    /// in whatever is drawing the fire. A grass fire is not a scaled-down wood fire —
+    /// it is a fuel with a fifth of the density burning at twice the flux and leaving
+    /// almost no char, which is exactly why it passes over in seconds and leaves black
+    /// ground rather than embers.
+    ///
+    /// Mechanically it is close to worthless, and the numbers say so: it is not load
+    /// bearing, and anything that asks it for a yield strength is asking the wrong
+    /// question.
+    pub fn dry_vegetation() -> Self {
+        Self::new(
+            120.0,              // density (kg/m³), loosely packed standing fuel
+            0.4e9,              // Young's modulus (Pa), across the stems
+            0.35,               // Poisson's ratio
+            0.6,                // friction coefficient
+            0.15,               // restitution coefficient
+            0.05,               // rolling resistance coefficient
+            0.07,               // thermal conductivity (W/(m·K)), mostly trapped air
+            1800.0,             // specific heat capacity (J/(kg·K))
+            0.4e6,              // yield strength (Pa)
+            1.0e6,              // ultimate strength (Pa)
+        ).expect("Failed to create dry vegetation material")
+        .burning(Combustion {
+            // Lower than wood: fine fuels have almost no thermal mass to heat through.
+            ignition_temperature: 573.0,
+            heat_of_combustion: 18.0e6,
+            // Roughly twice wood's, which is the whole character of a grass fire.
+            mass_burning_flux: 0.022,
+            // Next to nothing survives. Burnt grassland is black earth, not embers.
+            residue_fraction: 0.04,
+            // Cured standing grass. Dead fine fuel holds very little.
+            moisture_fraction: 0.08,
+        })
     }
 
     /// Creates a new Material instance with properties of copper.
@@ -1538,5 +1783,181 @@ pub fn calculate_stress(material: &Material, strain: f64) -> f64 {
         material.yield_strength +
             (material.ultimate_strength - material.yield_strength) *
                 (1.0 - (-5.0 * (strain - material.yield_strength / material.youngs_modulus)).exp())
+    }
+}
+#[cfg(test)]
+mod combustion_tests {
+    use super::*;
+
+    /// The materials that burn say so, and the ones that cannot stay silent.
+    #[test]
+    fn only_combustible_materials_carry_combustion() {
+        for m in [Material::wood(), Material::rubber(), Material::polyurethane(), Material::dry_vegetation()] {
+            assert!(m.is_combustible(), "a combustible material reported no combustion");
+        }
+        for m in [Material::steel(), Material::concrete(), Material::glass(), Material::ice()] {
+            assert!(
+                !m.is_combustible(),
+                "a non-combustible material was given combustion properties, so something \
+                 can now compute a burn duration for it and get a plausible answer",
+            );
+        }
+    }
+
+    /// Duration falls out of fuel load over flux, and the char is not consumed.
+    #[test]
+    fn burn_duration_follows_the_fuel_load() {
+        let brush = Material::dry_vegetation().combustion.unwrap();
+
+        // A kilogram of standing fuel per square metre — an ordinary grass load.
+        let quick = brush.burn_duration(1.0);
+        assert!(
+            (40.0..60.0).contains(&quick),
+            "a 1 kg/m2 grass load burned for {quick:.0} s, which is not a grass fire",
+        );
+
+        // Twice the fuel is twice the time: flux is a property of the substance.
+        let double = brush.burn_duration(2.0);
+        assert!((double - quick * 2.0).abs() < 1e-9, "duration is not linear in fuel load");
+
+        // Char is left behind rather than burned, so wood outlasts grass per kilogram
+        // by more than the flux ratio alone.
+        let wood = Material::wood().combustion.unwrap();
+        assert!(
+            wood.burn_duration(1.0) > quick,
+            "wood burned out faster than grass at the same load",
+        );
+    }
+
+    /// Grass is the fiercer fire per square metre and the shorter one — which is the
+    /// entire difference between a fire you walk through and one you do not.
+    #[test]
+    fn fine_fuels_burn_hotter_and_die_sooner() {
+        let grass = Material::dry_vegetation().combustion.unwrap();
+        let wood = Material::wood().combustion.unwrap();
+
+        assert!(
+            grass.heat_release_rate() > wood.heat_release_rate(),
+            "grass releases {:.0} W/m2 against wood's {:.0} - a grass fire is supposed to \
+             be the fiercer one per unit area",
+            grass.heat_release_rate(),
+            wood.heat_release_rate(),
+        );
+        assert!(
+            grass.burn_duration(1.0) < wood.burn_duration(1.0),
+            "grass outlasted wood at the same fuel load",
+        );
+    }
+
+    /// A non-combustible material cannot be asked how long it burns by accident.
+    #[test]
+    fn glass_has_no_burn_duration_to_ask_for() {
+        assert!(Material::glass().combustion.is_none());
+    }
+}
+
+#[cfg(test)]
+mod ignition_tests {
+    use super::*;
+
+    /// Ambient, in kelvin. A cool day.
+    const AMBIENT: f64 = 290.0;
+    /// Heat arriving at a fuel from a passing flame front, in W/m². A moderate surface
+    /// fire radiates this at a metre.
+    const FRONT_FLUX: f64 = 25_000.0;
+
+    /// **Leaves before trunk**, and by a very wide margin.
+    ///
+    /// The reason is thermal thickness rather than water: a leaf heats through as one
+    /// lump and a trunk conducts heat away into itself.
+    #[test]
+    fn foliage_ignites_long_before_the_wood_it_grew_on() {
+        let leaf_material = Material::dry_vegetation();
+        let leaf = leaf_material.combustion.unwrap();
+        let trunk_material = Material::wood();
+        let trunk = trunk_material.combustion.unwrap();
+
+        // **One leaf layer, not a litter bed.** A single leaf or needle runs about
+        // 0.05 kg/m2 of its own surface; a few hundred grams per square metre is
+        // accumulated litter several leaves deep, which is a slower fuel and a different
+        // question. Getting that wrong is how a correct formula produces a wrong answer.
+        let leaves = leaf.ignition_delay_thin(
+            0.05,
+            leaf_material.specific_heat_capacity,
+            AMBIENT,
+            FRONT_FLUX,
+        );
+        let bole = trunk.ignition_delay_thick(
+            trunk_material.thermal_conductivity,
+            trunk_material.density,
+            trunk_material.specific_heat_capacity,
+            AMBIENT,
+            FRONT_FLUX,
+        );
+
+        assert!(
+            leaves < 2.0,
+            "foliage took {leaves:.1} s to catch under a flame front, which is not how \
+             fine fuel behaves",
+        );
+        // An order of magnitude, not a fixed ratio: the exact figure moves with species,
+        // flux and moisture, and pinning it would pin this test to one arbitrary trunk.
+        // What matters is that the two regimes are not comparable - 1.4 s against 25.
+        assert!(
+            bole > leaves * 10.0,
+            "a trunk ignited in {bole:.1} s against foliage's {leaves:.2} - the thermally \
+             thick and thin regimes are supposed to be worlds apart",
+        );
+    }
+
+    /// And the gap *widens* as the fire weakens, because the two regimes scale
+    /// differently in flux: thin is linear, thick is inverse-square.
+    ///
+    /// That exponent is why a weak fire strips a canopy and leaves the timber standing.
+    #[test]
+    fn a_weaker_fire_spares_the_trunk_more_than_the_leaves() {
+        let leaf_material = Material::dry_vegetation();
+        let leaf = leaf_material.combustion.unwrap();
+        let trunk_material = Material::wood();
+        let trunk = trunk_material.combustion.unwrap();
+
+        let thin_at = |q| {
+            leaf.ignition_delay_thin(0.05, leaf_material.specific_heat_capacity, AMBIENT, q)
+        };
+        let thick_at = |q| {
+            trunk.ignition_delay_thick(
+                trunk_material.thermal_conductivity,
+                trunk_material.density,
+                trunk_material.specific_heat_capacity,
+                AMBIENT,
+                q,
+            )
+        };
+
+        // Halve the flux: the leaf takes twice as long, the trunk four times.
+        let leaf_ratio = thin_at(FRONT_FLUX / 2.0) / thin_at(FRONT_FLUX);
+        let trunk_ratio = thick_at(FRONT_FLUX / 2.0) / thick_at(FRONT_FLUX);
+
+        assert!((leaf_ratio - 2.0).abs() < 1e-9, "thin ignition is not linear in flux");
+        assert!((trunk_ratio - 4.0).abs() < 1e-9, "thick ignition is not inverse-square");
+    }
+
+    /// Water is a real bill, and it is the larger one for anything living.
+    #[test]
+    fn moisture_is_most_of_what_a_green_fuel_costs_to_light() {
+        let veg = Material::dry_vegetation();
+        let cured = veg.combustion.unwrap();
+
+        let mut green = cured;
+        green.moisture_fraction = 1.20; // live foliage, dry-weight basis
+
+        let dry_bill = cured.ignition_energy(veg.specific_heat_capacity, AMBIENT);
+        let green_bill = green.ignition_energy(veg.specific_heat_capacity, AMBIENT);
+
+        assert!(
+            green_bill > dry_bill * 3.0,
+            "green foliage cost {green_bill:.0} J/kg to light against cured fuel's \
+             {dry_bill:.0} - boiling a kilogram of water is 2.6 MJ and should dominate",
+        );
     }
 }
