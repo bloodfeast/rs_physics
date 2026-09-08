@@ -101,11 +101,171 @@ pub fn wavelength(frequency_hz: f64, speed_of_sound: f64) -> f64 {
     speed_of_sound / frequency_hz
 }
 
+/// Excess attenuation from propagating *through* standing vegetation, in dB per metre.
+///
+/// # The term that makes a treeline audible
+///
+/// Air absorption is small at the scale of a field — a few dB over a hundred metres —
+/// and a barrier only applies when something is squarely in the way. Neither explains the
+/// most familiar outdoor effect there is: a sound that has come through woodland is
+/// duller than the same sound across open ground at the same distance.
+///
+/// That is scattering off leaves and stems, and ISO 9613-2 tabulates it. The values here
+/// are its dense-foliage figures for a path of 20 m or more, running from 0.02 dB/m in
+/// the bass to 0.12 dB/m at 8 kHz. The ratio is the point: six to one across the
+/// spectrum, so a hundred metres of scrub costs 2 dB of bass and 12 dB of treble, which
+/// is a filter and not a fader.
+///
+/// Interpolated on a log-frequency axis, because that is how the table is spaced and how
+/// hearing is.
+pub fn foliage_absorption_db_per_m(frequency_hz: f64) -> f64 {
+    // ISO 9613-2 Table 5, dense foliage, 20 m <= path <= 200 m.
+    const OCTAVES: [(f64, f64); 8] = [
+        (63.0, 0.02),
+        (125.0, 0.03),
+        (250.0, 0.04),
+        (500.0, 0.05),
+        (1_000.0, 0.06),
+        (2_000.0, 0.08),
+        (4_000.0, 0.09),
+        (8_000.0, 0.12),
+    ];
+
+    let last = OCTAVES[OCTAVES.len() - 1];
+    if frequency_hz <= OCTAVES[0].0 {
+        return OCTAVES[0].1;
+    }
+    if frequency_hz >= last.0 {
+        return last.1;
+    }
+    for pair in OCTAVES.windows(2) {
+        let (f0, a0) = pair[0];
+        let (f1, a1) = pair[1];
+        if frequency_hz <= f1 {
+            let t = (frequency_hz / f0).ln() / (f1 / f0).ln();
+            return a0 + (a1 - a0) * t;
+        }
+    }
+    last.1
+}
+
+/// Loss from a path through vegetation, in decibels.
+///
+/// `metres` is the distance spent *inside* cover, not the total distance — a source in
+/// the open beyond a treeline is attenuated by the treeline's depth and nothing more.
+///
+/// Capped at the standard's own limit. ISO 9613-2 stops crediting foliage past 200 m of
+/// path, because beyond that the sound is arriving over the canopy rather than through
+/// it, and a model that kept integrating would silence a forest.
+pub fn foliage_attenuation_db(metres: f64, frequency_hz: f64) -> f64 {
+    const MAX_CREDITED_M: f64 = 200.0;
+    if metres <= 0.0 {
+        return 0.0;
+    }
+    foliage_absorption_db_per_m(frequency_hz) * metres.min(MAX_CREDITED_M)
+}
+
+/// A loss in decibels as a linear amplitude multiplier.
+///
+/// Here rather than at every call site because every term in this module is quoted in dB
+/// and every mixer wants a gain, and the sign convention is exactly the kind of thing
+/// that gets inverted once and then hidden behind a compensating constant.
+pub fn gain_from_db_loss(db: f64) -> f64 {
+    if db <= 0.0 {
+        return 1.0;
+    }
+    10f64.powf(-db / 20.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::acoustics::Air;
 
+
+    /// **Foliage is a filter, not a fader.** ISO 9613-2's dense-foliage figures run six
+    /// to one across the spectrum, which is why a treeline takes the crack out of a
+    /// distant shot and leaves the thump — the same character as a ridge, from a
+    /// completely different mechanism.
+    #[test]
+    fn foliage_takes_treble_and_leaves_bass() {
+        let through = 100.0;
+        let treble = foliage_attenuation_db(through, 4_000.0);
+        let bass = foliage_attenuation_db(through, 125.0);
+
+        assert!(
+            (8.0..11.0).contains(&treble),
+            "100 m of dense cover took {treble:.1} dB of 4 kHz against the standard's 9",
+        );
+        assert!(
+            treble > bass * 2.5,
+            "treble lost {treble:.1} dB and bass {bass:.1} - not the ratio the table has",
+        );
+    }
+
+    /// The published table, at the frequencies it is published at.
+    #[test]
+    fn foliage_matches_the_tabulated_octaves() {
+        for (hz, expected) in [
+            (63.0, 0.02),
+            (500.0, 0.05),
+            (1_000.0, 0.06),
+            (4_000.0, 0.09),
+            (8_000.0, 0.12),
+        ] {
+            let got = foliage_absorption_db_per_m(hz);
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "{hz} Hz gave {got:.4} dB/m against ISO 9613-2's {expected}",
+            );
+        }
+        // And between them it interpolates rather than stepping.
+        let between = foliage_absorption_db_per_m(1_400.0);
+        assert!(
+            between > 0.06 && between < 0.08,
+            "1.4 kHz gave {between:.4}, outside the octaves it sits between",
+        );
+    }
+
+    /// Off the ends of the table it holds rather than running away.
+    #[test]
+    fn foliage_is_bounded_outside_the_table() {
+        assert_eq!(foliage_absorption_db_per_m(1.0), 0.02);
+        assert_eq!(foliage_absorption_db_per_m(40_000.0), 0.12);
+        // And a path longer than the standard credits stops accumulating: past a couple
+        // of hundred metres sound arrives over the canopy, not through it.
+        let credited = foliage_attenuation_db(200.0, 4_000.0);
+        assert_eq!(foliage_attenuation_db(10_000.0, 4_000.0), credited);
+        assert_eq!(foliage_attenuation_db(0.0, 4_000.0), 0.0);
+    }
+
+    /// Decibels convert the way decibels convert, in the direction losses go.
+    #[test]
+    fn a_loss_in_decibels_is_a_gain_below_one() {
+        assert!((gain_from_db_loss(0.0) - 1.0).abs() < 1e-12);
+        assert!((gain_from_db_loss(6.0206) - 0.5).abs() < 1e-4, "6 dB should halve it");
+        assert!((gain_from_db_loss(20.0) - 0.1).abs() < 1e-9);
+        // A negative loss is a gain, and this is a loss function: it does not amplify.
+        assert_eq!(gain_from_db_loss(-10.0), 1.0);
+    }
+
+    /// **The two obstruction terms are different animals.** A barrier saturates - past a
+    /// point the sound arrives by another route - while foliage keeps integrating along
+    /// the path. Which one dominates depends on the map, and both are needed.
+    #[test]
+    fn a_barrier_saturates_and_foliage_accumulates() {
+        let c = Air::standard().speed_of_sound();
+        let lambda = wavelength(4_000.0, c);
+        assert_eq!(
+            barrier_insertion_db(50.0, lambda),
+            barrier_insertion_db(500.0, lambda),
+            "a barrier should have stopped attenuating well before this",
+        );
+        assert!(
+            foliage_attenuation_db(150.0, 4_000.0) > foliage_attenuation_db(50.0, 4_000.0),
+            "three times the cover was not more attenuation",
+        );
+    }
     /// Concrete rings; rubber does not. Neither was told to.
     #[test]
     fn hard_surfaces_reflect_and_soft_ones_do_not() {
