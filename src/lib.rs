@@ -67,6 +67,8 @@ pub mod rotational_dynamics;
 pub mod fluid_dynamics;
 pub mod thermodynamics;
 pub mod materials;
+/// Sound as a physical quantity: propagation, absorption, reflection and direction.
+pub mod acoustics;
 pub mod models;
 pub mod particles;
 pub mod world;
