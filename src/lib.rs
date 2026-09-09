@@ -129,6 +129,12 @@ pub mod prelude {
         Air, CanopyAttenuation, HillForm, Surface, WindProfile, LINEARISATION_SLOPE_LIMIT,
     };
 
+    // Rigid-body rotation. Ungated, because `rotational_dynamics`'s inertia and angular
+    // submodules are — only the legacy submodule sits behind the same-named feature.
+    // Gating the re-export and not the module (or the reverse) is the parity bug this
+    // crate's feature matrix is most exposed to.
+    pub use crate::rotational_dynamics::{InertiaTensor, RigidBodyRotation, inertia_3d};
+
     // Materials
     pub use crate::materials::{Material, calculate_collision_response, calculate_stress};
 
