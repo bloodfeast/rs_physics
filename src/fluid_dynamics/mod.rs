@@ -105,6 +105,17 @@ mod fluid_dynamics;
 #[cfg(feature = "fluid_dynamics")]
 pub use fluid_dynamics::*;
 
+// Thin-film surface flow: the lubrication approximation. Gated with the analytical
+// module rather than with `fluid_simulation`, because it is a *law* — pure functions
+// on scalars, meant to be transcribed into a compute shader — and because it is built
+// on `Fluid`, which lives behind this same flag. Gating it on `fluid_simulation`
+// instead would let a `--features fluid_dynamics` build see `Fluid` and not the film
+// law that consumes it.
+#[cfg(feature = "fluid_dynamics")]
+mod thin_film;
+#[cfg(feature = "fluid_dynamics")]
+pub use thin_film::*;
+
 // Grid-based fluid simulation (Eulerian solver)
 #[cfg(feature = "fluid_simulation")]
 mod fluid_simulation;

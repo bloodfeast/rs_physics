@@ -1,7 +1,7 @@
 // src/fluid_dynamics.rs
 
 use crate::utils::PhysicsError;
-use super::validation::validate_positive;
+use super::validation::{validate_finite, validate_positive};
 
 /// Represents a fluid with physical properties for analytical calculations.
 ///
@@ -168,6 +168,68 @@ impl Fluid {
         }
     }
 
+    /// Creates a `Fluid` representing whole human blood at 37 °C.
+    ///
+    /// Properties:
+    /// - Density: 1060 kg/m³
+    /// - Dynamic viscosity: 4.0 mPa·s — **at one stated shear rate, see below**
+    ///
+    /// # What this constructor cannot honestly claim
+    ///
+    /// **Blood is not Newtonian, and a single `viscosity` field cannot say so.** At
+    /// rest, red cells stack into rouleaux and the suspension is nearly a solid; as
+    /// it is sheared they break apart, then deform and align with the flow. Apparent
+    /// viscosity therefore *falls* with shear rate — tens of mPa·s below 1 s⁻¹, an
+    /// asymptote near 3.5 mPa·s above a few hundred. Blood also has a small but
+    /// genuine **yield stress**, a few mPa, below which it does not flow at all.
+    /// That is why a pool on a level floor holds an edge instead of creeping outward
+    /// forever, and no `viscosity` however large reproduces it.
+    ///
+    /// So the number here is not "the viscosity of blood", because there is no such
+    /// number. It is the apparent viscosity at **one shear rate, and the shear rate
+    /// is named**: [`BLOOD_REFERENCE_SHEAR_RATE`], 300 s⁻¹, evaluated through
+    /// [`blood_apparent_viscosity`]. A test asserts the two agree, so this is a
+    /// derived figure with a source rather than a plausible one. 300 s⁻¹ is the
+    /// middle of the range a film of spilt blood on ground actually runs at — see
+    /// [`FilmFlow::shear_rate`], and the test that pins the whole plausible range of
+    /// film depths to within a few percent of this value.
+    ///
+    /// Use this `Fluid` where the shear rate is high: drag, Reynolds numbers,
+    /// buoyancy, and the thin-film flow in [`crate::fluid_dynamics::FilmFlow`]. Do
+    /// **not** use it anywhere near rest — sedimentation, clotting, a vessel at
+    /// diastole, a drop deciding whether to move at all — and reach for
+    /// [`blood_apparent_viscosity`] instead, which knows what shear rate you meant.
+    ///
+    /// # Sources
+    ///
+    /// Density: Kenner, *The measurement of blood density and its meaning*, Basic
+    /// Research in Cardiology 84 (1989), 111–124 — 1052–1063 kg/m³ for whole blood.
+    /// Rheology: Merrill et al., *Rheology of human blood near and at zero flow*,
+    /// Biophysical Journal 3 (1963), 199–213, and Cokelet et al. (1963), from whom
+    /// the Casson constants in [`BLOOD_CASSON_VISCOSITY`] and
+    /// [`BLOOD_YIELD_STRESS`] come.
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::Fluid;
+    ///
+    /// let blood = Fluid::blood();
+    /// // Denser than water and about four times as viscous — at high shear.
+    /// assert!(blood.density > Fluid::water().density);
+    /// assert!(blood.viscosity > 3.0 * Fluid::water().viscosity);
+    /// ```
+    pub fn blood() -> Self {
+        Self {
+            density: BLOOD_DENSITY,
+            // Not a table value: the Casson fit evaluated at the shear rate this
+            // approximation is declared valid at. `blood_apparent_viscosity` cannot
+            // be called in a const context, so the number is written here and a test
+            // (`newtonian_blood_is_the_casson_fit_at_its_stated_shear_rate`) is what
+            // keeps the two from drifting.
+            viscosity: 0.004,
+        }
+    }
+
     /// Creates a `Fluid` representing glycerin at 20°C.
     ///
     /// Properties:
@@ -206,6 +268,171 @@ impl Fluid {
     pub fn kinematic_viscosity(&self) -> f64 {
         self.viscosity / self.density
     }
+}
+
+/// Density of whole human blood at 37 °C, kg/m³.
+///
+/// Haematocrit around 45%. The measured range is 1052–1063 (Kenner 1989); 1060 is
+/// the value in ordinary use and is what [`Fluid::blood`] carries.
+pub const BLOOD_DENSITY: f64 = 1060.0;
+
+/// Casson viscosity μ_c of whole blood, Pa·s — the **high-shear asymptote**.
+///
+/// This is the number blood's apparent viscosity approaches from above as shear rate
+/// rises without bound, not a viscosity you should use directly at any real shear
+/// rate. See [`blood_apparent_viscosity`]. Merrill et al. (1963), Hct ≈ 45%.
+pub const BLOOD_CASSON_VISCOSITY: f64 = 0.0035;
+
+/// Casson yield stress τ_y of whole blood, Pa.
+///
+/// **The property a Newtonian `Fluid` cannot express at all.** Below this shear
+/// stress blood does not flow; rouleaux hold it together as a weak solid. Reported
+/// between about 0.004 and 0.01 Pa at Hct 45% and strongly dependent on haematocrit
+/// (Merrill et al. 1963); 0.005 sits at the low end of that band, which is the
+/// conservative direction for a solver — it arrests less liquid, not more.
+///
+/// It is small: on a one-in-ten slope it holds only a film about 5 µm deep
+/// (τ_y / ρ g sinθ). Yield stress is therefore *not* what makes a pool of blood hold
+/// a millimetres-deep edge on level ground — surface tension is, see
+/// [`puddle_depth`]. Both are real and they act at different scales.
+pub const BLOOD_YIELD_STRESS: f64 = 0.005;
+
+/// Surface tension of whole blood against air at 37 °C, N/m.
+///
+/// About 56 mN/m, appreciably below water's 72: plasma proteins are surface-active
+/// and crowd the interface. Hrnčíř & Rosina, *Surface tension of blood*, Physiological
+/// Research 46 (1997), 319–321.
+pub const BLOOD_SURFACE_TENSION: f64 = 0.056;
+
+/// The shear rate at which [`Fluid::blood`]'s single Newtonian viscosity is quoted, s⁻¹.
+///
+/// A Newtonian constructor for a shear-thinning fluid is only honest if it says which
+/// shear rate it means. This is that declaration, and it is not arbitrary: a film of
+/// spilt blood between a fifth of a millimetre and five millimetres deep, on grades
+/// from a gentle slope to a steep one, runs at wall shear rates of roughly one to
+/// eight hundred per second ([`FilmFlow::shear_rate`]). 300 s⁻¹ is the middle of that.
+pub const BLOOD_REFERENCE_SHEAR_RATE: f64 = 300.0;
+
+/// Apparent viscosity of whole blood at a given shear rate, Pa·s — the Casson model.
+///
+/// ```text
+///   √τ = √τ_y + √(μ_c γ̇)          so      μ_app(γ̇) = τ/γ̇ = (√(τ_y/γ̇) + √μ_c)²
+/// ```
+///
+/// This is what [`Fluid::blood`] is an approximation *of*. Blood thins under shear
+/// because red cells are deformable and, at low shear, aggregated: the yield term
+/// dominates below about 10 s⁻¹ and has all but vanished above a few hundred, where
+/// the answer settles toward [`BLOOD_CASSON_VISCOSITY`].
+///
+/// Reach for this whenever the shear rate is low or unknown. Reach for
+/// [`Fluid::blood`] when it is high and a few percent is not worth a square root.
+///
+/// # Arguments
+///
+/// * `shear_rate` — γ̇ in s⁻¹, strictly positive.
+///
+/// # Errors
+///
+/// Returns [`PhysicsError::CalculationError`] if the shear rate is not finite and
+/// strictly positive. Zero is genuinely undefined here rather than merely awkward:
+/// a fluid with a yield stress has *infinite* apparent viscosity at zero shear, and
+/// returning `f64::INFINITY` would hand a value that poisons every arithmetic
+/// expression downstream to a caller who only wanted to know if it moves. Ask
+/// [`FilmFlow::arrest_thickness`] that question instead.
+///
+/// # Examples
+/// ```
+/// use rs_physics::fluid_dynamics::{blood_apparent_viscosity, Fluid};
+///
+/// // Blood thins as it is sheared harder. This is the whole point.
+/// let slow = blood_apparent_viscosity(1.0).unwrap();
+/// let fast = blood_apparent_viscosity(1000.0).unwrap();
+/// assert!(slow > 4.0 * fast);
+///
+/// // And the Newtonian constructor is this curve at one point on it.
+/// let quoted = blood_apparent_viscosity(300.0).unwrap();
+/// assert!((quoted - Fluid::blood().viscosity).abs() < 1e-4);
+/// ```
+pub fn blood_apparent_viscosity(shear_rate: f64) -> Result<f64, PhysicsError> {
+    if !(shear_rate > 0.0) || !shear_rate.is_finite() {
+        return Err(PhysicsError::CalculationError(format!(
+            "shear rate must be finite and strictly positive, got {}",
+            shear_rate
+        )));
+    }
+    let root = (BLOOD_YIELD_STRESS / shear_rate).sqrt() + BLOOD_CASSON_VISCOSITY.sqrt();
+    Ok(root * root)
+}
+
+/// Depth of a static puddle of liquid standing on level ground, in metres.
+///
+/// ```text
+///   h = 2 √(γ / ρg) · sin(θ_c / 2)
+/// ```
+///
+/// **This is why a spill has an edge.** Gravity alone would flatten a puddle to a
+/// molecular film; what stops it is that thinning further costs surface energy. The
+/// balance is set by the capillary length √(γ/ρg) — 2.3 mm for blood, 2.7 for water —
+/// and by how well the liquid wets what it is sitting on, through the contact angle.
+/// A perfectly wetting liquid (θ_c = 0) forms no puddle at all and spreads without
+/// limit; a non-wetting one (θ_c = π) beads to twice the capillary length.
+///
+/// It is worth having because it is the derived form of a number that otherwise gets
+/// tuned. A flow solver needs a depth at which liquid stops levelling out, or a pool
+/// spreads into an invisible sheet and the pass never converges; that depth is this
+/// one, and it comes from the fluid rather than from how it looked.
+///
+/// The result is a *depth*, not a criterion for motion on a slope. For that see
+/// [`FilmFlow::arrest_thickness`], which is the yield-stress condition and a much
+/// smaller number.
+///
+/// # Arguments
+///
+/// * `surface_tension` — γ against air, N/m. Strictly positive.
+/// * `density` — kg/m³. Strictly positive.
+/// * `gravity` — m/s². Strictly positive.
+/// * `contact_angle` — θ_c in **radians**, in `[0, π]`. Blood on dry soil is around
+///   1.4 rad (80°); the crate carries no table of these because the substrate
+///   decides it, not the liquid.
+///
+/// # Errors
+///
+/// Returns [`PhysicsError::CalculationError`] if any argument is not finite, if any
+/// of the first three is not strictly positive, or if the contact angle lies outside
+/// `[0, π]` — where the formula silently returns a negative depth.
+///
+/// # Examples
+/// ```
+/// use rs_physics::fluid_dynamics::{puddle_depth, BLOOD_DENSITY, BLOOD_SURFACE_TENSION};
+///
+/// // Blood on soil it wets poorly stands about three millimetres deep.
+/// let h = puddle_depth(BLOOD_SURFACE_TENSION, BLOOD_DENSITY, 9.81, 80f64.to_radians()).unwrap();
+/// assert!(h > 0.002 && h < 0.004);
+///
+/// // A liquid that wets perfectly makes no puddle: it spreads without limit.
+/// assert_eq!(puddle_depth(BLOOD_SURFACE_TENSION, BLOOD_DENSITY, 9.81, 0.0).unwrap(), 0.0);
+/// ```
+pub fn puddle_depth(
+    surface_tension: f64,
+    density: f64,
+    gravity: f64,
+    contact_angle: f64,
+) -> Result<f64, PhysicsError> {
+    validate_finite(surface_tension, "surface_tension")?;
+    validate_finite(density, "density")?;
+    validate_finite(gravity, "gravity")?;
+    validate_finite(contact_angle, "contact_angle")?;
+    validate_positive(surface_tension, "surface_tension")?;
+    validate_positive(density, "density")?;
+    validate_positive(gravity, "gravity")?;
+    if !(0.0..=std::f64::consts::PI).contains(&contact_angle) {
+        return Err(PhysicsError::CalculationError(format!(
+            "contact angle must be in [0, pi] radians, got {}",
+            contact_angle
+        )));
+    }
+    let capillary_length = (surface_tension / (density * gravity)).sqrt();
+    Ok(2.0 * capillary_length * (contact_angle * 0.5).sin())
 }
 
 /// Calculates the Reynolds number for a fluid flow.
