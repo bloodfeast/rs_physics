@@ -546,10 +546,13 @@ impl RigidBodyRotation {
         if dt == 0.0 {
             return Ok(1);
         }
-        if self.required_substeps(dt) > MAX_SUBSTEPS as f64 {
+        // Computed once. `substeps_for` would recompute it, and this is a per-body
+        // per-frame path.
+        let wanted = self.required_substeps(dt);
+        if wanted > MAX_SUBSTEPS as f64 {
             return Err(PhysicsError::InvalidTime);
         }
-        let substeps = self.substeps_for(dt);
+        let substeps = wanted as u32;
         if self.integrate(dt, substeps) {
             Ok(substeps)
         } else {
@@ -567,10 +570,13 @@ impl RigidBodyRotation {
     /// `Result` constructed per body, and the bodies are walked in memory order. A body
     /// is 176 bytes of plain `f64`, so a `Vec<RigidBodyRotation>` streams.
     ///
-    /// Be honest about what this is not: it is **not** cross-body SIMD. That would need
-    /// a structure-of-arrays layout, and the measured cost of this workload does not ask
-    /// for one — see `benches/rigid_body_rotation.rs`. What it is, is a shape that does
-    /// not stand in the way of one later.
+    /// Be honest about what this is not. **It is not faster than the loop it replaces**:
+    /// `benches/rigid_body_rotation.rs` measures 62.5 µs against 61.2 µs for 520 bodies,
+    /// a wash. What it buys is contract — one validation, one error, a batch-level skip
+    /// count — not throughput. It is also **not** cross-body SIMD; that would need a
+    /// structure-of-arrays layout, and at 1.5% of a 240 Hz frame for the workload that
+    /// motivated it, nothing has asked for one. What this is, is a shape that does not
+    /// stand in the way of one later.
     ///
     /// # Returns
     ///

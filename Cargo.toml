@@ -65,3 +65,7 @@ required-features = ["fluid_simulation"]
 [[bench]]
 name = "atmosphere"
 harness = false
+
+[[bench]]
+name = "rigid_body_rotation"
+harness = false
