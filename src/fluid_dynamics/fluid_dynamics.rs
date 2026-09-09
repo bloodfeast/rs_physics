@@ -60,24 +60,50 @@ impl Fluid {
         }
     }
 
-    /// Creates a `Fluid` representing air at sea level and 20°C.
+    /// The bulk properties of a given state of the air.
     ///
-    /// Properties:
-    /// - Density: 1.225 kg/m³
-    /// - Dynamic viscosity: 1.81×10⁻⁵ Pa·s
+    /// # Why there is no `Fluid::air()`
+    ///
+    /// There was, and it was a defect. It returned a frozen density of 1.225 kg/m³ and a
+    /// frozen viscosity of 1.81×10⁻⁵ Pa·s, with a doc comment saying "20 °C" — which was
+    /// wrong twice over, since 1.225 is the **15 °C** ICAO figure and 1.81e-5 is the
+    /// 20 °C one. Worse, the crate simultaneously carried
+    /// [`crate::atmosphere::Air`], a real thermodynamic state that knew the temperature,
+    /// the humidity and the pressure, and the two could not be reconciled: a caller
+    /// simulating a winter map got winter air for sound and summer air for drag, in the
+    /// same frame, and no type, test or assertion objected. Winter air at 270 K is **9%
+    /// denser** than summer air at 293 K, and density is linear in every drag force this
+    /// module computes.
+    ///
+    /// So the nullary constructor is gone. There is no way to obtain a `Fluid` of air
+    /// without saying which air, which makes the divergence unrepresentable rather than
+    /// documented. For the old behaviour, ask for the state it meant:
+    /// `Fluid::from_air(&Air::sea_level())`, whose density comes out at 1.225 because it
+    /// is *computed* from the ICAO reference rather than copied from a table.
+    ///
+    /// # Arguments
+    ///
+    /// * `air` — the state of the air. See [`crate::atmosphere::Air`].
     ///
     /// # Examples
     /// ```
+    /// use rs_physics::atmosphere::Air;
     /// use rs_physics::fluid_dynamics::Fluid;
     ///
-    /// let air = Fluid::air();
-    /// assert!((air.density - 1.225).abs() < 0.01);
+    /// // The ICAO reference reproduces the constant this used to hardcode.
+    /// let isa = Fluid::from_air(&Air::sea_level());
+    /// assert!((isa.density - 1.225).abs() < 0.001);
+    ///
+    /// // And a cold day is genuinely a different fluid.
+    /// let winter = Fluid::from_air(&Air::winter());
+    /// assert!(winter.density > isa.density);
     /// ```
-    pub fn air() -> Self {
-        Self {
-            density: 1.225,
-            viscosity: 1.81e-5,
-        }
+    #[inline]
+    pub fn from_air(air: &crate::atmosphere::Air) -> Self {
+        // Infallible: `Air`'s constructor guarantees a positive temperature and
+        // pressure, so density and viscosity are both finite and strictly positive —
+        // which is exactly what `Fluid::new` would have checked for.
+        Self { density: air.density(), viscosity: air.dynamic_viscosity() }
     }
 
     /// Creates a `Fluid` representing motor oil (SAE 30) at 40°C.

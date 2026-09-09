@@ -61,3 +61,7 @@ required-features = ["particles"]
 name = "sph"
 harness = false
 required-features = ["fluid_simulation"]
+
+[[bench]]
+name = "atmosphere"
+harness = false

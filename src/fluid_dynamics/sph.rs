@@ -193,6 +193,19 @@ pub struct Settled {
 #[derive(Debug, Clone)]
 pub struct SphFluid {
     pos: Vec<[f64; 3]>,
+    /// Where each particle was at the *start* of the last completed substep.
+    ///
+    /// Kept so a renderer running faster than the solver can draw **between** two
+    /// solved states instead of on them. SPH has to substep — pressure is stiff — so
+    /// a caller accumulating frame time always finishes a frame with a remainder it
+    /// cannot spend, and drawing `pos` directly shows the fluid advancing in visible
+    /// quanta at the substep rate rather than tracking render time.
+    ///
+    /// Maintained in lockstep with `pos` by every operation that changes the particle
+    /// set — `spawn` pushes, `drain_settled` swap-removes, `clear` clears — so
+    /// `prev_pos.len() == pos.len()` is an invariant of the type rather than something
+    /// [`SphFluid::interpolated_position`] has to check.
+    prev_pos: Vec<[f64; 3]>,
     vel: Vec<[f64; 3]>,
     density: Vec<f64>,
     pressure: Vec<f64>,
@@ -246,6 +259,7 @@ impl SphFluid {
 
         Ok(SphFluid {
             pos: Vec::with_capacity(capacity),
+            prev_pos: Vec::with_capacity(capacity),
             vel: Vec::with_capacity(capacity),
             density: Vec::with_capacity(capacity),
             pressure: Vec::with_capacity(capacity),
@@ -281,6 +295,7 @@ impl SphFluid {
 
     pub fn clear(&mut self) {
         self.pos.clear();
+        self.prev_pos.clear();
         self.vel.clear();
         self.density.clear();
         self.pressure.clear();
@@ -289,6 +304,92 @@ impl SphFluid {
 
     pub fn position(&self, i: usize) -> [f64; 3] {
         self.pos[i]
+    }
+
+    /// Where particle `i` was at the start of the last completed substep.
+    ///
+    /// The other half of [`Self::interpolated_position`]; exposed so a caller that
+    /// wants to do its own blending does not have to keep a shadow copy that
+    /// `drain_settled`'s `swap_remove` would silently misalign.
+    pub fn previous_position(&self, i: usize) -> [f64; 3] {
+        self.prev_pos[i]
+    }
+
+    /// Particle `i` drawn `alpha` of the way through the last completed substep.
+    ///
+    /// # Why a solver offers this at all
+    ///
+    /// Because the alternative is that every caller gets it wrong in the same way.
+    /// SPH must substep, so a renderer accumulating frame time always ends a frame
+    /// with a remainder shorter than one substep and no way to spend it. Reading
+    /// [`Self::position`] draws the last *solved* state, so the fluid advances in
+    /// quanta at the substep rate however smooth the frame rate is — visible
+    /// immediately as a liquid running downhill in steps.
+    ///
+    /// The obvious client-side fix — keep a `Vec` of previous positions — does not
+    /// work, because [`Self::drain_settled`] compacts with `swap_remove`. A shadow
+    /// buffer would need to mirror that, so the buffer belongs to whatever performs
+    /// the removal. That is this type.
+    ///
+    /// # What it is not
+    ///
+    /// Read-only, and it never touches solver state: the fluid still advances by
+    /// whole substeps and integrates nothing between them. This blends the two most
+    /// recent solved states the way a fixed-tick renderer blends ticks, so the drawn
+    /// position lags the solved one by up to one substep. At the rates SPH needs —
+    /// 240 Hz is four milliseconds — that lag is well under a frame.
+    ///
+    /// `alpha` is clamped to `[0, 1]`, so an accumulator that ran past a substep
+    /// cannot extrapolate a particle somewhere the solver never put it.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` — particle index, `0..len()`.
+    /// * `alpha` — fraction of a substep elapsed since the last one completed,
+    ///   normally `accumulator / substep`.
+    pub fn interpolated_position(&self, i: usize, alpha: f64) -> [f64; 3] {
+        // NaN would take the false branch of every comparison inside `clamp` and is
+        // not representable as "somewhere between", so it resolves to the solved
+        // state rather than propagating into a vertex position.
+        let a = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let from = self.prev_pos[i];
+        let to = self.pos[i];
+        [
+            from[0] + (to[0] - from[0]) * a,
+            from[1] + (to[1] - from[1]) * a,
+            from[2] + (to[2] - from[2]) * a,
+        ]
+    }
+
+    /// The fastest a particle can actually travel in this solver, m/s, at `dt`.
+    ///
+    /// # Why this is public
+    ///
+    /// Because [`Self::step`] enforces it silently and callers have been building
+    /// designs on top of speeds it deletes. The cap is a CFL condition — a particle
+    /// may not cross more than a fraction of a smoothing radius in one step, or the
+    /// neighbour search stops finding the neighbours whose forces were meant to act
+    /// on it — so it is not negotiable and not a tuning knob. But it *is* invisible:
+    /// [`Self::spawn`] accepts any velocity and the next step quietly truncates it,
+    /// which reads as the solver working and the emitter's numbers not mattering.
+    ///
+    /// Blood spawned along a 42 m/s round at "40% of its speed" and blood spawned at
+    /// wound-cavity speeds arrive here as the same number. Nothing errors, nothing
+    /// logs, and the two-population spray the caller wrote is one population. Asking
+    /// first is the difference between a designed spread and an accidental constant.
+    ///
+    /// Raise it by raising the smoothing radius (a coarser, cheaper fluid) or by
+    /// stepping faster; there is no third way, and both are the caller's decision.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` — the substep this fluid is stepped with, seconds.
+    pub fn speed_ceiling(&self, dt: f64) -> f64 {
+        cfl_speed_ceiling(self.params.smoothing_radius, dt)
     }
 
     pub fn velocity(&self, i: usize) -> [f64; 3] {
@@ -303,11 +404,20 @@ impl SphFluid {
 
     /// Add one particle. Silently refuses once full rather than growing, so a long
     /// fight cannot turn the solver into a slideshow.
+    ///
+    /// **`velocity` is a request, not a promise.** The first step clamps it to
+    /// [`Self::speed_ceiling`], which at typical droplet spacings is a few metres per
+    /// second — far below anything a projectile or an explosion would suggest. Ask
+    /// the ceiling before spreading emitter speeds across a range, or the spread
+    /// collapses to a single value and the emission design stops existing.
     pub fn spawn(&mut self, position: [f64; 3], velocity: [f64; 3]) -> bool {
         if self.pos.len() >= self.capacity {
             return false;
         }
         self.pos.push(position);
+        // A particle that has never been stepped is where it is: `alpha` blending on
+        // the spawn frame must give the spawn point, not a lerp from stale memory.
+        self.prev_pos.push(position);
         self.vel.push(velocity);
         self.density.push(self.params.rest_density);
         self.pressure.push(0.0);
@@ -326,6 +436,13 @@ impl SphFluid {
         if dt <= 0.0 || self.is_empty() {
             return;
         }
+
+        // Snapshot before anything moves, so `interpolated_position` has the two ends
+        // of the interval the renderer is blending across. `clear` + `extend` rather
+        // than an assignment, so the buffer is reused and `step` still allocates
+        // nothing after the first call.
+        self.prev_pos.clear();
+        self.prev_pos.extend_from_slice(&self.pos);
 
         self.build_grid();
         self.compute_density_and_pressure();
@@ -532,7 +649,11 @@ impl SphFluid {
         // A hard speed cap. SPH goes unstable by way of one particle acquiring an
         // enormous velocity and dragging its neighbours after it; clamping turns
         // that from an explosion into a brief wobble.
-        let max_speed = self.params.smoothing_radius / dt.max(1e-6) * 0.4;
+        //
+        // It is also the single most surprising thing about this solver from the
+        // outside, which is why the arithmetic lives in one shared function that
+        // callers can query through `speed_ceiling` rather than being written twice.
+        let max_speed = cfl_speed_ceiling(self.params.smoothing_radius, dt);
 
         for i in 0..self.len() {
             let speed_sq: f64 = self.vel[i].iter().map(|v| v * v).sum();
@@ -595,6 +716,9 @@ impl SphFluid {
             });
 
             self.pos.swap_remove(i);
+            // Kept aligned with `pos` by the same removal, which is the whole reason
+            // this buffer lives in the solver rather than in the renderer.
+            self.prev_pos.swap_remove(i);
             self.vel.swap_remove(i);
             self.density.swap_remove(i);
             self.pressure.swap_remove(i);
@@ -602,6 +726,24 @@ impl SphFluid {
         }
     }
 }
+
+/// The Courant condition this solver enforces: a particle may cross no more than
+/// [`CFL_FRACTION`] of a smoothing radius per step.
+///
+/// One definition, used by both the enforcement in `integrate` and the
+/// [`SphFluid::speed_ceiling`] a caller reads. Two copies of this line is how a
+/// documented ceiling and an enforced ceiling come to differ.
+#[inline]
+fn cfl_speed_ceiling(smoothing_radius: f64, dt: f64) -> f64 {
+    smoothing_radius / dt.max(1e-6) * CFL_FRACTION
+}
+
+/// How much of a smoothing radius a particle may cross in one step.
+///
+/// Below one because the neighbour search is built once per step: a particle that
+/// moved a whole radius has left the set of neighbours whose forces were computed
+/// for it, so the forces it received were for somewhere it no longer is.
+const CFL_FRACTION: f64 = 0.4;
 
 /// Akinci's cohesion spline, normalised over the kernel support.
 ///
@@ -888,6 +1030,294 @@ mod tests {
         let mut p = SphParams::water();
         p.particle_mass = -1.0;
         assert!(SphFluid::new(p, 16).is_err());
+    }
+
+    /// The ceiling a caller reads must be the ceiling the solver enforces.
+    ///
+    /// Asserted against a *measured* peak speed rather than against the formula,
+    /// because the formula is what would be copied wrongly. This is the guard on the
+    /// thing that silently deleted a caller's emission design: blood spawned at
+    /// 17 m/s and blood spawned at 3 m/s came out of `step` as the same number, and
+    /// nothing said so.
+    #[test]
+    fn nothing_ever_moves_faster_than_the_advertised_ceiling() {
+        let dt = 1.0 / 240.0;
+        let mut fluid = SphFluid::new(SphParams::blood(), 64).unwrap();
+        let ceiling = fluid.speed_ceiling(dt);
+
+        // Absurdly fast, in every direction, from a spread of places.
+        for i in 0..24 {
+            let f = i as f64 * 0.01;
+            fluid.spawn([f, 3.0, -f], [400.0, 250.0, -300.0]);
+        }
+
+        let mut peak: f64 = 0.0;
+        for _ in 0..240 {
+            fluid.step(dt, 9.81, flat);
+            for i in 0..fluid.len() {
+                let v = fluid.velocity(i);
+                peak = peak.max((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt());
+            }
+        }
+
+        assert!(
+            peak <= ceiling * 1.001,
+            "a particle reached {peak:.3} m/s against an advertised ceiling of \
+             {ceiling:.3} m/s"
+        );
+
+        // And the ceiling is genuinely reached, or it would be advertising a bound
+        // that some *other* limit is actually doing the work of.
+        assert!(
+            peak > ceiling * 0.99,
+            "peak {peak:.3} m/s never approached the ceiling {ceiling:.3} m/s — \
+             something else is limiting the fluid and `speed_ceiling` is not it"
+        );
+    }
+
+    /// The ceiling is a real constraint on what a caller may ask for, stated in the
+    /// units a caller thinks in: metres of throw.
+    ///
+    /// Blood spaced for droplets at 240 Hz cannot be flung across a field however
+    /// hard it is launched, and an emitter that believes otherwise is writing
+    /// constants that do nothing. The number here is the one that matters at the call
+    /// site — a splash throws metres, not tens of metres.
+    #[test]
+    fn a_droplet_splash_throws_metres_not_tens_of_metres() {
+        let dt = 1.0 / 240.0;
+        let mut fluid = SphFluid::new(SphParams::blood(), 64).unwrap();
+
+        // Launched at a rifle round's speed, flat out along +X from chest height.
+        for i in 0..16 {
+            fluid.spawn([0.0, 1.2, i as f64 * 0.01], [42.0, 4.0, 0.0]);
+        }
+
+        let mut furthest: f64 = 0.0;
+        let mut note = |p: [f64; 3]| {
+            let d = (p[0] * p[0] + p[2] * p[2]).sqrt();
+            if d > furthest {
+                furthest = d;
+            }
+        };
+        for _ in 0..(240 * 20) {
+            fluid.step(dt, 9.81, flat);
+            let mut settled = Vec::new();
+            fluid.drain_settled(|s| settled.push(s.position));
+            for p in settled {
+                note(p);
+            }
+            if fluid.is_empty() {
+                break;
+            }
+        }
+        for i in 0..fluid.len() {
+            note(fluid.position(i));
+        }
+
+        // The ballistic range of the *requested* 42 m/s is 180 m. What the solver can
+        // represent is `ceiling^2 / g` plus the drop from launch height, a couple of
+        // metres. Both bounds are asserted: the upper one is the bug this catches, the
+        // lower one stops a future change from making a splash that goes nowhere.
+        let ceiling = fluid.speed_ceiling(dt);
+        let ballistic = ceiling * ceiling / 9.81;
+        assert!(
+            furthest < ballistic + 2.0,
+            "a splash reached {furthest:.2} m, past the {:.2} m its own speed ceiling \
+             of {ceiling:.2} m/s can carry it",
+            ballistic + 2.0
+        );
+        assert!(
+            furthest > 0.5,
+            "a splash reached only {furthest:.2} m — that is a puddle, not a spray"
+        );
+    }
+
+    /// The render buffer has to survive the two things that move particles around in
+    /// the arrays: spawning and `swap_remove`.
+    ///
+    /// If `prev_pos` ever falls out of step with `pos`, `interpolated_position`
+    /// blends one particle's history into another particle's present — which draws as
+    /// a droplet streaking across the map between two unrelated splashes, and is
+    /// exactly the failure a client-side shadow buffer would have.
+    #[test]
+    fn interpolation_stays_aligned_across_spawns_and_drains() {
+        let dt = 1.0 / 240.0;
+        let mut fluid = SphFluid::new(SphParams::blood(), 256).unwrap();
+
+        for round in 0..40 {
+            // Two clusters, far apart, so a misalignment is a huge distance rather
+            // than a subtle one.
+            for i in 0..3 {
+                let f = i as f64 * 0.01;
+                fluid.spawn([f, 0.4, f], [0.2, 1.0, 0.0]);
+                fluid.spawn([80.0 + f, 0.4, 80.0 + f], [-0.2, 1.0, 0.0]);
+            }
+            for _ in 0..6 {
+                fluid.step(dt, 9.81, flat);
+            }
+            fluid.drain_settled(|_| {});
+
+            for i in 0..fluid.len() {
+                let from = fluid.previous_position(i);
+                let to = fluid.position(i);
+                let mid = fluid.interpolated_position(i, 0.5);
+
+                // One substep at the ceiling is 0.4 of a smoothing radius. Anything
+                // further means the two ends belong to different particles.
+                let travelled = ((to[0] - from[0]).powi(2)
+                    + (to[1] - from[1]).powi(2)
+                    + (to[2] - from[2]).powi(2))
+                .sqrt();
+                assert!(
+                    travelled <= fluid.params().smoothing_radius * CFL_FRACTION + 1e-9,
+                    "round {round}: particle {i} moved {travelled:.4} m in one substep \
+                     — prev_pos is aligned with a different particle"
+                );
+
+                for a in 0..3 {
+                    let lo = from[a].min(to[a]);
+                    let hi = from[a].max(to[a]);
+                    assert!(mid[a] >= lo - 1e-9 && mid[a] <= hi + 1e-9);
+                }
+            }
+        }
+    }
+
+    /// The two ends, and nothing outside them.
+    #[test]
+    fn interpolation_is_a_blend_and_never_an_extrapolation() {
+        let dt = 1.0 / 240.0;
+        let mut fluid = SphFluid::new(SphParams::blood(), 16).unwrap();
+        fluid.spawn([0.0, 5.0, 0.0], [1.0, 0.0, 0.0]);
+
+        // On the spawn frame there is no history, so every alpha is the spawn point.
+        for a in [0.0, 0.5, 1.0] {
+            assert_eq!(fluid.interpolated_position(0, a), [0.0, 5.0, 0.0]);
+        }
+
+        fluid.step(dt, 9.81, flat);
+        let from = fluid.previous_position(0);
+        let to = fluid.position(0);
+        assert_ne!(from, to, "the step did not move it, so this proves nothing");
+
+        assert_eq!(fluid.interpolated_position(0, 0.0), from);
+        assert_eq!(fluid.interpolated_position(0, 1.0), to);
+        // Clamped, not extrapolated: an accumulator that overran must not invent a
+        // position the solver never produced.
+        assert_eq!(fluid.interpolated_position(0, 4.0), to);
+        assert_eq!(fluid.interpolated_position(0, -3.0), from);
+        assert_eq!(fluid.interpolated_position(0, f64::NAN), to);
+    }
+
+    /// The reported symptom, measured: a fluid drawn at a frame rate that is not a
+    /// multiple of the substep rate advances in uneven jumps.
+    ///
+    /// This is what "not smooth, running at a fixed rate instead of interpolated"
+    /// actually is. At 144 fps over a 240 Hz solver a frame consumes 1.67 substeps, so
+    /// some frames advance one substep's worth and some two — the drawn position moves
+    /// twice as far on some frames as on others, and the eye reads that as stutter
+    /// however high the frame rate is. Sixty exactly would have hidden it: four
+    /// substeps every frame, perfectly even, which is why this test does not use it.
+    ///
+    /// Asserted as a ratio of the largest per-frame step to the smallest, which is a
+    /// property of the *motion* rather than of any number this module returns.
+    #[test]
+    fn drawing_at_an_awkward_frame_rate_advances_evenly() {
+        let substep = 1.0 / 240.0;
+        let frame = 1.0 / 144.0;
+
+        fn evenness(substep: f64, frame: f64, interpolate: bool) -> f64 {
+            let mut fluid = SphFluid::new(SphParams::blood(), 64).unwrap();
+            // One drop, alone, in **zero gravity**, well clear of the ground.
+            //
+            // Deliberately not a parabola. The first version of this test fell under
+            // gravity and measured a ratio of 1.89 even when interpolated — because a
+            // falling drop genuinely does cover more ground on a late frame than an
+            // early one, so a global max-over-min was measuring acceleration and
+            // calling it stutter. Under no forces the true motion is exactly linear,
+            // and *every* departure from a constant step is the sampling.
+            fluid.spawn([0.0, 40.0, 0.0], [2.0, 0.0, 1.0]);
+
+            let mut accumulator = 0.0;
+            let mut drawn: Vec<[f64; 3]> = Vec::new();
+            for _ in 0..120 {
+                accumulator += frame;
+                while accumulator >= substep {
+                    accumulator -= substep;
+                    fluid.step(substep, 0.0, flat);
+                }
+                let alpha = accumulator / substep;
+                drawn.push(if interpolate {
+                    fluid.interpolated_position(0, alpha)
+                } else {
+                    fluid.position(0)
+                });
+            }
+
+            let steps: Vec<f64> = drawn
+                .windows(2)
+                .map(|w| {
+                    ((w[1][0] - w[0][0]).powi(2)
+                        + (w[1][1] - w[0][1]).powi(2)
+                        + (w[1][2] - w[0][2]).powi(2))
+                    .sqrt()
+                })
+                // The first frames are still filling the accumulator.
+                .skip(4)
+                .collect();
+
+            let biggest = steps.iter().cloned().fold(0.0f64, f64::max);
+            let smallest = steps.iter().cloned().fold(f64::INFINITY, f64::min);
+            biggest / smallest
+        }
+
+        let stepped = evenness(substep, frame, false);
+        let blended = evenness(substep, frame, true);
+
+        // Reading `position` at 144 fps over 240 Hz: some frames move two substeps'
+        // worth and some one, so the ratio is close to two.
+        assert!(
+            stepped > 1.9,
+            "reading the solved position gave a step ratio of {stepped:.2} — this test \
+             is supposed to reproduce the quantisation before asserting it is gone"
+        );
+
+        // Interpolated, every frame covers the same amount of simulated time. The
+        // residual is the drop accelerating under gravity, which is real motion.
+        assert!(
+            blended < 1.001,
+            "interpolated drawing still stepped unevenly: ratio {blended:.3} against \
+             {stepped:.2} unblended"
+        );
+    }
+
+    /// Interpolating must not feed back into the solver.
+    ///
+    /// The failure it guards against is a render-side convenience that ends up
+    /// writing to solver state — at which point the fluid's behaviour depends on the
+    /// frame rate, which is the one thing substepping exists to prevent.
+    #[test]
+    fn reading_interpolated_positions_does_not_perturb_the_solver() {
+        fn run(read_between_steps: bool) -> Vec<[f64; 3]> {
+            let mut fluid = SphFluid::new(SphParams::blood(), 256).unwrap();
+            for i in 0..40 {
+                let f = i as f64 * 0.03;
+                fluid.spawn([f, 1.5 + f * 0.5, -f], [1.0, 2.0, 0.5]);
+            }
+            for s in 0..300 {
+                fluid.step(1.0 / 240.0, 9.81, flat);
+                if read_between_steps {
+                    let alpha = (s % 7) as f64 / 7.0;
+                    let mut sink = 0.0;
+                    for i in 0..fluid.len() {
+                        sink += fluid.interpolated_position(i, alpha)[1];
+                    }
+                    assert!(sink.is_finite());
+                }
+            }
+            (0..fluid.len()).map(|i| fluid.position(i)).collect()
+        }
+        assert_eq!(run(false), run(true));
     }
 
     #[test]

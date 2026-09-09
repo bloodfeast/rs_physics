@@ -169,22 +169,56 @@ impl Substance {
         }
     }
 
-    /// Creates a substance representing air at 25°C, 1 atm
+    /// The thermal properties of a given state of the air.
     ///
-    /// Properties:
-    /// - Specific heat capacity: 1005 J/(kg·K)
-    /// - Thermal conductivity: 0.0262 W/(m·K)
-    /// - Density: 1.184 kg/m³
-    /// - Molar mass: 0.02897 kg/mol (average)
-    pub fn air() -> Self {
+    /// Density, conductivity and heat capacity all come from
+    /// [`crate::atmosphere::Air`], which is the crate's single description of air. That
+    /// matters because this used to be the **third** independent one: `Fluid::air()`
+    /// said 1.225 kg/m³, `PhysicsConstants::air_density` said 1.225, and this said
+    /// 1.184 — three literals for the same substance at three unstated temperatures,
+    /// none of which could be told from the others at a call site.
+    ///
+    /// They now all agree by construction, because there is only one calculation.
+    ///
+    /// # Arguments
+    ///
+    /// * `air` — the state of the air.
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::atmosphere::Air;
+    /// use rs_physics::thermodynamics::Substance;
+    ///
+    /// let winter = Substance::from_air(&Air::winter());
+    /// let summer = Substance::from_air(&Air::standard());
+    /// assert!(winter.density > summer.density);
+    /// ```
+    pub fn from_air(air: &crate::atmosphere::Air) -> Self {
         Self {
             name: "Air".to_string(),
-            specific_heat_capacity: 1005.0,
-            thermal_conductivity: 0.0262,
-            density: 1.184,
-            molar_mass: 0.02897,
+            specific_heat_capacity: air.specific_heat_capacity(),
+            thermal_conductivity: air.thermal_conductivity(),
+            density: air.density(),
+            molar_mass: crate::atmosphere::MOLAR_MASS_DRY_AIR,
             phase: Phase::Gas,
         }
+    }
+
+    /// Air at 25 °C, dry, 1 atm.
+    ///
+    /// Kept as a convenience — unlike `Fluid::air()`, which was removed, a `Substance` is
+    /// a lookup of thermal properties rather than something that flows into a force, so a
+    /// named default is not the same hazard. The number is no longer independent: it is
+    /// [`Substance::from_air`] at the state the doc comment names, so it cannot drift
+    /// away from the density the rest of the crate uses. Density comes out at
+    /// 1.184 kg/m³ and conductivity at 0.0262 W/(m·K), the two figures this used to
+    /// carry as literals.
+    pub fn air() -> Self {
+        // The state is fixed and valid, so the `Result` cannot be `Err`; expressed as a
+        // fallback rather than an `unwrap` because this is a library path.
+        let state = crate::atmosphere::Air::new(298.15, 0.0, crate::atmosphere::STANDARD_PRESSURE)
+            .unwrap_or_else(|_| crate::atmosphere::Air::sea_level());
+        Substance::from_air(&state)
     }
 
     /// Creates an ideal gas with specified molar mass

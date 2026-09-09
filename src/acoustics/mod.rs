@@ -67,66 +67,52 @@ pub use surfaces::{barrier_insertion_db, impedance, reflection_coefficient};
 /// loud as it can possibly be.
 pub const REFERENCE_M: f64 = 1.0;
 
-/// The medium sound is travelling through.
-///
-/// Three numbers, and between them they fix both the speed and the colour of everything
-/// heard at a distance. Humidity is the one people are surprised by: dry air absorbs high
-/// frequencies *more* than damp air over most of the audible range, which is why a cold
-/// clear day carries a crack further than a muggy one carries a thump.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Air {
-    /// Temperature in kelvin.
-    pub temperature: f64,
-    /// Relative humidity, 0 to 1.
-    pub humidity: f64,
-    /// Static pressure in pascals.
-    pub pressure: f64,
-}
+pub use crate::atmosphere::Air;
 
 /// Reference pressure for the absorption model, in pascals. One standard atmosphere.
-const REFERENCE_PRESSURE: f64 = 101_325.0;
+pub const REFERENCE_PRESSURE: f64 = crate::atmosphere::STANDARD_PRESSURE;
 /// Reference temperature for the absorption model, in kelvin. 20 °C.
-const REFERENCE_TEMPERATURE: f64 = 293.15;
-/// Triple-point isotherm, in kelvin. Appears in the saturation-vapour term.
-const TRIPLE_POINT: f64 = 273.16;
+pub const REFERENCE_TEMPERATURE: f64 = crate::atmosphere::REFERENCE_TEMPERATURE;
 
+/// The acoustics of the medium.
+///
+/// [`Air`] itself lives in [`crate::atmosphere`], because what air *is* — its temperature,
+/// its humidity, its pressure, and therefore its density and its viscosity — is not an
+/// acoustics question. It used to be declared here, and the consequence was that the crate
+/// held two irreconcilable descriptions of air: this one, which knew about the weather, and
+/// `Fluid::air()`, whose density was frozen at 1.225 kg/m³ whatever the weather was. A
+/// caller could hold both at once, in the same frame, and nothing would object.
+///
+/// What stays here is the physics that is genuinely acoustic: how fast sound crosses the
+/// medium, and how much of it the medium eats on the way.
 impl Air {
-    /// 20 °C, half humidity, sea level.
-    pub fn standard() -> Air {
-        Air {
-            temperature: REFERENCE_TEMPERATURE,
-            humidity: 0.5,
-            pressure: REFERENCE_PRESSURE,
-        }
-    }
-
-    /// A cold, dry day. Carries high frequencies noticeably further.
-    pub fn winter() -> Air {
-        Air { temperature: 270.0, humidity: 0.4, pressure: REFERENCE_PRESSURE }
-    }
-
     /// Speed of sound, in metres per second.
     ///
     /// From the ideal-gas relation `c = sqrt(γ R T / M)`, which for air reduces to
     /// `20.05 * sqrt(T)`. Humidity raises it slightly — water is lighter than the nitrogen
     /// it displaces — by about 0.3 m/s at full saturation and room temperature, which is
     /// under a tenth of a per cent and is included because it costs one term.
+    ///
+    /// There is no guard on the temperature here any more. [`Air::new`] will not build a
+    /// state at or below 0 K, so the square root cannot see a negative and the `max(1.0)`
+    /// that used to stand in this line is gone. That is the whole argument for making the
+    /// fields private: the check moved from three use sites to one constructor, and the
+    /// use sites became total.
     pub fn speed_of_sound(&self) -> f64 {
-        let dry = 20.05 * self.temperature.max(1.0).sqrt();
-        dry * (1.0 + 0.0016 * self.molar_water_fraction())
+        let dry = 20.05 * self.temperature().sqrt();
+        dry * (1.0 + 0.0016 * self.water_vapour_percent())
     }
 
-    /// Mole fraction of water vapour, as a percentage.
+    /// Mole fraction of water vapour as a **percentage**, which is the unit ISO 9613-1
+    /// writes its absorption formula in.
     ///
-    /// The absorption model is written in terms of this rather than relative humidity,
-    /// because what matters is how many water molecules are present, and a given relative
-    /// humidity is a very different number of them at 0 °C and at 30 °C.
-    fn molar_water_fraction(&self) -> f64 {
-        // Saturation vapour pressure, ISO 9613-1's fit.
-        let t = self.temperature / TRIPLE_POINT;
-        let exponent = -6.8346 * t.powf(-1.261) + 4.6151;
-        let saturation = REFERENCE_PRESSURE * 10f64.powf(exponent);
-        100.0 * self.humidity.clamp(0.0, 1.0) * saturation / self.pressure
+    /// The crate's public form is [`Air::water_vapour_mole_fraction`], a dimensionless
+    /// fraction, per the SI convention everything else follows. This is the one place the
+    /// factor of 100 exists, and it sits beside the two formulas that need it rather than
+    /// in a public signature where a caller could pick the wrong one.
+    #[inline]
+    fn water_vapour_percent(&self) -> f64 {
+        100.0 * self.water_vapour_mole_fraction()
     }
 
     /// Atmospheric absorption at a frequency, in decibels per metre.
@@ -145,10 +131,10 @@ impl Air {
             return 0.0;
         }
         let f = frequency_hz;
-        let t = self.temperature;
-        let p_ratio = self.pressure / REFERENCE_PRESSURE;
+        let t = self.temperature();
+        let p_ratio = self.pressure() / REFERENCE_PRESSURE;
         let t_ratio = t / REFERENCE_TEMPERATURE;
-        let h = self.molar_water_fraction();
+        let h = self.water_vapour_percent();
 
         // Relaxation frequency of oxygen. Water vapour is the catalyst, so this climbs
         // steeply with humidity — which is why damp air absorbs *less* at speech
@@ -175,12 +161,6 @@ impl Air {
     pub fn absorption_gain(&self, frequency_hz: f64, metres: f64) -> f64 {
         let db = self.absorption_db_per_m(frequency_hz) * metres.max(0.0);
         10f64.powf(-db / 20.0)
-    }
-}
-
-impl Default for Air {
-    fn default() -> Self {
-        Air::standard()
     }
 }
 
@@ -260,7 +240,7 @@ mod tests {
     /// about 5 dB per kilometre and 4 kHz about 24.
     #[test]
     fn absorption_matches_the_standards_table() {
-        let air = Air { temperature: 293.15, humidity: 0.70, pressure: REFERENCE_PRESSURE };
+        let air = Air::new(293.15, 0.70, REFERENCE_PRESSURE).unwrap();
         let at_1k = air.absorption_db_per_m(1_000.0) * 1_000.0;
         let at_4k = air.absorption_db_per_m(4_000.0) * 1_000.0;
 
@@ -279,8 +259,8 @@ mod tests {
     #[test]
     fn dry_air_absorbs_more_than_damp_air_at_speech_frequencies() {
         let base = Air::standard();
-        let dry = Air { humidity: 0.05, ..base };
-        let damp = Air { humidity: 0.80, ..base };
+        let dry = base.with_humidity(0.05).unwrap();
+        let damp = base.with_humidity(0.80).unwrap();
         assert!(
             dry.absorption_db_per_m(2_000.0) > damp.absorption_db_per_m(2_000.0),
             "dry air did not absorb more than damp air at 2 kHz",
