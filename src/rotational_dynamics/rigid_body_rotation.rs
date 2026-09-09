@@ -12,7 +12,7 @@
 //! of spinning cleanly, why a spacecraft precesses, and why a body spun about its
 //! *intermediate* principal axis periodically turns end over end with nothing acting on
 //! it (the Dzhanibekov effect, asserted in
-//! [`tests::intermediate_axis_spin_flips`]). Drop it and **a free body with zero torque
+//! `tests::intermediate_axis_spin_flips`). Drop it and **a free body with zero torque
 //! never changes its angular velocity at all** — no wobble, no precession, no tumble.
 //!
 //! [`AngularState3D::apply_torque`] drops it. That is not a bug that can be fixed in
@@ -65,7 +65,7 @@ use super::inertia::InertiaTensor;
 /// moves within a step.
 ///
 /// A quarter radian is where the measured drift in the conserved quantities sits at the
-/// level [`tests::free_rotation_conserves_angular_momentum_but_not_speed`] asserts. It is a step size,
+/// level `tests::free_rotation_conserves_angular_momentum_but_not_speed` asserts. It is a step size,
 /// not a tuning knob: halving it buys accuracy at linear cost and changes no behaviour.
 pub const MAX_STEP_RADIANS: f64 = 0.25;
 
@@ -88,9 +88,9 @@ pub const MAX_SUBSTEPS: u32 = 32;
 
 /// A rigid body's rotational state and the mass properties that govern it.
 ///
-/// Owns the angular velocity, so the only way to advance it is [`step`], which
-/// integrates the full Euler equation. See the [module docs](self) for why that
-/// ownership is the point rather than an implementation detail.
+/// Owns the angular velocity, so the only way to advance it is [`RigidBodyRotation::step`],
+/// which integrates the full Euler equation. See the module docs at the top of this file for why
+/// that ownership is the point rather than an implementation detail.
 ///
 /// # Units
 ///
@@ -99,8 +99,8 @@ pub const MAX_SUBSTEPS: u32 = 32;
 ///
 /// # Invariants
 ///
-/// Established by [`new`] and preserved by every method, none of which can be
-/// side-stepped because all fields are private:
+/// Established by [`RigidBodyRotation::new`] and preserved by every method, none of which
+/// can be side-stepped because all fields are private:
 ///
 /// - `inertia` is finite, positive definite, and satisfies the triangle inequality.
 /// - `inverse` is `inertia.inverse()`, computed once.
@@ -499,7 +499,7 @@ impl RigidBodyRotation {
     /// torque.
     ///
     /// This is the only method that moves `ω` forward in time, which is what makes the
-    /// gyroscopic term non-optional; see the [module docs](self).
+    /// gyroscopic term non-optional; see the module docs at the top of this file.
     ///
     /// # Scheme, and what bounds its error
     ///
@@ -515,7 +515,7 @@ impl RigidBodyRotation {
     /// substep is therefore `≲ |ω|·h`, the same quantity the angle criterion bounds.
     ///
     /// RK4 is fourth order but not symplectic, so `|Iω|` and the energy drift slowly
-    /// rather than exactly. [`tests::free_rotation_decays_rather_than_gains_over_a_long_run`] pins that
+    /// rather than exactly. `tests::free_rotation_decays_rather_than_gains_over_a_long_run` pins that
     /// drift over a minute of simulated time, which is the test that would catch a
     /// change to the scheme trading accuracy away.
     ///
