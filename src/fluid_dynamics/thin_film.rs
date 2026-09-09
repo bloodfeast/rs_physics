@@ -127,9 +127,46 @@
 //! `row[x + 1]` against a slice of length `width` is provable and
 //! `flux_x[y * width + x + 1]` against `width * height + 1` is not.
 //!
+//! Counted rather than eyeballed: of the double-precision arithmetic in
+//! [`FilmFlow::flux_batch`], **76% is packed** (65 `pd` against 20 `sd`, 26 of the packed
+//! ops on `%ymm`); in [`FilmGrid::step`], **64%** (244 against 139, 108 on `%ymm`). The
+//! scalar remainder is loop prologues, epilogues and tail elements across six loops, not
+//! arithmetic that failed to vectorize.
+//!
 //! No hand-written intrinsics, and deliberately none: the production consumer is a
 //! compute shader, so `unsafe` architecture-specific code here would be maintained
 //! forever to accelerate a reference implementation.
+//!
+//! # What it costs
+//!
+//! Measured, `cargo bench --bench thin_film`, release, one Windows x86-64 desktop. The
+//! ratios are the durable part; the absolute figures move with the machine.
+//!
+//! | | per call | per element |
+//! |---|---|---|
+//! | `flux_batch`, Newtonian, 100 k faces | 72 µs | **0.72 ns** |
+//! | the same loop written by hand, calling `flux` | 318 µs | 3.2 ns |
+//! | `flux_batch`, with a yield stress | 91 µs | 0.91 ns |
+//! | the same, by hand | 295 µs | 2.9 ns |
+//! | `FilmGrid::step`, 128 × 128 | 101 µs | 6.1 ns/cell |
+//! | `FilmGrid::step`, 1400 × 1000 | **16.8 ms** | 12 ns/cell |
+//! | `FilmGrid::max_step`, 1400 × 1000 | 5.2 ms | 3.7 ns/cell |
+//!
+//! Two things follow, and neither was safe to assume.
+//!
+//! **The batch entry point is worth 3.3–4.4×**, not merely tidier. Part of that is the
+//! yield-stress unswitch — the Bingham divide costs 26% — but only part: the two
+//! hand-written loops land within 8% of each other, so most of the gap is the slice
+//! shape, which is what lets LLVM discharge the bounds checks and vectorize at all. The
+//! prediction going in was that the unswitch was the whole story. It was not.
+//!
+//! **A whole-map sweep is not a frame budget.** 1400 × 1000 is Ridgeline's stain buffer
+//! at 5 texels per metre over a 280 × 200 m map, and 16.8 ms of it is a frame. That is
+//! the measurement behind [`FilmGrid`] declining to own the sweep: liquid covers a
+//! percent or two of a map, and a caller that visits only the tiles holding any pays a
+//! percent or two of that. It is also why [`FilmGrid::max_step`] documents an escape —
+//! 5.2 ms to scan for the deepest cell is absurd beside one [`FilmFlow::max_step`] call
+//! with a depth the caller already knows.
 //!
 //! Per-cell functions are **total** — no `Result`, no panic, no allocation. The
 //! validation the rest of this module does per call at the API edge is done here once,
@@ -377,6 +414,13 @@ impl FilmFlow {
     /// One length check, then a flat loop with no bounds checks and no branches, which
     /// is what the auto-vectorizer needs. Allocates nothing.
     ///
+    /// **Measured at 3.3–4.4× the same loop written by hand around [`Self::flux`]** —
+    /// 0.72 ns a face against 3.2 — so this is a speed-up and not only a tidier
+    /// signature. Two things buy it: the yield-stress branch is hoisted out of the loop
+    /// by a const generic, worth 26%, and re-slicing all three inputs to one known
+    /// length lets LLVM drop the bounds checks and vectorize, which is the rest. See the
+    /// module docs for the whole table.
+    ///
     /// # Arguments
     ///
     /// * `slopes` — free-surface gradients, one per face.
@@ -569,9 +613,12 @@ impl FilmFlow {
 /// not exist are indices nobody writes, so they stay `0.0` forever and there is no `if`
 /// for an edge anywhere in the step. Four flat, branch-free passes over the grid.
 ///
-/// It visits every cell whether or not it holds liquid. For a large map that is the
-/// wrong sweep — the caller should track which tiles are wet — but that bookkeeping
-/// depends on how the caller stores its liquid and does not belong in the law.
+/// It visits every cell whether or not it holds liquid, and **at map scale that is the
+/// wrong sweep by a wide measured margin**: 1400 × 1000 cells cost 16.8 ms a step, which
+/// is a whole frame spent on a buffer that is 99% dry. A caller must track which tiles
+/// hold liquid and step only those. That bookkeeping is not here because it depends on
+/// how the caller stores its liquid, and because at 6.1 ns a cell the arithmetic is not
+/// what needs fixing — the number of cells is.
 #[derive(Debug, Clone)]
 pub struct FilmGrid {
     width: usize,
@@ -773,9 +820,11 @@ impl FilmGrid {
     ///
     /// It changes as the liquid moves — a splash lands, the depth quadruples, the
     /// allowable step falls by sixteen — so it is a per-frame question, not a setup-time
-    /// one. O(cells) and allocation-free, but it is a whole extra sweep; a caller that
-    /// knows the deepest cell it just deposited can call [`FilmFlow::max_step`] with
-    /// that depth instead and skip this entirely.
+    /// one. O(cells) and allocation-free, but it is a whole extra sweep and it is priced
+    /// accordingly: **5.2 ms on a 1400 × 1000 grid**, which is most of a frame to
+    /// rediscover something the caller usually already knows. A caller that has just
+    /// deposited the deepest liquid on the map should call [`FilmFlow::max_step`] with
+    /// that depth and skip this entirely.
     pub fn max_step(&self, flow: &FilmFlow) -> f64 {
         let (w, h) = (self.width, self.height);
         let inv_dx = 1.0 / self.cell_size;
