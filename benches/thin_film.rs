@@ -18,7 +18,9 @@
 //! every cell is affordable at all, or whether the caller has to track which tiles are
 //! wet. The answer decides an API, so it is worth a number rather than an opinion.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
+};
 use rs_physics::fluid_dynamics::{FilmFlow, FilmGrid, Fluid, BLOOD_YIELD_STRESS};
 
 const G: f64 = 9.81;
@@ -137,6 +139,38 @@ fn benchmark(c: &mut Criterion) {
     group.bench_function("max_step_1400x1000_map", |b| {
         b.iter(|| black_box(map.max_step(black_box(&newtonian))))
     });
+
+    group.finish();
+
+    // Does `step` get slower per cell as the grid outgrows cache?
+    //
+    // This is the measurement that decides whether hand-written SIMD is worth writing.
+    // `FilmGrid` holds five `f64` arrays (`ground`, `thickness`, `flux_x`, `flux_y`,
+    // `work`), so the working set is ~40 bytes a cell and these sizes walk it from
+    // comfortably-in-L2 to several times L3:
+    //
+    //   64 x 64   =>  164 KB      512 x 512   =>  10.5 MB
+    //   128 x 128 =>  655 KB      1024 x 1024 =>  42 MB
+    //   256 x 256 =>  2.6 MB
+    //
+    // The arithmetic per cell is identical at every size. So if ns/cell is flat, the
+    // loop is compute-bound and wider vectors would buy something; if it climbs once
+    // the working set passes L3, the large grid is waiting on memory and no amount of
+    // SIMD moves it. Throughput is set to Elements so Criterion reports the per-cell
+    // figure directly rather than leaving it to be divided out by hand.
+    let mut group = c.benchmark_group("thin_film_scaling");
+
+    for &(w, h) in &[(64, 64), (128, 128), (256, 256), (512, 512), (1024, 1024)] {
+        let cells = (w * h) as u64;
+        let mut grid = spill(w, h, 0.05);
+        let step_dt = grid.max_step(&newtonian) * 0.25;
+        group.throughput(Throughput::Elements(cells));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &step_dt,
+            |b, &d| b.iter(|| grid.step(black_box(&newtonian), black_box(d))),
+        );
+    }
 
     group.finish();
 }

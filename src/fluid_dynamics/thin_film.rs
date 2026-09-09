@@ -117,25 +117,44 @@
 //! not.
 //!
 //! Checked rather than hoped for, since "it should vectorize" is the same class of
-//! claim as "it should be fast". Against `rustc` 1.9x in release,
-//! `cargo rustc --release --emit asm`, the body of `FilmGrid::step` contains 42
-//! `vmulpd`, 18 `vaddpd`, 12 `vsubpd`, 12 `vmaxpd` and 10 `vcmpltpd`/`vblendvpd` pairs
-//! on `%ymm` registers — four `f64` lanes at a time, with the NaN sink emitted as a
-//! blend rather than a branch. Every bounds check LLVM could not discharge sits in the
-//! cold tail of the function, past the last vector instruction, so none of them is in a
-//! loop body. That is also why the first pass is written a row at a time:
+//! claim as "it should be fast". Counted from `--emit=asm`, **stock
+//! `cargo build --release`**, which is the build a consumer actually gets: of the
+//! double-precision arithmetic in `FilmGrid::step`, **66% is packed** (294 `pd` against
+//! 149 `sd`); in [`FilmFlow::flux_batch`], **69%** (68 against 30). The NaN sink is
+//! emitted as a `cmp`/`blend` pair rather than a branch. Every bounds check LLVM could
+//! not discharge sits in the cold tail, past the last vector instruction, so none is in
+//! a loop body — which is also why the first pass is written a row at a time:
 //! `row[x + 1]` against a slice of length `width` is provable and
-//! `flux_x[y * width + x + 1]` against `width * height + 1` is not.
+//! `flux_x[y * width + x + 1]` against `width * height + 1` is not. The scalar remainder
+//! is loop prologues, epilogues and tail elements across six loops, not arithmetic that
+//! failed to vectorize.
 //!
-//! Counted rather than eyeballed: of the double-precision arithmetic in
-//! [`FilmFlow::flux_batch`], **76% is packed** (65 `pd` against 20 `sd`, 26 of the packed
-//! ops on `%ymm`); in [`FilmGrid::step`], **64%** (244 against 139, 108 on `%ymm`). The
-//! scalar remainder is loop prologues, epilogues and tail elements across six loops, not
-//! arithmetic that failed to vectorize.
+//! **Those packed ops are `%xmm` — two `f64` lanes, not four.** Baseline `x86-64` has
+//! SSE2 and nothing wider, so unless a consumer sets `target-cpu`, this loop runs
+//! 2-wide. The obvious inference is that there is a free 2x in it. **There is not, and
+//! the measurement is the whole point of this paragraph:** rebuilt with
+//! `-C target-cpu=native` the loop does go 4-wide (154 ops on `%ymm`) and it gets
+//! *slower* — +4% at 128 x 128, **+38% at 512 x 512, +27% at 1024 x 1024**, +18% on the
+//! 1400 x 1000 map. Only the 64 x 64 case improves, by a non-significant 4%.
 //!
-//! No hand-written intrinsics, and deliberately none: the production consumer is a
-//! compute shader, so `unsafe` architecture-specific code here would be maintained
-//! forever to accelerate a reference implementation.
+//! The shape of that regression names its cause. It is absent when the grid fits cache
+//! and severe when it does not, and the two builds do not converge on a common
+//! bandwidth ceiling — SSE2 plateaus at ~92 Melem/s and AVX at ~71, so this is not the
+//! memory system saturating equally for both. The likely mechanism is alignment: `Vec`
+//! gives 16-byte alignment, so every 32-byte load has a good chance of straddling a
+//! cache line where a 16-byte load mostly does not, and the wider build also spills
+//! more (150 scalar ops against 135 in the loop bodies). **Wider vectors do not help a
+//! loop that is waiting on memory; they can make it worse.**
+//!
+//! So: no hand-written intrinsics, and now for a measured reason rather than a stylistic
+//! one. The crate's own AVX pattern — runtime `is_x86_feature_detected!` selecting a
+//! `#[target_feature(enable = "avx")]` body, as in `particles/particle_simulation.rs` —
+//! is the right idiom and would be the way to do it, but it would be dispatching to a
+//! kernel this benchmark says is slower on the sizes that matter. The lever here is
+//! traffic, not lanes: **step fewer cells** (see [`FilmGrid`]) before making the
+//! arithmetic wider. And the production consumer is a compute shader regardless, so
+//! `unsafe` architecture-specific code here would be maintained forever to accelerate a
+//! reference implementation.
 //!
 //! # What it costs
 //!
@@ -151,6 +170,21 @@
 //! | `FilmGrid::step`, 128 × 128 | 101 µs | 6.1 ns/cell |
 //! | `FilmGrid::step`, 1400 × 1000 | **16.8 ms** | 12 ns/cell |
 //! | `FilmGrid::max_step`, 1400 × 1000 | 5.2 ms | 3.7 ns/cell |
+//!
+//! And the same `step` across grid sizes, which is how the memory effect above was
+//! found. `FilmGrid` holds five `f64` arrays, so the working set is ~40 bytes a cell:
+//!
+//! | grid | working set | per cell |
+//! |---|---|---|
+//! | 64 x 64 | 164 KB | 8.1 ns |
+//! | 128 x 128 | 655 KB | **6.5 ns** |
+//! | 256 x 256 | 2.6 MB | 8.1 ns |
+//! | 512 x 512 | 10.5 MB | 10.6 ns |
+//! | 1024 x 1024 | 42 MB | 10.9 ns |
+//! | 1400 x 1000 | 56 MB | 12.0 ns |
+//!
+//! Identical arithmetic at every size, so the 1.8x spread is entirely the memory
+//! system. Past L3 it flattens at ~92 Melem/s and stays there.
 //!
 //! Two things follow, and neither was safe to assume.
 //!
