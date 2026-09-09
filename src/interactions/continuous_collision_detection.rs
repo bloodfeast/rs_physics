@@ -2002,8 +2002,15 @@ pub fn update_physics_with_ccd(
             resolve_remaining_discrete_collisions(objects, sub_dt);
         }
 
-        // Apply minimal damping only if not in the final step or if explicitly needed
-        if step < SUB_STEPS - 1 || constants.gravity.abs() > EPSILON {
+        // Apply minimal damping only if not in the final step or if explicitly needed.
+        //
+        // `step + 1 < SUB_STEPS` rather than `step < SUB_STEPS - 1`: `SUB_STEPS` is
+        // `usize`, so the subtraction underflows to `usize::MAX` the moment anyone sets
+        // it to 0, and at the current value of 1 it made the whole clause `step < 0` --
+        // dead, and silently so. This form says "not the final step" for every value of
+        // `SUB_STEPS` and cannot wrap. Behaviour at `SUB_STEPS == 1` is unchanged: both
+        // spellings are false on the only iteration.
+        if step + 1 < SUB_STEPS || constants.gravity.abs() > EPSILON {
             for obj in objects.iter_mut() {
                 // Very light damping to prevent instabilities, but not affect test results
                 crate::interactions::shape_collisions_3d::apply_damping(obj, 0.001, 0.001, sub_dt);
