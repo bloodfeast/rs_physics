@@ -562,6 +562,63 @@ impl RigidBodyRotation {
         }
     }
 
+    /// **Advance `ω` only**, leaving the orientation alone. For the caller whose
+    /// orientation lives somewhere else.
+    ///
+    /// An ECS is the usual case: the renderer's transform *is* the orientation, and a
+    /// second copy inside this type would be a second source of truth that has to be
+    /// synchronised every frame. Such a caller wants Euler's equation and nothing more.
+    ///
+    /// # This is not an approximation of [`step`]
+    ///
+    /// `ω̇ = I⁻¹(τ − ω × Iω)` does not contain `q`. The orientation is downstream of the
+    /// angular velocity and never feeds back into it, so the Runge-Kutta stages for `ω`
+    /// are unaffected by whether the orientation is being carried alongside them: this
+    /// produces **bit-identical** `ω` to [`step`], asserted in
+    /// `tests::stepping_omega_alone_is_bit_identical_to_stepping_both`. It is simply
+    /// cheaper, since the four quaternion stages and the renormalisation are not paid
+    /// for.
+    ///
+    /// The caller composing the orientation itself takes on the one thing this type
+    /// otherwise guaranteed: `ω` is in the **body frame**, so the increment goes on the
+    /// **right** — `q ← normalize(q · Δ)`, not `Δ · q`. Getting that backwards rotates
+    /// the body at the right rate about the wrong axis and fails nothing loudly. Use
+    /// [`angular_velocity_world`] if you would rather compose on the left.
+    ///
+    /// # Returns and errors
+    ///
+    /// As [`step`].
+    ///
+    /// [`step`]: RigidBodyRotation::step
+    /// [`angular_velocity_world`]: RigidBodyRotation::angular_velocity_world
+    pub fn step_angular_velocity(&mut self, dt: f64) -> Result<u32, PhysicsError> {
+        if !dt.is_finite() || dt < 0.0 {
+            return Err(PhysicsError::InvalidTime);
+        }
+        if dt == 0.0 {
+            return Ok(1);
+        }
+        let wanted = self.required_substeps(dt);
+        if wanted > MAX_SUBSTEPS as f64 {
+            return Err(PhysicsError::InvalidTime);
+        }
+        let substeps = wanted as u32;
+        let h = dt / substeps as f64;
+
+        let mut w = self.velocity;
+        for _ in 0..substeps {
+            w = self.rk4_velocity(w, h);
+        }
+        if !is_finite(w) {
+            return Err(PhysicsError::CalculationError(
+                "rotational integration produced a non-finite angular velocity".to_string(),
+            ));
+        }
+        self.velocity = w;
+        self.torque = (0.0, 0.0, 0.0);
+        Ok(substeps)
+    }
+
     /// **Step a contiguous batch of bodies.** Same physics as [`step`], arranged for the
     /// caller that has hundreds of them.
     ///
@@ -683,19 +740,16 @@ impl RigidBodyRotation {
     /// One classical RK4 substep on the joint state `(q, ω)`.
     #[inline]
     fn rk4(&self, q: Quaternion, w: Vec3, h: f64) -> (Quaternion, Vec3) {
-        let (dq1, dw1) = (Self::orientation_derivative(q, w), self.velocity_derivative(w));
+        let (w_next, stages) = self.rk4_velocity_stages(w, h);
 
-        let q2 = q_axpy(q, dq1, 0.5 * h);
-        let w2 = add(w, scale(dw1, 0.5 * h));
-        let (dq2, dw2) = (Self::orientation_derivative(q2, w2), self.velocity_derivative(w2));
-
-        let q3 = q_axpy(q, dq2, 0.5 * h);
-        let w3 = add(w, scale(dw2, 0.5 * h));
-        let (dq3, dw3) = (Self::orientation_derivative(q3, w3), self.velocity_derivative(w3));
-
-        let q4 = q_axpy(q, dq3, h);
-        let w4 = add(w, scale(dw3, h));
-        let (dq4, dw4) = (Self::orientation_derivative(q4, w4), self.velocity_derivative(w4));
+        // The orientation stages ride on the ω stages the velocity integration already
+        // produced. `ω̇` does not depend on `q`, so this direction of dependence is the
+        // only one there is — which is what makes `step_angular_velocity` bit-identical
+        // rather than merely close.
+        let dq1 = Self::orientation_derivative(q, w);
+        let dq2 = Self::orientation_derivative(q_axpy(q, dq1, 0.5 * h), stages[0]);
+        let dq3 = Self::orientation_derivative(q_axpy(q, dq2, 0.5 * h), stages[1]);
+        let dq4 = Self::orientation_derivative(q_axpy(q, dq3, h), stages[2]);
 
         let sixth = h / 6.0;
         let q_next = Quaternion {
@@ -704,12 +758,41 @@ impl RigidBodyRotation {
             y: q.y + sixth * (dq1.y + 2.0 * dq2.y + 2.0 * dq3.y + dq4.y),
             z: q.z + sixth * (dq1.z + 2.0 * dq2.z + 2.0 * dq3.z + dq4.z),
         };
+        (q_next, w_next)
+    }
+
+    /// One RK4 substep of `ω` alone, plus the three intermediate `ω` stages the
+    /// orientation integration needs.
+    ///
+    /// **The single source of the velocity arithmetic.** Both [`step`] and
+    /// [`step_angular_velocity`] go through here, which is what makes their agreement a
+    /// property of the code rather than of two implementations happening to match.
+    ///
+    /// [`step`]: RigidBodyRotation::step
+    /// [`step_angular_velocity`]: RigidBodyRotation::step_angular_velocity
+    #[inline]
+    fn rk4_velocity_stages(&self, w: Vec3, h: f64) -> (Vec3, [Vec3; 3]) {
+        let dw1 = self.velocity_derivative(w);
+        let w2 = add(w, scale(dw1, 0.5 * h));
+        let dw2 = self.velocity_derivative(w2);
+        let w3 = add(w, scale(dw2, 0.5 * h));
+        let dw3 = self.velocity_derivative(w3);
+        let w4 = add(w, scale(dw3, h));
+        let dw4 = self.velocity_derivative(w4);
+
+        let sixth = h / 6.0;
         let w_next = (
             w.0 + sixth * (dw1.0 + 2.0 * dw2.0 + 2.0 * dw3.0 + dw4.0),
             w.1 + sixth * (dw1.1 + 2.0 * dw2.1 + 2.0 * dw3.1 + dw4.1),
             w.2 + sixth * (dw1.2 + 2.0 * dw2.2 + 2.0 * dw3.2 + dw4.2),
         );
-        (q_next, w_next)
+        (w_next, [w2, w3, w4])
+    }
+
+    /// One RK4 substep of `ω` alone.
+    #[inline]
+    fn rk4_velocity(&self, w: Vec3, h: f64) -> Vec3 {
+        self.rk4_velocity_stages(w, h).0
     }
 }
 
@@ -1405,6 +1488,56 @@ mod tests {
         assert!(is_finite(bodies[0].angular_velocity_body()));
         assert!(is_finite(bodies[2].angular_velocity_body()));
         assert_ne!(bodies[0].orientation(), Quaternion::identity());
+    }
+
+    /// **`step_angular_velocity` must agree with `step` bit for bit**, not merely
+    /// closely.
+    ///
+    /// It is the caller with an ECS transform who reaches for it, and if it were only
+    /// approximately the same the two paths would diverge over a flight and the
+    /// difference would be attributed to anything but the choice of entry point. The
+    /// agreement is structural — `ω̇` does not depend on `q`, and both go through
+    /// `rk4_velocity_stages` — so `assert_eq!` on the floats is the right assertion and
+    /// an epsilon would be hiding something.
+    #[test]
+    fn stepping_omega_alone_is_bit_identical_to_stepping_both() {
+        let mut both = brick();
+        let mut omega_only = brick();
+        both.set_angular_velocity_body((4.0, 0.7, 11.0)).unwrap();
+        omega_only.set_angular_velocity_body((4.0, 0.7, 11.0)).unwrap();
+        both.set_orientation(Quaternion::from_axis_angle((1.0, 2.0, 3.0), 0.7))
+            .unwrap();
+
+        let dt = 1.0 / 120.0;
+        for i in 0..1200 {
+            let torque = (0.3, -0.1 * (i as f64 * 0.01).sin(), 0.05);
+            both.apply_torque_body(torque).unwrap();
+            omega_only.apply_torque_body(torque).unwrap();
+            assert_eq!(both.step(dt).unwrap(), omega_only.step_angular_velocity(dt).unwrap());
+            assert_eq!(
+                both.angular_velocity_body(),
+                omega_only.angular_velocity_body(),
+                "diverged at step {i}"
+            );
+        }
+        // And the ω-only path really did leave the orientation alone.
+        assert_eq!(omega_only.orientation(), Quaternion::identity());
+        assert_ne!(both.orientation(), Quaternion::identity());
+    }
+
+    #[test]
+    fn step_angular_velocity_reports_bad_and_unresolvable_timesteps() {
+        let mut body = brick();
+        body.set_angular_velocity_body((300.0, 40.0, 700.0)).unwrap();
+        assert_eq!(
+            body.step_angular_velocity(-1.0).unwrap_err(),
+            PhysicsError::InvalidTime
+        );
+        assert_eq!(
+            body.step_angular_velocity(1.0).unwrap_err(),
+            PhysicsError::InvalidTime
+        );
+        assert_eq!(body.angular_velocity_body(), (300.0, 40.0, 700.0));
     }
 
     #[test]

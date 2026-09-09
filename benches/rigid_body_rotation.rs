@@ -24,34 +24,44 @@
 //!
 //! # What it measured
 //!
-//! On a Windows x86-64 desktop, `cargo bench --bench rigid_body_rotation`, and every
-//! conclusion below is one of these numbers rather than an expectation:
+//! On a Windows x86-64 desktop, `cargo bench --bench rigid_body_rotation`:
 //!
 //! ```text
 //!   step_many/520                        62.5 µs      8.3 Melem/s
 //!   step_loop/520                        61.2 µs      8.5 Melem/s
+//!   step_angular_velocity_loop/520       32 µs
 //!   omega_only/cached_inverse/520        24.1 µs     21.5 Melem/s
 //!   omega_only/recomputed_inverse/520    49.3 µs     10.5 Melem/s
 //!   substeps_1                            124 ns
 //!   substeps_4                            278 ns
 //! ```
 //!
-//! **Caching the inverse tensor is worth 2.04×** on identical arithmetic. That is the
+//! **Read the ratios, not the microseconds.** Repeated runs on a machine with other work
+//! on it move every absolute number by ±25% together, while the ratios below held to
+//! within a few percent across every run. Each conclusion is stated as the ratio it
+//! actually is.
+//!
+//! **Caching the inverse tensor is worth 2.0–2.1×** on identical arithmetic. That is the
 //! one clear win, and it is the thing `RigidBodyRotation` does that
 //! `InertiaTensor::apply_inverse_to_torque` cannot.
 //!
-//! **`step_many` is not faster than the hand-written loop** — 62.5 µs against 61.2 µs,
-//! which is a wash or marginally worse for the batch call. Said plainly because the
-//! opposite is the easy assumption: what `step_many` actually buys is contract, not
-//! throughput. One `dt` validation for the whole slice, no `Result` per body, and a
-//! batch-level skip count instead of an error the caller has to fold. Anyone reaching
-//! for it expecting a speed-up should reach for the loop instead and lose nothing.
+//! **Not carrying the orientation is worth 2×.** `step_angular_velocity` costs about
+//! half of `step`, which is what the four quaternion Runge-Kutta stages and the
+//! renormalisation come to. The caller whose orientation lives in an ECS transform gets
+//! that back for free and gets bit-identical `ω`.
+//!
+//! **`step_many` is not faster than the hand-written loop** — a wash, or a few percent
+//! worse. Said plainly because the opposite is the easy assumption: what `step_many`
+//! actually buys is contract, not throughput. One `dt` validation for the whole slice,
+//! no `Result` per body, and a batch-level skip count instead of an error the caller has
+//! to fold. Anyone reaching for it expecting a speed-up should reach for the loop
+//! instead and lose nothing.
 //!
 //! **The adaptive substep rule beats a fixed worst-case count.** Four substeps cost
-//! 2.24× one, not 4× — there is about 40 ns of fixed overhead per body and 51 ns per
-//! marginal substep — so forcing every body to the count the fastest one needs would
-//! roughly double a workload in which most bodies need one substep. The per-body branch
-//! that chooses the count is cheaper than the work it avoids.
+//! 2.2–2.4× one, not 4× — roughly a third of a body's cost is fixed and two thirds is
+//! per-substep — so forcing every body to the count the fastest one needs would roughly
+//! double a workload in which most bodies need one substep. The per-body branch that
+//! chooses the count is cheaper than the work it avoids.
 //!
 //! **LLVM does auto-vectorize, partially and within a body.** Disassembling
 //! `step_many` from `--emit=asm` gives 32 packed SSE ops (`mulpd`/`addpd`/`subpd`)
@@ -152,6 +162,16 @@ fn bench_batch(c: &mut Criterion) {
             let slice: &mut [RigidBodyRotation] = black_box(&mut bodies);
             for body in slice.iter_mut() {
                 body.step(black_box(DT)).unwrap();
+            }
+        });
+    });
+
+    group.bench_function("step_angular_velocity_loop/520", |b| {
+        let mut bodies = seed.clone();
+        b.iter(|| {
+            let slice: &mut [RigidBodyRotation] = black_box(&mut bodies);
+            for body in slice.iter_mut() {
+                body.step_angular_velocity(black_box(DT)).unwrap();
             }
         });
     });
