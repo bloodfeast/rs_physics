@@ -27,6 +27,17 @@
 //! In 2D there is no such distinction. `AngularState2D::apply_torque` is complete as
 //! written: a scalar moment about a fixed axis has no gyroscopic term.
 //!
+//! ## Three doors onto the same integration
+//!
+//! All three run identical arithmetic; they differ in what they carry and what they
+//! validate, not in the physics.
+//!
+//! | you have | call | it costs |
+//! |---|---|---|
+//! | one body, and you want the orientation too | `RigidBodyRotation::step` | the baseline |
+//! | one body, orientation kept elsewhere (an ECS `Transform`) | `RigidBodyRotation::step_angular_velocity` | half — and gives bit-identical `ω` |
+//! | a contiguous slice of hundreds | `RigidBodyRotation::step_many` | the same, with `dt` validated once and a batch skip count instead of a `Result` per body |
+//!
 //! ## Feature Flags
 //!
 //! **This module is not gated by the feature that shares its name.** `InertiaTensor`,
