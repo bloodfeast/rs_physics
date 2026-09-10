@@ -155,6 +155,13 @@ pub mod prelude {
         calculate_reynolds_number,
         calculate_drag_force,
         calculate_buoyant_force,
+        // Thin-film surface flow. Gated identically to `mod thin_film` in
+        // `fluid_dynamics/mod.rs`; the two gates must stay the same string or this
+        // re-export names something that does not exist in a single-flag build.
+        FilmFlow,
+        FilmGrid,
+        blood_apparent_viscosity,
+        puddle_depth,
     };
 
     // Fluid simulation (when enabled)

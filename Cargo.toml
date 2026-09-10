@@ -65,3 +65,8 @@ required-features = ["fluid_simulation"]
 [[bench]]
 name = "atmosphere"
 harness = false
+
+[[bench]]
+name = "thin_film"
+harness = false
+required-features = ["fluid_dynamics"]
