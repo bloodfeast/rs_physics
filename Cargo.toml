@@ -70,3 +70,7 @@ harness = false
 name = "thin_film"
 harness = false
 required-features = ["fluid_dynamics"]
+
+[[bench]]
+name = "rigid_body_rotation"
+harness = false

@@ -158,8 +158,124 @@ impl InertiaTensor {
 
     /// Apply the inverse inertia tensor to a torque to get angular acceleration
     /// α = I⁻¹ * τ
+    ///
+    /// # Cost
+    ///
+    /// **This recomputes [`InertiaTensor::inverse`] on every call** — a determinant and
+    /// six cofactors for a general tensor, three divisions for a diagonal one. The
+    /// inverse is a property of the body, not of the call, so anything invoking this
+    /// per body per step should hold the inverse instead. [`RigidBodyRotation`] does
+    /// exactly that: it computes the inverse once in its constructor and never again.
+    ///
+    /// [`RigidBodyRotation`]: crate::rotational_dynamics::RigidBodyRotation
     pub fn apply_inverse_to_torque(&self, torque: (f64, f64, f64)) -> (f64, f64, f64) {
         self.inverse().multiply_vector(torque)
+    }
+
+    /// Every component is finite — no `NaN`, no `±∞`.
+    #[inline]
+    pub fn is_finite(&self) -> bool {
+        self.diagonal.0.is_finite()
+            && self.diagonal.1.is_finite()
+            && self.diagonal.2.is_finite()
+            && self.off_diagonal.0.is_finite()
+            && self.off_diagonal.1.is_finite()
+            && self.off_diagonal.2.is_finite()
+    }
+
+    /// **The inverse exists and every principal moment is strictly positive.**
+    ///
+    /// A symmetric matrix is positive definite iff its three leading principal minors
+    /// are positive (Sylvester's criterion), which is checked directly here rather than
+    /// by extracting eigenvalues. Positive definiteness is what makes `I⁻¹` finite; a
+    /// tensor with a zero moment about some axis — `inertia_3d::thin_rod_center` returns
+    /// one, deliberately, as an idealisation — gives that axis infinite angular
+    /// acceleration and cannot be integrated.
+    ///
+    /// The tolerance is relative to the trace, so the answer does not depend on whether
+    /// the body is measured in kg·m² or g·cm².
+    pub fn is_positive_definite(&self) -> bool {
+        if !self.is_finite() {
+            return false;
+        }
+        let (ixx, iyy, izz) = self.diagonal;
+        let (ixy, ixz, iyz) = self.off_diagonal;
+
+        let scale = (ixx.abs() + iyy.abs() + izz.abs()) / 3.0;
+        if scale <= 0.0 {
+            return false;
+        }
+        let eps = 1e-12;
+
+        // Leading principal minors of
+        //   | ixx  ixy  ixz |
+        //   | ixy  iyy  iyz |
+        //   | ixz  iyz  izz |
+        let m1 = ixx;
+        let m2 = ixx * iyy - ixy * ixy;
+        let m3 = ixx * (iyy * izz - iyz * iyz) - ixy * (ixy * izz - iyz * ixz)
+            + ixz * (ixy * iyz - iyy * ixz);
+
+        m1 > eps * scale && m2 > eps * scale * scale && m3 > eps * scale * scale * scale
+    }
+
+    /// **The principal moments obey `I₁ + I₂ ≥ I₃`** — the tensor could have come from
+    /// a real mass distribution.
+    ///
+    /// No arrangement of positive mass can violate this: each moment is an integral of
+    /// the squared distance from one axis, and the three integrands satisfy the
+    /// inequality pointwise. A tensor that violates it is a data error, and it is worth
+    /// catching because **the integrator's error bound depends on it**: in principal
+    /// axes `ω̇ₓ = (I_y − I_z)/I_x · ω_y ω_z`, and the triangle inequality is exactly
+    /// what bounds that coefficient by 1, hence `|ω̇| ≲ |ω|²` and hence the substep rule
+    /// in [`RigidBodyRotation::step`]. Without it there is no bound on how fast the
+    /// gyroscopic term can move `ω`, and a fixed substep count means nothing.
+    ///
+    /// Checked without an eigendecomposition: the inequality on the eigenvalues of `I`
+    /// holds iff `C = (tr I / 2)·Id − I` is positive semi-definite, because the
+    /// eigenvalues of `C` are exactly `(Iⱼ + I_k − Iᵢ)/2`. Positive semi-definiteness
+    /// of a symmetric 3×3 needs *all* seven principal minors to be non-negative, not
+    /// just the leading three, so all seven are tested.
+    ///
+    /// [`RigidBodyRotation::step`]: crate::rotational_dynamics::RigidBodyRotation::step
+    pub fn satisfies_triangle_inequality(&self) -> bool {
+        if !self.is_finite() {
+            return false;
+        }
+        let (ixx, iyy, izz) = self.diagonal;
+        let (ixy, ixz, iyz) = self.off_diagonal;
+
+        let half_trace = 0.5 * (ixx + iyy + izz);
+        // C = (tr/2) Id - I
+        let cxx = half_trace - ixx;
+        let cyy = half_trace - iyy;
+        let czz = half_trace - izz;
+        let cxy = -ixy;
+        let cxz = -ixz;
+        let cyz = -iyz;
+
+        let scale = (ixx.abs() + iyy.abs() + izz.abs()) / 3.0;
+        if scale <= 0.0 {
+            return false;
+        }
+        let eps = 1e-12;
+        let (t1, t2, t3) = (eps * scale, eps * scale * scale, eps * scale * scale * scale);
+
+        // 1x1 principal minors
+        if cxx < -t1 || cyy < -t1 || czz < -t1 {
+            return false;
+        }
+        // 2x2 principal minors
+        if cxx * cyy - cxy * cxy < -t2
+            || cxx * czz - cxz * cxz < -t2
+            || cyy * czz - cyz * cyz < -t2
+        {
+            return false;
+        }
+        // 3x3
+        let det = cxx * (cyy * czz - cyz * cyz) - cxy * (cxy * czz - cyz * cxz)
+            + cxz * (cxy * cyz - cyy * cxz);
+        det >= -t3
     }
 }
 

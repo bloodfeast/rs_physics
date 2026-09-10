@@ -86,7 +86,18 @@ pub fn normalize_angle(angle: f64) -> f64 {
 // 3D ANGULAR DYNAMICS
 //==============================================================================
 
-/// Angular state for 3D rotation
+/// Angular velocity in 3D, with helpers that add to it.
+///
+/// **Not a rigid-body integrator.** It carries `ω` and nothing else — no inertia tensor,
+/// no orientation — so it cannot evaluate `ω × Iω` without being handed the tensor at
+/// each call, and its `apply_torque` does not. For a body that rotates the way a real
+/// one does, use [`RigidBodyRotation`], which owns `ω` and integrates the whole of
+/// Euler's equation.
+///
+/// This type remains useful as a plain container and for impulses, which are exact
+/// without the gyroscopic term.
+///
+/// [`RigidBodyRotation`]: crate::rotational_dynamics::RigidBodyRotation
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AngularState3D {
     /// Angular velocity vector (ωx, ωy, ωz) in radians per second
@@ -127,7 +138,35 @@ impl AngularState3D {
         0.5 * (wx * l.0 + wy * l.1 + wz * l.2)
     }
 
-    /// Apply a torque for a duration: Δω = I⁻¹ * τ * Δt
+    /// Add the effect of a torque over a duration: `Δω += I⁻¹ τ Δt`.
+    ///
+    /// # This is not Euler's equation
+    ///
+    /// A rigid body obeys `ω̇ = I⁻¹(τ − ω × Iω)`, and this computes only the `I⁻¹τ`
+    /// half. The missing `ω × Iω` is the entire free-rotation behaviour of a body whose
+    /// principal moments differ: **handed zero torque, this changes nothing at all**, so
+    /// a body integrated with it holds one axis forever — no wobble, no precession, no
+    /// intermediate-axis flip.
+    ///
+    /// The term is not added here because it cannot correctly be: this is an
+    /// accumulator, called once per torque, and the gyroscopic term belongs to advancing
+    /// time once. A caller with three torques would get it three times.
+    ///
+    /// Use [`RigidBodyRotation`] for 3D rigid-body rotation. Note that the 2D
+    /// [`AngularState2D::apply_torque`] has no such gap — a scalar moment about a fixed
+    /// axis has no gyroscopic term, and it is complete as written.
+    ///
+    /// This also recomputes the full inverse tensor on every call; see
+    /// [`InertiaTensor::apply_inverse_to_torque`].
+    ///
+    /// [`RigidBodyRotation`]: crate::rotational_dynamics::RigidBodyRotation
+    #[deprecated(
+        since = "0.2.1",
+        note = "omits the gyroscopic term `ω × Iω`, so a free body never tumbles. Use \
+                RigidBodyRotation, which owns ω and integrates the whole of Euler's \
+                equation. If you genuinely want a torque accumulator, note that this \
+                function's Δt makes it a partial integrator rather than one."
+    )]
     #[inline]
     pub fn apply_torque(&mut self, torque: (f64, f64, f64), dt: f64, inertia: &InertiaTensor) {
         let alpha = inertia.apply_inverse_to_torque(torque);
@@ -226,6 +265,7 @@ pub fn effective_inverse_mass(
 // are now re-exported from crate::utils::vector3
 
 #[cfg(test)]
+#[allow(deprecated)] // These tests pin what the deprecated accumulator does, on purpose.
 mod tests {
     use super::*;
 
