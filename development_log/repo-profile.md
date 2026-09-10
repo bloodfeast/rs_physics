@@ -384,3 +384,40 @@ baseline lacked.
 - 2026-09-09: **Withdrawn, and it was my own claim: the flat bio refill law does not favour The Strain.** I compared Maul (340 kg, bio) against Bulwark (260 kg, mech) and called the 1.90x unearned — different units, different masses, a category error. The real discriminator is **areal density: flesh beats metal iff m/r2 > 248 kg/m2**. The biggest beneficiary is the Assembly's own Bulwark at x1.45, and the Assembly's internal spread is x0.83 (Courser) to x1.86 (Crawler), a 2.2x range inside one faction. The Skirmisher lands on exactly x1.00, which is the pin arriving as a check. **Generalises: comparing two different units measures their difference, not the rule's.**
 - 2026-09-09: **`rotational_dynamics::AngularState3D::apply_torque` is not Euler's equation.** It integrates `Δω = I⁻¹τ·Δt` and **omits the `ω × Iω` gyroscopic term entirely**, so a free body handed zero torque does not tumble, wobble, or exhibit the intermediate-axis instability — it holds one axis forever. The name and signature read like the function for rigid-body rotation and it is a torque integrator. Anyone reaching for this module to make debris tumble (Ridgeline just did, in `ridgeline/src/tumble.rs`) has to write the `−ω × Iω` term themselves. It also calls `inertia.apply_inverse_to_torque`, which recomputes the full 3×3 matrix inverse on **every call** — fine once, wrong per-body-per-substep-per-frame. If this is meant to be the crate's rotational integrator, the missing term is a defect; if it is meant to be a torque accumulator, the doc comment should say so, because `# Arguments` naming an inertia tensor implies otherwise.
 - 2026-09-09: **The `rotational_dynamics` *module* is not gated by the `rotational_dynamics` *feature*.** `lib.rs:66` declares `pub mod rotational_dynamics;` unconditionally, and `mod.rs` marks `inertia` and `angular` "always available"; only the legacy `rotational_dynamics.rs` submodule sits behind the flag. So `InertiaTensor`, `AngularState3D` and `inertia_3d::*` are reachable from a `--no-default-features` build, and a consumer does **not** need to add the feature to use them — Ridgeline uses `inertia_3d::solid_cuboid` with the feature off. A same-named module and feature that gate differently is a real trip hazard in both directions; worth a sentence in the module docs.
+- 2026-09-09: **`fluid_dynamics::puddle_depth` is the fourth blood constant Ridgeline has had
+  to hand-copy**, and the copies now outnumber anything a version pin could protect.
+  `ridgeline/src/terrain_stain.rs` already carries `BLOOD_YIELD_STRESS`, `BLOOD_DENSITY`,
+  `BLOOD_VISCOSITY` and `BLOOD_SURFACE_TENSION` as literals with pin-tests, because they live
+  on branch **`thin-film-blood`** and the workspace resolves `rs_physics` **by path to a
+  checkout on `master`**, which has none of them. A blood-retention fix there needed
+  `puddle_depth(σ, ρ, g, θ)` too and copied it the same way — plus `Surface::contact_angle`,
+  which `rs_physics` deliberately does *not* carry a table of ("the substrate decides it, not
+  the liquid") while its own doc quotes 80° for soil, so the consumer has taken the doc
+  comment as the source. Two consequences: (1) **merging `thin-film-blood` is now the cheapest
+  thing on this list**, since every day it stays on a branch adds another literal; (2) the
+  doc-comment figure is being *used as data* and should be a named constant or the sentence
+  should stop quoting a number.
+- 2026-09-09: **A result `thin_film.rs` does not have and should**: `FilmFlow::arrest_thickness`
+  is the *yield-stress* criterion and is three orders of magnitude too small to arrest anything
+  on a real slope — 0.005 Pa over ρg is **0.5 µm**, against the 380 µm film Ridgeline actually
+  draws. What holds a film on an incline is the contact line, and the force balance is
+  one line: retention force per unit width is `σ(1−cosθ) = ½ρg h_p²` — *exactly* the puddle
+  thrust, so `puddle_depth` already contains it and no separate hysteresis number is needed —
+  set against the wall shear `ρ g h S` of a film of depth `h`, giving
+  **`head across one cell ≤ h_p²/(2h)`**. ρ, g and the cell size all cancel, so it is
+  mesh-independent, which is the check that it is a force balance rather than a fitted curve.
+  The yield criterion by contrast is on the *gradient*, so its head form does carry the cell
+  size — one is a body stress, the other a line force, and they scale differently by
+  construction. Measured against blood on soil (θ = 80°, h_p = 2.98 mm) it is 46× the yield
+  term at every depth. This belongs next to `puddle_depth` as `capillary_retention_head` or
+  similar; the consumer derived it because the crate did not have it.
+- 2026-09-09: **A threshold below one quantum of its own quantised input is not a threshold.**
+  The general form of the bug this fixed, and worth carrying because it is invisible to
+  inspection: `terrain_stain` compared a head threshold of 24 display units against a terrain
+  fall baked as an `i8` whose **one unit is 51 display units**. Every representable slope beat
+  it and the flat did not, so a tunable "cohesion" was in fact the boolean `fall != 0` — a
+  property of the terrain with no liquid in it — and the texels that arrested formed a
+  **contour line**, which is what the user reported as "banks along a hard edge". Both numbers
+  were individually defensible and neither was ever compared to the other. Whenever a constant
+  is set against a quantised quantity, the ratio of the constant to the quantum is the first
+  thing to compute.
