@@ -154,6 +154,70 @@ pub struct Combustion {
     /// at 120% moisture spends five times as much energy drying as igniting, which is
     /// why a fire runs through dead grass and stops at a green hedge.
     pub moisture_fraction: f64,
+    /// The gas-phase half of the fuel, for anything that evaporates. `None` for a
+    /// solid, which is the honest answer rather than a defaulted one: wood does not
+    /// have a flash point, and asking it for a burning velocity is asking the wrong
+    /// question.
+    pub volatile: Option<VolatileFuel>,
+}
+
+/// A fuel that puts flammable vapour above itself, and what that vapour does.
+///
+/// # Why a solid fuel has none of this
+///
+/// Everything in [`Combustion`] proper describes a *surface* burning. That is the whole
+/// story for wood or grass: the flame heats the solid, the solid pyrolyses, and the
+/// front advances no faster than the condensed phase can be brought to its ignition
+/// temperature. Nothing is waiting in the air ahead of it.
+///
+/// A liquid or gelled hydrocarbon is a different problem, because there **is** something
+/// waiting in the air ahead of it. Above its flash point the pool has already filled the
+/// layer over itself with a flammable mixture, and the flame does not have to heat
+/// anything to get there — it propagates through gas that was ready before it arrived.
+/// That is a change of *regime*, not a change of rate, and it is the reason a pool fire
+/// spreads at metres per second where a grass fire spreads at half of one.
+///
+/// These three numbers are what decide which of the two is happening, and how fast.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VolatileFuel {
+    /// Lowest temperature at which the fuel evaporates fast enough to make the air just
+    /// above it flammable, in kelvin.
+    ///
+    /// **The regime switch.** Below it there is no standing vapour and a flame crosses
+    /// the pool at centimetres per second, dragged along by surface-tension-gradient
+    /// flow in the liquid. Above it the vapour is already there and the flame crosses at
+    /// metres per second. Ambient temperature decides which, so the same fuel is two
+    /// different weapons in winter and summer — except that the common hydrocarbons
+    /// flash far below any weather, which is exactly why they are dangerous.
+    pub flash_point: f64,
+    /// Laminar burning velocity of the fuel's vapour in air, m/s, near stoichiometric
+    /// at one atmosphere.
+    ///
+    /// How fast a premixed flame eats into the mixture *relative to the mixture*. It is
+    /// a measured property of the fuel and it is much smaller than people expect —
+    /// under half a metre a second for every ordinary hydrocarbon. What makes a
+    /// premixed front look fast is [`VolatileFuel::expansion_ratio`], not this.
+    pub laminar_burning_velocity: f64,
+    /// Adiabatic flame temperature of the stoichiometric vapour-air mixture, in kelvin.
+    ///
+    /// Here to give the expansion ratio rather than to describe how hot the fire feels;
+    /// [`Combustion::heat_release_rate`] is the quantity for that.
+    pub adiabatic_flame_temperature: f64,
+}
+
+impl VolatileFuel {
+    /// How much the gas expands on burning, as a ratio of volumes.
+    ///
+    /// Constant-pressure combustion at `ambient`, so it is a ratio of absolute
+    /// temperatures and nothing else. Around eight for a hydrocarbon in air, which is
+    /// the factor that turns a burning velocity nobody would describe as fast into a
+    /// front nobody can stand in front of.
+    pub fn expansion_ratio(&self, ambient: f64) -> f64 {
+        if ambient <= 0.0 {
+            return 1.0;
+        }
+        (self.adiabatic_flame_temperature / ambient).max(1.0)
+    }
 }
 
 /// Latent heat of vaporisation of water at 100 °C, in J/kg.
@@ -170,6 +234,65 @@ impl Combustion {
     /// kept in step with them by hand.
     pub fn heat_release_rate(&self) -> f64 {
         self.mass_burning_flux * self.heat_of_combustion
+    }
+
+    /// Speed at which a flame front crosses a **pool** of this fuel, in m/s.
+    ///
+    /// `None` for anything that is not a volatile liquid, and `None` below the fuel's
+    /// flash point. Both are refusals rather than gaps — see below.
+    ///
+    /// # Which regime, and why it is not a matter of degree
+    ///
+    /// Flame spread over a liquid is two mechanisms with an order of magnitude between
+    /// them, and the flash point is the switch.
+    ///
+    /// **Below it** the air above the pool is not flammable, so the flame has to bring
+    /// the liquid up to temperature to make its own fuel. It does that by heating the
+    /// surface just ahead of itself, which lowers the surface tension there and pulls
+    /// warm liquid forward underneath the front. The front rides that flow, and it is
+    /// slow — centimetres per second, and it pulses. This function returns `None`
+    /// there, deliberately: the rate depends on the liquid's own convection, which is a
+    /// different calculation, and returning a wrong-by-a-factor-of-fifty number would be
+    /// worse than returning nothing.
+    ///
+    /// **Above it** the pool has already filled the layer over itself with a flammable
+    /// mixture. Nothing has to be heated first; the flame is simply a premixed flame
+    /// propagating through gas that was ready before it got there, and the condensed
+    /// phase is not the rate-limiting step at all.
+    ///
+    /// # The derivation
+    ///
+    /// A premixed flame consumes unburnt mixture at the laminar burning velocity `Sʟ`
+    /// *relative to that mixture*. Burning it raises its temperature from ambient to the
+    /// flame temperature at constant pressure, so its volume grows by the ratio of the
+    /// two. That expanding gas has to go somewhere, and the part of it that goes forward
+    /// pushes the unburnt layer ahead of the flame — which the flame then rides. In the
+    /// ground frame the front therefore advances at
+    ///
+    /// ```text
+    ///     v = Sʟ · T_flame / T_ambient
+    /// ```
+    ///
+    /// Two looked-up fuel properties and the ideal gas law. There is no chosen
+    /// coefficient in it, and there is no length scale in it either, which is what makes
+    /// it worth having: a spread rate written as a heated length over an ignition delay
+    /// has a free parameter hiding in the length.
+    ///
+    /// # What it is, honestly
+    ///
+    /// **A ceiling.** The expansion is only converted into forward flow to the extent
+    /// the layer is confined, and a pool in the open is confined by the ground on one
+    /// side and by nothing at all on the other, so some of it vents upward instead. The
+    /// true front is between `Sʟ` (everything vents) and this (nothing does), and
+    /// measurements of above-flash pools sit in the upper half of that band. Taking the
+    /// ceiling errs fast rather than inventing a venting fraction to sit in the middle
+    /// of, and it says which way it errs.
+    pub fn pool_flame_spread(&self, ambient: f64) -> Option<f64> {
+        let volatile = self.volatile?;
+        if ambient < volatile.flash_point {
+            return None;
+        }
+        Some(volatile.laminar_burning_velocity * volatile.expansion_ratio(ambient))
     }
 
     /// How long a fuel load of `areal_density` kg/m² takes to burn out, in seconds.
@@ -540,6 +663,7 @@ impl Material {
             mass_burning_flux: 0.010,
             residue_fraction: 0.15,
             moisture_fraction: 0.01,
+            volatile: None,
         })
     }
 
@@ -588,6 +712,7 @@ impl Material {
             mass_burning_flux: 0.025,
             residue_fraction: 0.03,
             moisture_fraction: 0.005,
+            volatile: None,
         })
     }
 
@@ -679,6 +804,7 @@ impl Material {
             residue_fraction: 0.20,
             // Seasoned structural timber, not a living tree.
             moisture_fraction: 0.12,
+            volatile: None,
         })
     }
 
@@ -716,6 +842,66 @@ impl Material {
             residue_fraction: 0.04,
             // Cured standing grass. Dead fine fuel holds very little.
             moisture_fraction: 0.08,
+            volatile: None,
+        })
+    }
+
+    /// Thickened hydrocarbon fuel: petrol with a gelling agent in it. Napalm.
+    ///
+    /// **The point of the thickener is not that it burns differently.** It burns like
+    /// the petrol it is — same vapour, same flame, same burning velocity — and what the
+    /// gel changes is everything mechanical: it sticks to what it lands on, it does not
+    /// run off a slope or soak away, and it does not splash apart in flight. Those are
+    /// the properties in the top half of this constructor, and they are why the numbers
+    /// there describe something closer to a soft solid than to a liquid.
+    ///
+    /// The one thing the thickener does change about the *fire* is a subtraction. A free
+    /// liquid below its flash point spreads flame by surface-tension-gradient flow,
+    /// dragging warm fuel forward under the front; a gel cannot, because suppressing
+    /// exactly that kind of flow is what a thickener is for. So gelling removes the slow
+    /// regime and leaves the fast one, which is the opposite of the intuition that a
+    /// thicker fuel must be a slower one.
+    ///
+    /// In practice it never matters, because the flash point below is two hundred and
+    /// fifty kelvin under anything a battlefield sees.
+    pub fn napalm() -> Self {
+        Self::new(
+            900.0,              // density (kg/m³), a little under water, like the petroleum it is
+            5.0e3,              // Young's modulus (Pa) - a gel, not a solid
+            0.499,              // Poisson's ratio - essentially incompressible
+            0.9,                // friction coefficient - it sticks
+            0.05,               // restitution coefficient - it splats
+            0.3,                // rolling resistance coefficient
+            0.13,               // thermal conductivity (W/(m·K))
+            2100.0,             // specific heat capacity (J/(kg·K))
+            2.0e2,              // yield strength (Pa) - the gel's yield stress, and it is tiny
+            5.0e2,              // ultimate strength (Pa)
+        ).expect("Failed to create napalm material")
+        .burning(Combustion {
+            // The *fire point* of the petrol carrier, and it is below freezing. A napalm
+            // pool does not need warming up to be ignitable, which is the single fact
+            // that decides how fire crosses it.
+            ignition_temperature: 250.0,
+            // Petrol's 43.7 MJ/kg ideal, at the ~0.9 combustion efficiency a sooty open
+            // pool fire actually manages. The missing tenth is the black smoke.
+            heat_of_combustion: 39.0e6,
+            // Measured for open pool fires of thickened hydrocarbon, and more than twice
+            // dry grass: this is a fuel, not a fine fuel.
+            mass_burning_flux: 0.05,
+            // Near enough nothing. What gets left on the ground after napalm is gel that
+            // never caught, which is a different thing from char.
+            residue_fraction: 0.02,
+            moisture_fraction: 0.0,
+            volatile: Some(VolatileFuel {
+                // Petrol flashes at about -45 °C. Nothing outdoors is ever below this,
+                // so a napalm pool is *always* in the above-flash regime — there is no
+                // weather in which it creeps.
+                flash_point: 228.0,
+                // Petrol-air, stoichiometric, one atmosphere. Slower than a walk.
+                laminar_burning_velocity: 0.40,
+                // Stoichiometric petrol-air. Used for the expansion, not for the heat.
+                adiabatic_flame_temperature: 2270.0,
+            }),
         })
     }
 
@@ -1853,6 +2039,134 @@ mod combustion_tests {
     #[test]
     fn glass_has_no_burn_duration_to_ask_for() {
         assert!(Material::glass().combustion.is_none());
+    }
+
+    /// Standard sea-level air, so the ambient in these tests is the one the atmosphere
+    /// module already agrees on rather than a second opinion about room temperature.
+    const STANDARD_AIR: f64 = crate::atmosphere::SEA_LEVEL_TEMPERATURE;
+
+    /// The regime question, which is the one that decides the answer.
+    ///
+    /// A solid fuel has no vapour standing over it and no flash point to be above, so
+    /// the pool-spread calculation does not apply to it and says so rather than
+    /// returning a number that happens to be finite.
+    #[test]
+    fn only_pooled_fuels_have_a_pool_spread_rate() {
+        for solid in [Material::wood(), Material::dry_vegetation()] {
+            let c = solid.combustion.unwrap();
+            assert!(
+                c.pool_flame_spread(STANDARD_AIR).is_none(),
+                "a solid fuel was given a pool flame spread rate, which means the \
+                 regime distinction has been lost",
+            );
+        }
+        assert!(
+            Material::napalm()
+                .combustion
+                .unwrap()
+                .pool_flame_spread(STANDARD_AIR)
+                .is_some(),
+            "napalm is a pooled volatile fuel and could not be asked how fast a flame \
+             crosses it",
+        );
+    }
+
+    /// Napalm is never in the slow regime, and that is a property of petrol rather than
+    /// a decision anybody made.
+    ///
+    /// Worth a test because it is the whole argument: if the flash point were anywhere
+    /// near ambient the spread rate would be a function of the weather, and the
+    /// simulation reading it would need to care what season it is.
+    #[test]
+    fn napalm_is_above_its_flash_point_in_any_weather() {
+        let gel = Material::napalm().combustion.unwrap();
+        // Antarctic winter to a hot desert afternoon.
+        for ambient in [223.0_f64, 250.0, 273.15, 288.15, 313.0] {
+            let spread = gel.pool_flame_spread(ambient);
+            if ambient < 228.0 {
+                assert!(spread.is_none(), "petrol flashed below its own flash point");
+                continue;
+            }
+            let v = spread.expect("napalm failed to spread above its flash point");
+            assert!(
+                (1.0..10.0).contains(&v),
+                "a flame crosses a napalm pool at {v:.2} m/s at {ambient:.0} K, which is \
+                 not a premixed front over a hydrocarbon — those are metres per second",
+            );
+        }
+    }
+
+    /// The expansion is the whole reason the front is fast, and it is worth saying so
+    /// in a test: the burning velocity on its own would be a stroll.
+    #[test]
+    fn the_front_outruns_the_burning_velocity_by_the_expansion() {
+        let gel = Material::napalm().combustion.unwrap();
+        let volatile = gel.volatile.unwrap();
+        let v = gel.pool_flame_spread(STANDARD_AIR).unwrap();
+
+        assert!(
+            volatile.laminar_burning_velocity < 0.5,
+            "a laminar burning velocity of {:.2} m/s is not a hydrocarbon - every \
+             ordinary fuel is under half a metre a second",
+            volatile.laminar_burning_velocity,
+        );
+        let ratio = v / volatile.laminar_burning_velocity;
+        assert!(
+            (6.0..10.0).contains(&ratio),
+            "the front ran {ratio:.1} times the burning velocity; constant-pressure \
+             combustion in air expands by about eight",
+        );
+        assert!(
+            (ratio - volatile.expansion_ratio(STANDARD_AIR)).abs() < 1e-12,
+            "the spread rate is not the burning velocity times the expansion ratio, so \
+             something other than the derivation is in it",
+        );
+    }
+
+    /// Napalm is the fiercer fire, and a kilogram of it is therefore the *shorter* one.
+    ///
+    /// # The half of this that is counter-intuitive
+    ///
+    /// The first version of this test asserted that a kilo of gel outlasts a kilo of
+    /// grass, and it failed, correctly. Mass burning flux is a *rate*: gel burns at more
+    /// than twice grass's flux, so the same load is gone sooner. Napalm denies ground for
+    /// longer than a grass fire does **because a shell puts far more fuel per square
+    /// metre down**, not because the substance is slower. Those are different claims and
+    /// only the second one is a property of the material.
+    #[test]
+    fn gel_is_the_fiercer_fire_and_the_shorter_one_per_kilogram() {
+        let gel = Material::napalm().combustion.unwrap();
+        let grass = Material::dry_vegetation().combustion.unwrap();
+
+        assert!(
+            gel.heat_release_rate() > 2.0 * grass.heat_release_rate(),
+            "gel releases {:.0} W/m2 against grass at {:.0} - napalm is supposed to be \
+             in a different class, not a slightly worse grass fire",
+            gel.heat_release_rate(),
+            grass.heat_release_rate(),
+        );
+        assert!(
+            gel.burn_duration(1.0) < grass.burn_duration(1.0),
+            "a kilo per square metre of gel outlasted the same load of grass, which \
+             contradicts it burning at the higher flux",
+        );
+    }
+
+    /// And it is much faster across the ground than a fire in a solid fuel.
+    ///
+    /// Not a coincidence and not a tuning: the gel front is a premixed flame in gas that
+    /// was already flammable, and the grass front has to heat its fuel up first. The
+    /// mechanisms are different, so the rates are not close.
+    #[test]
+    fn a_gel_front_outruns_a_fire_in_standing_fuel() {
+        let gel = Material::napalm().combustion.unwrap();
+        let v = gel.pool_flame_spread(STANDARD_AIR).unwrap();
+        // A grass fire on the flat is about half a metre a second.
+        assert!(
+            v > 5.0 * 0.5,
+            "flame crosses gel at {v:.2} m/s, which is within a factor of five of a \
+             grass fire - the two regimes should not be that close",
+        );
     }
 }
 
