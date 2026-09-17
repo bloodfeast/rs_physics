@@ -431,3 +431,36 @@ baseline lacked.
 - 2026-09-09: **A physical inertia tensor's principal moments obey `I₁ + I₂ ≥ I₃`, and that inequality is load-bearing for any substep rule.** In principal axes `ω̇ᵢ = (Iⱼ − I_k)/Iᵢ · ωⱼω_k`; the triangle inequality is exactly what makes that coefficient ≤ 1, hence `|ω̇| ≲ |ω|²`, hence "substep so `|ω|·h ≤ 0.25`" is a derivation rather than a tuned constant. It is checkable with no eigendecomposition: it holds iff `(tr I / 2)·Id − I` is positive semi-definite. Note that `InertiaTensor::diagonal_only(2, 4, 8)` — used in this crate's own older tests — violates it, and `inertia_3d::thin_rod_center` returns a singular tensor by design. Anything integrating a caller-supplied tensor must check both.
 - 2026-09-09: **`cargo check --lib --no-default-features` does not compile, and has not for a while.** `lib.rs`'s `prelude` re-exports `crate::materials::{Material, ...}` and `crate::constraints::{Joint, ...}` **ungated** while the module contents are behind the `materials` / `constraints` default features — 6 unresolved-import errors. This is the prelude gate-parity hazard the profile already warns about, landing for real. Unrelated to and pre-dating the rotational work; `--all-features` and the default set are both clean.
 - 2026-09-09: **Two agents in one working tree will lose each other's work.** Two sessions ran in `C:/dev/rs_physics` simultaneously; `HEAD` was switched between branches mid-task twice, one agent's `git add -A` swept up the other's uncommitted file, and a checkout reverted six files that had already been committed elsewhere. Nothing was ultimately lost, but only because the commits existed. If a second agent may be active, **commit after every green test run**, add explicit paths rather than `-A`, and prefer `git worktree add` to sharing the tree.
+- 2026-09-10 — `C:/dev/ridgeline` has **no `development_log/repo-profile.md`** of its own, and it needs
+  one: it carries a real player-facing UI (`ridgeline/src/ui/`, a documented 2×Fibonacci spacing scale
+  `S1..S5` = 4/6/10/16/26 at mean ratio 1.601, a named palette, a 228 px derived bottom bar) plus a
+  second, non-player population — the author running `--capture --scene=rig/play` to judge models
+  against concept art. Those two want opposite framings from the same camera. Reviews of ridgeline
+  presentation code should not be written against this file.
+- 2026-09-12 — Ridgeline's **out-of-match** surfaces reviewed (main page, settings, compendium);
+  mockup at `C:/dev/ridgeline/development_log/out-of-match/out-of-match-mockup.html`. Five facts a
+  reviewer of that repo needs and this file did not carry. (1) **A third population exists** beyond
+  the author and the playtester: a *non-playing reader* who wants the derivations, which is the
+  compendium's entire reason to exist and which neither in-match surface serves. Ridgeline **still
+  has no `repo-profile.md`** — this is the third review that has had to state its population as an
+  assumption. (2) **The menu already rules against a hub** (`menu.rs`: "a screen whose entire job is
+  to point at another screen"), so settings and compendium have to be modals over the setup, not
+  destinations beside it; and `menu::bypassed()` plus `Enter`-plays-last is a **zero-click**
+  guarantee any front-end change is graded against. (3) **Peer discovery does not exist**
+  (`NETCODE.md` item 1; `net.rs::from_args` — "Direct addresses, and no discovery"), so a lobby,
+  browser or friends list would each be a control over nothing; and `replay::fingerprint()`
+  `0x3068_3d2c_cf0a_abb1` is the whole handshake — two builds that disagree get
+  `NetStatus::Refused` and **no explanation**, which is the failure two testers on different
+  commits will actually hit. (4) **The preset ladder currently has no slope**: `merge_surfaces`
+  took every model to one primitive, so `skirmisher_primitives` is 1/1/1 and
+  `Preset::saved_draws()` is **0.0 for all three presets** — `high`/`balanced`/`performance` remove
+  the same zero draws, and the only live lever (`shadow_cascades`) is *unpriced* on Bevy 0.19.
+  A settings UI that renders three tiers without saying this is partial correctness, which is worse
+  than none. (5) **WEST and EAST separate by hue and not by value** — L 0.257 vs 0.386 is
+  **1.41:1** against each other, under the project's own 1.618 threshold — so a side-picker, a
+  status dot or a faction mark must never be colour alone; and `ui/mod.rs` already owns the house
+  scale (S1..S5 = 4/6/10/16/26, mean ratio 1.601; four type sizes 17/15/12/10; FAINT explicitly
+  barred from text), so any new Ridgeline surface should reuse it rather than invent one. Two small
+  defects filed in passing: `hud.rs:60` says `F1` toggles diagnostics when the binding is
+  `Backquote` (`F1` is `Bookmark(0)`), and `menu.rs::field()` uses a bare `2.0` gap where
+  `ui::stack()` uses `S1 = 4` for the identical figure-to-label relationship.
