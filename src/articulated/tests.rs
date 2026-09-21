@@ -2358,3 +2358,123 @@ fn colouring_after_a_retirement_matches_colouring_what_is_left() {
          surviving joints would have produced",
     );
 }
+
+/// **A hinge reads the same angle whichever way the world is facing.**
+///
+/// The angle is a property of the two bodies' relative orientation about their shared
+/// axis. Turn the whole joint rigidly and nothing physical has changed, so the number must
+/// not change either -- and if it does, `min` and `max` are being enforced on something
+/// that is not the hinge's angle.
+///
+/// Stated on an axis that is **not** a coordinate axis, which is the part that matters.
+/// [`perpendicular`] returns `(1, 0, 0)` for anything with `|x| < 0.9`, so a hinge built
+/// on `(1, 0, 0)` -- which is every hinge in every other fixture here -- gets a reference
+/// orthogonal to its axis for free and cannot see the defect this guards. Measured against
+/// the version that took its reference from the world axis: 0.9000 rad read back as
+/// 0.9000, 0.7130 and 0.4640 in three frames of the same joint.
+#[test]
+fn a_hinge_reads_the_same_angle_whichever_way_the_world_faces() {
+    let axis_a = normalized((1.0, 1.0, 0.0)).expect("a direction");
+    let swing = 0.9f64;
+    for (name, frame) in [
+        ("upright", Quaternion::from_axis_angle((0.0, 1.0, 0.0), 0.0)),
+        ("rolled", Quaternion::from_axis_angle((0.0, 1.0, 0.0), 1.1)),
+        ("pitched", Quaternion::from_axis_angle((1.0, 0.0, 0.0), 1.4)),
+        ("yawed", Quaternion::from_axis_angle((0.0, 0.0, 1.0), 2.3)),
+        ("tumbled", Quaternion::from_axis_angle((0.3, -0.7, 0.5), 2.9)),
+    ] {
+        let a = frame.normalized();
+        let axis = normalized(rotate(a, axis_a)).expect("a world axis");
+        // `b` is `a` turned by exactly `swing` about that axis, so there is a truth to
+        // compare against rather than only a consistency between frames.
+        let b = Quaternion::from_axis_angle(axis, swing)
+            .multiply(&a)
+            .normalized();
+        let got = hinge_angle(a, b, axis, axis_a, axis_a);
+        assert!(
+            (got - swing).abs() < 1e-9,
+            "the same joint at the same swing read {got:.6} rad in the {name} frame \
+             where it is turned {swing:.6}; the angle the range is enforced on depends \
+             on which way the world faces",
+        );
+    }
+}
+
+/// **A hinge axis is a direction, so twice as long is the same hinge.**
+///
+/// The alignment correction reads `asin` of the cross product's length, which carries the
+/// product of the two magnitudes. Given axes of length two it reads four times the sine,
+/// saturates, and asks for a quarter turn however small the error is -- which drives the
+/// joint into the inverted state `a_hinge_does_not_turn_itself_inside_out` forbids, and it
+/// stays there. [`Skeleton::add_joint`] normalises on the way in so the contract is true
+/// rather than merely documented.
+#[test]
+fn a_hinge_axis_is_a_direction_however_long_it_is_written() {
+    let mut settled = Vec::new();
+    for scale in [1.0f64, 2.0, 5.0] {
+        let mut s = Skeleton::new();
+        let root = s.add_body(Body::pinned((0.0, 1.0, 0.0)));
+        let arm = s.add_body(Body::capsule(4.0, 0.06, 0.25, (0.0, 0.7, 0.0)));
+        assert!(s.add_joint(Joint::Hinge {
+            a: root,
+            b: arm,
+            anchor_a: (0.0, 0.0, 0.0),
+            anchor_b: (0.0, 0.25, 0.0),
+            axis_a: (scale, 0.0, 0.0),
+            axis_b: (scale, 0.0, 0.0),
+            min: -0.1,
+            max: 2.2,
+        }));
+        // Knocked off the axis once, so the alignment correction has something to do.
+        s.set_angular_velocity(arm, (0.0, 3.0, 0.0));
+        let mut worst: f64 = 1.0;
+        for _ in 0..600 {
+            s.step(DT, G, 8);
+            let axis_a = rotate(s.orientation(root), (1.0, 0.0, 0.0));
+            let axis_b = rotate(s.orientation(arm), (1.0, 0.0, 0.0));
+            worst = worst.min(dot(axis_a, axis_b));
+        }
+        assert!(
+            worst > 0.0,
+            "written {scale}x as long, the hinge reached a cosine of {worst:.4} between \
+             its axes, so it turned itself past the quarter turn and inside out",
+        );
+        settled.push(s.position(arm));
+    }
+    for (n, place) in settled.iter().enumerate().skip(1) {
+        let apart = length(sub(*place, settled[0]));
+        assert!(
+            apart < 1e-9,
+            "the same hinge written with a longer axis came to rest {apart:.6} m away \
+             from where the unit one did, so the length of the axis is changing the \
+             simulation ({n})",
+        );
+    }
+}
+
+/// **An axis of no length is not a hinge, and is refused rather than quietly demoted.**
+///
+/// Every branch of the hinge solve is guarded by a `normalized` that hands back `None` for
+/// a zero axis, so letting one through leaves a joint that holds its anchors together and
+/// enforces no axis and no range -- a ball joint wearing a hinge's declaration, with
+/// nothing anywhere to say so.
+#[test]
+fn a_hinge_with_no_axis_is_refused() {
+    let mut s = Skeleton::new();
+    let root = s.add_body(Body::pinned((0.0, 1.0, 0.0)));
+    let arm = s.add_body(Body::capsule(4.0, 0.06, 0.25, (0.0, 0.7, 0.0)));
+    assert!(
+        !s.add_joint(Joint::Hinge {
+            a: root,
+            b: arm,
+            anchor_a: (0.0, 0.0, 0.0),
+            anchor_b: (0.0, 0.25, 0.0),
+            axis_a: (0.0, 0.0, 0.0),
+            axis_b: (1.0, 0.0, 0.0),
+            min: -0.1,
+            max: 2.2,
+        }),
+        "a hinge with no axis was accepted; it would hold the anchors and enforce no range",
+    );
+    assert!(s.joints().is_empty(), "the refused joint was stored anyway");
+}

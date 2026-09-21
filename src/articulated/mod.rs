@@ -2966,11 +2966,33 @@ impl Skeleton {
     /// produced -- which `colouring_joints_as_they_arrive_matches_colouring_them_all_at_once`
     /// asserts against a from-scratch pass rather than leaving implicit, because the
     /// colour count is what decides how parallel the solve can be.
-    pub fn add_joint(&mut self, joint: Joint) -> bool {
+    pub fn add_joint(&mut self, mut joint: Joint) -> bool {
         let (a, b) = joint.bodies();
         let n = self.position.len();
         if a >= n || b >= n || a == b || self.retired.get(a) || self.retired.get(b) {
             return false;
+        }
+        // **A hinge axis is a direction, so it is stored as one.** The alignment
+        // correction takes its angle as `asin` of the cross product's length, which is
+        // `|axis_a| |axis_b| sin t` and only equals `sin t` for unit axes. Given a pair of
+        // axes twice as long it reads four times the sine, saturates the clamp at a
+        // quarter turn, and asks for a quarter turn whatever the error actually is --
+        // which walks the hinge into the inverted basin
+        // `a_hinge_does_not_turn_itself_inside_out` exists to forbid, and it does not come
+        // back. `(2, 0, 0)` is the same hinge as `(1, 0, 0)` and must behave like it, so
+        // the contract is made true here rather than written in the doc and hoped for.
+        //
+        // An axis of no length is refused rather than normalised. There is no direction to
+        // recover, and letting it through degrades the hinge to a ball joint in silence:
+        // every branch of the hinge solve is guarded by a `normalized` that would hand
+        // back `None`, so the range would stop being enforced and nothing would say so.
+        if let Joint::Hinge { axis_a, axis_b, .. } = &mut joint {
+            let (Some(unit_a), Some(unit_b)) = (normalized(*axis_a), normalized(*axis_b))
+            else {
+                return false;
+            };
+            *axis_a = unit_a;
+            *axis_b = unit_b;
         }
         let index = self.joints.len();
         self.joints.push(joint);
@@ -4948,9 +4970,31 @@ fn hinge_angle(
     axis_a: (f64, f64, f64),
     axis_b: (f64, f64, f64),
 ) -> f64 {
-    let reference = perpendicular(axis);
+    // **The reference is taken in `a`'s own frame, and that is the whole of this
+    // function's correctness.** It is turned into the world by `a`'s orientation below, so
+    // it has to start as a body vector; built from the *world* axis instead it is a world
+    // vector being rotated as though it were a body one, and what comes back is not
+    // perpendicular to the hinge at all. Writing `c` for `reference . axis_a`, that
+    // version returns `atan2((1 - c^2) sin t, (1 - c^2) cos t + c^2)` rather than `t`, so
+    // the angle collapses towards zero as `|c|` approaches one -- and since `c` is built
+    // from the body's *current* world orientation, the same joint at the same swing reads
+    // differently depending on which way the skeleton happens to be facing. Measured, a
+    // hinge held at 0.9000 rad read 0.9000, 0.7130 and 0.4640 in three world frames.
+    //
+    // It survived because `perpendicular` returns `(1, 0, 0)` whenever `|axis.x| < 0.9`,
+    // so for the `axis_a = (1, 0, 0)` every fixture in this crate uses, the world version
+    // came out orthogonal to the axis by accident and `c` stayed near zero. A hinge whose
+    // axis runs along its own bone, or any diagonal, does not get that luck.
+    //
+    // Taking it in the body frame also removes `perpendicular`'s discontinuity at
+    // `|x| = 0.9` from the answer: `axis_a` is a constant of the joint, so whichever
+    // perpendicular is picked is the same one on both sides and cancels between `in_a` and
+    // `in_b`. `a_hinge_reads_the_same_angle_whichever_way_the_world_faces` is the guard.
+    let reference = perpendicular(axis_a);
     let in_a = rotate(a, reference);
-    let in_b = rotate(b, rotate_into(reference, axis_b, axis_a));
+    // Carried `axis_a -> axis_b`, the direction that puts it in `b`'s frame. The other way
+    // round measures from a reference the second body does not share.
+    let in_b = rotate(b, rotate_into(reference, axis_a, axis_b));
     dot(cross(in_a, in_b), axis).atan2(dot(in_b, in_a))
 }
 
