@@ -2916,5 +2916,3 @@ fn shaped_rig(into: &mut Skeleton, x: f64, y: f64, z: f64, facets: u32) {
         );
     }
 }
-
-
