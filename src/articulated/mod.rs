@@ -136,9 +136,10 @@
 //! out of the step entirely -- an awake bitset walked a word at a time, islands over
 //! joints plus contacts as the unit that sleeps and wakes together -- and a step where
 //! nothing is awake returns before it touches memory. Measured on ten thousand capsules
-//! resting on the ground in stacks of three: **8.6 ms a step down to nothing
-//! measurable.** With nothing asleep it costs between two and four per cent, which is
-//! the settling test and the live constraint lists.
+//! resting on the ground in stacks of three: **4.5 to 6.5 ms a step down to nothing
+//! measurable**, the spread being what a shared machine does to a twenty-step timing.
+//! With nothing asleep it costs nothing that can be told from the noise, which is what
+//! the translation-only early exit in [`Skeleton::settle`] is for.
 //!
 //! # Why the iteration count is what it is, and what will not move it
 //!
@@ -2086,13 +2087,24 @@ impl Skeleton {
             // finger bone and a torso. The floor is for a body with no extent at all,
             // which is a joint anchor rather than a thing anyone watches.
             let reach = (radius[i] + half_length[i]).max(1e-3);
-            let moved = length(sub(position[i], still_from[i])) + swept(
-                turned_since(orientation[i], still_turn[i]),
-                orientation[i],
-                radius[i],
-                half_length[i],
-            );
-            if moved > STILL_FRACTION * reach {
+            let limit = STILL_FRACTION * reach;
+            // The translation alone, squared, decides most bodies while a heap is
+            // arriving -- and it costs a subtract and a dot, where the whole test costs a
+            // square root and two quaternion products. The turn is only asked about for a
+            // body that has not already moved too far on its own.
+            let gap = sub(position[i], still_from[i]);
+            let moved = if dot(gap, gap) > limit * limit {
+                f64::INFINITY
+            } else {
+                length(gap)
+                    + swept(
+                        turned_since(orientation[i], still_turn[i]),
+                        orientation[i],
+                        radius[i],
+                        half_length[i],
+                    )
+            };
+            if moved > limit {
                 still_steps[i] = 0;
                 still_from[i] = position[i];
                 still_turn[i] = orientation[i];
