@@ -1019,8 +1019,9 @@ pub(super) fn solve_contact_velocity_normal(
     a_moves: ((f64, f64, f64), (f64, f64, f64)),
     b_moves: ((f64, f64, f64), (f64, f64, f64)),
     share: f64,
-) -> [Correction; 2] {
+) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
+    let mut spent = spent;
     let Contact { a, b, normal, .. } = contact;
     out[0].body = a;
     out[1].body = b;
@@ -1028,7 +1029,7 @@ pub(super) fn solve_contact_velocity_normal(
     // overlap, so a depth test here reports every loaded contact as unloaded. What says a
     // contact is resting on something is the normal impulse it carried.
     if spent.normal <= 0.0 || share <= 0.0 {
-        return out;
+        return (out, spent);
     }
 
     let ra = rotate(first.now.orientation, contact.local_a);
@@ -1042,18 +1043,24 @@ pub(super) fn solve_contact_velocity_normal(
     let kb = generalised_inverse_mass(&second.now, rb, normal);
     let total = ka + kb;
     if total <= 1e-12 {
-        return out;
+        return (out, spent);
     }
     // At the positional scale, like everything [`accumulate`] is handed: the impulse that
     // leaves the surfaces neither closing nor opening, then the no-pull bound.
     let lambda = (share * closing * dt / total).max(-spent.driven);
     if lambda == 0.0 {
-        return out;
+        return (out, spent);
     }
+    // **What is taken back comes off the total, so a second sweep cannot take it again.**
+    // The pass runs [`super::VELOCITY_SWEEPS`] times, and a bound re-read from the
+    // positional figure each sweep would let N of them hand back N times what the contact
+    // ever gave. A positive `lambda` is normal impulse this sweep *added* as velocity, so
+    // it raises the total by the same accounting.
+    spent.driven = (spent.driven + lambda).max(0.0);
     let push = scale(normal, lambda);
     accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), Charge::Still);
     accumulate(&mut out[1], &second.now, rb, push, Charge::Still);
-    out
+    (out, spent)
 }
 
 /// **The velocity pass's tangential half for one pair contact**: Coulomb and rolling
@@ -1101,15 +1108,16 @@ pub(super) fn solve_contact_velocity_friction(
     a_moves: ((f64, f64, f64), (f64, f64, f64)),
     b_moves: ((f64, f64, f64), (f64, f64, f64)),
     share: f64,
-) -> [Correction; 2] {
+) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
+    let mut spent = spent;
     let Contact {
         a, b, normal, span, ..
     } = contact;
     out[0].body = a;
     out[1].body = b;
     if spent.normal <= 0.0 || share <= 0.0 || friction <= 0.0 {
-        return out;
+        return (out, spent);
     }
 
     let ra = rotate(first.now.orientation, contact.local_a);
@@ -1120,7 +1128,7 @@ pub(super) fn solve_contact_velocity_friction(
         sub(relative, scale(normal, dot(relative, normal)))
     };
     let Some(direction) = normalized(slip) else {
-        return out;
+        return (out, spent);
     };
     // The patch carries what of the friction couple it can, exactly as it does one level
     // up. See [`patch_arm`].
@@ -1131,15 +1139,21 @@ pub(super) fn solve_contact_velocity_friction(
     let tb = generalised_inverse_mass(&second.now, arm_b, direction);
     let total = ta + tb;
     if total <= 1e-12 {
-        return out;
+        return (out, spent);
     }
     // At the positional scale: the impulse that stops the slip is the one that would undo
     // the distance the slip is about to cover, which is `slip * dt`.
     let wanted = scale(direction, -share * length(slip) * dt / total);
-    let (grip, _) = cone(spent.tangential, wanted, friction * spent.normal);
+    let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
     if grip == (0.0, 0.0, 0.0) {
-        return out;
+        return (out, spent);
     }
+    // **One cone for the whole step, the velocity sweeps included.** The resultant is
+    // carried the way the positional passes carry it, so running the pass N times spends
+    // the coefficient once. Re-reading the positional resultant each sweep would be a
+    // coefficient of N times `friction`, which is the defect this module rejects a fresh
+    // budget for one level up.
+    spent.tangential = total_grip;
     accumulate(&mut out[0], &first.now, arm_a, grip, Charge::Still);
     accumulate(
         &mut out[1],
@@ -1148,7 +1162,7 @@ pub(super) fn solve_contact_velocity_friction(
         scale(grip, -1.0),
         Charge::Still,
     );
-    out
+    (out, spent)
 }
 
 /// **The velocity pass's normal half against the plane.** Everything
@@ -1168,11 +1182,12 @@ pub(super) fn solve_ground_velocity_normal(
     v: (f64, f64, f64),
     w: (f64, f64, f64),
     share: f64,
-) -> Correction {
+) -> (Correction, Patch) {
     let mut out = Correction::none();
+    let mut patch = patch;
     out.body = contact.body;
     if patch.spent.normal <= 0.0 || share <= 0.0 {
-        return out;
+        return (out, patch);
     }
 
     let load = rotate(body.now.orientation, patch.local_load);
@@ -1182,12 +1197,17 @@ pub(super) fn solve_ground_velocity_normal(
     let leaving = dot(add(v, cross(w, load)), normal);
     let k = generalised_inverse_mass(&body.now, load, normal);
     if k <= 1e-12 {
-        return out;
+        return (out, patch);
     }
     let lambda = (-share * leaving * dt / k).max(-patch.spent.driven);
     if lambda == 0.0 {
-        return out;
+        return (out, patch);
     }
+    // Off the total, so a second sweep cannot take it again; see the pair version. **Only
+    // `driven` moves**: `normal` and `tangential` are what [`Skeleton::anchor_ground`]
+    // decides a patch's stickiness from once the step is over, and they are the positional
+    // solve's record of it rather than a running budget.
+    patch.spent.driven = (patch.spent.driven + lambda).max(0.0);
     accumulate(
         &mut out,
         &body.now,
@@ -1195,7 +1215,7 @@ pub(super) fn solve_ground_velocity_normal(
         scale(normal, lambda),
         Charge::Still,
     );
-    out
+    (out, patch)
 }
 
 /// How much of the normal load each end of a patch carries: `K l = d` subject to `l >= 0`.

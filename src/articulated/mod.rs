@@ -797,6 +797,41 @@
 //! four takes three times as long to settle, while a column of eight takes a seventh as
 //! long and the worst column of any height falls from 2961 steps to 920.
 //!
+//! ## Sweeping it more than once, which does not work and is not a convergence question
+//!
+//! The pass is one Jacobi sweep of a velocity-level complementarity problem, so it
+//! propagates a correction exactly one contact deep, and in a heap a body's velocity
+//! depends on its neighbours' through the contacts it shares. The obvious next move is to
+//! sweep it two or three times, and the obvious expectation is that the draws which fail
+//! to sleep -- close rather than badly wrong -- come over. [`VELOCITY_SWEEPS`] is the
+//! count, the sweeps share one step's budget so that N of them cannot spend the
+//! coefficient N times, and the whole of it was measured:
+//!
+//! ```text
+//!   sweeps                    1        2        3        4
+//!   draws that sleep      9/16     1/16    13/16     0/16
+//!   residual, fraction of g dt
+//!                    .062..182  .10..2.1  .19..213  .024..064
+//!   a settled rig's energy   stable  UNSTABLE   stable   stable
+//! ```
+//!
+//! **Good at one, catastrophic at two, best at three, useless at four.** That is not an
+//! iteration converging; it is a coefficient that happens to suit a scene, and it is the
+//! same shape this page rejects under-relaxation for. At two sweeps a settled rig gains
+//! energy, peaking at 1024 J against the 215 it settles from. The reason it is not a
+//! convergence question is the one the joints already taught: each sweep leaves the
+//! *joints'* velocity constraints violated by what it just did, only the next step's
+//! positional solve repairs that, and the repair is charged as velocity -- so sweeping
+//! harder feeds the loop rather than closing it. The count stays at one.
+//!
+//! **And four sweeps names what is left of the defect.** It is the stillest the rig has
+//! ever been -- 0.024 to 0.064 of `g dt` against 0.062 to 0.182, and a median drift of
+//! 0.0000 of a reach over four hundred and eighty steps -- and it sleeps in none of sixteen
+//! draws over twelve thousand steps. A drift criterion that a frozen median bone will not
+//! satisfy means what is still moving is one or two bones of seventeen rather than the rig.
+//! So whatever remains is **local to a bone**, not a cycle around the whole loop, and it is
+//! a different thing to go after than the one the velocity pass was built for.
+//!
 //! **What it costs, and the cost lands exactly where the pass runs.** A traversal and a
 //! half -- two velocity stages over the contacts, one over the ground, and the extra
 //! read-back sweep -- against eight positional passes. Three alternating rounds of
@@ -851,6 +886,57 @@ use contacts::{
 };
 use scatter::Bodies;
 use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTION};
+
+/// **How many times the velocity pass sweeps its constraints before the step ends.**
+///
+/// The pass is a simultaneous solve -- every constraint answering against one frozen
+/// velocity state, a body taking the mean of what named it -- which is one Jacobi sweep of
+/// a velocity-level complementarity problem, and one sweep propagates a correction exactly
+/// one contact deep. In a heap a body's velocity depends on its neighbours' through the
+/// contacts it shares, so the obvious question is whether a second sweep carries it
+/// further.
+///
+/// **It is one, and the answer is not that one is enough -- it is that the count is a
+/// tuned number and this module does not take those.** Measured on the seventeen-bone rig
+/// with self-collision on, sixteen draws at eight positional passes, capped at twelve
+/// thousand steps:
+///
+/// ```text
+///   sweeps                    1        2        3        4
+///   draws that sleep      9/16     1/16    13/16     0/16
+///   median bone's residual, as a fraction of g dt, six draws:
+///                    .062..182  .10..2.1  .19..213  .024..064
+///   total energy of a settled rig     stable  UNSTABLE   stable   stable
+/// ```
+///
+/// Three sweeps is the best figure anything in this module has produced and two is the
+/// worst -- a rig at two sweeps gains energy, peaking at 1024 J against the 215 it settles
+/// from, and one draw of sixteen sleeps. A count that is good at one, catastrophic at two,
+/// best at three and useless at four is not converging on anything; it is a coefficient
+/// that happens to suit a scene, which is exactly the shape the module header rejects
+/// under-relaxation for. The velocity pass is a Jacobi sweep of a velocity-level problem
+/// and the obvious reading is that more sweeps solve it better, and the measurement says
+/// it is not that kind of iteration at all: each sweep disturbs the *joints'* velocity
+/// constraints, which only the next step's positional solve repairs, and that repair is
+/// charged as velocity. So sweeping harder feeds the loop rather than closing it.
+///
+/// **And four sweeps names what is left.** It is the stillest the rig has ever been -- the
+/// median bone at 0.024 to 0.064 of `g dt` against 0.062 to 0.182 at one sweep, and a
+/// median drift of 0.0000 of a reach over four hundred and eighty steps -- and it never
+/// sleeps, in none of sixteen draws over twelve thousand steps. A drift criterion that a
+/// frozen median bone does not satisfy means the bodies still moving are one or two of
+/// seventeen rather than the rig. Whatever is left of this defect is local to a bone, not
+/// a cycle in the whole loop, and that is a different thing to go after than the one the
+/// velocity pass was built for.
+///
+/// Whatever the count, the sweeps **share one step's budget**: each carries the running
+/// totals in [`contacts::Spent`] forward the way the positional passes do. A sweep that
+/// re-read the positional figures would be handing back N times what a contact ever gave
+/// and spending Coulomb's coefficient N times, which is the same defect as giving the pass
+/// a fresh budget, reached by a different route. That accounting is what makes the row
+/// above a measurement of iteration rather than of a coefficient being multiplied, and at
+/// one sweep it is provably free: the answer is bit-identical with and without it.
+const VELOCITY_SWEEPS: usize = 1;
 
 /// Below this many items, a sweep or a colour runs on the calling thread.
 ///
@@ -2461,10 +2547,17 @@ impl Skeleton {
         //
         // Skipped when there is nothing to solve, which is a skeleton with no contacts of
         // any kind -- a free chain, a pendulum -- so that those pay nothing for it.
+        //
+        // The read-back sweep runs again between sweeps as well as after the last, because
+        // a simultaneous pass is defined by the state it reads: two sweeps over the *same*
+        // frozen velocities are one sweep applied twice, which is a relaxation factor and
+        // not an iteration.
         if !self.plan_velocity.is_empty() {
             self.share_velocity();
-            self.solve_pass(Which::Velocity, dt);
-            self.read_velocities(dt);
+            for _ in 0..VELOCITY_SWEEPS {
+                self.solve_pass(Which::Velocity, dt);
+                self.read_velocities(dt);
+            }
         }
 
         self.settle(dt, length(gravity));
@@ -2827,13 +2920,12 @@ impl Skeleton {
         //   same barrier that separates any other pair of stages -- which is what makes the
         //   normals' writes visible to the frictions that read them.
         // * **The velocity pass is two more stages of the same kind**, over the same
-        //   colours and the same ground set, so it adds nothing to this argument either --
-        //   and it adds one thing that makes it easier rather than harder: it writes no
-        //   running impulse at all. There is one velocity-level correction per contact per
-        //   step, so there is nothing to carry between passes; it reads what the positional
-        //   solve spent and leaves it alone. The arrays it writes are `prev_position` and
-        //   `prev_orientation`, which are two of the four [`scatter::Bodies`] already
-        //   covers.
+        //   colours and the same ground set, so it adds nothing to this argument either. It
+        //   writes the same two running-impulse arrays the positional halves write, indexed
+        //   the same way -- by the constraint, so each is touched by the one lane that owns
+        //   it -- and it writes `prev_position` and `prev_orientation`, which are two of the
+        //   four [`scatter::Bodies`] already covers. Running it more than once changes
+        //   nothing here: a sweep is a pass, and a pass is what this argument is about.
         // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
         let run = |lane: crew::Lane| unsafe {
             match plan[lane.stage] {
@@ -2936,16 +3028,20 @@ impl Skeleton {
                             }
                             // One of each a step, so nothing is carried and nothing is
                             // written back.
-                            Half::VelocityNormal => solve_ground_velocity_normal(
-                                contact,
-                                &body,
-                                normal,
-                                patch,
-                                dt,
-                                velocity[contact.body],
-                                angular_velocity[contact.body],
-                                velocity_share[contact.body],
-                            ),
+                            Half::VelocityNormal => {
+                                let (correction, totals) = solve_ground_velocity_normal(
+                                    contact,
+                                    &body,
+                                    normal,
+                                    patch,
+                                    dt,
+                                    velocity[contact.body],
+                                    angular_velocity[contact.body],
+                                    velocity_share[contact.body],
+                                );
+                                ground_impulse.set(k, totals);
+                                correction
+                            }
                             // The plane has no tangential half in the velocity pass, so it
                             // is never given the stage. See [`Skeleton::plan_pass`].
                             Half::VelocityFriction => Correction::none(),
@@ -3431,28 +3527,38 @@ unsafe fn solve_some_contacts(
             // contact: nothing accumulates, and what the positional solve spent is read
             // rather than added to.
             // Applied through [`scatter::Bodies::apply_velocity`], which is the difference
-            // between the two halves above and the two below.
-            Half::VelocityNormal => solve_contact_velocity_normal(
-                contact,
-                &first,
-                &second,
-                spent,
-                dt,
-                (velocity[contact.a], angular_velocity[contact.a]),
-                (velocity[contact.b], angular_velocity[contact.b]),
-                velocity_share[contact.a].min(velocity_share[contact.b]),
-            ),
-            Half::VelocityFriction => solve_contact_velocity_friction(
-                contact,
-                &first,
-                &second,
-                friction,
-                spent,
-                dt,
-                (velocity[contact.a], angular_velocity[contact.a]),
-                (velocity[contact.b], angular_velocity[contact.b]),
-                velocity_share[contact.a].min(velocity_share[contact.b]),
-            ),
+            // between the two halves above and the two below. They carry a running total
+            // like the positional halves, because the pass runs [`VELOCITY_SWEEPS`] times
+            // and the sweeps share one step's budget rather than getting one each.
+            Half::VelocityNormal => {
+                let (corrections, totals) = solve_contact_velocity_normal(
+                    contact,
+                    &first,
+                    &second,
+                    spent,
+                    dt,
+                    (velocity[contact.a], angular_velocity[contact.a]),
+                    (velocity[contact.b], angular_velocity[contact.b]),
+                    velocity_share[contact.a].min(velocity_share[contact.b]),
+                );
+                impulse.set(k, totals);
+                corrections
+            }
+            Half::VelocityFriction => {
+                let (corrections, totals) = solve_contact_velocity_friction(
+                    contact,
+                    &first,
+                    &second,
+                    friction,
+                    spent,
+                    dt,
+                    (velocity[contact.a], angular_velocity[contact.a]),
+                    (velocity[contact.b], angular_velocity[contact.b]),
+                    velocity_share[contact.a].min(velocity_share[contact.b]),
+                );
+                impulse.set(k, totals);
+                corrections
+            }
         };
         match half {
             Half::Normal | Half::Friction => bodies.apply(corrections),
