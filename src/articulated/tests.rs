@@ -533,11 +533,28 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
     }
     s.add_body(lying(Body::capsule(40.0, 0.4, 2.0, (0.0, 0.4, 0.0)), 0.3));
     s.step(DT, G, 8);
+    s.rebuild_jointed();
 
     let mut got = Vec::new();
+    let mut reached = Vec::new();
     let mut grid = super::broadphase::Grid::default();
     grid.rebuild(&s.position, &s.radius, &s.half_length);
-    grid.pairs(&s.position, &s.inv_mass, s.jointed(), &mut got);
+    // Everything sweeping and nothing already swept, which is the case the grid has to be
+    // exhaustive in. The sleeping sweep is a restriction of this one; that it loses
+    // nothing is what `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` checks.
+    let mut everything = super::sleep::BitSet::default();
+    everything.resize(s.len(), true);
+    let mut nothing = super::sleep::BitSet::default();
+    nothing.resize(s.len(), false);
+    grid.pairs(
+        &s.position,
+        &s.inv_mass,
+        s.jointed(),
+        &everything,
+        &nothing,
+        &mut got,
+        &mut reached,
+    );
     got.sort_unstable();
 
     let mut expected = Vec::new();
@@ -654,11 +671,17 @@ fn the_same_crowd_twice_lands_on_the_same_bits() {
                 bits.push(value.to_bits());
             }
         }
-        (bits, widest)
+        (bits, widest, s.awake_count())
     };
 
-    let (first, widest) = run();
-    let (second, _) = run();
+    let (first, widest, first_awake) = run();
+    let (second, _, second_awake) = run();
+
+    assert_eq!(
+        first_awake, second_awake,
+        "the two runs put a different number of bodies to sleep, so the settling test is \
+         reading something other than the simulation's own state",
+    );
 
     assert!(
         widest >= PARALLEL_FLOOR,
@@ -704,6 +727,258 @@ fn crowd(side: usize) -> Skeleton {
         }
     }
     s
+}
+
+// -- sleeping ---------------------------------------------------------------------
+
+/// **A pile that has arrived stops costing anything.** The whole claim of [`super::sleep`]:
+/// a heap spends nearly all of its life settled, and a settled heap that is still being
+/// solved is the largest single piece of wasted work in the step.
+#[test]
+fn a_settled_stack_leaves_the_simulation() {
+    let mut s = stack(5);
+    let mut slept = None;
+    for step in 1..=900 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            slept = Some(step);
+            break;
+        }
+    }
+    let slept = slept.unwrap_or_else(|| {
+        panic!(
+            "a stack of five dropped on the ground was still being solved after fifteen \
+             seconds; {} of 5 bodies awake",
+            s.awake_count()
+        )
+    });
+    assert!(
+        slept > 30,
+        "it went to sleep after {slept} steps, which is less than the time it takes to \
+         fall and stop moving -- something is calling a body still while it is still \
+         arriving",
+    );
+}
+
+/// **The test the whole mechanism has to pass: a sleeping pile wakes when something
+/// lands on it, and the bodies underneath wake too.**
+///
+/// Waking only what was touched is the failure that looks right and is not: the body that
+/// was hit starts moving and drives straight through the ones below it, because they are
+/// no longer being solved. The island is the unit for exactly this reason.
+#[test]
+fn a_sleeping_stack_wakes_all_the_way_down_when_something_lands_on_it() {
+    let mut s = stack(5);
+    for _ in 0..900 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        s.awake_count(),
+        0,
+        "the stack never settled, so this test cannot say anything about waking it",
+    );
+    let bottom = s.position(0);
+
+    let falling = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (0.0, 3.0, 0.0)), 0.0));
+    // Still well clear of the stack: nothing should have been disturbed yet.
+    for _ in 0..20 {
+        s.step(DT, G, 8);
+    }
+    assert!(
+        s.position(falling).1 > 2.0,
+        "the fixture's body has already reached the stack, so the next assertion is vacuous",
+    );
+    assert_eq!(
+        s.awake_count(),
+        1,
+        "only the falling body should be awake while it is still in the air",
+    );
+
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+    }
+    for i in 0..5 {
+        assert!(
+            s.is_awake(i),
+            "body {i} of the stack is still asleep after something landed on top of it; \
+             the bottom of a stack is as disturbed as the top",
+        );
+    }
+    let moved = length(sub(s.position(0), bottom));
+    assert!(
+        moved > 0.0,
+        "the bottom body did not move at all under the impact, so nothing was actually \
+         transmitted through the stack",
+    );
+}
+
+/// A sleeping body is not merely slow, it is **exactly** where it was left. Anything less
+/// and a settled heap creeps for free, which is the artefact sleeping exists to remove.
+#[test]
+fn a_sleeping_body_does_not_move_at_all() {
+    let mut s = stack(1);
+    for _ in 0..900 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(s.awake_count(), 0, "the body never settled");
+    let (where_it_is, how_it_lies) = (s.position(0), s.orientation(0));
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+    }
+    assert_eq!(
+        s.position(0),
+        where_it_is,
+        "ten seconds asleep moved it; a sleeping body must be bit-identical, not close",
+    );
+    assert_eq!(s.orientation(0), how_it_lies, "and it must not have turned");
+    assert_eq!(s.velocity(0), (0.0, 0.0, 0.0), "nor read back as moving");
+}
+
+/// **A body dropped on a sleeping pile lands on it rather than through it.**
+///
+/// The broad phase only sweeps outward from the awake set, so a sleeping body is a
+/// collider that never looks around itself. If that restriction lost a pair, this is
+/// where it would show: the newcomer would find nothing under it.
+#[test]
+fn a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it() {
+    let mut s = stack(3);
+    for _ in 0..900 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(s.awake_count(), 0, "the stack never settled");
+    let top = s.position(2).1;
+
+    let falling = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (0.0, 3.0, 0.0)), 0.0));
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    let landed = s.position(falling).1;
+    assert!(
+        landed > top,
+        "the body finished at {landed:.3} and the stack's top body is at {top:.3}: it \
+         went through a pile that was asleep",
+    );
+}
+
+/// Turning sleeping off has to give back the solver that was there before it, or the
+/// feature is not a feature but a change of physics.
+#[test]
+fn sleeping_does_not_move_where_a_pile_ends_up() {
+    let settle = |sleeping: bool| {
+        let mut s = pile(40);
+        s.set_sleeping(sleeping);
+        for _ in 0..900 {
+            s.step(DT, G, 8);
+        }
+        let mut height = 0.0;
+        let mut footprint: f64 = 0.0;
+        for i in 0..s.len() {
+            height += s.position(i).1;
+            footprint = footprint.max(length((s.position(i).0, 0.0, s.position(i).2)));
+        }
+        (height / s.len() as f64, footprint)
+    };
+    let (asleep_height, asleep_spread) = settle(true);
+    let (awake_height, awake_spread) = settle(false);
+    // Aggregates rather than positions: a pile of forty is chaotic, and two runs that
+    // differ by one body's sleep step diverge in detail while staying the same heap.
+    assert!(
+        (asleep_height - awake_height).abs() < 0.05,
+        "the pile settles at {asleep_height:.3} m with sleeping and {awake_height:.3} m \
+         without it",
+    );
+    assert!(
+        (asleep_spread - awake_spread).abs() < 0.5,
+        "the pile spreads to {asleep_spread:.3} m with sleeping and {awake_spread:.3} m \
+         without it",
+    );
+}
+
+/// Colouring a joint as it arrives has to land on the assignment a from-scratch greedy
+/// pass would have produced, or the parallelism quietly gets worse as a rig is built.
+///
+/// The invariant is not subtle -- greedy takes the joints in the order they were added
+/// either way -- but it is the thing that would break silently if the colour bits ever
+/// stopped being per-body, so it is worth stating.
+#[test]
+fn colouring_joints_as_they_arrive_matches_colouring_them_all_at_once() {
+    let mut s = Skeleton::new();
+    for i in 0..40 {
+        rig(&mut s, i as f64 * 0.4);
+    }
+
+    let mut taken: Vec<Vec<usize>> = vec![Vec::new(); s.len()];
+    let mut expected: Vec<Vec<usize>> = Vec::new();
+    for (index, joint) in s.joints().iter().enumerate() {
+        let (a, b) = joint.bodies();
+        let mut colour = 0;
+        while taken[a].contains(&colour) || taken[b].contains(&colour) {
+            colour += 1;
+        }
+        taken[a].push(colour);
+        taken[b].push(colour);
+        if colour >= expected.len() {
+            expected.resize_with(colour + 1, Vec::new);
+        }
+        expected[colour].push(index);
+    }
+
+    assert_eq!(
+        s.colours().len(),
+        expected.len(),
+        "incremental colouring used {} colours where a full pass uses {}; the colour \
+         count is what decides how parallel the solve can be",
+        s.colours().len(),
+        expected.len(),
+    );
+    assert_eq!(s.colours(), expected.as_slice());
+}
+
+/// A stack of `count` capsules lying flat on the ground, each resting on the one below.
+/// The smallest arrangement where "the bodies underneath" means anything.
+fn stack(count: usize) -> Skeleton {
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    for i in 0..count {
+        s.add_body(lying(
+            Body::capsule(4.0, 0.1, 0.5, (0.0, 0.11 + 0.21 * i as f64, 0.0)),
+            0.0,
+        ));
+    }
+    s
+}
+
+/// A pinned root with two chains of three hung off it, which is enough joint degree for
+/// greedy colouring to have to make a choice.
+fn rig(into: &mut Skeleton, x: f64) {
+    let root = into.add_body(Body::pinned((x, 2.0, 0.0)));
+    for side in [-1.0f64, 1.0] {
+        let mut previous = root;
+        for i in 0..3 {
+            let body = into.add_body(Body::capsule(
+                3.0,
+                0.05,
+                0.3,
+                (x + side * 0.1, 1.7 - 0.35 * i as f64, 0.0),
+            ));
+            into.add_joint(Joint::Ball {
+                a: previous,
+                b: body,
+                anchor_a: (0.0, -0.15, 0.0),
+                anchor_b: (0.0, 0.15, 0.0),
+            });
+            previous = body;
+        }
+    }
 }
 
 /// A pinned root with `links` capsules hanging off it in a line.
@@ -785,7 +1060,3 @@ fn pile(count: usize) -> Skeleton {
     }
     s
 }
-
-
-
-

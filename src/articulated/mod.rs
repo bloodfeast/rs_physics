@@ -129,13 +129,75 @@
 //!   spread to twenty metres over thirty seconds. Rolling resistance -- the same law on
 //!   the same budget, one dimension over -- holds it at about a metre and a quarter.
 //!
+//! # Sleeping, which is the removal of the solve rather than an optimisation of it
+//!
+//! `iterations` multiplies every joint and every contact, and none of that arithmetic
+//! changes anything for a body that has stopped moving. [`sleep`] takes settled bodies
+//! out of the step entirely -- an awake bitset walked a word at a time, islands over
+//! joints plus contacts as the unit that sleeps and wakes together -- and a step where
+//! nothing is awake returns before it touches memory. Measured on ten thousand capsules
+//! resting on the ground in stacks of three: **8.6 ms a step down to nothing
+//! measurable.** With nothing asleep it costs between two and four per cent, which is
+//! the settling test and the live constraint lists.
+//!
+//! # Why the iteration count is what it is, and what will not move it
+//!
+//! Two things that look like levers and are not, both measured rather than argued.
+//!
+//! * **There is no impulse here to warm-start.** `contact_impulse` is not an applied
+//!   impulse, it is the Coulomb budget; the positional correction is re-derived from the
+//!   current geometry on every pass. Carrying the previous step's budget forward changes
+//!   the slope a body holds to by under a per cent at four iterations and by nothing at
+//!   eight, because the seed sits on the limit line and cancels. Nor is there an active
+//!   set to predict: a contact is active iff `depth > 0`, which is three flops and
+//!   cheaper than any prediction of it could be. **The N passes are Gauss-Seidel
+//!   propagation whose count is set by graph distance from the ground to the top of a
+//!   stack, not by combinatorics.**
+//! * **Substepping does not pay.** N substeps of one pass against one step of N passes,
+//!   at the same total solve work and with the broad and narrow phases still run once:
+//!   the creep below is unchanged, the cost is flat within noise, the resting height and
+//!   the pile's footprint improve in the third decimal, and at eight substeps of one pass
+//!   Coulomb's angle breaks outright -- a thirty-degree slope holds. Macklin et al (2019)
+//!   argue for it in general and it is the right thing to have tried; it is not what is
+//!   wrong here.
+//!
+//! # The creep, which is what stops any of this settling
+//!
+//! A pile resting on the plane **drifts for ever**, and the drift over a window is
+//! exactly linear in the window -- forty capsules left for twenty-five seconds, median
+//! surface displacement as a fraction of each body's own reach, over windows of 15, 30,
+//! 60, 120, 240 and 480 steps:
+//!
+//! ```text
+//!   translation               0.0057  0.0085  0.0166  0.0359  0.0630  0.1207
+//!   surface sweep of the turn 0.0077  0.0099  0.0216  0.0466  0.0922  0.1535
+//!   together                  0.0126  0.0208  0.0458  0.0906  0.1697  0.2749
+//! ```
+//!
+//! It is not a convergence failure: it is the same at eight iterations and at sixty-four,
+//! and only worse at four. It is not Coulomb slip either, because quadrupling the
+//! coefficient changes it by a tenth. The faults that were *within* a step have been
+//! fixed -- the cone, the patch couple, the pooled ground budget -- and this survived all
+//! of them, because it is **across** steps: friction compares surface points with where
+//! they were at the start of *this* step, so whatever slip a step fails to remove is
+//! forgiven by the next one, which re-anchors at the new position. A persistent contact
+//! carrying its own anchor, re-anchored when the cone is exceeded, is what would hold it.
+//!
+//! The same thing keeps a rig awake, and the measurement that localises it is worth
+//! keeping: two bodies and one ball joint dropped on the plane are asleep by step 28; a
+//! seventeen-bone rig is still moving at 34 mm a second after a hundred seconds, and the
+//! same seventeen bodies with the joints removed mostly sleep. The residual grows with
+//! the size of the constraint graph, which is the same Gauss-Seidel story as the
+//! iteration count -- and it does not fall off with more passes, which is what says the
+//! forgiveness is across steps rather than within one.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
 //! sets, the contact buffers and the per-chunk buffers the broad and narrow phases fill
-//! all live in the struct and are reused. Joint colouring happens when the joint set
-//! changes rather than per step; contact colouring has to happen every step, because the
-//! contacts do.
+//! all live in the struct and are reused. Joint colouring happens as each joint arrives
+//! -- see [`Skeleton::add_joint`] -- and contact colouring has to happen every step,
+//! because the contacts do.
 
 use rayon::prelude::*;
 
@@ -145,12 +207,14 @@ mod broadphase;
 mod contacts;
 mod crew;
 mod scatter;
+mod sleep;
 
 use broadphase::{Grid, Jointed};
 use contacts::{
     capsule_contact, ground_contacts, solve_contact, solve_ground, Contact, GroundContact, Spent,
 };
 use scatter::Bodies;
+use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTION};
 
 /// Below this many items, a sweep or a colour runs on the calling thread.
 ///
@@ -166,6 +230,16 @@ const PARALLEL_FLOOR: usize = 256;
 
 /// Candidate pairs per chunk of the narrow phase. See [`Skeleton::build_contacts`].
 const NARROW_CHUNK: usize = 1024;
+
+/// Words of the awake set per chunk of a streaming sweep.
+///
+/// The sweeps walk the awake set a word at a time so that one test can dismiss sixty-four
+/// sleeping bodies, but a word is far too small to be a unit of work for the thread pool:
+/// at one word a chunk a ten-thousand-body predict is a hundred and sixty splits of about
+/// a microsecond each, and the scheduling costs more than the sweep. Sixteen words is a
+/// thousand bodies a chunk, which is the granularity the flat sweep this replaced had.
+const SWEEP_WORDS: usize = 16;
+const SWEEP_BLOCK: usize = SWEEP_WORDS * 64;
 
 /// Coulomb friction between two bodies, unless a caller says otherwise.
 ///
@@ -571,13 +645,22 @@ impl Correction {
 /// A pass is a list of these, and every lane walks the same list. They exist as a list
 /// rather than as four loops because the pool is handed the whole pass at once and has to
 /// be told what the pass *is*; see [`crew`].
+///
+/// A stage carries **how much of its list to run** as well as which list, because that is
+/// the only thing that differs between the full plan and the reduced one a background
+/// island gets, and because a list shortened by sleeping is the same list with a smaller
+/// count. A stage whose count reaches zero is left out of the plan entirely rather than
+/// costing a barrier for no work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
-    Joints(u32),
-    Contacts(u32),
+    Joints { colour: u32, upto: u32 },
+    Contacts { colour: u32, upto: u32 },
     /// The contacts colouring could not place. Run by one lane, because each reads the
     /// positions the one before it wrote.
     Overflow,
+    /// The joints colouring could not place. Empty unless a body carries more than
+    /// sixty-four joints; see [`Skeleton::add_joint`].
+    JointOverflow,
     Ground(u32),
 }
 
@@ -596,10 +679,30 @@ pub struct Skeleton {
     half_length: Vec<f64>,
 
     joints: Vec<Joint>,
-    /// Joint indices grouped so that no two joints in a group share a body. Rebuilt when
-    /// the joint set changes, not per step. See the module header.
+    /// Joint indices grouped so that no two joints in a group share a body. Extended as
+    /// each joint arrives; see [`Skeleton::add_joint`].
     colours: Vec<Vec<usize>>,
-    coloured: bool,
+    /// One word per body: bit `c` set means this body already carries a joint of colour
+    /// `c`. Persistent, which is what makes colouring a new joint two loads and a
+    /// `trailing_ones` rather than a pass over the whole joint set.
+    joint_bits: Vec<u64>,
+    /// Joints that could not be coloured inside the sixty-four bits, solved one at a time
+    /// on the calling thread. Reaching this needs a body with sixty-five joints on it.
+    joint_overflow: Vec<usize>,
+    /// Whether the jointed-neighbour runs still describe the joint set. See
+    /// [`Skeleton::rebuild_jointed`].
+    jointed_built: bool,
+    /// Each colour's joints that are live this step, foreground first, and how much of
+    /// each is foreground. Built once per step from the awake set rather than tested
+    /// inside every pass -- `iterations` multiplies the pass.
+    ///
+    /// **A slice of one of these is still a proper colour**, which is what lets it be
+    /// handed to [`scatter`]: taking a subset of a set in which no body appears twice
+    /// cannot make a body appear twice, and ordering the set foreground-first is a
+    /// permutation, which cannot either. `scatter::disjoint` is run on the slice that is
+    /// actually solved, so the check follows the restriction rather than the whole set.
+    live_joints: Vec<Vec<usize>>,
+    live_joints_near: Vec<usize>,
 
     prev_position: Vec<(f64, f64, f64)>,
     prev_orientation: Vec<Quaternion>,
@@ -616,6 +719,8 @@ pub struct Skeleton {
     /// concatenated. See [`Skeleton::build_contacts`].
     contact_scratch: Vec<Vec<Contact>>,
     contact_colours: Vec<Vec<usize>>,
+    /// How much of each contact colour is foreground. See [`Skeleton::set_background`].
+    contact_colours_near: Vec<usize>,
     /// Contacts on a body that has already used every colour the bitmask can hold. See
     /// [`Skeleton::colour_contacts`]; solved serially, and in practice empty.
     contact_overflow: Vec<usize>,
@@ -662,9 +767,49 @@ pub struct Skeleton {
     /// The stages of a pass, in order, with the empty colours left out. Rebuilt when the
     /// colouring is, not per pass. See [`Skeleton::plan_pass`].
     plan: Vec<Stage>,
+    /// The same pass with every background island's constraints left out. See
+    /// [`Skeleton::plan_pass`].
+    plan_near: Vec<Stage>,
+    plan_work: usize,
+    plan_near_work: usize,
 
     /// The broad phase. See [`broadphase`] for why it is a grid.
     grid: Grid,
+
+    // -- sleeping. See [`sleep`] for the whole of the reasoning. ------------------
+    /// Whether settled bodies may be left out of a step at all.
+    sleeping: bool,
+    /// One bit per body: set means the body is simulated this step. A pinned body is
+    /// never set, because it cannot move and there is nothing to simulate.
+    awake: BitSet,
+    /// The bodies the broad phase has already swept as it walks outward from the awake
+    /// set, and the ones it is sweeping now. See [`Skeleton::find_pairs`].
+    swept: BitSet,
+    frontier: BitSet,
+    next_frontier: BitSet,
+    /// Bodies the sweep reached that were asleep, to be woken before the next round.
+    reached: Vec<usize>,
+    /// Where a body was when its settling window opened, and how long it has been there.
+    /// See [`sleep`] for why the drift is measured against the window rather than against
+    /// the previous step.
+    still_from: Vec<(f64, f64, f64)>,
+    still_turn: Vec<Quaternion>,
+    still_steps: Vec<u32>,
+    /// Which sleeping island a body belongs to, or [`NO_ISLAND`] while it is awake.
+    island_of: Vec<u32>,
+    islands: Islands,
+    components: Components,
+    /// Scratch for grouping the awake bodies by island: a counting sort keyed on the
+    /// component root, which is a body index, so the tallies are one word a body.
+    island_tally: Vec<u32>,
+    island_list: Vec<u32>,
+    /// Per component root, whether any member of it is still moving.
+    unsettled: Vec<bool>,
+    /// Bodies the caller has said are not worth full quality, and what they get instead.
+    /// See [`Skeleton::set_background`].
+    background: BitSet,
+    background_iterations: usize,
+    any_background: bool,
 }
 
 impl Default for Skeleton {
@@ -683,7 +828,11 @@ impl Default for Skeleton {
             half_length: Vec::new(),
             joints: Vec::new(),
             colours: Vec::new(),
-            coloured: false,
+            joint_bits: Vec::new(),
+            joint_overflow: Vec::new(),
+            jointed_built: false,
+            live_joints: Vec::new(),
+            live_joints_near: Vec::new(),
             prev_position: Vec::new(),
             prev_orientation: Vec::new(),
             jointed_start: Vec::new(),
@@ -692,6 +841,7 @@ impl Default for Skeleton {
             contacts: Vec::new(),
             contact_scratch: Vec::new(),
             contact_colours: Vec::new(),
+            contact_colours_near: Vec::new(),
             contact_overflow: Vec::new(),
             colour_bits: Vec::new(),
             ground: None,
@@ -703,7 +853,28 @@ impl Default for Skeleton {
             contact_impulse: Vec::new(),
             ground_impulse: Vec::new(),
             plan: Vec::new(),
+            plan_near: Vec::new(),
+            plan_work: 0,
+            plan_near_work: 0,
             grid: Grid::default(),
+            sleeping: true,
+            awake: BitSet::default(),
+            swept: BitSet::default(),
+            frontier: BitSet::default(),
+            next_frontier: BitSet::default(),
+            reached: Vec::new(),
+            still_from: Vec::new(),
+            still_turn: Vec::new(),
+            still_steps: Vec::new(),
+            island_of: Vec::new(),
+            islands: Islands::default(),
+            components: Components::default(),
+            island_tally: Vec::new(),
+            island_list: Vec::new(),
+            unsettled: Vec::new(),
+            background: BitSet::default(),
+            background_iterations: 1,
+            any_background: false,
         }
     }
 }
@@ -717,6 +888,10 @@ impl Skeleton {
     /// leaves only the non-penetration constraint.
     pub fn set_friction(&mut self, friction: f64) {
         self.friction = friction.max(0.0);
+        // A material change is a disturbance no settling test can see: a body held on a
+        // slope by the old coefficient is asleep, and has to be given the chance to find
+        // out that the new one does not hold it.
+        self.wake_all();
     }
 
     /// Rolling resistance between bodies, as a fraction of the contact radius. Zero lets
@@ -724,6 +899,7 @@ impl Skeleton {
     /// for why that is not what a pile wants.
     pub fn set_rolling_resistance(&mut self, resistance: f64) {
         self.rolling_resistance = resistance.max(0.0);
+        self.wake_all();
     }
 
     /// **The ground**: the plane `dot(normal, p) = distance`, which every shaped body
@@ -737,11 +913,15 @@ impl Skeleton {
     /// problem for now; this is the half of it every pile needs.
     pub fn set_ground(&mut self, normal: (f64, f64, f64), distance: f64) {
         self.ground = normalized(normal).map(|n| (n, distance));
+        // The floor moving is the one thing that can reach a sleeping body without
+        // touching it.
+        self.wake_all();
     }
 
     /// Removes the ground plane.
     pub fn clear_ground(&mut self) {
         self.ground = None;
+        self.wake_all();
     }
 
     /// How many contacts the last [`Skeleton::step`] found. The number a broad phase is
@@ -777,7 +957,26 @@ impl Skeleton {
         self.prev_position.push(body.position);
         self.prev_orientation.push(body.orientation);
         self.colour_bits.push(0);
-        self.position.len() - 1
+        self.joint_bits.push(0);
+        self.still_from.push(body.position);
+        self.still_turn.push(body.orientation);
+        self.still_steps.push(0);
+        self.island_of.push(NO_ISLAND);
+        let i = self.position.len() - 1;
+        let n = self.position.len();
+        self.awake.resize(n, false);
+        self.swept.resize(n, false);
+        self.frontier.resize(n, false);
+        self.next_frontier.resize(n, false);
+        self.background.resize(n, false);
+        // A new body arrives awake unless it is pinned, and a pinned body is never awake:
+        // it does not move, so there is nothing for a step to do to it.
+        if body.inv_mass > 0.0 {
+            self.awake.set(i);
+        }
+        // The jointed runs are indexed by body, so the last one no longer covers the set.
+        self.jointed_built = false;
+        i
     }
 
     /// One body, gathered out of the arrays.
@@ -796,7 +995,12 @@ impl Skeleton {
 
     /// Writes one body back. The whole body, because a caller that has one has usually
     /// changed more than one field of it.
+    ///
+    /// **Wakes the body's island.** A caller writing a body is the one disturbance the
+    /// solver cannot see coming, and a teleported body that stays asleep is a body that
+    /// never collides with anything again.
     pub fn set_body(&mut self, i: usize, body: Body) {
+        self.wake(i);
         self.position[i] = body.position;
         // Unit on the way in; see [`Skeleton::add_body`].
         self.orientation[i] = body.orientation.normalized();
@@ -824,25 +1028,74 @@ impl Skeleton {
         self.angular_velocity[i]
     }
 
+    /// Sets a body's angular velocity, and **wakes its island**: a caller pushing a body
+    /// is a disturbance the settling test cannot see, and it has to reach the bodies
+    /// leaning on it as well as the one that was pushed.
     pub fn set_angular_velocity(&mut self, i: usize, w: (f64, f64, f64)) {
+        self.wake(i);
         self.angular_velocity[i] = w;
     }
 
+    /// Sets a body's velocity, and **wakes its island**. See
+    /// [`Skeleton::set_angular_velocity`].
     pub fn set_velocity(&mut self, i: usize, v: (f64, f64, f64)) {
+        self.wake(i);
         self.velocity[i] = v;
     }
 
     /// Adds a joint. Returns `false` and adds nothing if it names a body that does not
     /// exist, or joints a body to itself -- an out-of-range index is a caller's bug and
     /// panicking in a solver that runs per frame is worse than refusing.
+    ///
+    /// **Coloured on arrival, in constant time and without allocating.** The greedy rule
+    /// is "the lowest colour neither body is already using", which depends on nothing but
+    /// the two bodies -- so an edge added to a proper edge-colouring leaves it proper, and
+    /// there is never anything to recolour.
+    ///
+    /// The version this replaced set a dirty flag and coloured the whole joint set on the
+    /// next step, through a `vec![Vec::new(); bodies]` -- ten thousand heap allocations on
+    /// a heap that size -- with a linear scan per colour probe. A caller that adds a rig
+    /// per frame paid it every frame, and neither bench could see it because both build
+    /// the skeleton once and then step it. Measured on ten thousand bodies and nine
+    /// thousand six hundred joints: **1688 us against 3.2 us to add a rig.**
+    ///
+    /// The colour count is unchanged by this. Greedy takes the joints in the order they
+    /// were added either way, so it lands on exactly the assignment the from-scratch pass
+    /// produced -- which `colouring_joints_as_they_arrive_matches_colouring_them_all_at_once`
+    /// asserts against a from-scratch pass rather than leaving implicit, because the
+    /// colour count is what decides how parallel the solve can be.
     pub fn add_joint(&mut self, joint: Joint) -> bool {
         let (a, b) = joint.bodies();
         let n = self.position.len();
         if a >= n || b >= n || a == b {
             return false;
         }
+        let index = self.joints.len();
         self.joints.push(joint);
-        self.coloured = false;
+
+        let taken = self.joint_bits[a] | self.joint_bits[b];
+        if taken == u64::MAX {
+            // Sixty-five joints on one body. Nothing a skeleton does reaches it, and a
+            // serial tail is a better answer than a colour nobody can parallelise.
+            self.joint_overflow.push(index);
+        } else {
+            let colour = taken.trailing_ones() as usize;
+            let bit = 1u64 << colour;
+            self.joint_bits[a] |= bit;
+            self.joint_bits[b] |= bit;
+            if colour >= self.colours.len() {
+                self.colours.resize_with(colour + 1, Vec::new);
+                self.live_joints.resize_with(colour + 1, Vec::new);
+                self.live_joints_near.resize(colour + 1, 0);
+            }
+            self.colours[colour].push(index);
+        }
+        self.jointed_built = false;
+
+        // A joint arriving between a sleeping body and anything else is a new way for a
+        // disturbance to travel, and the islands were frozen without it.
+        self.wake(a);
+        self.wake(b);
         true
     }
 
@@ -852,45 +1105,28 @@ impl Skeleton {
 
     /// How the joints were partitioned. Exposed because the colour count is the thing
     /// that decides how parallel a step can be, and a caller tuning a rig wants to see it.
-    pub fn colours(&mut self) -> &[Vec<usize>] {
-        self.recolour();
+    ///
+    /// **Greedy colouring**: each joint takes the lowest colour no joint already on
+    /// either of its bodies is using. Greedy rather than optimal because optimal
+    /// colouring is NP-hard and the gain would be at most a colour or two on a graph
+    /// where every vertex has degree three or four. A skeleton lands on four or five
+    /// either way. It happens in [`Skeleton::add_joint`], one joint at a time.
+    pub fn colours(&self) -> &[Vec<usize>] {
         &self.colours
     }
 
-    /// **Greedy colouring**: each joint takes the lowest colour no joint already coloured
-    /// on either of its bodies is using.
+    /// Rebuilds the jointed-neighbour runs, which are indexed by body and so do not
+    /// survive a body or a joint arriving.
     ///
-    /// Greedy rather than optimal because optimal colouring is NP-hard and the gain would
-    /// be at most a colour or two on a graph where every vertex has degree three or four.
-    /// A skeleton lands on four or five either way.
-    fn recolour(&mut self) {
-        if self.coloured {
+    /// Still a full pass, unlike the colouring, because the runs are a compressed
+    /// adjacency and an insertion into one moves every run after it. It is `O(bodies +
+    /// joints)` of `u32` writes against the colouring pass's allocation per body, and on
+    /// the heap workload it is the difference between 1688 us a frame and the number in
+    /// [`Skeleton::add_joint`].
+    fn rebuild_jointed(&mut self) {
+        if self.jointed_built {
             return;
         }
-        for set in self.colours.iter_mut() {
-            set.clear();
-        }
-        // Which colours are already taken on each body. Indexed by body, holding the
-        // highest colour seen plus a bitmask of the low ones, would be faster; a small
-        // vec per body is clearer and this runs when the rig changes, not per step.
-        let mut taken: Vec<Vec<usize>> = vec![Vec::new(); self.position.len()];
-        for (index, joint) in self.joints.iter().enumerate() {
-            let (a, b) = joint.bodies();
-            let mut colour = 0;
-            while taken[a].contains(&colour) || taken[b].contains(&colour) {
-                colour += 1;
-            }
-            taken[a].push(colour);
-            taken[b].push(colour);
-            if colour >= self.colours.len() {
-                self.colours.resize_with(colour + 1, Vec::new);
-            }
-            self.colours[colour].push(index);
-        }
-        self.colours.retain(|set| !set.is_empty());
-
-        // The pairs contact generation must not produce, as a run per body. See
-        // [`Jointed`] for why it is that shape and not a sorted list of pairs.
         let bodies = self.position.len();
         self.jointed_start.clear();
         self.jointed_start.resize(bodies + 1, 0);
@@ -917,8 +1153,7 @@ impl Skeleton {
                 cursor[from] += 1;
             }
         }
-
-        self.coloured = true;
+        self.jointed_built = true;
     }
 
     /// Which bodies each body is jointed to. See [`Jointed`].
@@ -932,17 +1167,70 @@ impl Skeleton {
     /// Whether a joint holds these two bodies together, which is the pair contact
     /// generation must not produce.
     pub fn is_jointed(&mut self, a: usize, b: usize) -> bool {
-        self.recolour();
+        self.rebuild_jointed();
         self.jointed().holds(a, b)
     }
 
     /// Candidate pairs for the narrow phase, from the broad phase.
+    ///
+    /// **Only awake bodies are swept**, which is the broad phase's whole share of what
+    /// sleeping saves: a settled heap produces no outer loop at all, and the grid is left
+    /// standing because nothing in it moved. A sleeping body is still in the grid and
+    /// still a collider -- it has to be, or an awake body would fall through the heap it
+    /// landed on -- it simply does not go looking.
+    ///
+    /// A sleeping body found within reach of an awake one is woken, and then has to be
+    /// swept itself, because *its* neighbours further into the heap have not been looked
+    /// at by anybody. So the sweep runs outward in rounds until a round wakes nothing:
+    /// the awake set first, then whatever that reached, and so on. One round on a quiet
+    /// frame, two or three where something has just landed.
     fn find_pairs(&mut self) {
         let mut pairs = std::mem::take(&mut self.pairs);
         pairs.clear();
+        if !self.awake.any() {
+            // Nothing moved, so the grid still describes where everything is and there is
+            // no outer loop to run.
+            self.pairs = pairs;
+            return;
+        }
         let mut grid = std::mem::take(&mut self.grid);
         grid.rebuild(&self.position, &self.radius, &self.half_length);
-        grid.pairs(&self.position, &self.inv_mass, self.jointed(), &mut pairs);
+
+        self.swept.clear();
+        self.frontier.clear();
+        self.frontier.union(&self.awake);
+        let mut reached = std::mem::take(&mut self.reached);
+        loop {
+            reached.clear();
+            grid.pairs(
+                &self.position,
+                &self.inv_mass,
+                Jointed {
+                    start: &self.jointed_start,
+                    to: &self.jointed_to,
+                },
+                &self.frontier,
+                &self.swept,
+                &mut pairs,
+                &mut reached,
+            );
+            self.swept.union(&self.frontier);
+            if reached.is_empty() {
+                break;
+            }
+            // Everything the round reached is now awake, and its island with it: a body
+            // underneath the one that was touched is just as disturbed as the one that
+            // was.
+            for &i in reached.iter() {
+                self.wake(i);
+            }
+            self.next_frontier.difference(&self.awake, &self.swept);
+            std::mem::swap(&mut self.frontier, &mut self.next_frontier);
+            if !self.frontier.any() {
+                break;
+            }
+        }
+        self.reached = reached;
         self.grid = grid;
         self.pairs = pairs;
     }
@@ -1000,10 +1288,11 @@ impl Skeleton {
         let Some((normal, distance)) = self.ground else {
             return;
         };
-        for i in 0..self.position.len() {
-            if self.inv_mass[i] <= 0.0 {
-                continue;
-            }
+        // Awake bodies only, and in increasing order, which is the order the loop this
+        // replaced produced: a sleeping body is already resting on the plane -- that is
+        // most of why it went to sleep -- and the plane cannot arrive underneath it.
+        let awake = std::mem::take(&mut self.awake);
+        awake.for_each_set(|i| {
             let before = self.ground_contacts.len();
             ground_contacts(
                 i,
@@ -1029,7 +1318,8 @@ impl Skeleton {
                 }
                 _ => (0.0, 0.0, 0.0),
             };
-        }
+        });
+        self.awake = awake;
 
         // **One budget per body, not one per end.** A capsule lying on the plane touches
         // it along a line and gets a contact at each end of that line, but the two are
@@ -1074,26 +1364,99 @@ impl Skeleton {
         for set in self.contact_colours.iter_mut() {
             set.clear();
         }
+        self.contact_colours_near.clear();
+        self.contact_colours_near
+            .resize(self.contact_colours.len(), 0);
         self.contact_overflow.clear();
         for bits in self.colour_bits.iter_mut() {
             *bits = 0;
         }
 
-        for (index, contact) in self.contacts.iter().enumerate() {
-            let (a, b) = (contact.a, contact.b);
-            let taken = self.colour_bits[a] | self.colour_bits[b];
-            if taken == u64::MAX {
-                self.contact_overflow.push(index);
-                continue;
+        // Foreground contacts are coloured first, so each colour's list is its foreground
+        // prefix followed by its background tail and a reduced pass stops at
+        // `contact_colours_near`. Which colour a contact gets is free to choose; that a
+        // colour names each body once is not, and taking a prefix of a set with that
+        // property cannot break it. See [`scatter`].
+        for background in [false, true] {
+            if background && !self.any_background {
+                break;
             }
-            let colour = taken.trailing_ones() as usize;
-            let bit = 1u64 << colour;
-            self.colour_bits[a] |= bit;
-            self.colour_bits[b] |= bit;
-            if colour >= self.contact_colours.len() {
-                self.contact_colours.resize_with(colour + 1, Vec::new);
+            for (index, contact) in self.contacts.iter().enumerate() {
+                let (a, b) = (contact.a, contact.b);
+                // Background only where *both* ends are: a contact on the boundary
+                // between the two is solved at full quality, because it is the one
+                // carrying whatever the foreground is leaning on.
+                if self.any_background
+                    && (self.background.get(a) && self.background.get(b)) != background
+                {
+                    continue;
+                }
+                let taken = self.colour_bits[a] | self.colour_bits[b];
+                if taken == u64::MAX {
+                    self.contact_overflow.push(index);
+                    continue;
+                }
+                let colour = taken.trailing_ones() as usize;
+                let bit = 1u64 << colour;
+                self.colour_bits[a] |= bit;
+                self.colour_bits[b] |= bit;
+                if colour >= self.contact_colours.len() {
+                    self.contact_colours.resize_with(colour + 1, Vec::new);
+                    self.contact_colours_near.resize(colour + 1, 0);
+                }
+                self.contact_colours[colour].push(index);
             }
-            self.contact_colours[colour].push(index);
+            if !background {
+                for (near, set) in self
+                    .contact_colours_near
+                    .iter_mut()
+                    .zip(self.contact_colours.iter())
+                {
+                    *near = set.len();
+                }
+            }
+        }
+    }
+
+    /// Which joints are worth solving this step, per colour, foreground first.
+    ///
+    /// Built once rather than tested inside every pass: `iterations` is the multiplier on
+    /// everything in the solve, so a test that has to happen per constraint wants to
+    /// happen once a step and not eight times.
+    fn find_live_joints(&mut self) {
+        let Skeleton {
+            colours,
+            live_joints,
+            live_joints_near,
+            joints,
+            awake,
+            background,
+            any_background,
+            ..
+        } = self;
+        live_joints.resize_with(colours.len(), Vec::new);
+        live_joints_near.resize(colours.len(), 0);
+        for (colour, set) in colours.iter().enumerate() {
+            let live = &mut live_joints[colour];
+            live.clear();
+            for pass in [false, true] {
+                if pass && !*any_background {
+                    break;
+                }
+                for &k in set.iter() {
+                    let (a, b) = joints[k].bodies();
+                    if !awake.get(a) && !awake.get(b) {
+                        continue;
+                    }
+                    if *any_background && (background.get(a) && background.get(b)) != pass {
+                        continue;
+                    }
+                    live.push(k);
+                }
+                if !pass {
+                    live_joints_near[colour] = live.len();
+                }
+            }
         }
     }
 
@@ -1106,7 +1469,13 @@ impl Skeleton {
         if dt <= 0.0 || self.position.is_empty() {
             return;
         }
-        self.recolour();
+        // Everything has settled and nothing has disturbed it. There is no state a step
+        // could change, so the cheapest honest answer is the whole step: `bodies / 64`
+        // word tests and no memory touched. This is what sleeping is for.
+        if !self.awake.any() {
+            return;
+        }
+        self.rebuild_jointed();
 
         self.prev_position.copy_from_slice(&self.position);
         self.prev_orientation.copy_from_slice(&self.orientation);
@@ -1131,22 +1500,61 @@ impl Skeleton {
             *q = integrate_spin(*q, *w, dt);
         };
 
+        // **And only over the bodies that are awake**, a word of the awake set at a
+        // time. A word of zeroes is sixty-four sleeping bodies dismissed by one test,
+        // which is the shape a settled heap has; a word of ones runs a straight loop with
+        // no bit arithmetic in it, so a skeleton where nothing sleeps runs what it ran
+        // before. Only the ragged edge between them pays for the `trailing_zeros`.
+        let block = |(((p, v), q), ((inv_m, w), words)): (
+            (
+                (&mut [(f64, f64, f64)], &mut [(f64, f64, f64)]),
+                &mut [Quaternion],
+            ),
+            ((&[f64], &[(f64, f64, f64)]), &[u64]),
+        )| {
+            let mut run = |i: usize| predict(((((&mut p[i], &mut v[i]), &mut q[i]), &inv_m[i]), &w[i]));
+            for (nth, &word) in words.iter().enumerate() {
+                let base = nth * 64;
+                if word == u64::MAX {
+                    let upto = (base + 64).min(inv_m.len());
+                    for i in base..upto {
+                        run(i);
+                    }
+                    continue;
+                }
+                let mut word = word;
+                while word != 0 {
+                    let i = base + word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    run(i);
+                }
+            }
+        };
+        let words = self.awake.words();
         if wide {
             self.position
-                .par_iter_mut()
-                .zip(self.velocity.par_iter_mut())
-                .zip(self.orientation.par_iter_mut())
-                .zip(self.inv_mass.par_iter())
-                .zip(self.angular_velocity.par_iter())
-                .for_each(predict);
+                .par_chunks_mut(SWEEP_BLOCK)
+                .zip(self.velocity.par_chunks_mut(SWEEP_BLOCK))
+                .zip(self.orientation.par_chunks_mut(SWEEP_BLOCK))
+                .zip(
+                    self.inv_mass
+                        .par_chunks(SWEEP_BLOCK)
+                        .zip(self.angular_velocity.par_chunks(SWEEP_BLOCK))
+                        .zip(words.par_chunks(SWEEP_WORDS)),
+                )
+                .for_each(block);
         } else {
             self.position
-                .iter_mut()
-                .zip(self.velocity.iter_mut())
-                .zip(self.orientation.iter_mut())
-                .zip(self.inv_mass.iter())
-                .zip(self.angular_velocity.iter())
-                .for_each(predict);
+                .chunks_mut(SWEEP_BLOCK)
+                .zip(self.velocity.chunks_mut(SWEEP_BLOCK))
+                .zip(self.orientation.chunks_mut(SWEEP_BLOCK))
+                .zip(
+                    self.inv_mass
+                        .chunks(SWEEP_BLOCK)
+                        .zip(self.angular_velocity.chunks(SWEEP_BLOCK))
+                        .zip(words.chunks(SWEEP_WORDS)),
+                )
+                .for_each(block);
         }
 
         // Contacts are found once, from the predicted positions, and then solved on every
@@ -1156,10 +1564,17 @@ impl Skeleton {
         self.find_pairs();
         self.build_contacts();
         self.colour_contacts();
+        self.find_live_joints();
         self.plan_pass();
 
-        for _ in 0..iterations.max(1) {
-            self.solve_pass();
+        let iterations = iterations.max(1);
+        // Past this count a pass runs the foreground plan instead of the whole one. The
+        // two plans are built together and differ only in how much of each stage's list
+        // they name, so the choice is one branch a pass rather than a test per
+        // constraint. See [`Skeleton::set_background`].
+        let background = self.background_iterations.clamp(1, iterations);
+        for pass in 0..iterations {
+            self.solve_pass(self.any_background && pass >= background);
         }
 
         // And one sweep to read both velocities back, for the same reason the predict is
@@ -1182,23 +1597,73 @@ impl Skeleton {
             *w = scale((delta.x, delta.y, delta.z), 2.0 * inv_dt * sign);
         };
 
+        // Awake bodies only, in blocks of sixty-four, for the same reason the predict is.
+        let block = |(((v, w), p), ((prev_p, (q, prev_q)), words)): (
+            (
+                (&mut [(f64, f64, f64)], &mut [(f64, f64, f64)]),
+                &[(f64, f64, f64)],
+            ),
+            ((&[(f64, f64, f64)], (&[Quaternion], &[Quaternion])), &[u64]),
+        )| {
+            let mut run = |i: usize| {
+                read_back((
+                    (((&mut v[i], &mut w[i]), &p[i]), &prev_p[i]),
+                    (&q[i], &prev_q[i]),
+                ))
+            };
+            for (nth, &word) in words.iter().enumerate() {
+                let base = nth * 64;
+                if word == u64::MAX {
+                    let upto = (base + 64).min(p.len());
+                    for i in base..upto {
+                        run(i);
+                    }
+                    continue;
+                }
+                let mut word = word;
+                while word != 0 {
+                    let i = base + word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    run(i);
+                }
+            }
+        };
+        let words = self.awake.words();
         if wide {
             self.velocity
-                .par_iter_mut()
-                .zip(self.angular_velocity.par_iter_mut())
-                .zip(self.position.par_iter())
-                .zip(self.prev_position.par_iter())
-                .zip(self.orientation.par_iter().zip(self.prev_orientation.par_iter()))
-                .for_each(read_back);
+                .par_chunks_mut(SWEEP_BLOCK)
+                .zip(self.angular_velocity.par_chunks_mut(SWEEP_BLOCK))
+                .zip(self.position.par_chunks(SWEEP_BLOCK))
+                .zip(
+                    self.prev_position
+                        .par_chunks(SWEEP_BLOCK)
+                        .zip(
+                            self.orientation
+                                .par_chunks(SWEEP_BLOCK)
+                                .zip(self.prev_orientation.par_chunks(SWEEP_BLOCK)),
+                        )
+                        .zip(words.par_chunks(SWEEP_WORDS)),
+                )
+                .for_each(block);
         } else {
             self.velocity
-                .iter_mut()
-                .zip(self.angular_velocity.iter_mut())
-                .zip(self.position.iter())
-                .zip(self.prev_position.iter())
-                .zip(self.orientation.iter().zip(self.prev_orientation.iter()))
-                .for_each(read_back);
+                .chunks_mut(SWEEP_BLOCK)
+                .zip(self.angular_velocity.chunks_mut(SWEEP_BLOCK))
+                .zip(self.position.chunks(SWEEP_BLOCK))
+                .zip(
+                    self.prev_position
+                        .chunks(SWEEP_BLOCK)
+                        .zip(
+                            self.orientation
+                                .chunks(SWEEP_BLOCK)
+                                .zip(self.prev_orientation.chunks(SWEEP_BLOCK)),
+                        )
+                        .zip(words.chunks(SWEEP_WORDS)),
+                )
+                .for_each(block);
         }
+
+        self.settle(dt, length(gravity));
     }
 
     /// The four body arrays every correction writes, as the disjoint-scatter view a
@@ -1219,33 +1684,75 @@ impl Skeleton {
     /// Built once a step rather than once a pass, because the colouring does not change
     /// between the passes of a step -- only the positions do. Reused rather than
     /// reallocated, like everything else here.
+    ///
+    /// **Two plans**, and they differ only in how much of each list they name: the whole
+    /// of it, and the foreground prefix a background island's constraints are left out
+    /// of. Building both here rather than choosing per stage per pass keeps the choice to
+    /// one branch a pass. A colour with nothing live in it -- every constraint on
+    /// sleeping bodies -- is in neither, so a mostly-settled skeleton produces a shorter
+    /// plan rather than a plan full of empty stages.
     fn plan_pass(&mut self) {
         self.plan.clear();
-        for colour in 0..self.colours.len() {
-            if !self.colours[colour].is_empty() {
-                self.plan.push(Stage::Joints(colour as u32));
+        self.plan_near.clear();
+        self.plan_work = 0;
+        self.plan_near_work = 0;
+        for colour in 0..self.live_joints.len() {
+            let live = self.live_joints[colour].len();
+            let near = self.live_joints_near[colour];
+            if live > 0 {
+                self.plan.push(Stage::Joints {
+                    colour: colour as u32,
+                    upto: live as u32,
+                });
+                self.plan_work += live;
+            }
+            if near > 0 {
+                self.plan_near.push(Stage::Joints {
+                    colour: colour as u32,
+                    upto: near as u32,
+                });
+                self.plan_near_work += near;
             }
         }
+        if !self.joint_overflow.is_empty() {
+            self.plan.push(Stage::JointOverflow);
+            self.plan_near.push(Stage::JointOverflow);
+        }
         for colour in 0..self.contact_colours.len() {
-            if !self.contact_colours[colour].is_empty() {
-                self.plan.push(Stage::Contacts(colour as u32));
+            let live = self.contact_colours[colour].len();
+            let near = self.contact_colours_near[colour];
+            if live > 0 {
+                self.plan.push(Stage::Contacts {
+                    colour: colour as u32,
+                    upto: live as u32,
+                });
+                self.plan_work += live;
+            }
+            if near > 0 {
+                self.plan_near.push(Stage::Contacts {
+                    colour: colour as u32,
+                    upto: near as u32,
+                });
+                self.plan_near_work += near;
             }
         }
         if !self.contact_overflow.is_empty() {
             self.plan.push(Stage::Overflow);
+            self.plan_near.push(Stage::Overflow);
         }
+        // The ground is never reduced and never dropped: there are at most two contacts
+        // per body, they are the cheapest constraint in the step, and the artefact of
+        // under-solving one is a body sinking through the floor, which is the one no
+        // distance excuses. The two sets must also stay separate stages in both plans --
+        // set one reads the budget set zero spent, and the barrier is what orders them.
         for colour in 0..2 {
             if !self.ground_colours[colour].is_empty() {
                 self.plan.push(Stage::Ground(colour as u32));
+                self.plan_near.push(Stage::Ground(colour as u32));
+                self.plan_work += self.ground_colours[colour].len();
+                self.plan_near_work += self.ground_colours[colour].len();
             }
         }
-    }
-
-    /// How much one pass has to solve. The number [`crew::PASS_FLOOR`] is weighed
-    /// against, and it is the whole constraint set rather than the biggest colour,
-    /// because the pass is now handed out once.
-    fn pass_work(&self) -> usize {
-        self.joints.len() + self.contacts.len() + self.ground_contacts.len()
     }
 
     /// **One pass over every colour**, handed to the pool once.
@@ -1255,7 +1762,7 @@ impl Skeleton {
     /// the next one starts, which is what the colouring requires, but it costs a barrier
     /// rather than a fork. See [`crew`] for the measurement that demanded it and for why
     /// this adds no unsafety to what [`scatter`] already argued.
-    fn solve_pass(&mut self) {
+    fn solve_pass(&mut self, near_only: bool) {
         #[cfg(debug_assertions)]
         self.check_colours_are_disjoint();
 
@@ -1265,11 +1772,17 @@ impl Skeleton {
         let contact_impulse = scatter::Cells::of(&mut self.contact_impulse);
         let ground_impulse = scatter::Cells::of(&mut self.ground_impulse);
 
-        let plan = &self.plan;
-        let colours = &self.colours;
+        let (plan, work) = if near_only {
+            (&self.plan_near, self.plan_near_work)
+        } else {
+            (&self.plan, self.plan_work)
+        };
+        let colours = &self.live_joints;
         let contact_colours = &self.contact_colours;
         let ground_colours = &self.ground_colours;
         let overflow = &self.contact_overflow;
+        let joint_overflow = &self.joint_overflow;
+        let awake = &self.awake;
         let joints = &self.joints;
         let contacts = &self.contacts;
         let ground_contacts = &self.ground_contacts;
@@ -1310,10 +1823,10 @@ impl Skeleton {
         //   That ordering used to come from the join; losing it without replacing it
         //   would be the one way this change could be unsound.
         // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
-        let work = |lane: crew::Lane| unsafe {
+        let run = |lane: crew::Lane| unsafe {
             match plan[lane.stage] {
-                Stage::Joints(colour) => {
-                    let set = &colours[colour as usize];
+                Stage::Joints { colour, upto } => {
+                    let set = &colours[colour as usize][..upto as usize];
                     for &k in &set[lane.span(set.len())] {
                         let joint = joints[k];
                         let (a, b) = joint.bodies();
@@ -1322,8 +1835,22 @@ impl Skeleton {
                         bodies.apply(solve_joint(joint, &first, &second));
                     }
                 }
-                Stage::Contacts(colour) => {
-                    let set = &contact_colours[colour as usize];
+                Stage::JointOverflow => {
+                    if lane.is_only() {
+                        for &k in joint_overflow.iter() {
+                            let joint = joints[k];
+                            let (a, b) = joint.bodies();
+                            if !awake.get(a) && !awake.get(b) {
+                                continue;
+                            }
+                            let first = bodies.pose(a, inv_mass, inv_inertia);
+                            let second = bodies.pose(b, inv_mass, inv_inertia);
+                            bodies.apply(solve_joint(joint, &first, &second));
+                        }
+                    }
+                }
+                Stage::Contacts { colour, upto } => {
+                    let set = &contact_colours[colour as usize][..upto as usize];
                     let span = lane.span(set.len());
                     solve_some_contacts(
                         &set[span],
@@ -1377,7 +1904,7 @@ impl Skeleton {
             }
         };
 
-        crew::each_stage(plan.len(), self.pass_work(), work);
+        crew::each_stage(plan.len(), work, run);
     }
 
     /// Every colour, checked to name each body at most once. The precondition of every
@@ -1385,8 +1912,13 @@ impl Skeleton {
     /// release builds.
     #[cfg(debug_assertions)]
     fn check_colours_are_disjoint(&self) {
+        // The *live* lists rather than the colours, because they are the sets the lanes
+        // actually walk. A live list is a subset of its colour reordered
+        // foreground-first, so checking it is strictly what is needed: a subset of a set
+        // in which no body appears twice is still such a set, and so is a permutation of
+        // one, but it is the set that is touched that has to be asserted.
         let bodies = self.position.len();
-        for set in self.colours.iter() {
+        for set in self.live_joints.iter() {
             scatter::disjoint(
                 bodies,
                 "joint",
@@ -1410,6 +1942,270 @@ impl Skeleton {
                 "ground",
                 set.iter().map(|&k| self.ground_contacts[k].body),
             );
+        }
+    }
+
+    // -- sleeping. See [`sleep`] for the reasoning behind all of it. ------------------
+
+    /// Whether settled bodies may be left out of a step. On by default.
+    ///
+    /// Turning it off wakes everything, because a caller that has just turned it off is
+    /// asking for the whole set to be simulated and not for whatever was asleep to stay
+    /// where it was.
+    pub fn set_sleeping(&mut self, sleeping: bool) {
+        self.sleeping = sleeping;
+        if !sleeping {
+            self.wake_all();
+        }
+    }
+
+    /// Whether this body is currently being simulated. A pinned body is never awake:
+    /// it cannot move, so there is nothing for a step to do to it.
+    pub fn is_awake(&self, i: usize) -> bool {
+        self.awake.get(i)
+    }
+
+    /// How many bodies a step is currently doing any work for. The number that says
+    /// whether a heap has arrived.
+    pub fn awake_count(&self) -> usize {
+        self.awake.count()
+    }
+
+    /// **Wakes the body's whole island**, not the body.
+    ///
+    /// A body in the middle of a resting stack is held still by everything around it, so
+    /// disturbing it disturbs them: waking one and leaving its neighbours asleep would
+    /// let it push through bodies that are no longer being solved. The island is stored
+    /// as the words it occupies in the awake set, so this is an OR per sixty-four bodies.
+    pub fn wake(&mut self, i: usize) {
+        let Skeleton {
+            awake,
+            islands,
+            island_of,
+            still_steps,
+            still_from,
+            still_turn,
+            position,
+            orientation,
+            inv_mass,
+            ..
+        } = self;
+        let id = island_of[i];
+        if id != NO_ISLAND {
+            islands.thaw(id, awake.words_mut(), island_of, still_steps);
+            islands.compact_if_worthwhile();
+        }
+        if inv_mass[i] > 0.0 {
+            awake.set(i);
+        }
+        still_steps[i] = 0;
+        still_from[i] = position[i];
+        still_turn[i] = orientation[i];
+    }
+
+    /// Wakes every body. What a caller reaches for when it has changed something the
+    /// solver has no way to notice -- the ground plane, a material, the whole world.
+    pub fn wake_all(&mut self) {
+        self.islands.clear();
+        for id in self.island_of.iter_mut() {
+            *id = NO_ISLAND;
+        }
+        for steps in self.still_steps.iter_mut() {
+            *steps = 0;
+        }
+        self.awake.fill();
+        for i in 0..self.inv_mass.len() {
+            if self.inv_mass[i] <= 0.0 {
+                self.awake.unset(i);
+            }
+            self.still_from[i] = self.position[i];
+            self.still_turn[i] = self.orientation[i];
+        }
+    }
+
+    /// Marks a body as background: a constraint with background at both ends is solved
+    /// with [`Skeleton::set_background_iterations`] passes instead of the count
+    /// [`Skeleton::step`] is given.
+    ///
+    /// The solver is told which bodies matter and nothing about why. A caller that knows
+    /// where the attention is -- a camera, a listener, a player -- owns that judgement;
+    /// a solver that tried to own it would need to be told about all three and would
+    /// still be guessing. Ground contacts are not reduced: there are at most two per
+    /// body, they are the cheapest constraint in the step, and the failure they produce
+    /// when under-solved is a body sinking through the floor, which is the one artefact
+    /// no distance excuses.
+    pub fn set_background(&mut self, i: usize, background: bool) {
+        if background {
+            self.background.set(i);
+            self.any_background = true;
+        } else {
+            self.background.unset(i);
+            self.any_background = self.background.any();
+        }
+    }
+
+    /// How many passes a background constraint gets. Clamped to the step's own count, so
+    /// a caller cannot ask for more quality out there than in here.
+    pub fn set_background_iterations(&mut self, iterations: usize) {
+        self.background_iterations = iterations.max(1);
+    }
+
+    /// Decide what may sleep, after the step has run.
+    ///
+    /// Two passes over the awake bodies and one union-find. The order matters: stillness
+    /// is a property of a body, sleeping is a property of an island, and a body is only
+    /// entitled to sleep because everything holding it up has stopped too.
+    fn settle(&mut self, dt: f64, gravity: f64) {
+        if !self.sleeping || !self.awake.any() {
+            return;
+        }
+        let n = self.position.len();
+
+        // -- what has stopped moving ------------------------------------------------
+        let Skeleton {
+            position,
+            orientation,
+            still_from,
+            still_turn,
+            still_steps,
+            radius,
+            half_length,
+            awake,
+            ..
+        } = self;
+        // Whether any body has now been still for its whole window. Everything below this
+        // is the island machinery, and none of it can put anything to sleep unless at
+        // least one body is ready -- so a heap that is still moving pays one pass over
+        // its awake bodies and nothing else. That is the common case while a heap is
+        // arriving, and it is worth an early exit: the union-find below is over every
+        // joint and every contact, which on the heap workload is fifty thousand edges.
+        let mut ready = false;
+        awake.for_each_set(|i| {
+            // The body's reach -- how far its surface is from its own centre -- is the
+            // length everything here is measured against, so that the same rule serves a
+            // finger bone and a torso. The floor is for a body with no extent at all,
+            // which is a joint anchor rather than a thing anyone watches.
+            let reach = (radius[i] + half_length[i]).max(1e-3);
+            let moved = length(sub(position[i], still_from[i])) + swept(
+                turned_since(orientation[i], still_turn[i]),
+                orientation[i],
+                radius[i],
+                half_length[i],
+            );
+            if moved > STILL_FRACTION * reach {
+                still_steps[i] = 0;
+                still_from[i] = position[i];
+                still_turn[i] = orientation[i];
+            } else {
+                still_steps[i] += 1;
+                ready |= still_steps[i] >= settling_steps(reach, gravity, dt);
+            }
+        });
+        if !ready {
+            return;
+        }
+
+        // -- which of them are held up by each other --------------------------------
+        self.components.reset(n);
+        for joint in self.joints.iter() {
+            let (a, b) = joint.bodies();
+            // A pinned body carries no disturbance and joins no island; see [`sleep`].
+            if self.inv_mass[a] > 0.0 && self.inv_mass[b] > 0.0 {
+                self.components.union(a, b);
+            }
+        }
+        for contact in self.contacts.iter() {
+            let (a, b) = (contact.a, contact.b);
+            if self.inv_mass[a] > 0.0 && self.inv_mass[b] > 0.0 {
+                self.components.union(a, b);
+            }
+        }
+
+        // -- and which whole islands may go ------------------------------------------
+        self.unsettled.clear();
+        self.unsettled.resize(n, false);
+        self.island_tally.clear();
+        self.island_tally.resize(n + 1, 0);
+        let Skeleton {
+            components,
+            unsettled,
+            still_steps,
+            radius,
+            half_length,
+            awake,
+            ..
+        } = self;
+        let mut anything = false;
+        awake.for_each_set(|i| {
+            let reach = (radius[i] + half_length[i]).max(1e-3);
+            if still_steps[i] < settling_steps(reach, gravity, dt) {
+                unsettled[components.find(i as u32) as usize] = true;
+            } else {
+                anything = true;
+            }
+        });
+        if !anything {
+            return;
+        }
+
+        // Counting sort of the sleeping candidates by their island's root, so that each
+        // island's members come out together and in increasing order -- which is what
+        // lets the island be stored as words rather than as a list of indices.
+        let Skeleton {
+            components,
+            unsettled,
+            island_tally,
+            island_list,
+            awake,
+            ..
+        } = self;
+        awake.for_each_set(|i| {
+            let root = components.find(i as u32) as usize;
+            if !unsettled[root] {
+                island_tally[root] += 1;
+            }
+        });
+        let mut running = 0u32;
+        for slot in island_tally.iter_mut() {
+            let count = *slot;
+            *slot = running;
+            running += count;
+        }
+        if running == 0 {
+            return;
+        }
+        island_list.clear();
+        island_list.resize(running as usize, 0);
+        awake.for_each_set(|i| {
+            let root = components.find(i as u32) as usize;
+            if !unsettled[root] {
+                island_list[island_tally[root] as usize] = i as u32;
+                island_tally[root] += 1;
+            }
+        });
+
+        // `island_tally[root]` now holds the end of that root's run, and the previous
+        // root's end is where it began, so the runs are read off in one pass.
+        let mut from = 0usize;
+        for root in 0..n {
+            let upto = self.island_tally[root] as usize;
+            if upto == from {
+                continue;
+            }
+            let members = &self.island_list[from..upto];
+            let id = self.islands.freeze_sorted(members);
+            for &member in members {
+                let i = member as usize;
+                self.awake.unset(i);
+                self.island_of[i] = id;
+                // A sleeping body must read back as stopped rather than as whatever the
+                // last correction happened to leave on it, or it wakes with a shove.
+                self.velocity[i] = (0.0, 0.0, 0.0);
+                self.angular_velocity[i] = (0.0, 0.0, 0.0);
+                self.prev_position[i] = self.position[i];
+                self.prev_orientation[i] = self.orientation[i];
+            }
+            from = upto;
         }
     }
 }
@@ -1445,6 +2241,28 @@ unsafe fn solve_some_contacts(
         impulse.set(k, totals);
         bodies.apply(corrections);
     }
+
+}
+
+/// How far a turn of `turned` actually carries the surface of a capsule of this size.
+///
+/// **A capsule is a surface of revolution, so a turn about its own long axis moves
+/// nothing.** Treating every axis alike costs a settling test most of its budget on a
+/// bone that is merely spinning where it lies: measured on a settled pile of forty, the
+/// axis-blind version reported a surface sweep half again as large as the real one and
+/// left the pile permanently awake. Across the axis the far end travels the body's whole
+/// reach; along it, the surface only goes round at the radius.
+#[inline]
+fn swept(
+    turned: (f64, f64, f64),
+    orientation: Quaternion,
+    radius: f64,
+    half_length: f64,
+) -> f64 {
+    let axis = rotate(orientation, (0.0, 1.0, 0.0));
+    let along = dot(turned, axis);
+    let across = length(sub(turned, scale(axis, along)));
+    across * (radius + half_length) + along.abs() * radius
 }
 
 /// `q` advanced by angular velocity `w` over `dt`, renormalised. The small-angle

@@ -60,13 +60,23 @@
 //! The invariant is not a property of the types; it is produced by two functions, and a
 //! change to either of them is what would make everything here unsound:
 //!
-//! * [`Skeleton::recolour`] partitions the joints. It gives each joint the lowest colour
+//! * [`Skeleton::add_joint`] partitions the joints. It gives each joint the lowest colour
 //!   neither of its bodies is already using, so a colour names each body at most once.
-//!   It runs when the joint set changes.
+//!   It runs as each joint arrives, and the assignment is never revisited: adding an edge
+//!   to a proper edge-colouring leaves it proper.
 //! * [`Skeleton::colour_contacts`] does the same for the contacts, every step, with a bit
 //!   per colour per body. A contact whose two bodies have between them used all
 //!   sixty-four bits goes to `contact_overflow` instead, **which is solved one at a time
 //!   on the calling thread** and never through a parallel colour.
+//!
+//! A solve may be handed a *restriction* of a colour rather than the whole of it -- the
+//! constraints touching an awake body, foreground first, which is what
+//! [`Skeleton::find_live_joints`] and the two-pass half of [`Skeleton::colour_contacts`]
+//! produce. That cannot break the invariant, and it is worth saying why rather than
+//! leaving it to be noticed: a subset of a set in which no body appears twice is still
+//! such a set, and reordering one is a permutation, which is also still such a set.
+//! [`disjoint`] runs on the slice that is actually solved, so the check follows the
+//! restriction rather than trusting it.
 //!
 //! If either grew a case that put two constraints on one body in one colour -- a colour
 //! cap that assigned the last colour rather than overflowing, say, or a merge of two

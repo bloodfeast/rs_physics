@@ -118,9 +118,11 @@ pub(super) struct Grid {
     members: Vec<Member>,
     starts: Vec<u32>,
     cursor: Vec<u32>,
-    /// Where each chunk of the parallel scan puts its pairs before they are concatenated.
-    /// Owned so that a step allocates nothing.
+    /// Where each chunk of the parallel scan puts its pairs before they are concatenated,
+    /// and the sleeping bodies it found next to an awake one. Owned so that a step
+    /// allocates nothing.
     scratch: Vec<Vec<(usize, usize)>>,
+    woken: Vec<Vec<usize>>,
     inv_cell: f64,
     /// `64 - log2(buckets)`, which is the shift Fibonacci hashing folds with.
     shift: u32,
@@ -196,48 +198,83 @@ impl Grid {
     /// Appends every pair worth testing to `out`, skipping pairs the caller has said are
     /// not candidates.
     ///
-    /// Each pair is produced once: a body only reports neighbours of a higher index, and
-    /// any body it can touch is within the cells it looks at, so the other side of the
-    /// pair finds it instead.
+    /// **Only bodies in `frontier` are swept.** A body outside it is still a collider and
+    /// is still reported as the other half of a pair; it simply does not look around
+    /// itself, which is what lets a sleeping heap cost nothing here. It is also why the
+    /// caller sweeps in rounds: a body found in neither `frontier` nor `swept` was
+    /// asleep, so it is appended to `reached` and the caller sweeps from it next.
+    ///
+    /// Each pair is still produced exactly once, and the rule that makes it so is now
+    /// three cases rather than one:
+    ///
+    /// * both ends sweeping -- the lower index reports it, as before;
+    /// * the other end already `swept` -- it reported the pair when it was the one
+    ///   sweeping, so this side keeps quiet;
+    /// * the other end in neither -- nobody has looked from it and nobody will until it is
+    ///   woken, so this side reports it.
+    ///
+    /// With everything awake the second and third cases never arise and this is the sweep
+    /// it replaced, which is what
+    /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an
+    /// all-set frontier.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn pairs(
         &mut self,
         position: &[(f64, f64, f64)],
         inv_mass: &[f64],
         jointed: Jointed<'_>,
+        frontier: &BitSet,
+        swept: &BitSet,
         out: &mut Vec<(usize, usize)>,
+        reached: &mut Vec<usize>,
     ) {
         let shaped = self.shaped.len();
         if shaped == 0 {
             return;
         }
         if shaped < PARALLEL_FLOOR {
-            self.scan(0, shaped, position, inv_mass, jointed, out);
+            self.scan(
+                0, shaped, position, inv_mass, jointed, frontier, swept, out, reached,
+            );
             return;
         }
 
         // Taken out so the chunks can borrow the grid's read-only half while filling it;
         // put back below, so nothing here allocates after the first few steps.
         let mut scratch = std::mem::take(&mut self.scratch);
+        let mut woken = std::mem::take(&mut self.woken);
         let chunks = shaped.div_ceil(CHUNK);
         if scratch.len() < chunks {
             scratch.resize_with(chunks, Vec::new);
         }
+        if woken.len() < chunks {
+            woken.resize_with(chunks, Vec::new);
+        }
         scratch[..chunks]
             .par_iter_mut()
+            .zip(woken[..chunks].par_iter_mut())
             .enumerate()
-            .for_each(|(chunk, into)| {
+            .for_each(|(chunk, (into, wake))| {
                 into.clear();
+                wake.clear();
                 let from = chunk * CHUNK;
                 let upto = (from + CHUNK).min(shaped);
-                self.scan(from, upto, position, inv_mass, jointed, into);
+                self.scan(
+                    from, upto, position, inv_mass, jointed, frontier, swept, into, wake,
+                );
             });
         for filled in scratch[..chunks].iter() {
             out.extend_from_slice(filled);
         }
+        for filled in woken[..chunks].iter() {
+            reached.extend_from_slice(filled);
+        }
         self.scratch = scratch;
+        self.woken = woken;
     }
 
     /// The neighbourhood scan for one run of the shaped list.
+    #[allow(clippy::too_many_arguments)]
     fn scan(
         &self,
         from: usize,
@@ -245,10 +282,16 @@ impl Grid {
         position: &[(f64, f64, f64)],
         inv_mass: &[f64],
         jointed: Jointed<'_>,
+        frontier: &BitSet,
+        swept: &BitSet,
         out: &mut Vec<(usize, usize)>,
+        reached: &mut Vec<usize>,
     ) {
         for nth in from..upto {
             let a = self.shaped[nth] as usize;
+            if !frontier.get(a) {
+                continue;
+            }
             // Everything about the outer body, read once for its whole neighbourhood
             // rather than for each of the three hundred candidates in it.
             let here = position[a];
@@ -269,7 +312,15 @@ impl Grid {
                             // itself has to be checked; and ordering by body index is
                             // what keeps each pair to one appearance.
                             let b = member.body as usize;
-                            if member.cell != cell || b <= a {
+                            if member.cell != cell || b == a {
+                                continue;
+                            }
+                            // Which of the two reports the pair. See the doc comment.
+                            let looking = frontier.get(b);
+                            if looking && b < a {
+                                continue;
+                            }
+                            if !looking && swept.get(b) {
                                 continue;
                             }
                             // Two pinned bodies can never be moved apart, so a test
@@ -289,7 +340,13 @@ impl Grid {
                             if jointed_to.contains(&(b as u32)) {
                                 continue;
                             }
-                            out.push((a, b));
+                            out.push((a.min(b), a.max(b)));
+                            // Close enough to be worth a narrow-phase test, and nobody
+                            // has looked from it: it was asleep, and something is beside
+                            // it now.
+                            if !looking {
+                                reached.push(b);
+                            }
                         }
                     }
                 }
