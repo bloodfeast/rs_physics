@@ -371,6 +371,11 @@ impl Grid {
     }
 
     /// Which bodies were held out of the grid, in increasing order.
+    ///
+    /// For the laws, which have to be able to say that a fixture still has an outlier in
+    /// it. The solve never asks: an outlier is a body like any other to everything past
+    /// this file.
+    #[cfg(test)]
     pub(super) fn oversized(&self) -> &[u32] {
         &self.oversized
     }
