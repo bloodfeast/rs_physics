@@ -27,8 +27,17 @@
 //! body four times the reach of the rest of the set multiplies the volume every other
 //! body scans by sixty-four. A skeleton's bones are within a few times each other's size
 //! and it never bit there. Driving one heavy body through a field of small ones it bit
-//! hard -- see the `ploughing` benchmark, whose fixture had to be cut down to a lane to
-//! get away from it.
+//! hard, and the `ploughing` benchmark's fixture had been cut down to a lane to get away
+//! from it. Restored to a field -- 4,800 capsules of reach 0.35 with a roller of reach
+//! 2.25 driven through them -- the bodies the scan looks at in one step:
+//!
+//! ```text
+//!   the roller in the grid   cell 4.50 m   1,495,561
+//!   the roller out of it     cell 0.70 m     105,362
+//! ```
+//!
+//! Fourteen times, and it is a cube of a ratio rather than a constant factor, so it gets
+//! worse with the size of the outlier and not better.
 //!
 //! So a body far enough above the rest of the set is **kept out of the grid**, and tested
 //! against it directly: the cells its own bound overlaps, which is cheap because there are

@@ -761,20 +761,47 @@ fn joining(c: &mut Criterion) {
 ///
 /// # What it shows
 ///
-/// Medians of four runs, since one run of anything on this machine says nothing:
+/// Medians of six runs, since one run of anything on this machine says nothing -- and on
+/// this fixture the spread between draws reached a factor of two, so read the shape of the
+/// row and not its third figure:
 ///
 /// ```text
-///   steps driven        30      330      630      930
-///   bodies still live  784      585      387      189
-///   a step            3.24 ms  2.12 ms  1.71 ms  0.89 ms
-///   per live body     4.13 us  3.62 us  4.42 us  4.70 us
+///   steps driven        30       330      630      930
+///   bodies still live  4699     3505     2316     1129
+///   a step             5.5 ms   3.7 ms   2.7 ms   2.65 ms
+///   per live body      1.17 us  1.06 us  1.17 us  2.35 us
 /// ```
 ///
-/// **The cost falls by a factor of 3.6 while the drive is going on**, and the bottom row
-/// is why: the cost per live body is flat to within the spread, so what the step is paying
-/// for is the bodies that are left and there are fewer of them every step. That is the
-/// whole claim of retirement being subtraction, and it is the one number in this file that
-/// goes down as a fixture runs.
+/// **The cost falls by a factor of two while the drive is going on**, and the bottom row
+/// is why: over the first three points the cost per live body is flat to within the
+/// spread, so what the step is paying for is the bodies that are left and there are fewer
+/// of them every step. That is the whole claim of retirement being subtraction, and it is
+/// the one number in this file that goes down as a fixture runs.
+///
+/// The last point is the limit of it and is worth reading rather than smoothing away. By
+/// then three quarters of the *array* is retired, and the passes that go over every slot
+/// rather than every live body -- the grid rebuild, the predict and read-back sweeps --
+/// are charged against a quarter as many live bodies. Retirement takes a body out of the
+/// solve; it does not take its slot out of the arrays.
+///
+/// # And what the broad phase was costing here
+///
+/// The roller is six times a field body's reach, so before the grid learned to hold a body
+/// that size out of itself it set the cell for all 4,800 of them. Bodies examined by the
+/// neighbourhood scan in one step at thirty driven steps, and the step itself, as medians
+/// of six draws alternating two prebuilt binaries:
+///
+/// ```text
+///   steps driven                    30       330      630      930
+///   roller in the grid, cell 4.50 m  8.5 ms   4.0 ms   4.2 ms   5.0 ms   1,495,561 examined
+///   roller out of it,   cell 0.70 m  5.5 ms   3.7 ms   2.7 ms   2.65 ms    105,362 examined
+/// ```
+///
+/// Fourteen times the search for a step and a half to two of the step. Note the shape of
+/// the top row: with the cell sized for the roller the step stopped falling after 330 and
+/// began to rise, because the field left in front of the roller is as dense as it ever was
+/// and a coarse cell charges for density, not for count. The claim this fixture exists to
+/// make was being eaten by the broad phase.
 fn ploughing(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/ploughing");
     group.sample_size(20);
