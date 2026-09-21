@@ -702,65 +702,102 @@ fn a_settled_rig_stays_where_it_settled() {
     const STILL_FRACTION: f64 = 0.02;
     const WINDOWS: usize = 32;
     const PER: usize = 15;
+    // Several starts, a relative 1e-12 apart, which is one unit in the last place. A
+    // settling rig is chaotic and one draw says nothing: the first version of this law
+    // ran a single start, passed, and was quoted as evidence that a rig no longer
+    // travels. Measured over twelve draws it stops dead on eleven and bolts on one, so
+    // what a single draw reported was which draw it happened to pick.
+    const DRAWS: usize = 8;
 
-    let mut s = Skeleton::new();
-    s.set_ground((0.0, 1.0, 0.0), 0.0);
-    // Self-collision left on, which is the whole point: with it off this rig goes to sleep
-    // and there is nothing left to measure.
-    let bones = rig(&mut s, 1.0);
-    assert!(s.self_collision(), "this law is about a rig that may touch itself");
-    // Long enough to have landed and folded; the drift this measures is what is left after
-    // that, and it does not depend on where the settling stopped.
-    s.set_sleeping(false);
-    for _ in 0..1500 {
-        s.step(DT, G, 8);
-    }
-
-    let pose = |s: &Skeleton| -> Vec<((f64, f64, f64), rs_physics::models::Quaternion)> {
-        (0..s.len())
-            .map(|i| (s.position(i), s.orientation(i)))
-            .collect()
-    };
-    let start = pose(&s);
-    let mut last = start.clone();
-    let mut path = vec![0.0f64; s.len()];
-    for _ in 0..WINDOWS {
-        for _ in 0..PER {
+    let mut drifts = Vec::new();
+    let mut straights = Vec::new();
+    let mut bones = 0;
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        // Self-collision left on, which is the whole point: with it off this rig goes to
+        // sleep and there is nothing left to measure.
+        bones = rig(&mut s, 1.0 * (1.0 + draw as f64 * 1e-12));
+        assert!(s.self_collision(), "this law is about a rig that may touch itself");
+        s.set_sleeping(false);
+        for _ in 0..1500 {
             s.step(DT, G, 8);
         }
-        let now = pose(&s);
-        for i in 0..s.len() {
-            path[i] += surface_travel(&s, i, last[i], now[i]);
-        }
-        last = now;
-    }
-    let now = pose(&s);
 
-    let mut drifts: Vec<f64> = Vec::new();
-    let mut straights: Vec<f64> = Vec::new();
-    for i in 0..s.len() {
-        let net = surface_travel(&s, i, start[i], now[i]);
-        drifts.push(net);
-        straights.push(if path[i] > 0.0 { net / path[i] } else { 0.0 });
+        let pose = |s: &Skeleton| -> Vec<((f64, f64, f64), rs_physics::models::Quaternion)> {
+            (0..s.len())
+                .map(|i| (s.position(i), s.orientation(i)))
+                .collect()
+        };
+        let start = pose(&s);
+        let mut last = start.clone();
+        let mut path = vec![0.0f64; s.len()];
+        for _ in 0..WINDOWS {
+            for _ in 0..PER {
+                s.step(DT, G, 8);
+            }
+            let now = pose(&s);
+            for i in 0..s.len() {
+                path[i] += surface_travel(&s, i, last[i], now[i]);
+            }
+            last = now;
+        }
+        let now = pose(&s);
+
+        let mut bone_drift: Vec<f64> = Vec::new();
+        let mut bone_straight: Vec<f64> = Vec::new();
+        for i in 0..s.len() {
+            let net = surface_travel(&s, i, start[i], now[i]);
+            bone_drift.push(net);
+            bone_straight.push(if path[i] > 0.0 { net / path[i] } else { 0.0 });
+        }
+        bone_drift.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+        bone_straight.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+        drifts.push(bone_drift[bone_drift.len() / 2]);
+        straights.push(bone_straight[bone_straight.len() / 2]);
     }
-    drifts.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
-    straights.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
-    let drift = drifts[drifts.len() / 2];
-    let straight = straights[straights.len() / 2];
 
     let jostling = STILL_FRACTION * (WINDOWS as f64).sqrt();
     let travelling = STILL_FRACTION * WINDOWS as f64;
+
+    // The typical draw is what the fix is claimed to have achieved, so the median draw is
+    // what the law weighs.
+    let mut ordered = drifts.clone();
+    ordered.sort_by(|a, b| a.partial_cmp(b).expect("no draw is at a NaN"));
+    let typical = ordered[ordered.len() / 2];
     assert!(
-        drift < jostling,
-        "the median bone of a {bones}-bone rig covered {drift:.4} of its own reach over \
-         {WINDOWS} windows. One jostling on the sleeping threshold would cover \
-         {jostling:.4} and one carried the whole way {travelling:.4}: this is the second.",
+        typical < jostling,
+        "the median draw's median bone covered {typical:.4} of its own reach over \
+         {WINDOWS} windows, across {DRAWS} draws of a {bones}-bone rig. One jostling on \
+         the sleeping threshold would cover {jostling:.4} and one carried the whole way \
+         {travelling:.4}: this is the second. Drifts were {drifts:.4?}.",
     );
+
+    // And the outliers are bounded rather than ignored. Measured over twelve draws on the
+    // commit this bound was set from, eleven had a drift under 0.011 of a reach and one
+    // bolted at 6.368 with a straightness of 0.936 -- a rig that found somewhere to go.
+    // That is a real defect and it is recorded here rather than hidden behind a median:
+    // what this arm asserts is that it stays an outlier. A quarter of the draws going the
+    // same way would be the fix having stopped working.
+    let bolted = drifts.iter().filter(|d| **d >= jostling).count();
     assert!(
-        straight < 0.5,
-        "the median bone's net travel was {straight:.4} of the path it walked getting \
-         there. A body being carried measures one and a jostled one about 0.18, so this \
-         is a rig with somewhere to go rather than one sitting still.",
+        bolted * 4 <= DRAWS,
+        "{bolted} of {DRAWS} draws of a {bones}-bone rig travelled past the {jostling:.4} \
+         a jostling body covers, where the recorded rate is one in twelve. Drifts were \
+         {drifts:.4?}, straightnesses {straights:.4?}.",
+    );
+
+    // Straightness separates a rig that wandered from one that was carried, and the
+    // typical draw must look like the first.
+    let mut ordered = straights.clone();
+    ordered.sort_by(|a, b| a.partial_cmp(b).expect("no draw is at a NaN"));
+    let typical = ordered[ordered.len() / 2];
+    assert!(
+        typical < 0.5,
+        "the median draw's median bone made {typical:.4} of the path it walked into net \
+         travel. A body being carried measures one and a jostled one about 0.18, so this \
+         is a rig with somewhere to go rather than one sitting still. Straightnesses \
+         were {straights:.4?}.",
     );
 }
 
@@ -1102,4 +1139,5 @@ fn settled_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u6
         })
         .collect()
 }
+
 
