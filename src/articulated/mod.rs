@@ -1530,6 +1530,56 @@
 //! other fixture in `benches` measures a scene that costs what it costs; this is the one
 //! number that goes *down* as its fixture runs.
 //!
+//! # What is left of the pile, which is rocking rather than sliding
+//!
+//! After the hinge fix, nine rigs in ten come to rest on their own and a heap of twenty
+//! still does not -- because a heap sleeps when its last body does, and one rig in ten
+//! never stopping is twenty chances to fail. This is what the ones that do not stop are
+//! doing, measured on twenty seventeen-bone rigs dropped together and left for sixty
+//! seconds.
+//!
+//! **They are rocking in place, not sliding.** The settling test measures translation plus
+//! the distance the surface sweeps as the body turns; over one settling window, of three
+//! hundred and forty bodies:
+//!
+//! ```text
+//!   over the limit on both            23
+//!   over on the turn only             68
+//!   over on the move only             15
+//!   under the limit on neither       234
+//! ```
+//!
+//! The turn is sixty-two per cent of the measured motion at the median and the sole cause
+//! of sixty-eight of the hundred and six failures, against fifteen for translation. Two
+//! hundred and thirty-four bodies in three hundred and forty pass any *given* window; what
+//! they cannot do is string sixteen consecutive steps together, because the rocking crosses
+//! the bound intermittently and resets the count.
+//!
+//! **And the residual is positional, not kinetic.** That is the part that says where the
+//! fix is not. Three separate interventions on the velocity of a body the settling test
+//! already calls still -- the whole velocity zeroed, halved, and the angular part alone
+//! zeroed -- were built and measured against a baseline of 334 of 340 awake:
+//!
+//! ```text
+//!   baseline                334 awake, 112 ready
+//!   velocity zeroed         336 awake,  99 ready
+//!   velocity halved         332 awake, 116 ready
+//!   angular part zeroed     328 awake,  97 ready
+//! ```
+//!
+//! All four are the same number. A body is not rocking because it carries angular
+//! momentum from the step before; it is rocking because the solve puts it back each step.
+//! Anything that damps, thresholds or resists *velocity* is treating the wrong quantity --
+//! including the tempting one, a deadband under which motion is ignored, which is why it
+//! is recorded here rather than tried again.
+//!
+//! So what is left is a convergence question about the angular half of a resting contact:
+//! a capsule lying in a heap is held by contacts at more than one point, and what the solve
+//! leaves is a turn rather than a slide. The instruments for it are in place -- the split
+//! above is two dozen lines against the settling test's own bound -- and
+//! `a_settled_rig_does_not_sit_on_a_limit_cycle` is the law that already asks the
+//! neighbouring question.
+//!
 //! # The GPU question, which double precision answers
 //!
 //! A graph-coloured constraint solve is a GPU-shaped workload: a colour is thousands of
@@ -4829,6 +4879,28 @@ impl Skeleton {
         // ready body holding up an unready one is not entitled to sleep either. They mark
         // the ready side's component instead of joining it, which they can only do once
         // every union is in, so it is two passes rather than one.
+        //
+        // **And the component is the right unit here, which is not obvious and was
+        // measured the hard way.** Blocking only the body the disturbance reaches, and
+        // letting the rest of its component sleep, is the exact mirror of what waking
+        // does, and on a settled field with a local disturbance it is worth a great deal:
+        // `benches`'s `ploughing` went from 330 of 2,049 awake to 174. It also fails
+        // `a_rig_that_does_not_touch_itself_comes_to_rest` and
+        // `a_rig_that_touches_itself_comes_to_rest`, with bones coming to rest **below the
+        // ground**, at y = -0.0413.
+        //
+        // That is the thing the component rule is really for, and it is not the one stated
+        // above it. A body can be locally still while the structure it belongs to is still
+        // being corrected -- held down by a joint whose other end has not resolved, sunk
+        // through the plane by a contact the solve has not finished undoing. Sleeping it
+        // then does not save work, it *freezes an unconverged state*, and nothing will
+        // ever come back to fix it because the body is no longer being solved. Waiting for
+        // the whole component is how a body knows the structure around it has converged
+        // and not merely that it personally stopped moving.
+        //
+        // So the cost is real and is paid deliberately: a heap sleeps when its last body
+        // does. What that costs on a heap of jointed rigs is written up in this module's
+        // header, along with what the rigs are actually doing, which is rocking.
         self.components.reset_members(n, &self.ready);
         self.unsettled.clear();
         self.unsettled.resize(n, false);
