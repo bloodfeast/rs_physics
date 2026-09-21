@@ -166,7 +166,7 @@
 //!   joints_only  10,200 bodies, 9,600 joints, 0 contacts, 4 colours, all awake
 //!   pile         10,200 bodies, 9,600 joints, 4,800 contacts, 9,600 awake
 //!   arriving     10,200 bodies, 9,600 joints, 11,600 contacts, all awake
-//!   ploughing     2,049 bodies over 23.2 by 15.8 m, 273 contacts, 330 awake
+//!   ploughing     2,049 bodies over 23.2 by 15.8 m, 201 contacts, 174 awake
 //!   crushing      4,800 bodies, 9,582 candidate pairs, 0 contacts settled
 //! ```
 //!
@@ -2777,6 +2777,10 @@ pub struct Skeleton {
     /// Where [`Skeleton::wake_island`] reads an island's members, so that retiring a body
     /// allocates nothing.
     island_members: Vec<usize>,
+    /// The frontier of [`Skeleton::wake`]'s walk out along the joints. Kept here rather
+    /// than on the stack because `wake` is called once per contact end in
+    /// [`Skeleton::wake_touched`], and a heap allocation there would be one per contact.
+    wake_walk: Vec<u32>,
     /// Bodies that have now been still for their whole settling window. The union-find
     /// below only looks at constraints with one of these at each end; see
     /// [`Skeleton::settle`].
@@ -2794,11 +2798,15 @@ pub struct Skeleton {
     island_of: Vec<u32>,
     islands: Islands,
     components: Components,
+    /// The same, over the **joints alone**: the set that has to sleep together, where
+    /// `components` above is the set that is stored and woken together. See
+    /// [`Skeleton::settle`] for why a joint and a contact are not the same kind of edge.
+    joint_components: Components,
     /// Scratch for grouping the awake bodies by island: a counting sort keyed on the
     /// component root, which is a body index, so the tallies are one word a body.
     island_tally: Vec<u32>,
     island_list: Vec<u32>,
-    /// Per component root, whether any member of it is still moving.
+    /// Per **joint**-component root, whether any member of it is still moving.
     unsettled: Vec<bool>,
     /// Bodies the caller has said are not worth full quality, and what they get instead.
     /// See [`Skeleton::set_background`].
@@ -2876,6 +2884,7 @@ impl Default for Skeleton {
             next_frontier: BitSet::default(),
             reached: Vec::new(),
             island_members: Vec::new(),
+            wake_walk: Vec::new(),
             ready: BitSet::default(),
             held: Vec::new(),
             still_from: Vec::new(),
@@ -2884,6 +2893,7 @@ impl Default for Skeleton {
             island_of: Vec::new(),
             islands: Islands::default(),
             components: Components::default(),
+            joint_components: Components::default(),
             island_tally: Vec::new(),
             island_list: Vec::new(),
             unsettled: Vec::new(),
@@ -4312,6 +4322,8 @@ impl Skeleton {
         self.build_ground_contacts();
         self.colour_contacts();
         self.find_live_joints();
+        #[cfg(debug_assertions)]
+        self.check_no_joint_straddles_the_awake_set();
         self.plan_pass();
 
         let iterations = iterations.max(1);
@@ -5025,6 +5037,57 @@ impl Skeleton {
         self.held_axis = held_axis;
     }
 
+    /// **No live joint has one end awake and the other asleep**, asserted rather than
+    /// assumed; compiled out of release builds.
+    ///
+    /// A joint that straddles the awake set is the defect this module's sleeping rules were
+    /// rebuilt around, and it does not announce itself: [`Skeleton::solve_pass`] applies a
+    /// joint's correction to both ends with their real inverse masses, so the sleeping end
+    /// is simply moved -- with no plane under it, because the ground patch is only sampled
+    /// for awake bodies, and with nothing to wake it, because the broad phase skips jointed
+    /// pairs by design. Measured on the parent of this change: a bone dragged 1.56 m
+    /// downward while asleep, and bones finishing a law at y = -0.0413.
+    ///
+    /// Two functions establish it and a change to either is what would break it:
+    ///
+    /// * [`Skeleton::settle`] blocks by **joint component**, so a set of jointed bodies goes
+    ///   to sleep all at once or not at all.
+    /// * [`Skeleton::wake`] walks the joints, so it comes back all at once too.
+    ///
+    /// Both stop at a body with no mass -- pinned or retired -- which is why the test below
+    /// excuses one, and why a joint to an anchor is not a straddle.
+    ///
+    /// **A runtime guard was written and withdrawn.** Passing a `live` flag into
+    /// [`scatter::Bodies::pose`] and giving a sleeping end zero inverse mass makes the
+    /// straddle harmless rather than merely detected, and it does fix the two rig laws on
+    /// its own. It was not kept, for two reasons: it is a cost on every joint of every pass
+    /// -- the multiplier `iterations` is on -- to insure against a state the two functions
+    /// above already make unreachable, and, worse, it *hides* the half of the defect that
+    /// matters more. A sleeping end weighing infinity is a rig whose far bone can be stirred
+    /// while the rest of it never moves, which is wrong and is silent. Making it impossible
+    /// beats making it safe. This check is here so that a change which brings it back fails
+    /// a debug test run rather than a release user's floor.
+    #[cfg(debug_assertions)]
+    fn check_no_joint_straddles_the_awake_set(&self) {
+        for set in self.live_joints.iter() {
+            for &k in set.iter() {
+                let (a, b) = self.joints[k].bodies();
+                // A body with no mass is never awake and never moves, so a joint to one is
+                // not a straddle. See the doc comment.
+                if self.inv_mass[a] <= 0.0 || self.inv_mass[b] <= 0.0 {
+                    continue;
+                }
+                assert_eq!(
+                    self.awake.get(a),
+                    self.awake.get(b),
+                    "the joint between bodies {a} and {b} is being solved with one end \
+                     awake and the other asleep; the solve will move the sleeping one and \
+                     nothing will put it back",
+                );
+            }
+        }
+    }
+
     /// Every colour, checked to name each body at most once. The precondition of every
     /// `unsafe` block in [`scatter`], asserted rather than assumed; compiled out of
     /// release builds.
@@ -5089,13 +5152,6 @@ impl Skeleton {
         self.awake.count()
     }
 
-    /// **Wakes this body**, and leaves the rest of its island asleep for the broad phase
-    /// to reach.
-    ///
-    /// Its neighbours are woken too, if the disturbance actually reaches them:
-    /// [`Skeleton::find_pairs`] wakes what a **moving** body comes within reach of, and
-    /// [`Skeleton::wake_touched`] wakes what anything touches. Waking the component instead
-    /// is what this used to do, and [`sleep`] holds the measurement that says what it cost.
     /// **Wakes the body's whole island**, for the one caller that has to.
     ///
     /// [`Skeleton::wake`] wakes a body and leaves its island to be reached, because every
@@ -5123,7 +5179,97 @@ impl Skeleton {
         self.wake(i);
     }
 
+    /// **Wakes this body and everything jointed to it**, and leaves the rest of its island
+    /// asleep for the broad phase to reach.
+    ///
+    /// Its *contact* neighbours are woken only if the disturbance actually reaches them:
+    /// [`Skeleton::find_pairs`] wakes what a **moving** body comes within reach of, and
+    /// [`Skeleton::wake_touched`] wakes what anything touches. Waking the whole island that
+    /// way is what this used to do, and [`sleep`] holds the measurement that says what it
+    /// cost.
+    ///
+    /// **A joint is the one edge neither of those rules can cross**, which is why it is
+    /// walked here instead. The broad phase rejects a jointed pair on purpose -- two bones
+    /// either side of an elbow overlap permanently, so testing them is wasted work -- so a
+    /// jointed neighbour is never in `pairs`, never in `contacts`, and never reached by
+    /// proximity or by touch. Measured on a chain of six capsules hung off a pinned root,
+    /// settled and then stirred at the far bone for six hundred steps: the five bones
+    /// between read `awake` as false at every step, and the one next to the stirred bone
+    /// was **dragged 1.56 m while asleep** by the joint's own correction, because a live
+    /// joint moves both its ends. `a_joint_carries_a_disturbance_into_a_sleeping_body` is
+    /// the guard, and [`Skeleton::settle`] is the mirror of this: the unit that wakes
+    /// together is the unit that has to sleep together.
+    ///
+    /// **The walk stops at a body with no mass**, pinned or retired, for the reason such a
+    /// body does not join an island either: it cannot move, so it carries nothing across.
+    /// Six hundred ragdolls hung off six hundred pinned pelvises stay six hundred
+    /// independent sets of limbs.
+    ///
+    /// **It reads the adjacency as the last step built it**, and does not rebuild it, which
+    /// would make adding a joint cost a pass over every body. It cannot be stale where it
+    /// matters: the runs are rebuilt at the top of [`Skeleton::step`], everything that
+    /// invalidates them ([`Skeleton::add_body`], [`Skeleton::add_joint`],
+    /// [`Skeleton::retire`]) leaves something awake, and nothing goes to sleep outside a
+    /// step -- so between an invalidation and the rebuild there is nothing asleep for a
+    /// stale run to fail to reach. `add_joint` wakes *both* of its ends for this reason:
+    /// the new component is the two old ones plus the edge, and waking both ends covers it
+    /// without the rebuild.
     pub fn wake(&mut self, i: usize) {
+        // The body itself, whether or not it was already awake: a caller that pushes on
+        // something that is already moving has still disturbed it, and its settling window
+        // has to start again.
+        if !self.wake_one(i) {
+            // Already awake, or has no mass. Either way its jointed component is awake
+            // already -- that is the invariant this and [`Skeleton::settle`] keep between
+            // them -- so there is nothing to walk. This is what keeps
+            // [`Skeleton::wake_touched`] linear in the contacts rather than in the rig.
+            return;
+        }
+        let (from, upto) = self.jointed_run(i);
+        if from == upto {
+            // **A body with no joints is its own component**, which is every body in a
+            // loose field and therefore the case this whole path must not cost anything:
+            // no scratch buffer, no walk, one compare.
+            return;
+        }
+        let mut walk = std::mem::take(&mut self.wake_walk);
+        walk.clear();
+        walk.push(i as u32);
+        while let Some(from) = walk.pop() {
+            let (start, upto) = self.jointed_run(from as usize);
+            for slot in start..upto {
+                let to = self.jointed_to[slot];
+                if self.wake_one(to as usize) {
+                    walk.push(to);
+                }
+            }
+        }
+        self.wake_walk = walk;
+    }
+
+    /// Where body `i`'s run of jointed neighbours lies in `jointed_to`, empty for a body
+    /// with none.
+    ///
+    /// The same run and the same out-of-range guard as [`broadphase::Jointed::of`], read by
+    /// index rather than through that borrow because [`Skeleton::wake`] holds the skeleton
+    /// mutably while it walks. A body added since the last rebuild falls off the end of the
+    /// runs and carries no joints yet, which is the same answer.
+    #[inline]
+    fn jointed_run(&self, i: usize) -> (usize, usize) {
+        if i + 1 >= self.jointed_start.len() {
+            return (0, 0);
+        }
+        (
+            self.jointed_start[i] as usize,
+            self.jointed_start[i + 1] as usize,
+        )
+    }
+
+    /// Wakes exactly one body, and says whether the walk in [`Skeleton::wake`] should carry
+    /// on through it: **it should only if this call is what woke it**. A body that was
+    /// already awake has an awake component behind it, and one with no mass carries
+    /// nothing across.
+    fn wake_one(&mut self, i: usize) -> bool {
         let Skeleton {
             awake,
             islands,
@@ -5143,12 +5289,14 @@ impl Skeleton {
             }
             island_of[i] = NO_ISLAND;
         }
+        let spread = inv_mass[i] > 0.0 && !awake.get(i);
         if inv_mass[i] > 0.0 {
             awake.set(i);
         }
         still_steps[i] = 0;
         still_from[i] = position[i];
         still_turn[i] = orientation[i];
+        spread
     }
 
     /// Wakes every body. What a caller reaches for when it has changed something the
@@ -5289,33 +5437,56 @@ impl Skeleton {
         // the ready side's component instead of joining it, which they can only do once
         // every union is in, so it is two passes rather than one.
         //
-        // **And the component is the right unit here, which is not obvious and was
-        // measured the hard way.** Blocking only the body the disturbance reaches, and
-        // letting the rest of its component sleep, is the exact mirror of what waking
-        // does, and on a settled field with a local disturbance it is worth a great deal:
-        // `benches`'s `ploughing` went from 330 of 2,049 awake to 174. It also fails
-        // `a_rig_that_does_not_touch_itself_comes_to_rest` and
-        // `a_rig_that_touches_itself_comes_to_rest`, with bones coming to rest **below the
-        // ground**, at y = -0.0413.
+        // **A joint and a contact are not the same kind of edge, and the unit that is
+        // blocked is different for each.** This is the whole of the rule and it took two
+        // wrong versions to find.
         //
-        // That is the thing the component rule is really for, and it is not the one stated
-        // above it. A body can be locally still while the structure it belongs to is still
-        // being corrected -- held down by a joint whose other end has not resolved, sunk
-        // through the plane by a contact the solve has not finished undoing. Sleeping it
-        // then does not save work, it *freezes an unconverged state*, and nothing will
-        // ever come back to fix it because the body is no longer being solved. Waiting for
-        // the whole component is how a body knows the structure around it has converged
-        // and not merely that it personally stopped moving.
+        // A **contact** is one-way support with a live channel back: the broad phase sweeps
+        // outward from what is moving and wakes what it reaches, and `wake_touched` wakes
+        // whatever a contact names. A disturbance therefore travels along contacts on its
+        // own, a step at a time, and nothing is needed here beyond blocking the body the
+        // disturbance has actually reached.
         //
-        // So the cost is real and is paid deliberately: a heap sleeps when its last body
-        // does. What that costs on a heap of jointed rigs is written up in this module's
-        // header, along with what the rigs are actually doing, which is rocking.
+        // A **joint** is a two-way rigid tie with **no channel at all**. The broad phase
+        // rejects a jointed pair on purpose -- two bones either side of an elbow overlap
+        // permanently, so testing them is wasted work -- so a jointed neighbour is never in
+        // `pairs`, never in `contacts`, and neither waking rule can ever reach it. And a
+        // live joint moves *both* its ends, so a joint whose ends disagree about being
+        // awake drags the sleeping one around with nothing to stop it: the plane is only
+        // sampled under bodies that are awake, so it does not even have a floor.
+        //
+        // Measured, on the committed parent of this change with no rule change at all: a
+        // chain of six capsules on a pinned root, settled, then stirred at the far bone for
+        // six hundred steps. The five bones between read `awake` as false at every step and
+        // the one next to the stirred bone was **dragged 1.56 m while asleep**. That is the
+        // real mechanism behind the below-ground bones the per-body rule used to produce --
+        // the bone is not put to sleep underground, it is *pulled* underground afterwards,
+        // by a joint, while asleep. Nothing about a state being unconverged came into it.
+        //
+        // So the rule is one sentence: **the jointed component is the unit that sleeps,
+        // because it is the unit that wakes.** A held body blocks its joint component and
+        // not its contact component, [`Skeleton::wake`] wakes a body's joint component and
+        // not its contact component, and between them they keep the invariant the solve
+        // needs -- that a live joint never has one end awake and the other asleep. On a
+        // field of loose capsules every joint component is a single body, so this is the
+        // fully local rule and costs the field nothing: `benches`'s `ploughing` goes from
+        // 330 of 2,049 awake to 174.
+        //
+        // **`components` is still over the joints *and* the pairs**, because it is what
+        // islands are stored by, and an island is what [`Skeleton::wake_island`] thaws when
+        // a body is retired -- the one disturbance that arrives from nowhere. A stack that
+        // has settled must stay one island or retiring the bottom of it leaves the rest
+        // asleep in the air. So the two groupings do different jobs and are both needed:
+        // `joint_components` says who must sleep *together*, `components` says who is
+        // *stored* together.
         self.components.reset_members(n, &self.ready);
+        self.joint_components.reset_members(n, &self.ready);
         self.unsettled.clear();
         self.unsettled.resize(n, false);
         {
             let Skeleton {
                 components,
+                joint_components,
                 joints,
                 pairs,
                 ready,
@@ -5354,9 +5525,21 @@ impl Skeleton {
                 (false, true) if holding(a) => held.push(b as u32),
                 _ => {}
             };
+            // A joint joins both groupings: the pair is stored together *and* has to sleep
+            // together. Both ends ready, like the union above it, and a ready body cut off
+            // from a held one by an unready body is then not reached -- which is right in
+            // all three of the ways there are to be unready. If the body between is
+            // **moving** it is awake, so it blocks the far side directly through the same
+            // `held` rule below. If it is **pinned** it carries nothing across, which is
+            // why [`Skeleton::wake`]'s walk stops at one too. And if it is **asleep** the
+            // far side is entitled to sleep beside it, which is the invariant holding
+            // rather than a hole in it.
             for joint in joints.iter() {
                 let (a, b) = joint.bodies();
                 edge(a, b);
+                if ready.get(a) && ready.get(b) {
+                    joint_components.union(a, b);
+                }
             }
             // **The broad phase's pairs, not the narrow phase's contacts.** Two bodies
             // resting exactly against each other overlap by nothing, so there is no
@@ -5371,13 +5554,13 @@ impl Skeleton {
         }
         {
             let Skeleton {
-                components,
+                joint_components,
                 unsettled,
                 held,
                 ..
             } = self;
             for &i in held.iter() {
-                unsettled[components.find(i) as usize] = true;
+                unsettled[joint_components.find(i) as usize] = true;
             }
         }
 
@@ -5390,17 +5573,21 @@ impl Skeleton {
         // lets the island be stored as words rather than as a list of indices.
         let Skeleton {
             components,
+            joint_components,
             unsettled,
             island_tally,
             island_list,
             ready,
             ..
         } = self;
+        // Grouped by the island's root and blocked by the joint component's, which are two
+        // different roots for the same body. See above.
         ready.for_each_set(|i| {
-            let root = components.find(i as u32) as usize;
-            if !unsettled[root] {
-                island_tally[root] += 1;
+            if unsettled[joint_components.find(i as u32) as usize] {
+                return;
             }
+            let root = components.find(i as u32) as usize;
+            island_tally[root] += 1;
         });
         let mut running = 0u32;
         for slot in island_tally.iter_mut() {
@@ -5414,11 +5601,12 @@ impl Skeleton {
         island_list.clear();
         island_list.resize(running as usize, 0);
         ready.for_each_set(|i| {
-            let root = components.find(i as u32) as usize;
-            if !unsettled[root] {
-                island_list[island_tally[root] as usize] = i as u32;
-                island_tally[root] += 1;
+            if unsettled[joint_components.find(i as u32) as usize] {
+                return;
             }
+            let root = components.find(i as u32) as usize;
+            island_list[island_tally[root] as usize] = i as u32;
+            island_tally[root] += 1;
         });
 
         // `island_tally[root]` now holds the end of that root's run, and the previous

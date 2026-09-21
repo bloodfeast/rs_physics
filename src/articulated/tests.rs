@@ -1711,6 +1711,99 @@ fn a_velocity_correction_changes_the_speed_and_not_the_place() {
     );
 }
 
+/// **A disturbance at one end of a sleeping chain travels along the joints.**
+///
+/// The one edge neither waking rule can cross. [`Skeleton::find_pairs`] wakes what a moving
+/// body comes within reach of and [`Skeleton::wake_touched`] wakes what a contact names, and
+/// **a jointed pair is in neither list**: the broad phase rejects one on purpose, because two
+/// bones either side of an elbow overlap permanently and testing them is wasted work. So a
+/// joint has no proximity channel and no touch channel, and if [`Skeleton::wake`] does not
+/// walk it there is nothing left.
+///
+/// What that cost, measured on the commit this was written against: the five bones between
+/// read `awake` as false at every one of six hundred stirred steps, and the bone next to the
+/// stirred one was **dragged 1.56 m while asleep** -- because a live joint applies its
+/// correction to both ends, and the sleeping end has no ground contact under it, since the
+/// plane is only sampled for bodies that are awake. That is the mechanism behind the bones
+/// that used to come to rest below the ground, and it is why the jointed component is the
+/// unit of sleeping as well as of waking. See [`Skeleton::settle`].
+///
+/// # Both halves are asserted, because either alone passes for the wrong reason
+///
+/// That the chain wakes, and that **the pinned root does not**: a body of infinite mass
+/// carries nothing across, so a walk that ran through one would weld every rig hanging off a
+/// shared anchor into a single set that can only wake together. That is the same rule that
+/// already keeps a pinned body out of an island.
+#[test]
+fn a_joint_carries_a_disturbance_into_a_sleeping_body() {
+    const LINKS: usize = 6;
+
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    let root = s.add_body(Body::pinned((0.0, 3.0, 0.0)));
+    let mut previous = root;
+    let mut chain = vec![root];
+    for i in 0..LINKS {
+        let link = s.add_body(Body::capsule(
+            4.0,
+            0.06,
+            0.12,
+            (0.0, 3.0 - 0.25 - 0.25 * i as f64, 0.0),
+        ));
+        assert!(s.add_joint(Joint::free_ball(
+            previous,
+            link,
+            (0.0, -0.125, 0.0),
+            (0.0, 0.125, 0.0),
+        )));
+        previous = link;
+        chain.push(link);
+    }
+
+    // Hanging straight down at its own equilibrium, so it settles rather than swings.
+    for step in 1..=900 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+        assert!(
+            step < 900,
+            "the chain never went to sleep, so there is nothing here to be woken",
+        );
+    }
+
+    let far = *chain.last().expect("a chain of six");
+    let before: Vec<(f64, f64, f64)> = chain.iter().map(|&i| s.position(i)).collect();
+    for _ in 0..120 {
+        s.set_angular_velocity(far, (0.0, 0.0, 6.0));
+        s.step(DT, G, 8);
+    }
+
+    for (n, &i) in chain.iter().enumerate().skip(1) {
+        assert!(
+            s.is_awake(i),
+            "link {n} of {LINKS} is still asleep after the far end of its own chain was \
+             stirred for two seconds; nothing can reach it, because the broad phase does \
+             not pair a jointed couple",
+        );
+    }
+    assert!(
+        !s.is_awake(root),
+        "the pinned root woke up, which means the walk runs through a body of infinite \
+         mass -- every rig on a shared anchor would then be one thing that wakes at once",
+    );
+    // And it is woken rather than dragged: a body that is being moved while asleep is the
+    // defect this is really about, and it shows up as a link that has travelled a long way.
+    for (n, &i) in chain.iter().enumerate() {
+        let moved = length(sub(s.position(i), before[n]));
+        assert!(
+            moved < 0.5,
+            "link {n} moved {moved:.4} m, which is most of the chain's own length: it is \
+             being dragged by the joint rather than simulated",
+        );
+    }
+}
+
 
 // -- what a body is carrying ------------------------------------------------------
 

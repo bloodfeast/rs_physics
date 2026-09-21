@@ -19,16 +19,41 @@
 //!
 //! Bodies are grouped into connected components over the joints and contacts between
 //! them, by union-find with path halving and union by size. A component is the unit that
-//! sleeps: a body in the middle of a resting stack is not still because it has come to
-//! rest on its own, it is still because everything holding it is, and the moment one of
-//! them moves it is no longer entitled to be asleep. So the whole component goes to sleep
-//! together.
+//! is *stored*: it is what an island is, and what one caller -- retirement -- has to thaw
+//! whole.
 //!
-//! **It does not wake together, and that is a separate question with a different answer.**
-//! Sleeping is a claim about a set -- nobody in it is moving -- and waking is a claim about
-//! one body, that something has happened to *it*. Reading the island as the unit of both
-//! is the defect the section below is about; [`Islands::release`] is what waking does to an
-//! island now, which is to take one body out of it and leave the rest of it asleep.
+//! **It is not the unit that sleeps and it is not the unit that wakes, and the two of
+//! those are the same question with the same answer.** Sleeping is a claim that a set has
+//! stopped; waking is a claim that something has reached one body. Whether a claim about
+//! one body may be made at all depends entirely on **what kind of edge** the body's
+//! neighbours are on:
+//!
+//! * A **contact** is one-way support with a channel back. The broad phase sweeps outward
+//!   from what is moving, `wake_touched` wakes what a contact names, and a disturbance
+//!   therefore travels along contacts by itself. So a contact blocks only the body it
+//!   reaches, and [`Islands::release`] takes that one body out of its island and leaves the
+//!   rest asleep.
+//! * A **joint** has no channel at all. The broad phase rejects a jointed pair on purpose,
+//!   because two bones either side of an elbow overlap permanently and testing them is
+//!   wasted work, so a jointed neighbour is in neither `pairs` nor `contacts` and neither
+//!   waking rule can reach it. And a live joint moves *both* its ends with their real
+//!   inverse masses, while the ground plane is only sampled under bodies that are awake. A
+//!   joint whose ends disagree about being awake therefore drags the sleeping one, with no
+//!   floor under it and nothing to wake it.
+//!
+//! Measured, on a chain of six capsules hung off a pinned root, settled and then stirred at
+//! the far bone for six hundred steps: the five bones between read `awake` as false at every
+//! step, and the bone next to the stirred one was **dragged 1.56 m while asleep**. That is
+//! what was really behind rig bones coming to rest at y = -0.0413 -- a bone is not put to
+//! sleep underground, it is *pulled* underground afterwards, by a joint, while asleep.
+//!
+//! **So the jointed component is the unit of both.** [`super::Skeleton::settle`] blocks by
+//! joint component and [`super::Skeleton::wake`] walks the joints, and between them a live
+//! joint never has one end awake and the other asleep -- which
+//! `Skeleton::check_no_joint_straddles_the_awake_set` asserts in debug builds, and
+//! `a_joint_carries_a_disturbance_into_a_sleeping_body` guards. On a field of loose capsules
+//! every joint component is a single body, so on the workload sleeping exists for this is
+//! the fully local rule and costs nothing.
 //!
 //! **One caller still wants the component, and it is the one nothing can see coming.** A
 //! body being retired does not arrive, it leaves: no body moves toward what it was holding
@@ -75,10 +100,31 @@
 //! that stays asleep is a *denser* scene by the time it is timed, and is a third cheaper
 //! anyway, because what a settled body costs a step is not its contacts.
 //!
+//! **Waking locally was only half of it: the field also has to be allowed to go *back* to
+//! sleep locally**, and until the joint rule above it was not. A held body disqualified its
+//! whole component, so one capsule shuffling behind the ram held the settled half in front
+//! of it awake for ever. Blocking by joint component instead -- which on a field with no
+//! joints in it means blocking the one body -- closes the loop. Exact counts on the same
+//! fixture, no rounds needed:
+//!
+//! ```text
+//!                            awake at 620   contacts   mean awake over the last 310 steps
+//!   blocking the component    330 / 2049        273    250.5
+//!   blocking the body         174 / 2049        201    158.6
+//! ```
+//!
+//! **And it is the only fixture that moves.** Every other named state in
+//! `benches/articulated.rs` is identical under both rules -- `one` 16 of 17 awake and 8
+//! contacts, `pile` 9,600 of 10,200 and 4,800, `arriving` 10,200 of 10,200 and 11,600,
+//! `has_settled` 0 of 9,999, and every row of `crushing` to the body -- because a scene
+//! whose bodies are all jointed has one joint component per rig, and a rig could never
+//! sleep in halves. The win is on the workload sleeping exists for and is paid for nowhere
+//! else.
+//!
 //! # So what wakes a body is that something moving reached it
 //!
-//! Three rules, and between them they replace the island thaw. Each is stated where it
-//! runs; this is why the three of them are needed and no fewer.
+//! Four rules, and between them they replace the island thaw. Each is stated where it
+//! runs; this is why the four of them are needed and no fewer.
 //!
 //! * **Waking takes one body out of its island** and leaves the rest of it asleep --
 //!   [`Islands::release`], and [`super::Skeleton::wake`]. On its own this changes nothing
@@ -100,6 +146,12 @@
 //!   a tolerance: below the speed at which the front leads, the overlap a body can present
 //!   a sleeping neighbour with before the contact wakes it is bounded by the same fraction
 //!   of its own reach.
+//! * **And waking crosses every joint**, because nothing else can -- [`super::Skeleton::wake`].
+//!   The two rules above are both proximity rules and the broad phase never offers them a
+//!   jointed pair, so without this one a rig can be woken a bone at a time while the joints
+//!   between its bones drag the rest of it around asleep. It is not a threshold and it has
+//!   no distance in it: a joint is rigid, so a disturbance at one end is a disturbance at
+//!   the other, at once.
 //!
 //! **Waking on the touch alone does not work, and the stack says why.** It is the tempting
 //! rule -- causal, no distances in it, the same shape as the one that keeps a contact
