@@ -350,9 +350,16 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
 /// ```
 ///
 /// The levels moved because the named state is a denser moment than the drifted ones the
-/// old samples wandered into -- `pile` at step 30 carries 8,400 contacts, more than any
-/// moment the drift was caught at -- and the contacts are most of what those two fixtures
-/// cost.
+/// old samples wandered into -- `pile` at the step it is timed from is the busiest moment
+/// the fixture reaches, where the drift was catching later and thinner ones -- and the
+/// contacts are most of what those two fixtures cost.
+///
+/// That sentence used to quote a figure, 8,400 contacts, and the fixture carries 4,800.
+/// The count moves when the *solve* changes and not only when the fixture does: a heap
+/// collapses differently after a fix to how its joints behave, so how much of it is
+/// touching at a named step moves with it. A contact count written into a comparison is a
+/// fact about that measurement; the fixture prints its own every run, which is the number
+/// to read.
 ///
 /// A settled scene does not need this -- it stays settled, so its samples are already the
 /// same scene -- and paying a ten-thousand-body clone to time a step that costs nothing

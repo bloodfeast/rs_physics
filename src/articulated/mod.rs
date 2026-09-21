@@ -151,6 +151,40 @@
 //! ploughing through it, halfway down: 2049 of 2049 awake at 2.88 to 3.09 ms a step
 //! becomes 346 of 2049 at 1.80 to 2.43 ms, against a *higher* contact count.
 //!
+//! # What the fixtures carry, and how to read the tables below
+//!
+//! Almost every claim in this file is a before-and-after on a named benchmark fixture, and
+//! each of those tables carries a `contacts` column. **Those columns record what the
+//! fixture carried when that measurement was taken, and several of them no longer match
+//! what it carries now.** They are left as they were, because rewriting a number inside a
+//! comparison nobody has re-run would be inventing a measurement. What follows is the
+//! authority on the present state; `cargo bench --bench articulated -- --test` prints it in
+//! a few seconds and is the way to check it rather than to trust it.
+//!
+//! ```text
+//!   one              17 bodies, 16 joints, 8 contacts, 16 of 17 awake
+//!   joints_only  10,200 bodies, 9,600 joints, 0 contacts, 4 colours, all awake
+//!   pile         10,200 bodies, 9,600 joints, 4,800 contacts, 9,600 awake
+//!   arriving     10,200 bodies, 9,600 joints, 11,600 contacts, all awake
+//!   ploughing     2,049 bodies over 23.2 by 15.8 m, 273 contacts, 330 awake
+//!   crushing      4,800 bodies, 9,582 candidate pairs, 0 contacts settled
+//! ```
+//!
+//! The one that matters most is `pile`, because it is the fixture most of this file
+//! divides by: it carries **4,800** contacts, where tables below say 8,400 and then 7,800.
+//! Any "cost per contact" read off those is out by a factor of one and a half to one and
+//! three quarters. The counts move when the *solve* changes and not only when the fixture
+//! does -- the hinge fix further down this page changed how a heap collapses, and therefore
+//! how much of it is touching at the step the bench names -- which is why a contact count
+//! quoted in a table is a fact about that measurement rather than about the fixture.
+//!
+//! The retirement table further down is the one to be most careful with: it is headed as a
+//! lane of eight hundred capsules, and that fixture has since been widened into a field of
+//! 4,801 and renamed `crushing`. Its rows cannot be reproduced by running the bench today.
+//! The conclusion drawn from it -- that the cost per live body is flat while three quarters
+//! of the field retires -- is restated on the current fixture in `benches/articulated.rs`,
+//! which is where to read it.
+//!
 //! # Why the iteration count is what it is, and what will not move it
 //!
 //! Two things that look like levers and are not, both measured rather than argued.

@@ -181,6 +181,28 @@ pub(super) fn oversize_cap(gridded: usize) -> usize {
 ///
 /// The cell is here rather than in a side table because the scan needs it for every
 /// candidate it rejects; see the module header.
+///
+/// # Carrying the centre and the reach here too, which does not pay
+///
+/// The obvious next step, and it was built: the scan rejects a candidate on its cell, its
+/// centre and its reach, and the last two are scattered loads into arrays ten thousand
+/// long, indexed by a body number with no relationship to where the scan is reading. A body
+/// in a heap has around three hundred candidates. Putting all three in the record the scan
+/// is already looking at is the same argument the header makes for `cell`, carried the rest
+/// of the way.
+///
+/// **Measured, it is nothing**, and the way it is nothing is worth more than the change
+/// would have been. Three alternating rounds of prebuilt binaries on `pile` at eight
+/// iterations said 6.99 / 5.81 / 6.35 ms against 5.84 / 5.79 / 5.85 -- a clean eight per
+/// cent with the "after" build strikingly steady. Four more rounds with **the order of the
+/// two binaries reversed** said 6.47 / 6.50 / 6.56 / 6.24 against 5.69 / 6.32 / 5.71 /
+/// 6.32. It flipped: whichever binary runs first in a round is the slow one, by about the
+/// size of the effect being looked for.
+///
+/// So the record stays at sixteen bytes, and the method note is the finding. Alternating
+/// *rounds* is not enough on this machine -- the order of the two builds within a round has
+/// to alternate as well, or the first one measured carries a penalty that reads as a result.
+/// Several tables in [`super`]'s header were taken by alternating rounds only.
 #[derive(Clone, Copy, Debug, Default)]
 struct Member {
     cell: u64,
