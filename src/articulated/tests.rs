@@ -104,6 +104,82 @@ fn a_hinge_stays_inside_its_range() {
     );
 }
 
+/// **A hinge handed to the solver already inside out turns itself back.**
+///
+/// The alignment correction turns the axes onto one another about `a x b`, and that cross
+/// product is zero at a half turn as well as at none -- so a hinge whose child has been
+/// turned end for end has nothing to turn about and would stay that way for ever. Which
+/// perpendicular axis undoes the half turn is arbitrary, because every one of them leaves
+/// the same hinge; that *some* axis is chosen is what this checks.
+///
+/// It is the exact case rather than a nearly-exact one on purpose: a hinge a degree off
+/// the half turn recovers through the ordinary correction, and the branch this is about is
+/// the one that only runs when the cross product vanishes outright.
+#[test]
+fn a_hinge_inverted_exactly_turns_itself_back() {
+    let mut s = Skeleton::new();
+    let thigh = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+    let shin = s.add_body(Body::capsule(4.0, 0.06, 0.4, (0.0, 1.6, 0.0)));
+    assert!(s.add_joint(Joint::Hinge {
+        a: thigh,
+        b: shin,
+        anchor_a: (0.0, 0.0, 0.0),
+        anchor_b: (0.0, 0.2, 0.0),
+        axis_a: (1.0, 0.0, 0.0),
+        axis_b: (1.0, 0.0, 0.0),
+        min: -0.2,
+        max: 2.0,
+    }));
+
+    // Half a turn about the shin's own length, which is perpendicular to the hinge axis:
+    // the axes are then exactly opposed and their cross product is exactly zero.
+    let mut body = s.body(shin);
+    body.orientation = Quaternion::from_axis_angle((0.0, 1.0, 0.0), std::f64::consts::PI);
+    s.set_body(shin, body);
+    let cosine = |s: &Skeleton| {
+        let a = s.orientation(thigh).rotate_point((1.0, 0.0, 0.0));
+        let b = s.orientation(shin).rotate_point((1.0, 0.0, 0.0));
+        dot(a, b) / (length(a) * length(b))
+    };
+    assert!(
+        cosine(&s) < -0.999,
+        "the fixture did not start inverted: cosine {:.4}",
+        cosine(&s),
+    );
+
+    // **And the repair is one step's worth of repair, not one per pass.** Undoing a half
+    // turn is a half turn, and a position solver reads a turn back as spin -- so a hinge
+    // handed to the solver inverted does snap back hard, the way a body spawned a metre
+    // from its anchor is snapped back hard, and that is what a rigid constraint is. What it
+    // must not do is snap back *eight* times, once per pass, which is the shape of defect
+    // the module header records four separate encounters with. The whole error delivered
+    // once is `PI / DT`, 188 rad/s here; measured, the peak is 120, and a correction charged
+    // per pass would be several times over the bound below.
+    let mut peak = 0.0_f64;
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        peak = peak.max(length(s.angular_velocity(shin)));
+    }
+
+    assert!(
+        cosine(&s) > 0.9,
+        "ten seconds later the hinge is still inside out, at a cosine of {:.4}",
+        cosine(&s),
+    );
+    assert!(
+        peak < std::f64::consts::PI / DT,
+        "recovering from the half turn spun the shin at {peak:.1} rad/s, past the {:.0} \
+         rad/s that delivering the whole error once would give -- so the alignment \
+         correction is being charged more than once for the same error",
+        std::f64::consts::PI / DT,
+    );
+    assert!(
+        length(s.angular_velocity(shin)) < 1.0,
+        "ten seconds after recovering, the shin is still turning at {:.3} rad/s",
+        length(s.angular_velocity(shin)),
+    );
+}
+
 /// A chain settles instead of running away. XPBD reads its velocities back out of the
 /// positions it corrected, so a constraint that fights itself shows up as a body that
 /// gains speed every step -- and a position-based solver that feeds itself does not drift,
