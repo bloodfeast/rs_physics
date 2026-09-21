@@ -212,7 +212,8 @@ mod sleep;
 
 use broadphase::{Grid, Jointed};
 use contacts::{
-    capsule_contact, ground_contacts, solve_contact, solve_ground, Contact, GroundContact, Spent,
+    capsule_contact, contact_left_slipped, ground_contacts, ground_left_slipped, solve_contact,
+    solve_ground, Contact, GroundContact, Spent,
 };
 use scatter::Bodies;
 use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTION};
@@ -585,6 +586,10 @@ impl Pose {
     }
 }
 
+/// One contact's friction anchor, under the name the contact is found by: the two bodies
+/// and which slot of their manifold it is. See [`Skeleton::anchor_slip`].
+type Anchor = ((u32, u32, u8), (f64, f64, f64));
+
 /// A [`Pose`] plus what a contact needs and a joint does not: where the body was when the
 /// step began, and how fat it is.
 #[derive(Clone, Copy, Debug)]
@@ -705,8 +710,25 @@ pub struct Skeleton {
     live_joints: Vec<Vec<usize>>,
     live_joints_near: Vec<usize>,
 
+    /// **Where a body counts as having come from, for the purpose of this step.** The
+    /// solve measures everything against this -- how much of an overlap the step drove in,
+    /// how far a surface has slid, how far a body has rolled -- and the free part of a
+    /// correction moves it, so that a body lifted out of an overlap it was already in
+    /// counts as not having moved. See [`Correction::free_translation`].
     prev_position: Vec<(f64, f64, f64)>,
     prev_orientation: Vec<Quaternion>,
+    /// **Where a body actually was when the step began**, which is a different question
+    /// and needs a different answer. Copied once a step and never touched again.
+    ///
+    /// The free part of a correction is a fiction that has to hold for one step: it says
+    /// a body did not travel to where the solver put it. Over that step it is exactly
+    /// right, and it is why `prev_position` moves. But the body *is* there at the end of
+    /// it, and by the next step the fiction has expired -- so anything carried across the
+    /// boundary has to be measured against where the body really was. The friction
+    /// anchors are the only thing here that crosses it. See [`Skeleton::anchor_slip`],
+    /// and the measurement is in the doc on `free_moved_it` below.
+    began_position: Vec<(f64, f64, f64)>,
+    began_orientation: Vec<Quaternion>,
 
     /// Which bodies are directly jointed to each body, as one run per body, so contact
     /// generation can skip them. Rebuilt with the colouring. See [`Jointed`].
@@ -774,6 +796,25 @@ pub struct Skeleton {
     plan_work: usize,
     plan_near_work: usize,
 
+    /// **How far each contact has slipped since it stuck**, which is what friction is
+    /// actually asked to remove. See [`Skeleton::anchor_slip`] for the whole argument.
+    ///
+    /// `contact_slipped` and `ground_slipped` are this step's, in the order the contacts
+    /// are in, and are read by the solve. `anchors` is the same thing keyed by the
+    /// contact's *name* and sorted, which is how a contact finds what it had slipped when
+    /// the contact set it belonged to no longer exists -- the set is rebuilt from nothing
+    /// every step. Ground anchors need no map: a body has at most one contact per end, so
+    /// two slots per body is a whole index -- which makes `ground_anchors` the second
+    /// thing in this module indexed by body rather than by constraint, after
+    /// `ground_impulse`, and sound for the same reason and under the same check. See the
+    /// safety argument in [`Skeleton::solve_pass`]; nothing reads it during a pass in any
+    /// case, only the sweep that runs once the passes are done.
+    contact_slipped: Vec<(f64, f64, f64)>,
+    ground_slipped: Vec<(f64, f64, f64)>,
+    anchors: Vec<Anchor>,
+    next_anchors: Vec<Anchor>,
+    ground_anchors: Vec<[(f64, f64, f64); 2]>,
+
     /// The broad phase. See [`broadphase`] for why it is a grid.
     grid: Grid,
 
@@ -834,6 +875,8 @@ impl Default for Skeleton {
             jointed_built: false,
             live_joints: Vec::new(),
             live_joints_near: Vec::new(),
+            began_position: Vec::new(),
+            began_orientation: Vec::new(),
             prev_position: Vec::new(),
             prev_orientation: Vec::new(),
             jointed_start: Vec::new(),
@@ -857,6 +900,11 @@ impl Default for Skeleton {
             plan_near: Vec::new(),
             plan_work: 0,
             plan_near_work: 0,
+            contact_slipped: Vec::new(),
+            ground_slipped: Vec::new(),
+            anchors: Vec::new(),
+            next_anchors: Vec::new(),
+            ground_anchors: Vec::new(),
             grid: Grid::default(),
             sleeping: true,
             awake: BitSet::default(),
@@ -1281,11 +1329,30 @@ impl Skeleton {
         self.contact_impulse
             .resize(self.contacts.len(), Spent::default());
 
+        // What each of these contacts had already slipped, from whichever contact of the
+        // last step's set had the same name. A contact nobody anchored starts at zero,
+        // which is a contact that has just been made. See [`Skeleton::anchor_slip`].
+        self.contact_slipped.clear();
+        let anchors = &self.anchors;
+        self.contact_slipped.extend(self.contacts.iter().map(|c| {
+            let name = c.name();
+            match anchors.binary_search_by_key(&name, |&(key, _)| key) {
+                Ok(at) => anchors[at].1,
+                Err(_) => (0.0, 0.0, 0.0),
+            }
+        }));
+
         self.ground_contacts.clear();
         self.ground_colours[0].clear();
         self.ground_colours[1].clear();
         self.ground_span.clear();
         self.ground_span.resize(self.position.len(), (0.0, 0.0, 0.0));
+        self.ground_slipped.clear();
+        // Grown rather than cleared: this is the one buffer in the step that is supposed
+        // to remember what the last step left in it. Bodies are only ever added, so an
+        // index means the same body for the life of the skeleton.
+        self.ground_anchors
+            .resize(self.position.len(), [(0.0, 0.0, 0.0); 2]);
         let Some((normal, distance)) = self.ground else {
             return;
         };
@@ -1307,6 +1374,8 @@ impl Skeleton {
             );
             for (nth, index) in (before..self.ground_contacts.len()).enumerate() {
                 self.ground_colours[nth.min(1)].push(index);
+                let end = self.ground_contacts[index].end as usize;
+                self.ground_slipped.push(self.ground_anchors[i][end]);
             }
             // How far this body's contact with the plane reaches, as the vector from one
             // end of it to the other, or zero where it touches at a point. See
@@ -1480,6 +1549,10 @@ impl Skeleton {
 
         self.prev_position.copy_from_slice(&self.position);
         self.prev_orientation.copy_from_slice(&self.orientation);
+        self.began_position.clear();
+        self.began_position.extend_from_slice(&self.position);
+        self.began_orientation.clear();
+        self.began_orientation.extend_from_slice(&self.orientation);
 
         // **One sweep, not three.** Falling, travelling and spinning were a pass each,
         // which is three reads of every array and three handings of the same ten thousand
@@ -1578,6 +1651,8 @@ impl Skeleton {
             self.solve_pass(self.any_background && pass >= background);
         }
 
+        self.anchor_slip();
+
         // And one sweep to read both velocities back, for the same reason the predict is
         // one.
         let inv_dt = 1.0 / dt;
@@ -1667,8 +1742,131 @@ impl Skeleton {
         self.settle(dt, length(gravity));
     }
 
-    /// The four body arrays every correction writes, as the disjoint-scatter view a
-    /// colour is applied through. See [`scatter`] for why, and for the safety argument.
+    /// **What each contact still has not put back, carried to the next step.**
+    ///
+    /// # The defect this exists for
+    ///
+    /// Friction here is positional: it measures how far the two surfaces have drifted
+    /// apart tangentially and pushes them back. The question this answers is *drifted
+    /// since when*, and the obvious answer is wrong. Measuring from the start of the step
+    /// means whatever slip a step fails to remove is **forgiven** at the next one,
+    /// because the next step re-reads the drift from where the surfaces now are. The
+    /// error per step is tiny and the forgiveness is total, so it accumulates linearly
+    /// and a resting pile creeps for ever.
+    ///
+    /// Measured on one capsule lying alone on level ground -- no slope, no neighbours,
+    /// nothing pushing it sideways -- it slid at a constant 15 mm a second, in a fixed
+    /// direction, holding a fixed orientation and a fixed height, with a velocity
+    /// identical to thirteen figures over four thousand steps. The same at four solver
+    /// iterations and at thirty-two, so not a convergence shortfall; the same at `mu` of
+    /// 0.25, 0.5 and 1.0, so not Coulomb slip. A sphere did not do it and a capsule stood
+    /// on one end did not do it: it takes the two-ended line contact, whose two normal
+    /// corrections act at opposite lever arms and turn the body opposite ways, and drag
+    /// the contact line tangentially as they do. Friction chases that drag and very
+    /// nearly catches it. What is left over is a few tenths of a millimetre, and it is
+    /// the same sign every step.
+    ///
+    /// Real static friction does not work that way. It holds a body at the point where it
+    /// **stuck**, not where it was a sixtieth of a second ago, and a contact that has been
+    /// dragged a tenth of a millimetre off that point is pulled back to it.
+    ///
+    /// # The anchor
+    ///
+    /// So each contact carries what it has slipped and not put back, as a world-space
+    /// tangential vector, and the friction constraint is asked to remove *that plus* this
+    /// step's drift rather than this step's drift alone. This sweep works out what is
+    /// left once the passes are done and stores it under the contact's name, for whatever
+    /// contact wears that name next step to pick up.
+    ///
+    /// Carried as an accumulated slip rather than as a stored material point, which
+    /// matters for a body that is *rolling*: the point of contact walks along the surface
+    /// as it rolls, so a remembered material point would soon be one that is no longer
+    /// touching, and pinning it would fight the roll. An accumulated slip has no such
+    /// problem, because a body rolling without sliding accumulates none.
+    ///
+    /// # Re-anchoring, which is the whole design
+    ///
+    /// **A contact that has spent its whole Coulomb budget is sliding, and a sliding
+    /// contact has no memory.** Its anchor is dropped -- the slip goes back to zero -- so
+    /// that a body which is genuinely sliding keeps sliding from wherever it has got to
+    /// and is never dragged back to where it last stuck. Anything else would hold a slope
+    /// past `atan(mu)`, which is the law on one side of this.
+    ///
+    /// Everything else is kept, and a contact that is holding keeps an anchor that is
+    /// almost zero anyway -- the point is only that the little it is not gets corrected
+    /// rather than forgiven. A contact that has come apart is dropped too, and so is a
+    /// contact that carried no normal impulse at all, because neither is a contact.
+    ///
+    /// Nothing here is a threshold and nothing is tuned: the test is whether the friction
+    /// impulse reached the cone, which is the same test Coulomb's law already makes.
+    fn anchor_slip(&mut self) {
+        self.next_anchors.clear();
+        for (k, &contact) in self.contacts.iter().enumerate() {
+            let slipped = contact_left_slipped(
+                contact,
+                &self.gathered(contact.a),
+                &self.gathered(contact.b),
+                self.contact_slipped[k],
+                self.friction,
+                self.contact_impulse[k],
+            );
+            if slipped != (0.0, 0.0, 0.0) {
+                self.next_anchors.push((contact.name(), slipped));
+            }
+        }
+        // Named, so it has to be searchable by name next step. Contact order follows the
+        // broad phase, which follows the grid rather than the body indices, so this is a
+        // real sort and not a check that one already holds.
+        self.next_anchors.sort_unstable_by_key(|&(name, _)| name);
+        std::mem::swap(&mut self.anchors, &mut self.next_anchors);
+
+        for slots in self.ground_anchors.iter_mut() {
+            *slots = [(0.0, 0.0, 0.0); 2];
+        }
+        let Some((normal, _)) = self.ground else {
+            return;
+        };
+        for (k, &contact) in self.ground_contacts.iter().enumerate() {
+            // Pooled per body, so both ends of a capsule are bounded by the load the
+            // whole patch carries, which is the same budget they spent. See
+            // `build_contacts`.
+            self.ground_anchors[contact.body][contact.end as usize] = ground_left_slipped(
+                contact,
+                &self.gathered(contact.body),
+                normal,
+                self.ground_span[contact.body],
+                self.ground_slipped[k],
+                self.friction,
+                self.ground_impulse[contact.body],
+            );
+        }
+    }
+
+    /// Body `i` as the solve sees it. The same thing [`scatter::Bodies::gather`] builds,
+    /// for the sweeps that hold `&self` and have no need of the pointers.
+    #[inline]
+    fn gathered(&self, i: usize) -> Gathered {
+        let orientation = self.orientation[i];
+        let inv_inertia = self.inv_inertia[i];
+        Gathered {
+            now: Pose {
+                position: self.position[i],
+                orientation,
+                inv_mass: self.inv_mass[i],
+                inv_inertia,
+                world_inv_inertia: SymMat3::of(orientation, inv_inertia),
+            },
+            // The anchor sweep is the one caller, and what it must measure against is
+            // where the body really began the step rather than where the free part of a
+            // correction has since claimed it began. See [`Skeleton::began_position`].
+            prev_position: self.began_position[i],
+            prev_orientation: self.began_orientation[i],
+            radius: self.radius[i],
+        }
+    }
+
+    /// The body arrays every correction writes, as the disjoint-scatter view a colour is
+    /// applied through. See [`scatter`] for why, and for the safety argument.
     #[inline]
     fn writable(&mut self) -> Bodies {
         Bodies::of(
@@ -1794,6 +1992,8 @@ impl Skeleton {
         let rolling = self.rolling_resistance;
         let ground = self.ground;
         let span = &self.ground_span;
+        let contact_slipped = &self.contact_slipped;
+        let ground_slipped = &self.ground_slipped;
 
         // SAFETY: the argument is the one [`scatter`] makes, and every part of it still
         // holds here.
@@ -1819,6 +2019,14 @@ impl Skeleton {
         //   also why the two ground sets must stay separate stages -- set one has to read
         //   what set zero spent, and that ordering is the barrier's to provide.
         //   `ground_span` is read only, and indexed by the same body.
+        // * **`ground_slipped` is read here and is indexed by the ground contact**, like
+        //   the pair impulses and unlike the budget, so it needs nothing of the above. Its
+        //   backing store `Skeleton::ground_anchors` *is* per body -- two slots, one per
+        //   end -- but nothing in a pass touches that: it is written once by
+        //   `Skeleton::anchor_slip` after the last pass has finished and read once by
+        //   `Skeleton::build_contacts` before the first has started, both on the calling
+        //   thread with `&mut self`. A change that moved either into a pass would put it
+        //   in the same position as `ground_impulse` and would need the same argument.
         // * Across stages, `crew::each_stage` puts a barrier between them, and its
         //   release-acquire pair is what makes one colour's writes visible to the next.
         //   That ordering used to come from the join; losing it without replacing it
@@ -1858,6 +2066,7 @@ impl Skeleton {
                         contacts,
                         &bodies,
                         &contact_impulse,
+                        contact_slipped,
                         inv_mass,
                         inv_inertia,
                         radius,
@@ -1872,6 +2081,7 @@ impl Skeleton {
                             contacts,
                             &bodies,
                             &contact_impulse,
+                            contact_slipped,
                             inv_mass,
                             inv_inertia,
                             radius,
@@ -1896,6 +2106,7 @@ impl Skeleton {
                             normal,
                             distance,
                             span[contact.body],
+                            ground_slipped[k],
                             ground_impulse.get(contact.body),
                         );
                         ground_impulse.set(contact.body, totals);
@@ -2238,6 +2449,7 @@ unsafe fn solve_some_contacts(
     contacts: &[Contact],
     bodies: &Bodies,
     impulse: &scatter::Cells<Spent>,
+    slipped: &[(f64, f64, f64)],
     inv_mass: &[f64],
     inv_inertia: &[(f64, f64, f64)],
     radius: &[f64],
@@ -2248,8 +2460,15 @@ unsafe fn solve_some_contacts(
         let contact = contacts[k];
         let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
         let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
-        let (corrections, totals) =
-            solve_contact(contact, &first, &second, friction, rolling, impulse.get(k));
+        let (corrections, totals) = solve_contact(
+            contact,
+            &first,
+            &second,
+            friction,
+            rolling,
+            slipped[k],
+            impulse.get(k),
+        );
         impulse.set(k, totals);
         bodies.apply(corrections);
     }
