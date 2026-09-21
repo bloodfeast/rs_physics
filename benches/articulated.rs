@@ -364,6 +364,48 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
 /// A settled scene does not need this -- it stays settled, so its samples are already the
 /// same scene -- and paying a ten-thousand-body clone to time a step that costs nothing
 /// would be measuring the clone. [`a_heap_that_has_settled`] is left in place.
+/// # How to compare two builds here, and what this machine can actually resolve
+///
+/// [`steady`] fixes the *scene*, which was the first thing wrong with these measurements.
+/// Two more things are wrong with the obvious way of using it, and both were found by
+/// getting a result and then trying to break it rather than by reasoning.
+///
+/// **Alternating rounds is not enough; the order within a round has to alternate too.**
+/// Running build A then build B, three times, gave a clean eight per cent in A's favour on
+/// `pile` at eight iterations -- 6.99 / 5.81 / 6.35 ms against 5.84 / 5.79 / 5.85, with B
+/// strikingly steady. Running B then A, four times, gave 6.47 / 6.50 / 6.56 / 6.24 against
+/// 5.69 / 6.32 / 5.71 / 6.32. It flipped. **Whichever binary runs first in a round is the
+/// slow one**, by about the size of the effect being looked for, so an A-B alternation
+/// measures the order and reports it as the change.
+///
+/// The fix is A B B A. Each build gets one early slot and one late slot, so any drift that
+/// is monotone across the round -- thermal, frequency, page cache -- lands equally on both
+/// means and cancels. It also *measures* the drift, as the gap between a build's own two
+/// samples, which is the number that says whether a round was usable.
+///
+/// **And then the round-to-round spread is what limits everything.** Under A B B A on
+/// `pile` at eight iterations, two builds whose difference is known to be nothing:
+///
+/// ```text
+///   round      A mean     B mean    drift
+///     1       6051.9     6080.3     -4.0%
+///     2       5732.8     6181.5     -6.7%
+///     3       6147.3     6508.8     +3.3%
+///     4       6181.5     5993.7     -6.7%
+///   mean      6028.3     6191.1     B +2.7%
+/// ```
+///
+/// Eight per cent of spread on each build across four rounds, against a difference of 2.7
+/// per cent -- so four rounds of A B B A resolve nothing finer than about ten per cent.
+/// Averaging beats it down as the square root of the count, so **resolving a three per cent
+/// change on this fixture takes on the order of thirty rounds**, which is about
+/// three-quarters of an hour of machine time for one comparison. That is the real price of
+/// a small optimisation here, and it should be paid deliberately or not at all.
+///
+/// The cheaper instruments are better where they apply, and several of this crate's
+/// findings came from them rather than from timing: an exact count of the bodies the scan
+/// examines, an allocation count from a counting allocator, `Skeleton::candidate_pairs`,
+/// `Skeleton::solved_in_parallel`. A number that is exact needs no rounds at all.
 fn steady(b: &mut criterion::Bencher<'_>, scene: &Skeleton, mut one_step: impl FnMut(&mut Skeleton)) {
     b.iter_batched_ref(
         || scene.clone(),
