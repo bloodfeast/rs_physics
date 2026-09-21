@@ -797,18 +797,33 @@
 //! four takes three times as long to settle, while a column of eight takes a seventh as
 //! long and the worst column of any height falls from 2961 steps to 920.
 //!
-//! **What it costs.** A traversal and a half -- two velocity stages over the contacts, one
-//! over the ground, and the extra read-back sweep -- against eight positional passes.
-//! Measured as a matched pair back to back, because this machine's variance between
-//! sessions is larger than the effect: `one/8` 38.5..42.0 us becomes 51.6..53.6,
-//! `pile/8` 3.24..4.10 ms becomes 4.71..4.92, `arriving/8` 7.10..7.21 ms becomes
-//! 7.75..8.04. So a quarter to a third on the small scene and rather less on the large
-//! ones, and part of even that is not arithmetic: the pile bench steps a scene that is
-//! still arriving, so a change that alters what has settled by the time it is timed alters
-//! the timing. **And two more vectors on [`Correction`] cost more than the pass does** --
-//! taking it from 120 bytes to 176 put `one/8` at 53.6 us and `pile/8` at 4.92 ms with
-//! the pass itself unchanged, which is why the third correction kind shares the first's
-//! fields rather than adding its own. See [`Charge`].
+//! **What it costs, and the cost lands exactly where the pass runs.** A traversal and a
+//! half -- two velocity stages over the contacts, one over the ground, and the extra
+//! read-back sweep -- against eight positional passes. Three alternating rounds of
+//! prebuilt binaries, so that neither build state nor a scene drifting under the benchmark
+//! is in the comparison; every fixture is timed from one named state, and `benches` has
+//! the account of why that had to be fixed first.
+//!
+//! ```text
+//!                   contacts        before              after
+//!   joints_only/8          0    2.65 .. 2.71 ms    2.65 .. 2.75 ms
+//!   one/8                 14    88.5 .. 96.1 us     109 .. 111 us
+//!   pile/8             8,400    5.82 .. 6.67 ms    7.39 .. 8.19 ms
+//!   arriving/8        23,000    7.42 .. 8.60 ms    8.60 .. 10.2 ms
+//! ```
+//!
+//! **A workload with no contacts pays nothing**, which is the check that says the cost is
+//! the pass and not a regression somewhere else: `joints_only` is six hundred rigs with
+//! self-collision off and no plane, the whole step is joints, `plan_velocity` is empty and
+//! the guard in [`Skeleton::step`] skips the lot -- and the two ranges are the same range.
+//! Where there are contacts it costs about a fifth to a quarter, and `arriving` is too
+//! noisy to say more than that its two ranges touch.
+//!
+//! **And two more vectors on [`Correction`] cost more than the pass does** -- taking it
+//! from 120 bytes to 176 was worth 30 to 40 per cent on its own, with the pass itself
+//! unchanged, because every joint and every contact in the positional solve carries one
+//! whether it has anything velocity-level to say or not. That is why the third correction
+//! kind shares the first's fields rather than adding its own. See [`Charge`].
 //!
 //! # Allocation
 //!
