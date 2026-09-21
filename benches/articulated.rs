@@ -104,16 +104,31 @@ const SETTLED: usize = 1800;
 const STACKS: usize = 3333;
 const STACK_HIGH: usize = 3;
 
-/// Capsules in the ploughed field, laid in single file down a lane.
+/// Rows of capsules down the ploughed field.
 ///
-/// **A lane and not a sheet, and that is the broad phase's doing rather than a taste.**
-/// The grid's cell is twice the largest reach in the set, so a roller wide enough to
-/// cover a broad field coarsens the cell for every small body in it: at four times a
-/// field body's reach a cell held forty of them, each scanning twenty-seven cells, and
-/// the step cost more in candidate pairs than in everything else together. A lane keeps
-/// the roller within twice a field body's reach, which is what the grid is sized for.
-/// See [`roller`].
+/// **A sheet and not a lane.** It was a lane, and that was the broad phase's doing rather
+/// than a taste: the grid's cell was twice the largest reach in the set, so a roller wide
+/// enough to cover a broad field coarsened the cell for every small body in it, and the
+/// step cost more in candidate pairs than in everything else together. A lane kept the
+/// roller within twice a field body's reach, which was what the grid was sized for. The
+/// grid now keeps a body that size out of itself and tests it directly, so the fixture no
+/// longer has to be the shape the broad phase wanted. See [`roller`].
 const FIELD_LONG: usize = 800;
+
+/// Capsules across the field, side by side in each row.
+///
+/// Six, which with [`FIELD_ACROSS`] is a field four and a half metres wide: wide enough
+/// that the grid's cell is coarse across the field as well as along it, which is where the
+/// cost of sizing it for the roller actually lived. The roller spans the whole of it --
+/// see [`roller`] -- so every body in the field is driven over and the retirement curve
+/// below is the whole field rather than a strip out of the middle of it.
+const FIELD_WIDE: usize = 6;
+
+/// How far apart the field's capsules stand across the field.
+///
+/// A field capsule lies across the lane and is 0.7 m from end to end, so this is the same
+/// five centimetres of clearance [`FIELD_ALONG`] leaves down it.
+const FIELD_ACROSS: f64 = 0.75;
 
 /// How far apart the field's capsules stand down the lane.
 ///
@@ -814,33 +829,50 @@ fn plough(s: &mut Skeleton, roller: usize) {
     }
 }
 
-/// A lane of capsules lying flat on the plane, each across the lane and near enough to its
-/// neighbours to be a surface rather than scattered bodies.
+/// A field of capsules lying flat on the plane, each across the line of the drive and near
+/// enough to its neighbours to be a surface rather than scattered bodies.
 fn field() -> Skeleton {
     let mut s = Skeleton::new();
     s.set_ground((0.0, 1.0, 0.0), 0.0);
     s.set_sleeping(false);
     for column in 0..FIELD_LONG {
-        let mut body = Body::capsule(8.0, 0.1, 0.5, (column as f64 * FIELD_ALONG, 0.11, 0.0));
-        // Lying flat with its axis across the lane, so the roller meets each one side on.
-        body.orientation = rs_physics::models::Quaternion::from_axis_angle(
-            (1.0, 0.0, 0.0),
-            std::f64::consts::FRAC_PI_2,
-        );
-        s.add_body(body);
+        for row in 0..FIELD_WIDE {
+            // Centred on the line the roller is driven down, so the roller meets the
+            // whole width of the field at once.
+            let across = (row as f64 - (FIELD_WIDE - 1) as f64 * 0.5) * FIELD_ACROSS;
+            let mut body = Body::capsule(
+                8.0,
+                0.1,
+                0.5,
+                (column as f64 * FIELD_ALONG, 0.11, across),
+            );
+            // Lying flat with its axis across the drive, so the roller meets each one
+            // side on.
+            body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+                (1.0, 0.0, 0.0),
+                std::f64::consts::FRAC_PI_2,
+            );
+            s.add_body(body);
+        }
     }
     s
 }
 
-/// The heavy body that is driven through it: a dense roller lying across the lane, two
-/// hundred and fifty times the mass of what it drives over.
+/// The heavy body that is driven through it: a dense roller lying across the field, long
+/// enough to span the whole width of it.
 ///
-/// **Only twice a field body's reach**, which is a constraint the broad phase puts on the
-/// fixture rather than a modelling choice: the grid's cell is twice the largest reach in
-/// the set, so one large collider coarsens the grid for every small body in it. See
-/// [`FIELD_LONG`] for what that cost when the roller was four times the size.
+/// **Six times a field body's reach**, which used to be a thing this fixture could not
+/// have. The grid's cell was twice the largest reach in the set, so a roller this long
+/// coarsened the cell for every small body in it, and the fixture was cut down to a lane
+/// and a roller half this size to keep the broad phase honest. It is now kept out of the
+/// grid and tested against it directly, so the roller may be the size the field wants.
+/// See [`FIELD_LONG`].
+///
+/// Its mass is the same steel it always was -- two and a half thousand kilogrammes a
+/// metre of length -- so the load it puts on a body under it, which is what [`CRUSHED`]
+/// is measured against, has not moved with the geometry.
 fn roller() -> Body {
-    let mut body = Body::capsule(2000.0, 0.25, 0.8, (-1.0, 0.25, 0.0));
+    let mut body = Body::capsule(10_000.0, 0.25, 4.0, (-1.0, 0.25, 0.0));
     body.orientation = rs_physics::models::Quaternion::from_axis_angle(
         (1.0, 0.0, 0.0),
         std::f64::consts::FRAC_PI_2,
