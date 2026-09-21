@@ -594,7 +594,7 @@
 //! resolve to stillness. Measured, a settled rig holds 0.73 to 0.82 J of kinetic energy
 //! where it used to hold 0.07 to 0.36, and stands about a fifth higher.
 //!
-//! # Three ways of taking the energy back out, and why none of them is here
+//! # Four ways of taking the energy back out, and why none of them is here
 //!
 //! * **Leave rolling resistance in the normal half**, so that only friction is staggered.
 //!   It is the natural minimal version and it is much worse than doing nothing: the rig
@@ -625,8 +625,44 @@
 //!   upper one. Bound that and the upper body is never stopped at all: a body dropped on a
 //!   sleeping stack sinks three millimetres into it and a settled pile of forty never comes
 //!   to rest. Bounding only the ground's share is worse again, four unit tests rather than
-//!   two. A version of this that bounds a *body's* velocity change rather than a contact's
-//!   has not been tried and is the remaining direction.
+//!   two.
+//! * **The same bound pooled over the body**, which is the obvious repair of the one above
+//!   and the third time this module has met the granularity question -- the ground patch
+//!   was two point constraints until it became one block solve, and contact memory was per
+//!   contact until it was pooled per pair patch. It was built and measured, and the
+//!   pooling does exactly what the pattern says it should: the propagation channel stays
+//!   open, `a_pile_settles_into_a_heap_rather_than_rolling_away` passes again, and so do
+//!   all thirteen laws, the centre-of-mass one included -- once the fraction charged is
+//!   the *same* for both ends of a pair, which it has to be, because the share of an
+//!   impulse that is momentum exchange rather than positional repair cannot be one number
+//!   for the body that receives it and another for the body that gives it. Charging each
+//!   end against its own bound moves a free skeleton's centre of mass by 1.8 m.
+//!
+//!   It still does not work, and the reason closes the whole family rather than this
+//!   member of it. **The bound is satisfied by the very thing it is aimed at.** "No faster
+//!   than it arrived" bounds growth, not a cycle: a body going round a limit cycle at a
+//!   constant speed arrives at that speed every step, so the bound is slack at exactly the
+//!   state it was built to forbid. Measured on the settled rig, the median bone's speed is
+//!   0.054 to 0.063 m/s on every draw -- a third of `g dt`, the same third on all six, which
+//!   is a cycle and not a spread. And what it does bite on it cannot dissipate: the share it
+//!   refuses to charge goes to `Correction::free_translation`, which moves the body without
+//!   reading back as velocity, so the momentum it declines to take out is still in the body
+//!   next step. Measured: the rig travels past the jostling allowance in ten draws of
+//!   twenty-four, the worst at 1.19 reaches with a straightness of 0.62, a settled pile of
+//!   twenty drifts 0.000..0.199 of a reach against 0.000..0.008, and a capsule dropped on a
+//!   sleeping stack of three still finishes six millimetres inside the top of it.
+//!
+//!   There is no third destination for the refused share. Charging it is this commit;
+//!   making it free preserves it; dropping it is under-relaxation, which is measured and
+//!   rejected in the section above. A sink would have to be something that removes momentum
+//!   without being asked, and this module does not have one and may not have a tuned one.
+//!
+//! So the state of it: the walk is gone and the sleeping is not, and what is left is a
+//! limit cycle at a third of one step of gravity that eight passes do not resolve and no
+//! bound on the read-back velocity can see. Anything aimed at it next has to be a genuine
+//! velocity-level solve -- one that can move `prev_position` without moving the body, which
+//! is the one correction shape this module does not have -- or it has to accept that a
+//! position-based solver at sixty hertz and eight passes leaves this much.
 //!
 //! # Allocation
 //!
