@@ -405,9 +405,13 @@
 //! stops travelling (0.239 of a reach to 0.0003, straightness 0.72 to 0.001) and one draw
 //! in six now sleeps; a rig that cannot touch itself sleeps in all six draws at steps 112
 //! to 230, where before four of six slept and took between 198 and 1520; and a settled pile
-//! of forty and of sixty drift below the whole spread they used to sit in. It costs
-//! nothing: `one/8` 36.8 us becomes 36.0, `pile/8` 3.25 ms becomes 3.13, `arriving/8`
-//! 6.44 ms becomes 5.98, all of it settling sooner rather than arithmetic saved.
+//! of forty and of sixty drift below the whole spread they used to sit in.
+//!
+//! It costs nothing, measured as a matched pair run back to back because this machine's
+//! variance between sessions is larger than the effect: `one/8` is nine per cent faster and
+//! `pile/8` twenty-six, while `arriving/8` does not move (p = 0.85). What is faster is a
+//! scene that settles sooner rather than arithmetic saved -- a step with anchors costs one
+//! extra pass over the ground contacts, two vectors, a float and a bit a body.
 //!
 //! **What it costs is patience with a tall jumble.** A stack of capsules dropped in a
 //! column falls into a heap that has to shake itself out, and the ground bodies underneath
