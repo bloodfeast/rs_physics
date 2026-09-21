@@ -45,19 +45,22 @@ const PILE: usize = 600;
 /// point where anything has stopped.
 const ARRIVING: usize = 120;
 
-/// Steps before [`a_heap_settled`] is timed.
+/// Steps before [`a_heap_at_thirty_seconds`] is timed.
 ///
 /// From the fixture's measured settling curve rather than picked. Median body speed after
 /// 30, 120, 300, 600, 900, 1200, 1800, 2400 and 3600 steps is 2.74, 1.64, 0.68, 0.27,
 /// 0.22, 0.26, 0.29, 0.24 and 0.14 m/s: it falls by a factor of ten over the first ten
 /// seconds and then creeps down. Thirty seconds is past the knee and short of the point
 /// where the run costs more than the bench.
-///
-/// **It is not yet enough for anything to fall asleep**, and that is a statement about
-/// the solver rather than about the fixture: see the creep in the module header. When
-/// that is fixed this is the bench that will say so, and the sleeping-off column is the
-/// control.
 const SETTLED: usize = 1800;
+
+/// Capsules in [`a_heap_that_has_settled`], and the height of each stack.
+///
+/// Three high because that is what settles: measured, stacks one, two and three deep all
+/// reach the point where nothing is awake, and five deep does not. Ten thousand of them
+/// so the count matches the other heaps here.
+const STACKS: usize = 3333;
+const STACK_HIGH: usize = 3;
 
 /// `count` rigs dropped onto the plane in a grid close enough that they land on one
 /// another. Nothing is pinned, so the heap has somewhere to put its energy.
@@ -301,14 +304,18 @@ fn a_heap_arriving(c: &mut Criterion) {
     group.finish();
 }
 
-/// **The same heap once it has arrived**, which is the state a heap spends nearly all of
-/// its life in and the state no bench here could see before.
+/// **The same heap after thirty seconds**, which is as close to rest as a rig of this
+/// solver's gets -- and not close enough for anything to fall asleep.
 ///
-/// Run with sleeping on and off, because the difference between the two *is* the
-/// measurement: a settled heap solved in full costs what it cost to arrive, and a settled
-/// heap left alone costs a word test per sixty-four bodies.
-fn a_heap_settled(c: &mut Criterion) {
-    let mut group = c.benchmark_group("articulated/settled");
+/// Named for what it measures rather than for what it was meant to. Every body is still
+/// awake here, so the sleeping column is not a win, it is **the cost of asking**: the
+/// settling test over ten thousand bodies and the live constraint lists, measured at five
+/// to ten per cent. It is kept for exactly that, as the control on the feature's
+/// overhead. What stops the heap settling is in the module header and is a defect in the
+/// solve, not in this fixture; [`a_heap_that_has_settled`] is the one that shows what
+/// sleeping is worth once a heap does come to rest.
+fn a_heap_at_thirty_seconds(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/thirty_seconds");
     group.sample_size(10);
 
     for sleeping in [false, true] {
@@ -318,10 +325,55 @@ fn a_heap_settled(c: &mut Criterion) {
             s.step(DT, G, 8);
         }
         println!(
-            "  settled, sleeping {sleeping}: {} of {} awake, {} contacts",
+            "  thirty seconds, sleeping {sleeping}: {} of {} awake, {} contacts",
             s.awake_count(),
             s.len(),
             s.contact_count(),
+        );
+        group.bench_with_input(BenchmarkId::new("sleeping", sleeping), &sleeping, |b, _| {
+            b.iter(|| {
+                s.step(black_box(DT), black_box(G), black_box(8));
+            });
+        });
+    }
+    group.finish();
+}
+
+/// **Ten thousand bodies that have actually come to rest**, which is the case sleeping
+/// exists for and the only one that demonstrates it.
+///
+/// Stacks of three capsules, spread far enough apart to be their own islands. They reach
+/// the point where nothing is awake at about step 700, and from there a step is a word
+/// test per sixty-four bodies and nothing else. The sleeping-off column is the same heap
+/// solved in full, for ever, which is what every settled workload cost before.
+fn a_heap_that_has_settled(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/has_settled");
+    group.sample_size(10);
+
+    for sleeping in [false, true] {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        let side = (STACKS as f64).sqrt().ceil() as usize;
+        for i in 0..STACKS {
+            let (x, z) = ((i % side) as f64 * 1.5, (i / side) as f64 * 1.5);
+            for k in 0..STACK_HIGH {
+                let mut body =
+                    Body::capsule(4.0, 0.1, 0.5, (x, 0.11 + 0.21 * k as f64, z));
+                body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+                    (0.0, 0.0, 1.0),
+                    -std::f64::consts::FRAC_PI_2,
+                );
+                s.add_body(body);
+            }
+        }
+        s.set_sleeping(sleeping);
+        for _ in 0..900 {
+            s.step(DT, G, 8);
+        }
+        println!(
+            "  has settled, sleeping {sleeping}: {} of {} awake",
+            s.awake_count(),
+            s.len(),
         );
         group.bench_with_input(BenchmarkId::new("sleeping", sleeping), &sleeping, |b, _| {
             b.iter(|| {
@@ -364,7 +416,8 @@ criterion_group!(
     the_pile,
     the_pendulums,
     a_heap_arriving,
-    a_heap_settled,
+    a_heap_at_thirty_seconds,
+    a_heap_that_has_settled,
     joining
 );
 criterion_main!(benches);

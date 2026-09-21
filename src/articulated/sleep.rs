@@ -203,11 +203,22 @@ pub(super) struct Components {
 }
 
 impl Components {
-    pub(super) fn reset(&mut self, len: usize) {
-        self.parent.clear();
-        self.parent.extend(0..len as u32);
-        self.size.clear();
-        self.size.resize(len, 1);
+    /// Makes every body in `members` a component of its own, and touches no others.
+    ///
+    /// Only those, because only they are ever unioned or looked up: a component that
+    /// could reach a body outside the set would have to have been joined to it, and the
+    /// caller joins nothing that is not in it. On a heap where one body in a hundred has
+    /// settled that is a hundredth of the writes a full reset does.
+    pub(super) fn reset_members(&mut self, len: usize, members: &BitSet) {
+        if self.parent.len() < len {
+            self.parent.resize(len, 0);
+            self.size.resize(len, 1);
+        }
+        let (parent, size) = (&mut self.parent, &mut self.size);
+        members.for_each_set(|i| {
+            parent[i] = i as u32;
+            size[i] = 1;
+        });
     }
 
     #[inline]

@@ -192,6 +192,65 @@
 //! iteration count -- and it does not fall off with more passes, which is what says the
 //! forgiveness is across steps rather than within one.
 //!
+//! # Why a body resting on level ground travels, which is what stops anything settling
+//!
+//! **Every capsule lying on the plane slides, at between 10 and 40 mm a second depending
+//! only on how long it is, while turning by nothing at all.** A sphere does not move.
+//! That is the whole reason a rig does not come to rest, and through the rig it is most
+//! of the reason sleeping does not yet pay on a heap.
+//!
+//! The rig's residual is not internal. Measured over windows from 15 to 1920 steps, a
+//! seventeen-bone rig's centre travels 3.3 mm to 434 mm while the median body moves the
+//! same amount *relative to that centre* -- 0.4 mm, and not growing. The rig is rigid and
+//! skating. So an island-relative settling criterion would be the wrong answer: there is
+//! nothing internal to forgive, the assembly really is going somewhere.
+//!
+//! The cause is a contact patch being sampled twice and solved in sequence:
+//!
+//! * A sphere has one ground contact and never moves; every capsule has one at each end
+//!   of its patch and every capsule slides.
+//! * With rolling resistance off it stops dead (0.001 mm/s). With friction off it stops
+//!   dead. **It takes both**, which is the signature of one law being charged for the
+//!   other's transient.
+//!
+//! The two ends are separate constraints in separate stages with a barrier between, so
+//! each one's normal correction tips the body about the across-patch axis before the
+//! other tips it back. Rolling resistance bills that transient as if it were a roll and
+//! turns the body; turning about the centre carries the contact point sideways; friction,
+//! the next pass, hauls the centre after it. The turn nets to nothing and the travel does
+//! not.
+//!
+//! It is **not** what the iteration count suggests: 4 passes is worse, and 8, 16, 32 and
+//! 64 are the same. It is not the joints -- a line of jointed capsules on the plane goes
+//! to sleep at step 22, and so does the same line unjointed.
+//!
+//! Four fixes were built and measured, and none is landable:
+//!
+//! * **Turn about the contact rather than the centre**, carrying the centre back by
+//!   `w x r`. Takes a lone capsule to 0.000 mm/s and its resting height to exact, and
+//!   levitates it: `w x r` has a normal component wherever the contact is not directly
+//!   below the centre, and the non-penetration constraint has no downward half to pull it
+//!   back. At a coefficient of 0.5 the body leaves at 1.5 m/s.
+//! * **The same, tangential part only.** Strictly better than the solver at every aspect
+//!   ratio -- 17.4/9.0/8.5/41.8/36.0/26.1/15.9/20.3/9.7/0.4 mm/s becomes
+//!   10.7/2.9/0.06/0.09/0.05/0.06/0.09/0.04/0.03/0.005 -- and with friction under about
+//!   0.05 it pivots about a point nothing is holding and crosses the ground at 4.8 m/s.
+//! * **The same, bounded by `friction * normal_impulse`.** Every test and every law
+//!   passes, at every friction from 0 to 1 and every aspect ratio. And the workloads that
+//!   matter get *worse*: the rig goes from 14 to 43 mm a second and a five-stack from 359
+//!   steps to sleep to 892, because the point a body pivots about has to be one that is
+//!   not moving, and the body under it is.
+//! * **The same, against the ground only**, where the point really is fixed. Rig 14 to 6
+//!   mm/s and the five-stack to 288 steps, and it fails
+//!   `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` and the pile drift law, and
+//!   at a coefficient of 0.5 the rig leaves at 410 mm/s.
+//!
+//! The pattern in all four is the same one the contact anchors ran into: a correction
+//! that gives one contact its own reference frame is consistent only where the contacts
+//! are. **The fix is upstream of all of them -- a body's ground patch should be one
+//! constraint, not two point constraints solved one after the other.** Every failure
+//! above is a symptom of the second sample seeing what the first did.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
@@ -790,6 +849,13 @@ pub struct Skeleton {
     next_frontier: BitSet,
     /// Bodies the sweep reached that were asleep, to be woken before the next round.
     reached: Vec<usize>,
+    /// Bodies that have now been still for their whole settling window. The union-find
+    /// below only looks at constraints with one of these at each end; see
+    /// [`Skeleton::settle`].
+    ready: BitSet,
+    /// Ready bodies found holding up one that is still moving, set aside during the edge
+    /// scan and disqualified after it. See [`Skeleton::settle`].
+    held: Vec<u32>,
     /// Where a body was when its settling window opened, and how long it has been there.
     /// See [`sleep`] for why the drift is measured against the window rather than against
     /// the previous step.
@@ -864,6 +930,8 @@ impl Default for Skeleton {
             frontier: BitSet::default(),
             next_frontier: BitSet::default(),
             reached: Vec::new(),
+            ready: BitSet::default(),
+            held: Vec::new(),
             still_from: Vec::new(),
             still_turn: Vec::new(),
             still_steps: Vec::new(),
@@ -969,6 +1037,7 @@ impl Skeleton {
         self.swept.resize(n, false);
         self.frontier.resize(n, false);
         self.next_frontier.resize(n, false);
+        self.ready.resize(n, false);
         self.background.resize(n, false);
         // A new body arrives awake unless it is pinned, and a pinned body is never awake:
         // it does not move, so there is nothing for a step to do to it.
@@ -1513,6 +1582,19 @@ impl Skeleton {
             ),
             ((&[f64], &[(f64, f64, f64)]), &[u64]),
         )| {
+            // A chunk with nothing asleep in it runs the zipped sweep it always ran.
+            // Walking it by index instead costs a bounds check on five slices a body, and
+            // measured on a heap where nothing sleeps that was most of what sleeping cost
+            // when it was saving nothing.
+            if words.iter().all(|&word| word == u64::MAX) {
+                p.iter_mut()
+                    .zip(v.iter_mut())
+                    .zip(q.iter_mut())
+                    .zip(inv_m.iter())
+                    .zip(w.iter())
+                    .for_each(predict);
+                return;
+            }
             let mut run = |i: usize| predict(((((&mut p[i], &mut v[i]), &mut q[i]), &inv_m[i]), &w[i]));
             for (nth, &word) in words.iter().enumerate() {
                 let base = nth * 64;
@@ -1606,6 +1688,17 @@ impl Skeleton {
             ),
             ((&[(f64, f64, f64)], (&[Quaternion], &[Quaternion])), &[u64]),
         )| {
+            // See the predict sweep: a chunk with nothing asleep in it runs the zipped
+            // form, and only a ragged one pays for the bits.
+            if words.iter().all(|&word| word == u64::MAX) {
+                v.iter_mut()
+                    .zip(w.iter_mut())
+                    .zip(p.iter())
+                    .zip(prev_p.iter())
+                    .zip(q.iter().zip(prev_q.iter()))
+                    .for_each(read_back);
+                return;
+            }
             let mut run = |i: usize| {
                 read_back((
                     (((&mut v[i], &mut w[i]), &p[i]), &prev_p[i]),
@@ -2072,6 +2165,7 @@ impl Skeleton {
             radius,
             half_length,
             awake,
+            ready,
             ..
         } = self;
         // Whether any body has now been still for its whole window. Everything below this
@@ -2080,7 +2174,8 @@ impl Skeleton {
         // its awake bodies and nothing else. That is the common case while a heap is
         // arriving, and it is worth an early exit: the union-find below is over every
         // joint and every contact, which on the heap workload is fifty thousand edges.
-        let mut ready = false;
+        let mut any_ready = false;
+        ready.clear();
         awake.for_each_set(|i| {
             // The body's reach -- how far its surface is from its own centre -- is the
             // length everything here is measured against, so that the same rule serves a
@@ -2110,55 +2205,82 @@ impl Skeleton {
                 still_turn[i] = orientation[i];
             } else {
                 still_steps[i] += 1;
-                ready |= still_steps[i] >= settling_steps(reach, gravity, dt);
+                if still_steps[i] >= settling_steps(reach, gravity, dt) {
+                    ready.set(i);
+                    any_ready = true;
+                }
             }
         });
-        if !ready {
+        if !any_ready {
             return;
         }
 
         // -- which of them are held up by each other --------------------------------
-        self.components.reset(n);
-        for joint in self.joints.iter() {
-            let (a, b) = joint.bodies();
-            // A pinned body carries no disturbance and joins no island; see [`sleep`].
-            if self.inv_mass[a] > 0.0 && self.inv_mass[b] > 0.0 {
-                self.components.union(a, b);
+        //
+        // **Only over the constraints with a body ready to sleep at each end.** An island
+        // sleeps only if every member is ready, so a constraint with an unready end
+        // cannot be inside one -- and the union-find is the expensive half of this, fifty
+        // thousand edges of pointer-chasing on the heap workload, against two bit tests
+        // to reject one. While a heap is arriving almost every edge is rejected.
+        //
+        // The edges that straddle the boundary still have to be looked at, because a
+        // ready body holding up an unready one is not entitled to sleep either. They mark
+        // the ready side's component instead of joining it, which they can only do once
+        // every union is in, so it is two passes rather than one.
+        self.components.reset_members(n, &self.ready);
+        self.unsettled.clear();
+        self.unsettled.resize(n, false);
+        {
+            let Skeleton {
+                components,
+                joints,
+                contacts,
+                ready,
+                held,
+                ..
+            } = self;
+            held.clear();
+            // **One scan, and two bit tests an edge.** Every other lookup here was a
+            // random access into an array the size of the body count, and there are
+            // eighteen thousand edges on the heap workload: the inverse masses this used
+            // to test are already implied, because a pinned body is never awake and only
+            // an awake body is ever ready.
+            //
+            // An edge with a ready body at one end and a moving one at the other cannot
+            // be inside a sleeping island, but it does disqualify the ready side -- a
+            // body holding up something that is still moving is not entitled to stop. Its
+            // component is not known until every union is in, so the ready end is set
+            // aside here and looked up afterwards, which costs a walk over the boundary
+            // rather than a second walk over every edge.
+            let mut edge = |a: usize, b: usize| match (ready.get(a), ready.get(b)) {
+                (true, true) => components.union(a, b),
+                (true, false) => held.push(a as u32),
+                (false, true) => held.push(b as u32),
+                (false, false) => {}
+            };
+            for joint in joints.iter() {
+                let (a, b) = joint.bodies();
+                edge(a, b);
+            }
+            for contact in contacts.iter() {
+                edge(contact.a, contact.b);
             }
         }
-        for contact in self.contacts.iter() {
-            let (a, b) = (contact.a, contact.b);
-            if self.inv_mass[a] > 0.0 && self.inv_mass[b] > 0.0 {
-                self.components.union(a, b);
+        {
+            let Skeleton {
+                components,
+                unsettled,
+                held,
+                ..
+            } = self;
+            for &i in held.iter() {
+                unsettled[components.find(i) as usize] = true;
             }
         }
 
         // -- and which whole islands may go ------------------------------------------
-        self.unsettled.clear();
-        self.unsettled.resize(n, false);
         self.island_tally.clear();
         self.island_tally.resize(n + 1, 0);
-        let Skeleton {
-            components,
-            unsettled,
-            still_steps,
-            radius,
-            half_length,
-            awake,
-            ..
-        } = self;
-        let mut anything = false;
-        awake.for_each_set(|i| {
-            let reach = (radius[i] + half_length[i]).max(1e-3);
-            if still_steps[i] < settling_steps(reach, gravity, dt) {
-                unsettled[components.find(i as u32) as usize] = true;
-            } else {
-                anything = true;
-            }
-        });
-        if !anything {
-            return;
-        }
 
         // Counting sort of the sleeping candidates by their island's root, so that each
         // island's members come out together and in increasing order -- which is what
@@ -2168,10 +2290,10 @@ impl Skeleton {
             unsettled,
             island_tally,
             island_list,
-            awake,
+            ready,
             ..
         } = self;
-        awake.for_each_set(|i| {
+        ready.for_each_set(|i| {
             let root = components.find(i as u32) as usize;
             if !unsettled[root] {
                 island_tally[root] += 1;
@@ -2188,7 +2310,7 @@ impl Skeleton {
         }
         island_list.clear();
         island_list.resize(running as usize, 0);
-        awake.for_each_set(|i| {
+        ready.for_each_set(|i| {
             let root = components.find(i as u32) as usize;
             if !unsettled[root] {
                 island_list[island_tally[root] as usize] = i as u32;
