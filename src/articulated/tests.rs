@@ -1409,3 +1409,202 @@ fn a_velocity_correction_changes_the_speed_and_not_the_place() {
         "an angular velocity correction left the body reading as not turning at all",
     );
 }
+
+
+// -- what a body is carrying ------------------------------------------------------
+
+/// **The load accessor is calibrated, and this is the calibration.** A capsule lying on
+/// the plane and carrying nothing but itself reads its own weight -- not something
+/// proportional to it, the number itself.
+///
+/// That is the derivation in [`Skeleton::normal_load`] run backwards. The body sags
+/// `g dt^2` into the plane in a step, the plane drives exactly that back out, so the
+/// impulse is `m g dt^2` in the solver's `correction = impulse * inv_mass` convention;
+/// dividing by the step twice -- once to reach momentum, once to reach a mean force --
+/// leaves `m g`. If the accessor ever reports a raw impulse, or divides once, or sums
+/// `normal` instead of `driven`, this number moves and nothing else here would notice.
+///
+/// **And a body that has gone to sleep reads zero**, which is not a defect but is worth
+/// stating where a caller will find it: a step that does not solve a body drives nothing
+/// into it, so what this reports is load *arriving*, and a caller whose rule has to see a
+/// static load has to keep the bodies awake to see it.
+#[test]
+fn a_body_resting_on_the_ground_reads_its_own_weight() {
+    const MASS: f64 = 4.0;
+    let weight = MASS * length(G);
+
+    // Eight draws a relative 1e-12 apart, because one draw of anything that has been
+    // through the solve says nothing about the next.
+    for draw in 0..8 {
+        let mut s = Skeleton::new();
+        floor(&mut s, 0.0);
+        s.set_sleeping(false);
+        let body = s.add_body(lying(
+            Body::capsule(MASS, 0.1, 0.5, (0.0, 0.11 * (1.0 + draw as f64 * 1e-12), 0.0)),
+            0.0,
+        ));
+        assert_eq!(
+            s.normal_load(body),
+            0.0,
+            "a body that has never been stepped is carrying something",
+        );
+        for _ in 0..300 {
+            s.step(DT, G, 8);
+        }
+        let load = s.normal_load(body);
+        assert!(
+            (load - weight).abs() < 0.01 * weight,
+            "draw {draw}: a capsule lying on the plane reads {load:.4} N where its own \
+             weight is {weight:.4} N",
+        );
+    }
+
+    // The same body left to fall asleep. Nothing is being solved, so nothing is being
+    // driven into it, and the load it reports is zero rather than stale.
+    let mut s = stack(1);
+    for _ in 0..900 {
+        s.step(DT, G, 8);
+    }
+    assert_eq!(s.awake_count(), 0, "the fixture did not settle");
+    assert_eq!(
+        s.normal_load(0),
+        0.0,
+        "a sleeping body is reporting a load out of a step that never ran",
+    );
+}
+
+/// **A body with weight on it reads the weight**, and the figure is the one the statics
+/// gives rather than merely a larger number.
+///
+/// A column of three identical capsules: the bottom one is pressed by the plane carrying
+/// all three and by the contact above carrying two, so it sums `(m + 2 * 2m) g = 5 m g`.
+/// The middle one sums `(2m + m) g = 3 m g` and the top one its own `m g`. That the three
+/// come out 5 : 3 : 1 is what says the accessor is adding up normal forces and not
+/// something that merely grows with a pile.
+///
+/// The bottom is also five times what the same capsule reads lying by itself, which is
+/// the "rises sharply" half of the claim, stated as a ratio the statics fixes rather than
+/// as a number that happens to be big.
+///
+/// **Over a window rather than at a step**, because what the statics fixes is the mean.
+/// A column left awake jostles -- the module header has the whole account of why -- and
+/// the instantaneous normal force on the bottom body swings with it: sampled at single
+/// steps 900, 1200 and 1500 the same fixture reads 183, 195 and 105 N. Averaged over six
+/// hundred steps it reads 4.995, 2.995 and 0.998 of a body's weight on all eight draws,
+/// which is the statics to a part in a thousand.
+#[test]
+fn a_body_under_a_pile_reads_what_the_pile_weighs() {
+    const MASS: f64 = 4.0;
+    const WINDOW: usize = 600;
+    let weight = MASS * length(G);
+
+    for draw in 0..8 {
+        let nudge = 1.0 + draw as f64 * 1e-12;
+        let mut s = Skeleton::new();
+        floor(&mut s, 0.0);
+        s.set_sleeping(false);
+        for k in 0..3 {
+            s.add_body(lying(
+                Body::capsule(MASS, 0.1, 0.5, (0.0, (0.11 + 0.21 * k as f64) * nudge, 0.0)),
+                0.0,
+            ));
+        }
+        for _ in 0..600 {
+            s.step(DT, G, 8);
+        }
+        let mut total = [0.0f64; 3];
+        for _ in 0..WINDOW {
+            s.step(DT, G, 8);
+            for (i, sum) in total.iter_mut().enumerate() {
+                *sum += s.normal_load(i);
+            }
+        }
+        for (i, share) in [5.0, 3.0, 1.0].into_iter().enumerate() {
+            let want = share * weight;
+            let load = total[i] / WINDOW as f64;
+            assert!(
+                (load - want).abs() < 0.01 * want,
+                "draw {draw}: body {i} of a column of three carries a mean {load:.2} N \
+                 where the statics puts {share} of a body's weight, {want:.2} N, on it",
+            );
+        }
+    }
+}
+
+/// **The number rises the way an impact does.** A body four times as heavy dropped on to
+/// a resting capsule from a metre: the peak load is a hundred times what the capsule was
+/// reading before it arrived, and comfortably past the arriving body's own weight, which
+/// is the lower bound the mechanics gives -- a body still moving when it lands is being
+/// stopped as well as held, and being stopped is the larger half.
+#[test]
+fn a_body_landed_on_reads_far_more_than_it_was() {
+    const MASS: f64 = 4.0;
+    const HEAVY: f64 = 16.0;
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    s.set_sleeping(false);
+    let low = s.add_body(lying(Body::capsule(MASS, 0.1, 0.5, (0.0, 0.11, 0.0)), 0.0));
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    let resting = s.normal_load(low);
+
+    s.add_body(lying(Body::capsule(HEAVY, 0.1, 0.5, (0.0, 1.2, 0.0)), 0.0));
+    let mut peak: f64 = 0.0;
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+        peak = peak.max(s.normal_load(low));
+    }
+    assert!(
+        peak > 10.0 * resting && peak > HEAVY * length(G),
+        "a body four times its mass landed on it from a metre and the load went from \
+         {resting:.1} N to a peak of {peak:.1} N, which is neither ten times what it was \
+         nor past the {:.1} N the arriving body weighs",
+        HEAVY * length(G),
+    );
+}
+
+/// **A badly placed body is not a crushed one**, and this is the test that says the
+/// accessor sums the right one of [`Spent`]'s two totals.
+///
+/// Two capsules spawned deeply inside one another are separated by an enormous normal
+/// impulse -- a third of a metre of overlap removed in a single step -- and *nothing is
+/// pressing on either of them*. `Spent::normal` counts the whole of that push and would
+/// report a spawn as the hardest crush in the scene; `Spent::driven` counts only the
+/// overlap the step itself drove, which for an inherited one is zero. See
+/// [`solve_contact_normal`], where the split is taken.
+#[test]
+fn an_overlapping_spawn_is_not_a_crushed_body() {
+    let mut s = Skeleton::new();
+    s.set_sleeping(false);
+    let a = s.add_body(Body::capsule(4.0, 0.2, 0.4, (0.0, 0.0, 0.0)));
+    let b = s.add_body(Body::capsule(4.0, 0.2, 0.4, (0.05, 0.0, 0.0)));
+    let overlap = 0.4 - 0.05;
+
+    // No gravity and no plane, so the only thing either body can be carrying is the other.
+    let opened = {
+        let before = length(sub(s.position(b), s.position(a)));
+        s.step(DT, (0.0, 0.0, 0.0), 8);
+        length(sub(s.position(b), s.position(a))) - before
+    };
+    assert!(
+        opened > 0.5 * overlap,
+        "the fixture did not actually separate: one step opened {opened:.4} m of an \
+         overlap of {overlap:.4} m, so there was no large normal impulse to be confused \
+         by",
+    );
+    for i in [a, b] {
+        assert_eq!(
+            s.normal_load(i),
+            0.0,
+            "recovering from a spawn overlap read as a load on body {i}",
+        );
+    }
+
+    for _ in 0..30 {
+        s.step(DT, (0.0, 0.0, 0.0), 8);
+        for i in [a, b] {
+            assert_eq!(s.normal_load(i), 0.0, "body {i} is still reading a load");
+        }
+    }
+}

@@ -1068,6 +1068,45 @@
 //! figure is recorded because it is the second time this page has caught that count behaving
 //! like a tuned number, and the next person to reach for it should know it has moved again.
 //!
+//! # What a body is carrying, and why it is `driven` rather than `normal`
+//!
+//! [`Skeleton::normal_load`] reports, per body, the normal impulse the last step actually
+//! handed it, as a mean force in newtons. It is the quantity a caller needs to decide that
+//! something has been crushed -- and the crate has no opinion on how much is too much,
+//! because what load breaks a body is a material judgement that varies by what the bodies
+//! represent. There is no threshold in here and there may not be one.
+//!
+//! **The quantity already existed, and only one of the two totals is it.**
+//! [`contacts::Spent`] separates `normal`, the whole normal impulse, from `driven`, the
+//! part the step itself drove and so the only part charged to the bodies as momentum. A
+//! body recovering from a careless spawn is separated by an enormous `normal` while
+//! nothing whatever presses on it; `driven` reads zero through the same separation. Using
+//! `normal` would make a badly placed body the most crushed thing in the scene, which
+//! `an_overlapping_spawn_is_not_a_crushed_body` is the guard against.
+//!
+//! **It is two divisions by the step, and that is not cosmetic.** The solver's impulses
+//! are in the convention `correction = impulse * inv_mass`, so a raw one is kilogram
+//! metres -- not the newton seconds the word suggests. One division gives the momentum,
+//! two give the mean force over the step. Reporting the raw total would make the same
+//! physical squeeze read four times smaller at half the timestep, and silently change the
+//! meaning of whatever rule a caller had written against it. The calibration is that a
+//! body lying on the plane reads its own weight, exactly: it sags `g dt^2`, the plane
+//! drives that back out, and `m g dt^2 / dt^2` is `m g`.
+//!
+//! **It costs nothing in the inner loop.** Every contact and every ground patch already
+//! carries its `Spent` across the passes, because Coulomb's cone needs the step's totals
+//! and the velocity pass needs to know what it is allowed to take back. So the load is
+//! already computed when the step ends, and [`Skeleton::gather_normal_load`] is one pass
+//! over two lists that are still in cache rather than a write inside eight passes over
+//! them. It runs *after* the velocity pass, so what it reports is the net the step handed
+//! the body rather than the gross the positional passes applied before some of it was
+//! taken back.
+//!
+//! One consequence is worth stating where a caller will meet it: **a sleeping body reads
+//! zero**. A step that does not solve a body drives nothing into it, so what this reports
+//! is load arriving. A caller whose rule has to see a static load has to keep those bodies
+//! awake.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
@@ -1777,6 +1816,16 @@ pub struct Skeleton {
     contact_impulse: Vec<Spent>,
     ground_impulse: Vec<contacts::Patch>,
 
+    /// **How hard each body was squeezed over the last step**, as a mean force in
+    /// newtons. See [`Skeleton::normal_load`], which is the whole of the argument for
+    /// what the number is and why it is that one.
+    normal_load: Vec<f64>,
+    /// Which entries of `normal_load` the last step wrote, so that clearing it costs the
+    /// bodies that carried load rather than the whole set. A body may appear twice; the
+    /// clear is idempotent, and a list that is never searched is cheaper to fill
+    /// carelessly than to keep unique.
+    normal_loaded: Vec<u32>,
+
     /// Where each body's ground patch was when it stuck, and what it stuck under. Only
     /// meaningful where [`Skeleton::ground_stuck`] says so. See [`contacts::Anchor`] for
     /// what it is for and [`Skeleton::anchor_ground`] for what maintains it.
@@ -1907,6 +1956,8 @@ impl Default for Skeleton {
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
             ground_impulse: Vec::new(),
+            normal_load: Vec::new(),
+            normal_loaded: Vec::new(),
             ground_anchor: Vec::new(),
             ground_stuck: BitSet::default(),
             ground_sticking: Vec::new(),
@@ -2101,6 +2152,7 @@ impl Skeleton {
             local: (0.0, 0.0, 0.0),
         });
         self.island_of.push(NO_ISLAND);
+        self.normal_load.push(0.0);
         let i = self.position.len() - 1;
         let n = self.position.len();
         self.awake.resize(n, false);
@@ -2171,6 +2223,127 @@ impl Skeleton {
 
     pub fn angular_velocity(&self, i: usize) -> (f64, f64, f64) {
         self.angular_velocity[i]
+    }
+
+    /// **How hard this body was squeezed by the last step**, as a mean force in newtons.
+    ///
+    /// The sum over every normal constraint that named the body -- pair contacts and the
+    /// plane alike -- of the normal impulse it was actually handed, divided by the step.
+    /// Zero for a body nothing pressed on, and for a body that has never been stepped.
+    ///
+    /// # Which impulse, and why the other one is wrong
+    ///
+    /// [`contacts::Spent`] distinguishes two totals, and only one of them is a load.
+    /// `normal` is the whole normal impulse a contact applied, which includes the solver
+    /// lifting the bodies out of an overlap they were **already** in when the step began;
+    /// `driven` is the part the step itself drove, and so the only part the bodies were
+    /// handed as momentum. This is the sum of `driven`.
+    ///
+    /// The difference is the difference between a crushed body and a carelessly placed
+    /// one. A body spawned half inside another is separated over its first few steps by
+    /// an enormous `normal` while nothing whatever is pressing on it, and reading that
+    /// would make a spawn look like an impact. `driven` reads near zero through the same
+    /// separation, because the overlap was inherited rather than made. See
+    /// [`contacts::solve_contact_normal`], where the split is taken, and
+    /// `an_overlapping_spawn_is_not_a_crushed_body`, which is the guard on it.
+    ///
+    /// # What the number is, dimensionally
+    ///
+    /// The solver's impulses are in the convention `correction = impulse * inv_mass`, so
+    /// a raw one is a mass times a distance -- kilogram metres, not the newton seconds a
+    /// reader would assume from the word. Dividing by the step turns it into the momentum
+    /// the body was handed (`kg m / s`, which *is* newton seconds) and dividing again
+    /// turns that into the mean force over the step, in newtons. **This is the second
+    /// one**, and it is divided by `dt` twice for that reason.
+    ///
+    /// Newtons rather than the raw total because the raw total scales with `dt * dt`: a
+    /// caller who halved their timestep would find the same physical squeeze reading a
+    /// quarter as large, and whatever rule they had written against it would silently
+    /// change meaning. A force does not move. The check that it is the right force is
+    /// that **a body lying on the plane reads its own weight**: it sags `g dt^2` in a
+    /// step, the plane drives that back out, the impulse is `m g dt^2`, and two divisions
+    /// by `dt` leave `m g`.
+    ///
+    /// # Turning it into a stress
+    ///
+    /// Divide by the area the load is carried over. The crate does not know that area --
+    /// a capsule's contact patch depends on how far the two surfaces flatten, which is a
+    /// property of the material and not of the geometry -- so a caller who wants a stress
+    /// supplies it. `2 * radius * half_length` is the projected side of a capsule and is
+    /// the usual stand-in; the resulting pascals are then comparable with a compressive
+    /// strength.
+    ///
+    /// # What it sums, and what that means for two-sided load
+    ///
+    /// The sum of the **magnitudes** of the normal impulses, not their vector sum. Two
+    /// opposed forces -- the plane below and something heavy above -- add, which is what
+    /// being crushed is; a body merely being accelerated by one push adds the same way,
+    /// which overstates it by the factor the second surface would have contributed.
+    /// A body genuinely in a vice is the case this is for, and it is the case the scalar
+    /// sum is exactly right for.
+    ///
+    /// The crate has no opinion on how much is too much. What load breaks a body is a
+    /// material judgement that varies by what the bodies represent, and there is no
+    /// threshold, no strength, and nothing resembling one anywhere in here: the solver
+    /// reports, and the caller decides. [`Skeleton::retire`] is what a caller who has
+    /// decided reaches for.
+    pub fn normal_load(&self, i: usize) -> f64 {
+        self.normal_load[i]
+    }
+
+    /// Forgets the last step's loads. Costs the bodies that carried one, not the set.
+    fn clear_normal_load(&mut self) {
+        for &i in self.normal_loaded.iter() {
+            self.normal_load[i as usize] = 0.0;
+        }
+        self.normal_loaded.clear();
+    }
+
+    /// **The per-body total of [`Skeleton::normal_load`]**, gathered once at the end of
+    /// the step out of the running totals the constraints already keep.
+    ///
+    /// Nothing is added to the inner loop for this. Every contact and every ground patch
+    /// already carries its `Spent` across the passes, because Coulomb's cone needs the
+    /// step's totals and the velocity pass needs to know what it is allowed to take back;
+    /// so the load is already computed by the time the step ends and this is one pass over
+    /// two lists that are in cache, not a write inside eight passes over them. Running it
+    /// after the velocity pass rather than after the positional one is deliberate as well:
+    /// that pass **removes** normal impulse where a resting contact ended the step
+    /// separating, and what a caller wants is the net momentum the step handed the body
+    /// rather than the gross the positional passes applied before it was taken back.
+    ///
+    /// Deterministic because it sums in list order, and both lists are built in a fixed
+    /// order on every machine -- the contacts by the narrow phase's fixed-size chunks, the
+    /// ground patches by increasing body index.
+    fn gather_normal_load(&mut self, dt: f64) {
+        self.clear_normal_load();
+        // Twice, and the second division is what makes this a force rather than a
+        // momentum. See [`Skeleton::normal_load`].
+        let per_step = 1.0 / (dt * dt);
+        for (k, contact) in self.contacts.iter().enumerate() {
+            let driven = self.contact_impulse[k].driven;
+            if driven <= 0.0 {
+                continue;
+            }
+            let load = driven * per_step;
+            for end in [contact.a, contact.b] {
+                if self.normal_load[end] == 0.0 {
+                    self.normal_loaded.push(end as u32);
+                }
+                self.normal_load[end] += load;
+            }
+        }
+        for (k, ground) in self.ground_contacts.iter().enumerate() {
+            let driven = self.ground_impulse[k].spent.driven;
+            if driven <= 0.0 {
+                continue;
+            }
+            let i = ground.body;
+            if self.normal_load[i] == 0.0 {
+                self.normal_loaded.push(i as u32);
+            }
+            self.normal_load[i] += driven * per_step;
+        }
     }
 
     /// Sets a body's angular velocity, and **wakes its island**: a caller pushing a body
@@ -2628,6 +2801,11 @@ impl Skeleton {
         // could change, so the cheapest honest answer is the whole step: `bodies / 64`
         // word tests and no memory touched. This is what sleeping is for.
         if !self.awake.any() {
+            // Nothing was pressed on, so nothing carries a load. This walks the list of
+            // bodies that carried one last step -- empty from the second idle step on --
+            // rather than the whole set, so a settled scene still returns without
+            // touching memory that is proportional to its size.
+            self.clear_normal_load();
             return;
         }
         self.rebuild_jointed();
@@ -2799,6 +2977,10 @@ impl Skeleton {
         // And for the same reason: which pairs were carrying load is a fact about the
         // whole step. See [`Skeleton::persist_contacts`].
         self.persist_contacts();
+        // And for the same reason again, one law over: how hard a body was squeezed is
+        // the whole step's normal impulse, which only exists once the velocity pass has
+        // finished taking back what it is entitled to.
+        self.gather_normal_load(dt);
     }
 
     /// **One sweep to read both velocities back out of how far everything moved**, for
