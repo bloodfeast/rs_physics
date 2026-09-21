@@ -2917,4 +2917,149 @@ fn shaped_rig(into: &mut Skeleton, x: f64, y: f64, z: f64, facets: u32) {
     }
 }
 
+/// A plain seventeen-bone rig of capsules, free balls and hinges: the configuration the
+/// matrix says is the best shippable one.
+fn plain_rig(into: &mut Skeleton, x: f64, y: f64, z: f64) {
+    let base = into.len();
+    let pelvis = into.add_body(Body::capsule(8.0, 0.1, 0.16, (x, y, z)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (x, y + 0.2 + 0.2 * i as f64, z)));
+        assert!(into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0))));
+        up = link;
+    }
+    for limb in 0..4 {
+        let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
+        let side_z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            let body = into.add_body(Body::capsule(
+                4.0,
+                0.06,
+                0.25,
+                (x, y + side * 0.25 * segment as f64, z + side_z),
+            ));
+            let joint = if segment == 0 {
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            assert!(into.add_joint(joint));
+            previous = body;
+        }
+    }
+    for i in base..into.len() {
+        let n = i as f64;
+        into.set_angular_velocity(
+            i,
+            (3.0 * (n * 0.7).sin(), 3.0 * (n * 1.1).cos(), 3.0 * (n * 0.3).sin()),
+        );
+    }
+}
 
+#[test]
+fn probe_how_many_rigs_before_it_breaks() {
+    for rigs in [1usize, 2, 3, 4] {
+        let mut settled = 0usize;
+        let mut soonest = usize::MAX;
+        let mut restless_bones = 0usize;
+        for draw in 0..8 {
+            let mut s = Skeleton::new();
+            floor(&mut s, 0.0);
+            let nudge = 1.0 + draw as f64 * 1e-6;
+            for k in 0..rigs {
+                plain_rig(&mut s, k as f64 * 0.45, (1.1 + 0.15 * k as f64) * nudge, 0.0);
+            }
+            let n = s.len();
+            let mut asleep_at = usize::MAX;
+            for step in 0..3600 {
+                s.step(DT, G, 8);
+                if s.awake_count() == 0 {
+                    asleep_at = step;
+                    break;
+                }
+            }
+            if asleep_at != usize::MAX {
+                settled += 1;
+                soonest = soonest.min(asleep_at);
+            } else {
+                restless_bones += (0..n).filter(|&i| s.is_awake(i) && !s.ready.get(i)).count();
+            }
+        }
+        println!(
+            "BISECT {rigs} rig(s): settled {settled} of 8, soonest {}, mean restless bones \
+             in the ones that did not {:.1}",
+            if soonest == usize::MAX { "never".to_string() } else { soonest.to_string() },
+            if settled == 8 { 0.0 } else { restless_bones as f64 / (8 - settled) as f64 },
+        );
+    }
+}
+
+#[test]
+fn probe_what_two_rigs_do() {
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    plain_rig(&mut s, 0.0, 1.1, 0.0);
+    plain_rig(&mut s, 0.45, 1.25, 0.0);
+    let n = s.len();
+    for _ in 0..3600 {
+        s.step(DT, G, 8);
+    }
+
+    // Which bones will not stop, and what each of them is touching.
+    let mut restless: Vec<usize> = (0..n).filter(|&i| s.is_awake(i) && !s.ready.get(i)).collect();
+    restless.sort_unstable();
+    println!("TWO {} of {n} bones will not stop: {restless:?}", restless.len());
+
+    // The bone parts, so the indices mean something: 0 pelvis, 1-4 spine, 5-16 limbs in
+    // threes.
+    let part = |i: usize| {
+        let k = i % 17;
+        match k {
+            0 => "pelvis".to_string(),
+            1..=4 => format!("spine{}", k),
+            _ => format!("limb{} seg{}", (k - 5) / 3, (k - 5) % 3),
+        }
+    };
+    for &i in restless.iter().take(8) {
+        let v = s.velocity(i);
+        let w = s.angular_velocity(i);
+        let own = s.contacts.iter().filter(|c| (c.a == i || c.b == i) && (c.a / 17 == c.b / 17)).count();
+        let other = s.contacts.iter().filter(|c| (c.a == i || c.b == i) && (c.a / 17 != c.b / 17)).count();
+        let ground = s.ground_contacts.iter().filter(|g| g.body == i).count();
+        println!(
+            "TWO   body {i:>2} rig{} {:<12} speed {:.4} spin {:.4}  contacts: {own} own rig, \
+             {other} other rig, {ground} ground",
+            i / 17,
+            part(i),
+            length(v),
+            length(w),
+        );
+    }
+
+    // And is it the same bones every time, or does it move around?
+    let mut seen = std::collections::BTreeMap::new();
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        for i in 0..n {
+            if s.is_awake(i) && !s.ready.get(i) {
+                *seen.entry(i).or_insert(0usize) += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<_> = seen.into_iter().collect();
+    ranked.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    println!("TWO the most persistently restless, over 600 more steps:");
+    for (i, count) in ranked.iter().take(6) {
+        println!("TWO   body {i:>2} rig{} {:<12} restless {count} of 600", i / 17, part(*i));
+    }
+}
