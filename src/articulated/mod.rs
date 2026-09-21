@@ -2299,6 +2299,18 @@ impl Skeleton {
         self.contacts.len()
     }
 
+    /// How many candidate pairs the last [`Skeleton::step`]'s broad phase handed the
+    /// narrow phase.
+    ///
+    /// The number a broad phase is actually judged by, and the one that says whether it
+    /// is still a broad phase. The contacts it leads to are a property of the scene; this
+    /// is a property of the *search*, so a grid whose cell has been coarsened -- by one
+    /// body far larger than the rest, say -- shows up here, and in the step time, and in
+    /// nothing else at all.
+    pub fn candidate_pairs(&self) -> usize {
+        self.pairs.len()
+    }
+
     pub fn len(&self) -> usize {
         self.position.len()
     }

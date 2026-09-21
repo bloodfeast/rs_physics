@@ -769,8 +769,9 @@ fn ploughing(c: &mut Criterion) {
         s.step(DT, G, 8);
     }
     println!(
-        "  ploughing: {} bodies, {} contacts in the settled field",
+        "  ploughing: {} bodies, {} candidate pairs, {} contacts in the settled field",
         s.len(),
+        s.candidate_pairs(),
         s.contact_count(),
     );
     let roller = s.add_body(roller());
@@ -783,9 +784,10 @@ fn ploughing(c: &mut Criterion) {
         }
         let live = (0..s.len()).filter(|&i| !s.is_retired(i)).count();
         println!(
-            "  ploughing after {upto} steps: {live} of {} bodies live, {} contacts, \
-             roller at x {:.1}",
+            "  ploughing after {upto} steps: {live} of {} bodies live, {} candidate pairs, \
+             {} contacts, roller at x {:.1}",
             s.len(),
+            s.candidate_pairs(),
             s.contact_count(),
             s.position(roller).0,
         );
