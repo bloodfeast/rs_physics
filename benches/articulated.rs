@@ -115,13 +115,13 @@ const SETTLED: usize = 1800;
 /// Capsules lie along the columns, so two in the same column would have to overlap to be
 /// within a broad-phase reach of each other -- hence the half-column stagger, which puts
 /// every capsule within reach of four in the rows either side while leaving a clear
-/// [`FIELD_ACROSS`] minus a diameter between their surfaces. A field that starts with
+/// [`WAKE_ACROSS`] minus a diameter between their surfaces. A field that starts with
 /// contacts in it measures the solve; this one starts with none, settles well inside the
 /// sixty steps it is given, and then costs nothing at all until the ram arrives -- which
 /// the fixture asserts rather than assumes.
-const FIELD: (usize, usize) = (32, 64);
-const FIELD_ALONG: f64 = 0.75;
-const FIELD_ACROSS: f64 = 0.25;
+const WAKE_FIELD: (usize, usize) = (32, 64);
+const WAKE_ALONG: f64 = 0.75;
+const WAKE_ACROSS: f64 = 0.25;
 
 /// How fast the body driven through the field travels, in metres a second.
 ///
@@ -133,7 +133,7 @@ const PLOUGH_SPEED: f64 = 1.4;
 
 /// Steps the ram is driven for before the fixture is timed: far enough that it is halfway
 /// down the field, with a settled half in front of it and a ploughed half behind.
-const PLOUGHED: usize = 620;
+const RAMMED: usize = 620;
 
 /// Capsules in [`a_heap_that_has_settled`], and the height of each stack.
 ///
@@ -143,16 +143,31 @@ const PLOUGHED: usize = 620;
 const STACKS: usize = 3333;
 const STACK_HIGH: usize = 3;
 
-/// Capsules in the ploughed field, laid in single file down a lane.
+/// Rows of capsules down the ploughed field.
 ///
-/// **A lane and not a sheet, and that is the broad phase's doing rather than a taste.**
-/// The grid's cell is twice the largest reach in the set, so a roller wide enough to
-/// cover a broad field coarsens the cell for every small body in it: at four times a
-/// field body's reach a cell held forty of them, each scanning twenty-seven cells, and
-/// the step cost more in candidate pairs than in everything else together. A lane keeps
-/// the roller within twice a field body's reach, which is what the grid is sized for.
-/// See [`roller`].
-const LANE_LONG: usize = 800;
+/// **A sheet and not a lane.** It was a lane, and that was the broad phase's doing rather
+/// than a taste: the grid's cell was twice the largest reach in the set, so a roller wide
+/// enough to cover a broad field coarsened the cell for every small body in it, and the
+/// step cost more in candidate pairs than in everything else together. A lane kept the
+/// roller within twice a field body's reach, which was what the grid was sized for. The
+/// grid now keeps a body that size out of itself and tests it directly, so the fixture no
+/// longer has to be the shape the broad phase wanted. See [`roller`].
+const FIELD_LONG: usize = 800;
+
+/// Capsules across the field, side by side in each row.
+///
+/// Six, which with [`FIELD_ACROSS`] is a field four and a half metres wide: wide enough
+/// that the grid's cell is coarse across the field as well as along it, which is where the
+/// cost of sizing it for the roller actually lived. The roller spans the whole of it --
+/// see [`roller`] -- so every body in the field is driven over and the retirement curve
+/// below is the whole field rather than a strip out of the middle of it.
+const FIELD_WIDE: usize = 6;
+
+/// How far apart the field's capsules stand across the field.
+///
+/// A field capsule lies across the lane and is 0.7 m from end to end, so this is the same
+/// five centimetres of clearance [`FIELD_ALONG`] leaves down it.
+const FIELD_ACROSS: f64 = 0.75;
 
 /// How far apart the field's capsules stand down the lane.
 ///
@@ -160,11 +175,11 @@ const LANE_LONG: usize = 800;
 /// five centimetres of clearance: near enough that the field is a surface rather than
 /// scattered bodies, and not touching at the moment it is built, since a spawn overlap is
 /// a different thing to be measuring.
-const LANE_ALONG: f64 = 0.25;
+const FIELD_ALONG: f64 = 0.25;
 
 /// Steps of settling before the roller arrives. The field is laid a centimetre above the
 /// plane and has only to fall that far and stop.
-const LANE_SETTLE: usize = 120;
+const FIELD_SETTLE: usize = 120;
 
 /// How fast the roller is driven, in metres a second.
 ///
@@ -756,12 +771,12 @@ fn a_field_being_ploughed(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/ploughing");
     group.sample_size(20);
 
-    let (columns, rows) = FIELD;
+    let (columns, rows) = WAKE_FIELD;
     let mut s = Skeleton::new();
     s.set_ground((0.0, 1.0, 0.0), 0.0);
     for row in 0..rows {
         for column in 0..columns {
-            let stagger = if row % 2 == 0 { 0.0 } else { 0.5 * FIELD_ALONG };
+            let stagger = if row % 2 == 0 { 0.0 } else { 0.5 * WAKE_ALONG };
             // Lying along the ram's path, resting on the plane at exactly one radius, so
             // the field settles without having to fall first.
             let mut body = Body::capsule(
@@ -769,9 +784,9 @@ fn a_field_being_ploughed(c: &mut Criterion) {
                 0.1,
                 0.5,
                 (
-                    column as f64 * FIELD_ALONG + stagger,
+                    column as f64 * WAKE_ALONG + stagger,
                     0.1,
-                    row as f64 * FIELD_ACROSS - 0.5 * (rows as f64 - 1.0) * FIELD_ACROSS,
+                    row as f64 * WAKE_ACROSS - 0.5 * (rows as f64 - 1.0) * WAKE_ACROSS,
                 ),
             );
             body.orientation = rs_physics::models::Quaternion::from_axis_angle(
@@ -797,7 +812,7 @@ fn a_field_being_ploughed(c: &mut Criterion) {
         s.awake_count(),
         s.len(),
     );
-    for _ in 0..PLOUGHED {
+    for _ in 0..RAMMED {
         drive(&mut s, ram);
         s.step(DT, G, 8);
     }
@@ -805,8 +820,8 @@ fn a_field_being_ploughed(c: &mut Criterion) {
         "  ploughing: {} bodies over {:.1} by {:.1} m, {} contacts, {} of {} awake, ram at \
          x {:.1}",
         s.len(),
-        (columns - 1) as f64 * FIELD_ALONG,
-        (rows - 1) as f64 * FIELD_ACROSS,
+        (columns - 1) as f64 * WAKE_ALONG,
+        (rows - 1) as f64 * WAKE_ACROSS,
         s.contact_count(),
         s.awake_count(),
         s.len(),
@@ -896,31 +911,59 @@ fn joining(c: &mut Criterion) {
 ///
 /// # What it shows
 ///
-/// Medians of four runs, since one run of anything on this machine says nothing:
+/// Medians of six runs, since one run of anything on this machine says nothing -- and on
+/// this fixture the spread between draws reached a factor of two, so read the shape of the
+/// row and not its third figure:
 ///
 /// ```text
-///   steps driven        30      330      630      930
-///   bodies still live  784      585      387      189
-///   a step            3.24 ms  2.12 ms  1.71 ms  0.89 ms
-///   per live body     4.13 us  3.62 us  4.42 us  4.70 us
+///   steps driven        30       330      630      930
+///   bodies still live  4699     3505     2316     1129
+///   a step             5.5 ms   3.7 ms   2.7 ms   2.65 ms
+///   per live body      1.17 us  1.06 us  1.17 us  2.35 us
 /// ```
 ///
-/// **The cost falls by a factor of 3.6 while the drive is going on**, and the bottom row
-/// is why: the cost per live body is flat to within the spread, so what the step is paying
-/// for is the bodies that are left and there are fewer of them every step. That is the
-/// whole claim of retirement being subtraction, and it is the one number in this file that
-/// goes down as a fixture runs.
-fn a_lane_being_crushed(c: &mut Criterion) {
+/// **The cost falls by a factor of two while the drive is going on**, and the bottom row
+/// is why: over the first three points the cost per live body is flat to within the
+/// spread, so what the step is paying for is the bodies that are left and there are fewer
+/// of them every step. That is the whole claim of retirement being subtraction, and it is
+/// the one number in this file that goes down as a fixture runs.
+///
+/// The last point is the limit of it and is worth reading rather than smoothing away. By
+/// then three quarters of the *array* is retired, and the passes that go over every slot
+/// rather than every live body -- the grid rebuild, the predict and read-back sweeps --
+/// are charged against a quarter as many live bodies. Retirement takes a body out of the
+/// solve; it does not take its slot out of the arrays.
+///
+/// # And what the broad phase was costing here
+///
+/// The roller is six times a field body's reach, so before the grid learned to hold a body
+/// that size out of itself it set the cell for all 4,800 of them. Bodies examined by the
+/// neighbourhood scan in one step at thirty driven steps, and the step itself, as medians
+/// of six draws alternating two prebuilt binaries:
+///
+/// ```text
+///   steps driven                    30       330      630      930
+///   roller in the grid, cell 4.50 m  8.5 ms   4.0 ms   4.2 ms   5.0 ms   1,495,561 examined
+///   roller out of it,   cell 0.70 m  5.5 ms   3.7 ms   2.7 ms   2.65 ms    105,362 examined
+/// ```
+///
+/// Fourteen times the search for a step and a half to two of the step. Note the shape of
+/// the top row: with the cell sized for the roller the step stopped falling after 330 and
+/// began to rise, because the field left in front of the roller is as dense as it ever was
+/// and a coarse cell charges for density, not for count. The claim this fixture exists to
+/// make was being eaten by the broad phase.
+fn a_field_being_crushed(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/crushing");
     group.sample_size(20);
 
-    let mut s = lane();
-    for _ in 0..LANE_SETTLE {
+    let mut s = field();
+    for _ in 0..FIELD_SETTLE {
         s.step(DT, G, 8);
     }
     println!(
-        "  crushing: {} bodies, {} contacts in the settled field",
+        "  crushing: {} bodies, {} candidate pairs, {} contacts in the settled field",
         s.len(),
+        s.candidate_pairs(),
         s.contact_count(),
     );
     let roller = s.add_body(roller());
@@ -933,9 +976,10 @@ fn a_lane_being_crushed(c: &mut Criterion) {
         }
         let live = (0..s.len()).filter(|&i| !s.is_retired(i)).count();
         println!(
-            "  crushing after {upto} steps: {live} of {} bodies live, {} contacts, \
-             roller at x {:.1}",
+            "  crushing after {upto} steps: {live} of {} bodies live, {} candidate pairs, \
+             {} contacts, roller at x {:.1}",
             s.len(),
+            s.candidate_pairs(),
             s.contact_count(),
             s.position(roller).0,
         );
@@ -962,33 +1006,50 @@ fn crush(s: &mut Skeleton, roller: usize) {
     }
 }
 
-/// A lane of capsules lying flat on the plane, each across the lane and near enough to its
-/// neighbours to be a surface rather than scattered bodies.
-fn lane() -> Skeleton {
+/// A field of capsules lying flat on the plane, each across the line of the drive and near
+/// enough to its neighbours to be a surface rather than scattered bodies.
+fn field() -> Skeleton {
     let mut s = Skeleton::new();
     s.set_ground((0.0, 1.0, 0.0), 0.0);
     s.set_sleeping(false);
-    for column in 0..LANE_LONG {
-        let mut body = Body::capsule(8.0, 0.1, 0.5, (column as f64 * LANE_ALONG, 0.11, 0.0));
-        // Lying flat with its axis across the lane, so the roller meets each one side on.
-        body.orientation = rs_physics::models::Quaternion::from_axis_angle(
-            (1.0, 0.0, 0.0),
-            std::f64::consts::FRAC_PI_2,
-        );
-        s.add_body(body);
+    for column in 0..FIELD_LONG {
+        for row in 0..FIELD_WIDE {
+            // Centred on the line the roller is driven down, so the roller meets the
+            // whole width of the field at once.
+            let across = (row as f64 - (FIELD_WIDE - 1) as f64 * 0.5) * FIELD_ACROSS;
+            let mut body = Body::capsule(
+                8.0,
+                0.1,
+                0.5,
+                (column as f64 * FIELD_ALONG, 0.11, across),
+            );
+            // Lying flat with its axis across the drive, so the roller meets each one
+            // side on.
+            body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+                (1.0, 0.0, 0.0),
+                std::f64::consts::FRAC_PI_2,
+            );
+            s.add_body(body);
+        }
     }
     s
 }
 
-/// The heavy body that is driven through it: a dense roller lying across the lane, two
-/// hundred and fifty times the mass of what it drives over.
+/// The heavy body that is driven through it: a dense roller lying across the field, long
+/// enough to span the whole width of it.
 ///
-/// **Only twice a field body's reach**, which is a constraint the broad phase puts on the
-/// fixture rather than a modelling choice: the grid's cell is twice the largest reach in
-/// the set, so one large collider coarsens the grid for every small body in it. See
-/// [`LANE_LONG`] for what that cost when the roller was four times the size.
+/// **Six times a field body's reach**, which used to be a thing this fixture could not
+/// have. The grid's cell was twice the largest reach in the set, so a roller this long
+/// coarsened the cell for every small body in it, and the fixture was cut down to a lane
+/// and a roller half this size to keep the broad phase honest. It is now kept out of the
+/// grid and tested against it directly, so the roller may be the size the field wants.
+/// See [`FIELD_LONG`].
+///
+/// Its mass is the same steel it always was -- two and a half thousand kilogrammes a
+/// metre of length -- so the load it puts on a body under it, which is what [`CRUSHED`]
+/// is measured against, has not moved with the geometry.
 fn roller() -> Body {
-    let mut body = Body::capsule(2000.0, 0.25, 0.8, (-1.0, 0.25, 0.0));
+    let mut body = Body::capsule(10_000.0, 0.25, 4.0, (-1.0, 0.25, 0.0));
     body.orientation = rs_physics::models::Quaternion::from_axis_angle(
         (1.0, 0.0, 0.0),
         std::f64::consts::FRAC_PI_2,
@@ -1008,6 +1069,6 @@ criterion_group!(
     a_heap_that_has_settled,
     joining,
     a_field_being_ploughed,
-    a_lane_being_crushed
+    a_field_being_crushed
 );
 criterion_main!(benches);

@@ -689,7 +689,14 @@ fn without_rolling_resistance_the_same_pile_comes_apart() {
 /// -- bodies pass through each other now and again, and a pile leaks -- so it is checked
 /// against the quadratic answer it exists to avoid, on a set arranged to be awkward for
 /// it: a dense heap, nothing axis-aligned, and one body several times the size of the
-/// rest, which is what decides the cell.
+/// rest.
+///
+/// **That last body is the point of the fixture and it is asserted for.** A body five
+/// times the reach of the heap is oversized by [`super::broadphase::OVERSIZE`], so it is
+/// held out of the grid and tested against it directly, and this is the law that says the
+/// two routes to a pair produce one answer between them. If a change to the fixture or to
+/// the criterion ever left nothing out of the grid, the test would still pass and would
+/// have stopped checking the thing it is named for.
 #[test]
 fn the_grid_finds_every_pair_the_quadratic_search_would() {
     let mut s = pile(60);
@@ -705,6 +712,13 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
     let mut reached = Vec::new();
     let mut grid = super::broadphase::Grid::default();
     grid.rebuild(&s.position, &s.radius, &s.half_length);
+    assert_eq!(
+        grid.oversized(),
+        &[60u32],
+        "the fixture's whole point is the body that does not fit the grid the other sixty \
+         want; the broad phase is holding {:?} out of the grid instead",
+        grid.oversized(),
+    );
     // Everything sweeping, nothing already swept and everything moving, which is the case
     // the grid has to be exhaustive in. The sleeping sweep is a restriction of this one;
     // that it loses nothing is what
@@ -759,6 +773,87 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
         "the grid produced {} pairs where testing every one gives {}",
         got.len(),
         expected.len(),
+    );
+}
+
+/// **What the grid holds out of itself is a shape of the set, not a size.** The rule is
+/// [`super::broadphase::OVERSIZE`] and it is derived from the neighbourhood -- a body more
+/// than half again the reach of the grid that would be left behind is cheaper asked
+/// directly -- so the cases that must come out right are opposite ones: a genuine outlier
+/// has to leave, and a set that is merely *graded* has to be left alone, because peeling
+/// that one would take half the bodies out of the grid and test them against each other.
+#[test]
+fn an_outlier_leaves_the_grid_and_a_graded_set_keeps_it() {
+    // `reach` is radius plus half-length, so a body of radius `r` and no length has
+    // reach `r`, which is all these cases are about.
+    fn held_out(reaches: &[f64]) -> Vec<u32> {
+        let position: Vec<(f64, f64, f64)> =
+            (0..reaches.len()).map(|i| (i as f64 * 0.01, 0.0, 0.0)).collect();
+        let half_length = vec![0.0; reaches.len()];
+        let mut grid = super::broadphase::Grid::default();
+        grid.rebuild(&position, reaches, &half_length);
+        grid.oversized().to_vec()
+    }
+
+    let flat: Vec<f64> = vec![1.0; 40];
+    assert!(
+        held_out(&flat).is_empty(),
+        "a set of one size has no outlier in it and the grid is already the right grid",
+    );
+
+    let mut one_giant = flat.clone();
+    one_giant.push(5.0);
+    assert_eq!(
+        held_out(&one_giant),
+        &[40u32],
+        "a body five times the rest of the set was costing the other forty the cube of \
+         how much it inflated their cell",
+    );
+
+    // The break-even either side of itself, which is the whole of the criterion: below
+    // it the direct test is the dearer of the two and the body belongs in the grid.
+    let mut just_under = flat.clone();
+    just_under.push(super::broadphase::OVERSIZE - 0.1);
+    assert!(
+        held_out(&just_under).is_empty(),
+        "a body under the break-even is cheaper left in the grid than asked directly",
+    );
+    let mut just_over = flat.clone();
+    just_over.push(super::broadphase::OVERSIZE + 0.1);
+    assert_eq!(
+        held_out(&just_over),
+        &[40u32],
+        "a body over the break-even is cheaper asked directly",
+    );
+
+    // Two tiers, each of which is an outlier in the grid the next one down would make.
+    // The answer has to be a fixed point and not just the top of the set.
+    let mut ladder = flat.clone();
+    ladder.push(4.0);
+    ladder.push(16.0);
+    assert_eq!(
+        held_out(&ladder),
+        &[40u32, 41u32],
+        "the four is an outlier in the grid the forty ones make, whatever the sixteen \
+         above it is doing",
+    );
+
+    // Half the set twice the size of the other half. There is no outlier here, there are
+    // two populations, and taking one of them out would be quadratic in half the bodies.
+    let mut graded: Vec<f64> = vec![1.0; 200];
+    graded.extend(std::iter::repeat(2.0).take(200));
+    assert!(
+        held_out(&graded).is_empty(),
+        "two hundred bodies are a population and not an outlier; see \
+         `super::broadphase::oversize_cap`",
+    );
+    // And the bound that says so is the point at which testing them against each other
+    // stops being cheaper than the pass the rebuild already makes over all of them.
+    let cap = super::broadphase::oversize_cap(400);
+    assert!(
+        cap * cap.saturating_sub(1) / 2 <= 400 && (cap + 1) * cap / 2 > 400,
+        "the cap is the largest k whose quadratic fits in one pass over the set; it is \
+         {cap}",
     );
 }
 
@@ -1286,6 +1381,74 @@ fn a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it() {
         landed > top,
         "the body finished at {landed:.3} and the stack's top body is at {top:.3}: it \
          went through a pile that was asleep",
+    );
+}
+
+/// **The same, both ways round, for a body too big to be in the grid.**
+///
+/// A body held out of the grid is nobody's neighbour: the neighbourhood scan reads the
+/// cells, and the oversized body is in none of them, so every pair it is half of has to
+/// come from its own sweep. That makes the sleeping rounds asymmetric, and both directions
+/// are here because they fail differently.
+///
+/// * An **awake** oversized body dropped on a sleeping pile has to find the pile and wake
+///   it, the way any other newcomer does.
+/// * A **sleeping** oversized body has to be woken by an awake body beside it, and that is
+///   the harder one: the awake body cannot see it, so nothing at all would happen unless
+///   the sleeping outlier looks for itself. It reports nothing in the round it is woken in
+///   -- the report comes from the round after, when it is on the frontier -- and if that
+///   were wrong in the other direction the pair would be in the list twice.
+#[test]
+fn an_oversized_body_and_a_sleeping_stack_find_each_other() {
+    let settled = |s: &mut Skeleton| {
+        for _ in 0..900 {
+            s.step(DT, G, 8);
+            if s.awake_count() == 0 {
+                return true;
+            }
+        }
+        false
+    };
+
+    // Reach 2.0 against the stack's 0.35, so it is nearly six times the set it is landing
+    // on and the grid holds it out. See `an_outlier_leaves_the_grid_and_a_graded_set_keeps_it`.
+    let big = |y: f64| lying(Body::capsule(8.0, 0.5, 3.0, (0.0, y, 0.0)), 0.0);
+
+    let mut s = stack(3);
+    assert!(settled(&mut s), "the stack never settled");
+    let top = s.position(2).1;
+    let falling = s.add_body(big(4.0));
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    let landed = s.position(falling).1;
+    assert!(
+        landed > top + 0.3,
+        "the oversized body finished at {landed:.3} where the stack's top body is at \
+         {top:.3}: resting on the plane rather than on a pile that was asleep, so the \
+         pairs its own sweep is the only source of were lost",
+    );
+
+    // And the other way about: the sleeping body is the oversized one.
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    let lying_still = s.add_body(big(0.5));
+    assert!(settled(&mut s), "the oversized body never settled");
+    let rested_at = s.position(lying_still).1;
+    let dropped = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (0.0, 4.0, 0.0)), 0.0));
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    let landed = s.position(dropped).1;
+    assert!(
+        landed > rested_at + 0.4,
+        "the newcomer finished at {landed:.3} where the sleeping body it was dropped on \
+         sits at {rested_at:.3}: it went through a body the grid does not hold, which \
+         nothing but that body's own sweep can wake",
+    );
+    assert!(
+        s.awake_count() > 0 || s.position(lying_still).1 != rested_at,
+        "the sleeping oversized body was never woken by what landed on it",
     );
 }
 

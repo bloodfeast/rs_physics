@@ -21,10 +21,46 @@
 //! there is nothing to tune: a smaller cell misses contacts and a larger one only costs
 //! time.
 //!
-//! The cost of that rule is that one large body coarsens the grid for every small one.
-//! A skeleton's bones are within a few times each other's size, so it does not bite here;
-//! a set holding one enormous collider and ten thousand small ones would want that
-//! collider kept out of the grid and tested separately.
+//! # One large body used to coarsen the grid for every small one
+//!
+//! That is what the rule costs, and it is not a small cost: the cell is a length, so a
+//! body four times the reach of the rest of the set multiplies the volume every other
+//! body scans by sixty-four. A skeleton's bones are within a few times each other's size
+//! and it never bit there. Driving one heavy body through a field of small ones it bit
+//! hard, and the `ploughing` benchmark's fixture had been cut down to a lane to get away
+//! from it. Restored to a field -- 4,800 capsules of reach 0.35 with a roller of reach
+//! 2.25 driven through them -- the bodies the scan looks at in one step:
+//!
+//! ```text
+//!   the roller in the grid   cell 4.50 m   1,495,561
+//!   the roller out of it     cell 0.70 m     105,362
+//! ```
+//!
+//! Fourteen times, and it is a cube of a ratio rather than a constant factor, so it gets
+//! worse with the size of the outlier and not better.
+//!
+//! So a body far enough above the rest of the set is **kept out of the grid**, and tested
+//! against it directly: the cells its own bound overlaps, which is cheap because there are
+//! few such bodies and the grid they are asking is now fine. Outliers are tested against
+//! each other quadratically. The cell is then sized by the population rather than by the
+//! one body, and the pair set is the same pair set --
+//! `the_grid_finds_every_pair_the_quadratic_search_would` is the guard, on a fixture with
+//! an outlier in it.
+//!
+//! **Far enough** is [`OVERSIZE`], which falls out of the neighbourhood rather than being
+//! chosen. How many may come out is [`oversize_cap`], and that is what stops this firing
+//! on a set that is not outlying but merely graded: where half the bodies are twice the
+//! size of the other half there is no outlier, there are two populations, and taking one
+//! of them out of the grid would be quadratic in half the set. Two grids would be the
+//! answer to that and this is not that.
+//!
+//! Downstream an outlier is a body like any other. It is reported in `pairs`, so it joins
+//! islands -- which are built over pairs and not over contacts, exactly so that two bodies
+//! resting against each other land in one island. It is swept in the same rounds, so a
+//! sleeping body beside it wakes. A sleeping *outlier* beside something awake wakes one
+//! round later than a gridded body would, because nothing in the grid looks at a body that
+//! is not in it, so an outlier has to do all of its own looking; the caller already sweeps
+//! in rounds and that is the round it costs.
 //!
 //! # A cell is one integer, and the scan carries it
 //!
@@ -92,6 +128,55 @@ const MIN_BUCKETS: usize = 64;
 /// runs on.
 const CHUNK: usize = 512;
 
+/// How much larger than the rest of the set a body has to be before it is cheaper to keep
+/// it out of the grid than to let it size the cell.
+///
+/// **This falls out of the neighbourhood; it is not a number that was tried.** A body of
+/// reach `r` in a grid the same body sizes sits in a cell of edge `2r` and scans the
+/// twenty-seven cells around its own, which is a box of edge `6r`. The same body tested
+/// directly against a grid whose widest member reaches `w` scans the cells its own bound
+/// overlaps -- a box of half-extent `r + w`, rounded out to cell boundaries, so an edge of
+/// at most `2(r + w) + 2(2w)`, which is `2r + 6w`. Direct is the cheaper of the two for
+/// that body alone when
+///
+/// ```text
+///     2r + 6w  <  6r     which is     r  >  1.5 w
+/// ```
+///
+/// -- the three being the cells on a side of the neighbourhood and the two being the
+/// reaches in a cell. Both are the grid's own contract, stated at the top of this file, and
+/// if either of them ever changes this moves with it.
+///
+/// It is a floor rather than a balance, and deliberately the conservative one: it is the
+/// point at which coming out of the grid pays for the outlier *itself*, and by then it has
+/// already stopped charging the other `n - 1` bodies the cube of how much it was inflating
+/// their cell, which is the whole of what this is for. A body at exactly the break-even
+/// saves the population a factor of `1.5^3`, a little over three.
+///
+/// **What would make it wrong** is a set whose large bodies are a population rather than
+/// an outlier -- half the set twice the size of the other half. Then taking them out is
+/// taking out half the grid and the quadratic below it is not a handful of pairs.
+/// [`oversize_cap`] is what says no to that.
+pub(super) const OVERSIZE: f64 = 1.5;
+
+/// The most bodies that may be held out of a grid holding `gridded` of them.
+///
+/// Bodies out of the grid are tested against each other directly, and that is quadratic.
+/// Quadratic is free only while it is smaller than a linear pass over the population --
+/// which [`Grid::rebuild`] makes several of anyway, so it is a pass the step is already
+/// paying for. So the bound is the largest `k` with `k(k - 1)/2 <= gridded`.
+///
+/// It is not there to be reached. A set with an outlier in it has one or two, and the
+/// peel in [`Grid::grid_ceiling`] stops long before this. What it is there for is the set
+/// that is merely graded, where peeling would walk on down the sizes taking half the
+/// bodies out of the grid and testing them against each other; this is the statement that
+/// such a set has no outlier in it and should be left alone.
+pub(super) fn oversize_cap(gridded: usize) -> usize {
+    // The positive root of `k^2 - k - 2n = 0`, floored. A budget rather than a bound that
+    // has to be tight, so the square root's last bit does not matter.
+    (0.5 * (1.0 + (1.0 + 8.0 * gridded as f64).sqrt())) as usize
+}
+
 /// One body's entry in a bucket: which cell it is really in, and which body it is.
 ///
 /// The cell is here rather than in a side table because the scan needs it for every
@@ -112,7 +197,22 @@ pub(super) struct Grid {
     keys: Vec<u64>,
     /// Each shaped body's radius plus half-length, indexed by **body**. One load in the
     /// inner loop where reading the two arrays was two.
+    ///
+    /// Filled for every body, gridded or not, because the oversized sweep reads it for
+    /// bodies that are in no cell.
     reach: Vec<f64>,
+    /// The bodies too big to be worth gridding, in increasing order -- see [`OVERSIZE`].
+    /// They are **not** in `shaped`, `keys` or `members`, so the neighbourhood scan never
+    /// sees one; [`Grid::sweep_oversized`] is where their pairs come from.
+    ///
+    /// In increasing body order because it is built by walking `shaped`, which is, and
+    /// because two of this module's laws are that the pair list does not depend on the run
+    /// or on the thread count.
+    oversized: Vec<u32>,
+    /// The largest reach left in the grid, which is half the cell. The oversized sweep
+    /// needs it to know how far from itself a gridded body's centre can be and still be
+    /// touching.
+    widest: f64,
     /// Bucket entries in bucket order, and where each bucket starts. The counting sort's
     /// two halves.
     members: Vec<Member>,
@@ -137,23 +237,47 @@ impl Grid {
         half_length: &[f64],
     ) {
         self.shaped.clear();
+        self.oversized.clear();
         self.reach.clear();
         self.reach.resize(position.len(), 0.0);
         let mut widest: f64 = 0.0;
+        let mut narrowest = f64::INFINITY;
         for i in 0..position.len() {
             let reach = radius[i] + half_length[i];
             self.reach[i] = reach;
             if radius[i] > 0.0 {
                 self.shaped.push(i as u32);
                 widest = widest.max(reach);
+                narrowest = narrowest.min(reach);
             }
         }
         if self.shaped.is_empty() {
+            self.widest = 0.0;
             return;
         }
 
-        // Twice the largest reach, so two bodies that touch are never more than one cell
-        // apart. See the module header.
+        // Whatever is too big to be worth gridding comes out before the cell is fixed,
+        // because the cell is exactly what it was taking from everything else.
+        let ceiling = self.grid_ceiling(widest, narrowest);
+        if ceiling < widest {
+            let mut kept = 0;
+            widest = 0.0;
+            for nth in 0..self.shaped.len() {
+                let body = self.shaped[nth];
+                if self.reach[body as usize] > ceiling {
+                    self.oversized.push(body);
+                } else {
+                    widest = widest.max(self.reach[body as usize]);
+                    self.shaped[kept] = body;
+                    kept += 1;
+                }
+            }
+            self.shaped.truncate(kept);
+        }
+        self.widest = widest;
+
+        // Twice the largest reach **in the grid**, so two gridded bodies that touch are
+        // never more than one cell apart. See the module header.
         self.inv_cell = 1.0 / (2.0 * widest).max(1e-6);
 
         let buckets = (2 * self.shaped.len()).next_power_of_two().max(MIN_BUCKETS);
@@ -195,6 +319,67 @@ impl Grid {
         }
     }
 
+    /// The largest reach the grid will hold; everything above it is an outlier.
+    ///
+    /// Peels the top of the set while the body setting the cell is more than [`OVERSIZE`]
+    /// times the widest body that would be left behind, so what it returns is a fixed
+    /// point: nothing left in the grid is oversized for the grid that remains, and nothing
+    /// taken out of it would have been better left in.
+    ///
+    /// Each round drops the ceiling by at least a factor of [`OVERSIZE`] and takes at least
+    /// one more body out, so the rounds are bounded by [`oversize_cap`]; on every set that
+    /// has an outlier in it at all there is one round, and on a set that has none the first
+    /// compare answers it.
+    fn grid_ceiling(&self, widest: f64, narrowest: f64) -> f64 {
+        // Nothing in the set is far enough below the widest body for that body to be an
+        // outlier in it. The usual answer, and it costs one compare on two numbers the
+        // caller had already.
+        if widest <= OVERSIZE * narrowest {
+            return widest;
+        }
+        let cap = oversize_cap(self.shaped.len());
+        let mut ceiling = widest;
+        let mut top = widest;
+        loop {
+            // The widest body that is more than the break-even below the one setting the
+            // cell: the cell this grid would have if everything above it came out.
+            let mut next = f64::NEG_INFINITY;
+            for &body in self.shaped.iter() {
+                let reach = self.reach[body as usize];
+                if reach * OVERSIZE < top {
+                    next = next.max(reach);
+                }
+            }
+            if !next.is_finite() {
+                // Everything left is within the break-even of the body sizing the cell, so
+                // the cell is the population's and there is no outlier under it.
+                return ceiling;
+            }
+            let bar = OVERSIZE * next;
+            let taken = self
+                .shaped
+                .iter()
+                .filter(|&&body| self.reach[body as usize] > bar)
+                .count();
+            if taken > cap {
+                // Not an outlier: a population. See [`oversize_cap`].
+                return ceiling;
+            }
+            ceiling = bar;
+            top = next;
+        }
+    }
+
+    /// Which bodies were held out of the grid, in increasing order.
+    ///
+    /// For the laws, which have to be able to say that a fixture still has an outlier in
+    /// it. The solve never asks: an outlier is a body like any other to everything past
+    /// this file.
+    #[cfg(test)]
+    pub(super) fn oversized(&self) -> &[u32] {
+        &self.oversized
+    }
+
     /// Appends every pair worth testing to `out`, skipping pairs the caller has said are
     /// not candidates.
     ///
@@ -206,8 +391,8 @@ impl Grid {
     /// the body that found it is in `moving`**, which is what stops the rounds spreading
     /// out to the whole component. See [`super::Skeleton::find_pairs`].
     ///
-    /// Each pair is still produced exactly once, and the rule that makes it so is three
-    /// cases rather than one:
+    /// Each pair is still produced exactly once, and the rule that makes it so is now
+    /// three cases rather than one:
     ///
     /// * both ends sweeping -- the lower index reports it, as before;
     /// * the other end already `swept` -- it reported the pair when it was the one
@@ -217,8 +402,8 @@ impl Grid {
     ///
     /// With everything awake the second and third cases never arise and this is the sweep
     /// it replaced, which is what
-    /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an all-set
-    /// frontier.
+    /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an
+    /// all-set frontier.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pairs(
         &mut self,
@@ -232,50 +417,231 @@ impl Grid {
         reached: &mut Vec<usize>,
     ) {
         let shaped = self.shaped.len();
-        if shaped == 0 {
-            return;
-        }
-        if shaped < PARALLEL_FLOOR {
+        if shaped >= PARALLEL_FLOOR {
+            // Taken out so the chunks can borrow the grid's read-only half while filling
+            // it; put back below, so nothing here allocates after the first few steps.
+            let mut scratch = std::mem::take(&mut self.scratch);
+            let mut woken = std::mem::take(&mut self.woken);
+            let chunks = shaped.div_ceil(CHUNK);
+            if scratch.len() < chunks {
+                scratch.resize_with(chunks, Vec::new);
+            }
+            if woken.len() < chunks {
+                woken.resize_with(chunks, Vec::new);
+            }
+            scratch[..chunks]
+                .par_iter_mut()
+                .zip(woken[..chunks].par_iter_mut())
+                .enumerate()
+                .for_each(|(chunk, (into, wake))| {
+                    into.clear();
+                    wake.clear();
+                    let from = chunk * CHUNK;
+                    let upto = (from + CHUNK).min(shaped);
+                    self.scan(
+                        from, upto, position, inv_mass, jointed, frontier, swept, moving,
+                        into, wake,
+                    );
+                });
+            for filled in scratch[..chunks].iter() {
+                out.extend_from_slice(filled);
+            }
+            for filled in woken[..chunks].iter() {
+                reached.extend_from_slice(filled);
+            }
+            self.scratch = scratch;
+            self.woken = woken;
+        } else if shaped > 0 {
             self.scan(
                 0, shaped, position, inv_mass, jointed, frontier, swept, moving, out,
                 reached,
             );
-            return;
+        }
+        if !self.oversized.is_empty() {
+            self.sweep_oversized(
+                position, inv_mass, jointed, frontier, swept, moving, out, reached,
+            );
+        }
+    }
+
+    /// The pairs of the bodies that were too big to be gridded: each against the grid, and
+    /// then against the others that came out of it.
+    ///
+    /// **Nothing in the grid ever looks at a body that is not in it**, so an outlier does
+    /// all of its own looking and reports every pair it finds, whatever the other end is
+    /// doing. That is the one place this differs from [`Grid::scan`], where the three cases
+    /// exist precisely because either end may be the one sweeping.
+    ///
+    /// The consequence is for sleeping. A gridded body beside an awake outlier is found and
+    /// woken here exactly as the scan would have done. An outlier beside an awake *gridded*
+    /// body is nobody's neighbour until it looks for itself, so when it is asleep this only
+    /// wakes it -- it reports nothing -- and it sweeps properly in the next of the caller's
+    /// rounds. Reporting from here as well would be the pair twice, once from each round.
+    ///
+    /// Outlier against outlier is quadratic and may be: [`oversize_cap`] bounds the count
+    /// at the point where the quadratic is smaller than a pass over the population, and in
+    /// a set that has an outlier at all the count is one or two.
+    #[allow(clippy::too_many_arguments)]
+    fn sweep_oversized(
+        &self,
+        position: &[(f64, f64, f64)],
+        inv_mass: &[f64],
+        jointed: Jointed<'_>,
+        frontier: &BitSet,
+        swept: &BitSet,
+        moving: &BitSet,
+        out: &mut Vec<(usize, usize)>,
+        reached: &mut Vec<usize>,
+    ) {
+        for &packed in self.oversized.iter() {
+            let a = packed as usize;
+            if swept.get(a) {
+                // It swept in an earlier round and reported then everything it can see;
+                // nothing has moved since.
+                continue;
+            }
+            let sweeping = frontier.get(a);
+            // The same rule the neighbourhood scan wakes by, asked of an outlier: what
+            // wakes a sleeping body is that something **moving** reached it, not that
+            // something awake is beside it. See [`super::Skeleton::find_pairs`].
+            let disturbing = moving.get(a);
+            let mut wake_a = false;
+            self.near(position[a], self.reach[a], |b| {
+                if !self.worth_testing(a, b, position, inv_mass, jointed) {
+                    return;
+                }
+                if sweeping {
+                    out.push((a.min(b), a.max(b)));
+                    if disturbing && !frontier.get(b) && !swept.get(b) {
+                        // Nobody has looked from it and nobody will until it is woken.
+                        reached.push(b);
+                    }
+                } else if moving.get(b) && (frontier.get(b) || swept.get(b)) {
+                    // Asleep with something moving beside it. Waking it is all this round
+                    // does; see the doc comment for why it does not also report.
+                    wake_a = true;
+                }
+            });
+            if wake_a {
+                reached.push(a);
+            }
         }
 
-        // Taken out so the chunks can borrow the grid's read-only half while filling it;
-        // put back below, so nothing here allocates after the first few steps.
-        let mut scratch = std::mem::take(&mut self.scratch);
-        let mut woken = std::mem::take(&mut self.woken);
-        let chunks = shaped.div_ceil(CHUNK);
-        if scratch.len() < chunks {
-            scratch.resize_with(chunks, Vec::new);
+        // And against each other. The same three cases the neighbourhood scan uses, and
+        // for the same reason: here both ends can be the one sweeping.
+        for (nth, &packed) in self.oversized.iter().enumerate() {
+            let a = packed as usize;
+            if !frontier.get(a) {
+                continue;
+            }
+            let disturbing = moving.get(a);
+            for (mth, &other) in self.oversized.iter().enumerate() {
+                if mth == nth {
+                    continue;
+                }
+                let b = other as usize;
+                let looking = frontier.get(b);
+                if looking && b < a {
+                    continue;
+                }
+                if !looking && swept.get(b) {
+                    continue;
+                }
+                if !self.worth_testing(a, b, position, inv_mass, jointed) {
+                    continue;
+                }
+                out.push((a.min(b), a.max(b)));
+                if disturbing && !looking {
+                    reached.push(b);
+                }
+            }
         }
-        if woken.len() < chunks {
-            woken.resize_with(chunks, Vec::new);
+    }
+
+    /// The rejections [`Grid::scan`] makes once a pair is in hand, for a sweep that has no
+    /// neighbourhood to amortise them over.
+    ///
+    /// The scan hoists every one of these out of its inner loop because it asks them of a
+    /// three-hundred-body neighbourhood; this asks them of a handful of bodies a step, so
+    /// the hoisting would be the more expensive half.
+    #[inline]
+    fn worth_testing(
+        &self,
+        a: usize,
+        b: usize,
+        position: &[(f64, f64, f64)],
+        inv_mass: &[f64],
+        jointed: Jointed<'_>,
+    ) -> bool {
+        if a == b {
+            return false;
         }
-        scratch[..chunks]
-            .par_iter_mut()
-            .zip(woken[..chunks].par_iter_mut())
-            .enumerate()
-            .for_each(|(chunk, (into, wake))| {
-                into.clear();
-                wake.clear();
-                let from = chunk * CHUNK;
-                let upto = (from + CHUNK).min(shaped);
-                self.scan(
-                    from, upto, position, inv_mass, jointed, frontier, swept, moving,
-                    into, wake,
-                );
-            });
-        for filled in scratch[..chunks].iter() {
-            out.extend_from_slice(filled);
+        // Two pinned bodies can never be moved apart, so a test between them has no
+        // outcome to produce.
+        if inv_mass[a] <= 0.0 && inv_mass[b] <= 0.0 {
+            return false;
         }
-        for filled in woken[..chunks].iter() {
-            reached.extend_from_slice(filled);
+        let apart = sub(position[a], position[b]);
+        let allowed = self.reach[a] + self.reach[b];
+        if dot(apart, apart) > allowed * allowed {
+            return false;
         }
-        self.scratch = scratch;
-        self.woken = woken;
+        if jointed.of(a).contains(&(b as u32)) {
+            return false;
+        }
+        // `u32::MAX` where no skeleton owns the body, which cannot match another body's.
+        let skeleton_a = jointed.component.get(a).copied().unwrap_or(u32::MAX);
+        jointed.component.get(b) != Some(&skeleton_a)
+    }
+
+    /// Every gridded body sitting in a cell that could hold something touching a body of
+    /// this `reach` at `p`.
+    ///
+    /// The cells overlapping a box of half-extent `reach + widest` about the point, which
+    /// is where anything it can touch has to be: no body in the grid reaches further than
+    /// [`Grid::widest`], so one whose centre is beyond that is not touching whatever is at
+    /// `p`. Cells rather than a sphere because a cell is the resolution the grid has.
+    ///
+    /// **It walks the members instead when the box covers more cells than the grid holds
+    /// bodies.** A body a thousand times the size of the set would otherwise walk a
+    /// thousand cubed mostly empty cells to reach the same few hundred bodies. The two
+    /// counts are in the same units and the crossover is where they cross, so there is
+    /// nothing here to choose either.
+    fn near(&self, p: (f64, f64, f64), reach: f64, mut visit: impl FnMut(usize)) {
+        let span = reach + self.widest;
+        // `as` saturates and the clamp is the grid's own, so a body at an absurd
+        // coordinate asks about an edge cell rather than one in the middle of the heap.
+        let edge = |v: f64| ((v * self.inv_cell).floor() as i64).clamp(-BIAS, BIAS - 1);
+        let lo = (edge(p.0 - span), edge(p.1 - span), edge(p.2 - span));
+        let hi = (edge(p.0 + span), edge(p.1 + span), edge(p.2 + span));
+        // In `i128` because each side of the box can be the whole two million cells of a
+        // lane and the product of three of those is not a `u64`.
+        let cells = (hi.0 - lo.0 + 1) as i128
+            * (hi.1 - lo.1 + 1) as i128
+            * (hi.2 - lo.2 + 1) as i128;
+        if cells > self.members.len() as i128 {
+            for member in self.members.iter() {
+                visit(member.body as usize);
+            }
+            return;
+        }
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for z in lo.2..=hi.2 {
+                    let cell = pack(x, y, z);
+                    let bucket = bucket_of(cell, self.shift);
+                    let start = self.starts[bucket] as usize;
+                    let end = self.starts[bucket + 1] as usize;
+                    for member in &self.members[start..end] {
+                        // A bucket holds every cell that hashed to it, so the cell itself
+                        // still has to be checked.
+                        if member.cell == cell {
+                            visit(member.body as usize);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The neighbourhood scan for one run of the shaped list.
