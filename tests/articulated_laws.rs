@@ -1315,3 +1315,96 @@ fn settled_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u6
 }
 
 
+
+/// A heap in which bodies are **retired while it is running**, reduced to the exact state
+/// of every body and to the step each one was taken out at.
+///
+/// The rule that decides is the caller's, which is the point: the crate holds no
+/// threshold, so the figure is here. It is a little over forty times a body's own weight,
+/// which on this fixture takes out eleven of the forty -- enough that the retirements
+/// change the answer, and not so many that what is being compared is two empty scenes.
+///
+/// **The schedule is part of the state.** Which body was retired at which step is decided
+/// by a number the solve produced, so a run that diverged by a bit anywhere would retire a
+/// different body a step earlier and the two runs would not even be comparable. Returning
+/// it alongside the positions is what makes this a sharper determinism test than the one
+/// without retirements rather than a weaker one.
+fn ploughed_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64, usize)> {
+    /// Newtons. See above: the caller's judgement, stated in the caller.
+    const CRUSHED: f64 = 1600.0;
+
+    let mut s = heap(count);
+    let mut retired_at = vec![usize::MAX; count];
+    for step in 0..steps {
+        s.step(DT, G, 8);
+        for i in 0..s.len() {
+            if !s.is_retired(i) && s.normal_load(i) > CRUSHED {
+                assert!(s.retire(i), "a live body refused to be retired");
+                retired_at[i] = step;
+            }
+        }
+    }
+    (0..s.len())
+        .map(|i| {
+            let p = s.position(i);
+            let v = s.velocity(i);
+            (
+                p.0.to_bits(),
+                p.1.to_bits(),
+                p.2.to_bits(),
+                v.0.to_bits(),
+                v.1.to_bits(),
+                v.2.to_bits(),
+                retired_at[i],
+            )
+        })
+        .collect()
+}
+
+/// **Retiring bodies while the simulation runs costs neither determinism.**
+///
+/// Both determinism laws again over a run that takes bodies out of the solve as it goes.
+/// Retirement is the one operation here that changes the *structure* of the step --
+/// joints leave, the whole joint set is coloured again, the broad phase's contents change
+/// -- and any of that going through a hash, or a set whose order depends on how the work
+/// was split, would show up as two runs disagreeing.
+///
+/// It is a stronger statement than the two laws above rather than a repeat of them,
+/// because the retirement schedule is itself derived from what the solve measured: a
+/// single bit of divergence anywhere changes which body is taken out and when, and the
+/// two runs then diverge structurally rather than numerically. See
+/// [`ploughed_heap_state`].
+#[test]
+fn retiring_bodies_mid_run_is_still_bit_identical_and_still_schedule_free() {
+    let first = ploughed_heap_state(40, 300);
+    let second = ploughed_heap_state(40, 300);
+    let retired = first.iter().filter(|b| b.6 != usize::MAX).count();
+    assert!(
+        retired > 0 && retired < first.len(),
+        "the fixture retired {retired} of {}, so it is not testing what it claims to",
+        first.len(),
+    );
+    for (i, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "body {i} ended at {a:?} on the first run and {b:?} on the second; a step \
+             that retires bodies depends on more than its inputs",
+        );
+    }
+
+    let counts = [1usize, 2, 8];
+    for threads in counts {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("a thread pool");
+        let answer = pool.install(|| ploughed_heap_state(40, 300));
+        for (i, (a, b)) in first.iter().zip(answer.iter()).enumerate() {
+            assert_eq!(
+                a, b,
+                "body {i} ended at {a:?} by default and at {b:?} on {threads} threads; \
+                 which body is retired, or when, depends on the schedule",
+            );
+        }
+    }
+}

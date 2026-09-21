@@ -1608,3 +1608,345 @@ fn an_overlapping_spawn_is_not_a_crushed_body() {
         }
     }
 }
+
+// -- retirement -------------------------------------------------------------------
+
+/// **Retiring a bone in the middle of a limb lets the far part come away**, and leaves the
+/// near part hanging.
+///
+/// This is the whole claim of taking the joints with the body: a smashed bone that still
+/// anchors its neighbours is wrong, so the two joints that named it go and the far half is
+/// free -- while every joint that did not name it is untouched, so the near half is still
+/// a limb and still on the root.
+///
+/// "Unaffected" is stated as *still jointed and still hanging* rather than as bit-equality
+/// with an uncut limb, which would be the wrong claim: the near part was carrying the far
+/// part's weight, so taking the far part away changes what it is holding, and it should
+/// move. What may not change is that it is attached.
+#[test]
+fn retiring_a_bone_in_a_limb_lets_the_far_part_come_away() {
+    const LINKS: usize = 5;
+    const CUT: usize = 3;
+    // Half the segment at each end, which is where [`limb`] puts the anchors.
+    const ANCHOR: f64 = 0.175;
+
+    let mut s = limb(LINKS);
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+    }
+    let fell_from = s.position(CUT + 1).1;
+
+    assert_eq!(s.joints().len(), LINKS);
+    assert!(s.retire(CUT), "the bone refused to be retired");
+    assert_eq!(
+        s.joints().len(),
+        LINKS - 2,
+        "retiring a bone in the middle of a limb left one of its two joints behind",
+    );
+    assert!(!s.retire(CUT), "a body was retired twice");
+
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+    }
+
+    // The near part is still a limb: every surviving joint's two anchors are still one
+    // point, including the one between the root and the first bone.
+    for joint in s.joints() {
+        let (a, b) = joint.bodies();
+        let Joint::Ball {
+            anchor_a, anchor_b, ..
+        } = *joint
+        else {
+            unreachable!("the fixture is ball joints");
+        };
+        let at_a = add(s.position(a), s.orientation(a).rotate_point(anchor_a));
+        let at_b = add(s.position(b), s.orientation(b).rotate_point(anchor_b));
+        let gap = length(sub(at_a, at_b));
+        assert!(
+            gap < 0.01,
+            "the joint between bodies {a} and {b} opened by {gap:.4} m; retiring a bone \
+             elsewhere disturbed a joint that never named it",
+        );
+    }
+    // And it is still hanging off the root rather than falling with the far part: the
+    // furthest near bone cannot be below the root by more than the chain that holds it.
+    let reach = 2.0 * ANCHOR * CUT as f64;
+    let hangs = s.position(0).1 - s.position(CUT - 1).1;
+    assert!(
+        hangs < reach + 0.01,
+        "the near part hangs {hangs:.3} m below the root where its chain is {reach:.3} m \
+         long; it came off",
+    );
+
+    // The far part: nothing holds it up any more, so it falls freely. Two seconds is
+    // `0.5 g t^2 = 0.33 m` from rest, and it started with whatever the limb had given it,
+    // so the bound is one-sided.
+    let fell = fell_from - s.position(CUT + 1).1;
+    assert!(
+        fell > 0.3,
+        "the far part of the limb fell {fell:.3} m in two seconds, where a body released \
+         from rest falls 0.33 m; the retired bone is still holding it up",
+    );
+    // It fell as a piece, not as loose parts: the joint between the two far bones is one
+    // of the ones checked above, and this is the distance that would have grown if it had
+    // been dropped instead.
+    let apart = length(sub(s.position(CUT + 1), s.position(LINKS)));
+    assert!(
+        apart < 2.0 * ANCHOR * (LINKS - CUT) as f64 + 0.01,
+        "the far part came apart as well as coming away: its ends are {apart:.3} m apart",
+    );
+}
+
+/// **A retired body takes no contacts**: something dropped where it was passes through.
+///
+/// Not "is solved and produces no correction" -- it is never offered to the narrow phase
+/// at all, because [`Skeleton::retire`] takes its radius away and the broad phase's grid
+/// holds only bodies with one. The visible consequence is the one a caller cares about:
+/// the place it occupied is empty.
+#[test]
+fn a_retired_body_takes_no_contacts() {
+    let mut s = stack(1);
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    let resting = s.position(0).1;
+    assert!(s.retire(0));
+
+    // Dropped straight on to where it was lying.
+    let over = s.add_body(lying(
+        Body::capsule(4.0, 0.1, 0.5, (0.0, resting + 0.8, 0.0)),
+        0.0,
+    ));
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        assert!(
+            !s.contacts.iter().any(|c| c.a == 0 || c.b == 0),
+            "the narrow phase produced a contact on a retired body",
+        );
+        assert!(
+            !s.ground_contacts.iter().any(|g| g.body == 0),
+            "the plane produced a contact on a retired body",
+        );
+    }
+
+    let landed = s.position(over).1;
+    assert!(
+        (landed - resting).abs() < 1e-3,
+        "the dropped body came to rest at {landed:.4} m where the plane is at \
+         {resting:.4} m; it landed on the body that was retired",
+    );
+}
+
+/// **A retired body never wakes and never appears in a colour.**
+///
+/// Never wakes is what makes it free: every sweep in the step walks the awake set, so a
+/// body that cannot be in it costs nothing per step rather than costing a test. Never
+/// coloured is the other half -- a colour is a set of constraints solved in parallel, and
+/// a retired body has no constraints of any kind to be in one.
+///
+/// Stated over a scene that is actively trying to wake it: the retired body is in the
+/// middle of a stack, and bodies keep landing on what is left.
+#[test]
+fn a_retired_body_never_wakes_and_never_appears_in_a_colour() {
+    let mut s = stack(3);
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    assert!(s.retire(1), "the middle of the stack refused to be retired");
+    assert!(s.is_retired(1) && !s.is_retired(0) && !s.is_retired(2));
+
+    // **And the caller cannot undo it.** Retirement is permanent by definition, so every
+    // door back in is shut: writing the body, pushing it, waking it by hand, or anchoring
+    // a new joint to it. Without this a retired body could be given a shape and a mass
+    // again and would rejoin the solve with no joints and no history.
+    let was = s.body(1);
+    s.set_body(1, Body::capsule(4.0, 0.1, 0.5, (0.0, 5.0, 0.0)));
+    s.set_velocity(1, (9.0, 9.0, 9.0));
+    s.set_angular_velocity(1, (9.0, 9.0, 9.0));
+    s.wake(1);
+    s.wake_all();
+    assert_eq!(s.body(1), was, "a retired body was written back into the solve");
+    assert!(!s.is_awake(1), "a retired body was woken by hand");
+    assert!(
+        !s.add_joint(Joint::Ball {
+            a: 0,
+            b: 1,
+            anchor_a: (0.0, 0.0, 0.0),
+            anchor_b: (0.0, 0.0, 0.0),
+        }),
+        "a joint was anchored to a retired body",
+    );
+
+    for step in 0..900 {
+        if step % 150 == 0 {
+            s.add_body(lying(
+                Body::capsule(4.0, 0.1, 0.5, (0.0, 1.4, 0.0)),
+                0.0,
+            ));
+        }
+        s.step(DT, G, 8);
+
+        assert!(!s.is_awake(1), "a retired body woke up at step {step}");
+        assert!(!s.ready.get(1), "a retired body was found ready to sleep");
+        for (colour, set) in s.colours().iter().enumerate() {
+            for &k in set {
+                let (a, b) = s.joints()[k].bodies();
+                assert!(
+                    a != 1 && b != 1,
+                    "joint colour {colour} names a retired body",
+                );
+            }
+        }
+        for (colour, set) in s.contact_colours.iter().enumerate() {
+            for &k in set {
+                let c = s.contacts[k];
+                assert!(
+                    c.a != 1 && c.b != 1,
+                    "contact colour {colour} names a retired body",
+                );
+            }
+        }
+        for &k in s.ground_colours.iter() {
+            assert!(
+                s.ground_contacts[k].body != 1,
+                "the ground colour names a retired body",
+            );
+        }
+    }
+}
+
+/// **Whatever was resting on it wakes.** A body that has stopped has stopped *because* of
+/// what is under it; take that away without telling it and it stays frozen in mid-air for
+/// as long as nothing else touches it.
+///
+/// The fixture is a stack that has gone all the way to sleep, so there is no other
+/// disturbance to confuse it with: the whole skeleton is out of the step, the bottom body
+/// is retired, and the two above it have to be back in.
+#[test]
+fn retiring_a_body_wakes_what_was_resting_on_it() {
+    let mut s = stack(3);
+    let mut slept = None;
+    for step in 1..=3000 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            slept = Some(step);
+            break;
+        }
+    }
+    assert!(slept.is_some(), "the stack never settled, so there is nothing to wake");
+    let was = [s.position(1).1, s.position(2).1];
+
+    assert!(s.retire(0), "the bottom of the stack refused to be retired");
+    assert!(
+        s.is_awake(1) && s.is_awake(2),
+        "the bodies resting on the retired one are still asleep: {} of {} awake",
+        s.awake_count(),
+        s.len(),
+    );
+
+    for _ in 0..300 {
+        s.step(DT, G, 8);
+    }
+    for (n, before) in was.iter().enumerate() {
+        let i = n + 1;
+        assert!(
+            s.position(i).1 < before - 0.15,
+            "body {i} was resting on the retired one at {before:.3} m and is still at \
+             {:.3} m; it never found out the support had gone",
+            s.position(i).1,
+        );
+    }
+}
+
+/// A limb of `links` capsules hung off a pinned root by ball joints, in space rather than
+/// over a plane, so that what a retirement does is the only thing happening to it.
+fn limb(links: usize) -> Skeleton {
+    let mut s = Skeleton::new();
+    // No self-collision: the question is what the joints do, and a limb that folds onto
+    // itself would answer it with contacts.
+    s.set_self_collision(false);
+    s.set_sleeping(false);
+    let mut previous = s.add_body(Body::pinned((0.0, 4.0, 0.0)));
+    for i in 0..links {
+        let body = s.add_body(Body::capsule(
+            3.0,
+            0.05,
+            0.3,
+            (0.0, 3.7 - 0.35 * i as f64, 0.0),
+        ));
+        s.add_joint(Joint::Ball {
+            a: previous,
+            b: body,
+            anchor_a: (0.0, -0.175, 0.0),
+            anchor_b: (0.0, 0.175, 0.0),
+        });
+        previous = body;
+    }
+    s
+}
+
+/// **Retiring a body leaves the colouring in the state it would have been built in**, and
+/// a joint added afterwards is still coloured in constant time against a truth.
+///
+/// This is the invariant the incremental path rests on: `add_joint` decides a colour from
+/// two bitmasks alone, which is only right if those bitmasks describe the assignment
+/// `colours` actually holds. A removal that cleared the sets without clearing the bits,
+/// or replayed them in a different order, would leave the two disagreeing -- and the
+/// damage would be a quietly worse colour count rather than a wrong answer, which is the
+/// kind of thing no simulation test catches.
+///
+/// Stated against the same from-scratch greedy pass
+/// `colouring_joints_as_they_arrive_matches_colouring_them_all_at_once` uses, run over
+/// the joints that survived, and with more joints added after the retirement so that the
+/// incremental path has to work from what the replay left behind.
+#[test]
+fn colouring_after_a_retirement_matches_colouring_what_is_left() {
+    let mut s = Skeleton::new();
+    for i in 0..12 {
+        rig(&mut s, i as f64 * 0.4);
+    }
+    // A rig is a pinned root with two chains of three, so this is a root and the middle
+    // of one of its limbs -- the two shapes whose removal frees a different number of
+    // colours.
+    assert!(s.retire(0));
+    assert!(s.retire(9));
+
+    // And then more joints, which have to be coloured against what the replay left.
+    for i in 0..6 {
+        let a = 14 + i * 3;
+        let b = 15 + i * 3;
+        assert!(s.add_joint(Joint::Ball {
+            a,
+            b,
+            anchor_a: (0.0, -0.15, 0.0),
+            anchor_b: (0.0, 0.15, 0.0),
+        }));
+    }
+
+    let mut taken: Vec<Vec<usize>> = vec![Vec::new(); s.len()];
+    let mut expected: Vec<Vec<usize>> = Vec::new();
+    for (index, joint) in s.joints().iter().enumerate() {
+        let (a, b) = joint.bodies();
+        assert!(
+            !s.is_retired(a) && !s.is_retired(b),
+            "joint {index} still names a retired body",
+        );
+        let mut colour = 0;
+        while taken[a].contains(&colour) || taken[b].contains(&colour) {
+            colour += 1;
+        }
+        taken[a].push(colour);
+        taken[b].push(colour);
+        if colour >= expected.len() {
+            expected.resize_with(colour + 1, Vec::new);
+        }
+        expected[colour].push(index);
+    }
+
+    assert_eq!(
+        s.colours(),
+        expected.as_slice(),
+        "after a retirement the colouring is not the one a full greedy pass over the \
+         surviving joints would have produced",
+    );
+}
