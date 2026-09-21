@@ -2475,9 +2475,11 @@ impl Skeleton {
     /// with loose bodies are untouched -- only a body and its own skeleton stop seeing
     /// each other -- so a heap of rigs still piles up as a heap.
     ///
-    /// It is off rather than on by default because the trade is the caller's: a rig that
-    /// is looked at closely wants its limbs to collide, and a rig in a crowd wants to stop
-    /// costing anything once it has landed.
+    /// **It is on by default**, because a rig whose limbs pass through each other is
+    /// wrong in a way anybody can see, where the cost of it is a frame-budget question the
+    /// caller is better placed to answer. The trade is real and it is the one above: a rig
+    /// that is looked at closely wants its limbs to collide, and a rig in a crowd wants to
+    /// stop costing anything once it has landed. A caller with crowds turns it off.
     ///
     /// # Why the narrower rejection already in here is not enough
     ///
@@ -2799,6 +2801,8 @@ impl Skeleton {
     /// [`Skeleton::settle`] gives: two bodies resting exactly against one another overlap
     /// by nothing and have no contact, and the better the solve gets the more often that
     /// is true.
+    #[must_use = "a body that refused to retire is still in the solve, and nothing else \
+                  will say so"]
     pub fn retire(&mut self, i: usize) -> bool {
         if i >= self.position.len() || self.retired.get(i) {
             return false;
@@ -3018,6 +3022,7 @@ impl Skeleton {
     /// produced -- which `colouring_joints_as_they_arrive_matches_colouring_them_all_at_once`
     /// asserts against a from-scratch pass rather than leaving implicit, because the
     /// colour count is what decides how parallel the solve can be.
+    #[must_use = "a refused joint is not in the skeleton, and nothing else will say so"]
     pub fn add_joint(&mut self, mut joint: Joint) -> bool {
         let (a, b) = joint.bodies();
         let n = self.position.len();
@@ -3433,24 +3438,38 @@ impl Skeleton {
         // Awake bodies only, and in increasing order, which is the order the loop this
         // replaced produced: a sleeping body is already resting on the plane -- that is
         // most of why it went to sleep -- and the plane cannot arrive underneath it.
-        let awake = std::mem::take(&mut self.awake);
+        // **Destructured rather than taken out and put back.** The closure needs the body
+        // arrays while `awake` is borrowed, and `mem::take` is the usual way to buy that --
+        // but a take that is restored after the loop is not restored if the loop unwinds,
+        // and what would be left behind here is an *empty* awake set: every body asleep,
+        // `step` returning at its first line for ever, and a skeleton that looks fine to
+        // every accessor. A caller that catches a panic rather than dying gets a corpse.
+        let Skeleton {
+            awake,
+            position,
+            orientation,
+            radius,
+            half_length,
+            ground_contacts: out,
+            ground_colours,
+            ..
+        } = self;
         awake.for_each_set(|i| {
-            let before = self.ground_contacts.len();
+            let before = out.len();
             ground_contacts(
                 i,
-                self.position[i],
-                self.orientation[i],
-                self.radius[i],
-                self.half_length[i],
+                position[i],
+                orientation[i],
+                radius[i],
+                half_length[i],
                 normal,
                 distance,
-                &mut self.ground_contacts,
+                out,
             );
-            for index in before..self.ground_contacts.len() {
-                self.ground_colours.push(index);
+            for index in before..out.len() {
+                ground_colours.push(index);
             }
         });
-        self.awake = awake;
 
         // One running impulse per contact, like every other constraint here. It used to
         // have to be one per *body*, pooled across the two ends of a capsule's patch,
@@ -3576,10 +3595,25 @@ impl Skeleton {
     /// **One step.** Predict under `gravity`, run `iterations` passes over the coloured
     /// joint sets, then read the velocities back out of what moved.
     ///
-    /// Allocates nothing. `iterations` is the quality dial: four is enough for a corpse,
-    /// and the cost is linear in it.
+    /// `iterations` is the quality dial: four is enough for a corpse, and the cost is
+    /// linear in it. Zero is read as one, since a step that ran no passes would integrate
+    /// gravity and solve nothing, which is a worse answer than a cheap one.
+    ///
+    /// **A `dt` that is not a positive, finite number does nothing**, and the spelling of
+    /// that test is load-bearing twice over.
+    ///
+    /// `dt <= 0.0` lets a NaN straight through, because every comparison with a NaN is
+    /// false -- and one NaN step puts NaN in every position and orientation in the
+    /// skeleton, with nothing that clears it and no accessor that admits to it. A caller
+    /// dividing by a frame rate can produce one on the frame a timer wraps.
+    ///
+    /// `dt > 0.0` alone still admits an infinity, which is worse than it sounds: it does
+    /// not merely produce a wrong answer, it reaches a `clamp` on a NaN inside the solve
+    /// and **panics**, from a call the caller had every reason to think was total.
+    /// `a_step_of_no_time_or_of_nonsense_does_nothing` covers all four of zero, negative,
+    /// NaN and infinite.
     pub fn step(&mut self, dt: f64, gravity: (f64, f64, f64), iterations: usize) {
-        if dt <= 0.0 || self.position.is_empty() {
+        if !(dt > 0.0 && dt.is_finite()) || self.position.is_empty() {
             return;
         }
         // Everything has settled and nothing has disturbed it. There is no state a step

@@ -38,15 +38,15 @@
 //!   and `b` and nothing else; every other constraint in the colour names a disjoint
 //!   pair. No two threads address the same element of any of the four body arrays, so
 //!   there is no data race and no ordering to depend on.
-//! * **The running impulses are addressed by something unique to the constraint within
-//!   the colour**, so each is touched by exactly one thread. For pair contacts that is
-//!   the contact's own index. For ground contacts it is the **body**, because the two
-//!   ends of a capsule on the plane pool one Coulomb budget -- see
-//!   [`Skeleton::build_contacts`] -- and that is sound for exactly the reason the body
-//!   arrays are: within a ground set each body appears at most once, which is the
-//!   property [`disjoint`] already checks there, since it walks the set's bodies rather
-//!   than its contacts. A change that put both of a body's ground contacts in one set
-//!   would race the budget as well as the body, and would fail that same check.
+//! * **Every running impulse is addressed by the constraint's own index**, so each is
+//!   touched by exactly one thread, and there is no case to argue beyond that. There used
+//!   to be one: a capsule lying on the plane took a contact at each end and the two pooled
+//!   one Coulomb budget, so the ground impulses had to be indexed by *body* instead, which
+//!   was sound only because a body appears at most once in a ground set. The patch is a
+//!   single constraint now -- `contacts::ground_contacts` pushes one entry per body,
+//!   carrying both ends -- so the budget belongs to the constraint and is indexed like
+//!   everything else. If a body ever takes two ground contacts again this bullet is the
+//!   one that has to be rewritten before it does.
 //! * **Nothing is read through a shared reference while it is written.** The arrays are
 //!   reached only through [`Cells`], which reads and writes elements through a raw
 //!   pointer and never forms a `&` or `&mut` over the buffer. The read-only arrays --

@@ -41,12 +41,12 @@ fn a_pinned_body_does_not_move() {
     let mut s = Skeleton::new();
     let root = s.add_body(Body::pinned((1.0, 2.0, 3.0)));
     let limb = s.add_body(Body::capsule(50.0, 0.1, 0.8, (1.0, 1.2, 3.0)));
-    s.add_joint(Joint::Ball {
+    assert!(s.add_joint(Joint::Ball {
         a: root,
         b: limb,
         anchor_a: (0.0, 0.0, 0.0),
         anchor_b: (0.0, 0.4, 0.0),
-    });
+    }), "the fixture could not build its own rig");
 
     for _ in 0..300 {
         s.step(DT, G, 8);
@@ -234,12 +234,12 @@ fn no_two_joints_in_a_colour_share_a_body() {
                 0.3,
                 (0.4 + 0.3 * segment as f64, 3.0 - 0.4 * link as f64, 0.0),
             ));
-            s.add_joint(Joint::Ball {
+            assert!(s.add_joint(Joint::Ball {
                 a: previous,
                 b: limb,
                 anchor_a: (0.0, -0.2, 0.0),
                 anchor_b: (0.0, 0.15, 0.0),
-            });
+            }), "the fixture could not build its own rig");
             previous = limb;
         }
     }
@@ -1004,12 +1004,12 @@ fn folded(into: &mut Skeleton, x: f64) {
         arm.orientation = Quaternion::from_axis_angle((0.0, 1.0, 0.0), -dz * std::f64::consts::FRAC_PI_2)
             .multiply(&Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2));
         let arm = into.add_body(arm);
-        into.add_joint(Joint::Ball {
+        assert!(into.add_joint(Joint::Ball {
             a: root,
             b: arm,
             anchor_a: (dx * 0.08, 0.0, dz * 0.08),
             anchor_b: (0.0, 0.125, 0.0),
-        });
+        }), "the fixture could not build its own rig");
     }
 }
 
@@ -1299,12 +1299,12 @@ fn a_limb_hanging_from_an_anchor_goes_to_sleep() {
             0.25,
             (0.0, 2.0 - 0.125 - 0.25 * i as f64, 0.0),
         ));
-        s.add_joint(Joint::Ball {
+        assert!(s.add_joint(Joint::Ball {
             a: previous,
             b: body,
             anchor_a,
             anchor_b: (0.0, 0.125, 0.0),
-        });
+        }), "the fixture could not build its own rig");
         anchor_a = (0.0, -0.125, 0.0);
         previous = body;
     }
@@ -1553,12 +1553,12 @@ fn rig(into: &mut Skeleton, x: f64) {
                 0.3,
                 (x + side * 0.1, 1.7 - 0.35 * i as f64, 0.0),
             ));
-            into.add_joint(Joint::Ball {
+            assert!(into.add_joint(Joint::Ball {
                 a: previous,
                 b: body,
                 anchor_a: (0.0, -0.15, 0.0),
                 anchor_b: (0.0, 0.15, 0.0),
-            });
+            }), "the fixture could not build its own rig");
             previous = body;
         }
     }
@@ -1572,12 +1572,12 @@ fn chain(links: usize) -> Skeleton {
     for i in 0..links {
         let y = 3.0 - 0.4 * (i as f64 + 1.0);
         let link = s.add_body(Body::capsule(3.0, 0.05, 0.35, (0.0, y, 0.0)));
-        s.add_joint(Joint::Ball {
+        assert!(s.add_joint(Joint::Ball {
             a: previous,
             b: link,
             anchor_a: if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
             anchor_b: (0.0, 0.2, 0.0),
-        });
+        }), "the fixture could not build its own rig");
         previous = link;
     }
     s
@@ -2282,12 +2282,12 @@ fn limb(links: usize) -> Skeleton {
             0.3,
             (0.0, 3.7 - 0.35 * i as f64, 0.0),
         ));
-        s.add_joint(Joint::Ball {
+        assert!(s.add_joint(Joint::Ball {
             a: previous,
             b: body,
             anchor_a: (0.0, -0.175, 0.0),
             anchor_b: (0.0, 0.175, 0.0),
-        });
+        }), "the fixture could not build its own rig");
         previous = body;
     }
     s
@@ -2524,4 +2524,32 @@ fn crowd_after(count: usize, steps: usize, lanes: Option<usize>) -> Vec<(u64, u6
             (p.0.to_bits(), p.1.to_bits(), p.2.to_bits())
         })
         .collect()
+}
+
+/// **A step that is handed nonsense does nothing, and NaN is nonsense.**
+///
+/// The guard is written `!(dt > 0.0)` rather than `dt <= 0.0` because every comparison
+/// with a NaN is false, so the second spelling lets one straight through -- and a single
+/// NaN step puts NaN in every position and orientation in the skeleton, with nothing that
+/// clears it and no accessor that admits to it. A caller dividing by a frame rate can
+/// produce one on the frame a timer wraps.
+#[test]
+fn a_step_of_no_time_or_of_nonsense_does_nothing() {
+    for dt in [0.0f64, -1.0 / 60.0, f64::NAN, f64::INFINITY] {
+        let mut s = stack(2);
+        let before: Vec<_> = (0..s.len()).map(|i| s.position(i)).collect();
+        s.step(dt, G, 8);
+        for i in 0..s.len() {
+            let now = s.position(i);
+            assert!(
+                now.0.is_finite() && now.1.is_finite() && now.2.is_finite(),
+                "a step of dt = {dt} left body {i} at {now:?}; the skeleton is poisoned \
+                 and there is no way back from it",
+            );
+            assert_eq!(
+                now, before[i],
+                "a step of dt = {dt} moved body {i}",
+            );
+        }
+    }
 }
