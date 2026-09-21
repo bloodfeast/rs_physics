@@ -336,6 +336,22 @@ fn joints_only(c: &mut Criterion) {
 
     let mut s = Skeleton::new();
     s.set_self_collision(false);
+    // **Sleeping off, which is what makes this a control.**
+    //
+    // It is not off because sleeping is unwelcome -- it is off because this fixture's job
+    // is to hold everything else still while one thing changes, and a fixture that sleeps
+    // cannot do that. A pinned rig's legs hang straight down with nothing to swing them,
+    // so six of its sixteen movable bodies leave the step within half a second: with
+    // sleeping on this scene runs four tenths asleep, and its number then moves when the
+    // *sleeping* changes rather than when the joint solve does. That is exactly what
+    // happened -- a fix to which bodies are eligible to sleep took this benchmark from
+    // 4.17 ms to 2.49 ms and was briefly read as a gain in the joint path, which it was
+    // not.
+    //
+    // Awake, it measures what it says: nine thousand six hundred joints, no contacts, no
+    // contact list to build or colour. Anything that costs per contact costs nothing here,
+    // and anything that costs per sleeping body costs nothing here either.
+    s.set_sleeping(false);
     for i in 0..PILE {
         ragdoll(&mut s, i as f64 * 0.8, 0.0);
     }
@@ -348,7 +364,8 @@ fn joints_only(c: &mut Criterion) {
         "the joint-only fixture found contacts, so it is not measuring what it says",
     );
     println!(
-        "  joints only: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake",
+        "  joints only: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake \
+         (all of them, deliberately)",
         s.len(),
         s.joints().len(),
         s.contact_count(),
