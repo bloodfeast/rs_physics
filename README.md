@@ -20,6 +20,7 @@ It provides a comprehensive set of tools for working with physical constants, pe
 - Fluid Simulation based on eulerian method (optional, available behind feature flag)
 - Material properties and physics (e.g., density, specific heat capacity) (optional, available behind feature flag)
 - Constraint solvers for connected bodies (optional, available behind feature flag)
+- Articulated bodies: skeletons of jointed capsules, contacts, and piles of them that settle and then cost nothing
 - Particle system simulation (optional, available behind feature flag)
 - WebAssembly (WASM) api for easy integration with web projects
 - Comprehensive test suite
@@ -107,6 +108,36 @@ fn main() {
 - `Joint`: Struct for rigid connections between objects
 - `Spring`: Struct for spring connections between objects
 - `IterativeConstraintSolver`: Solver for systems with multiple constraints
+
+### Articulated Bodies
+
+- `Skeleton`: one set of bodies solved together, with joints and contacts referring to it by index
+- `Body`: a rigid body as a value -- a capsule, or a pinned anchor the solver moves the world around
+- `Joint`: `Ball` for a shoulder, `Hinge` for a knee, with a range of motion it will not fold past
+
+A `Skeleton` holds its bodies as parallel arrays rather than owning them one constraint at
+a time, because a forearm is the second body of the elbow and the first body of the wrist,
+and two copies of it do not converge. It solves the whole figure at once -- or a few hundred
+figures -- with the constraints graph-coloured so that no two in a colour name the same body,
+and a pool of workers asked once per pass rather than once per colour.
+
+What it does beyond joints: capsule-against-capsule and capsule-against-ground contacts, with
+Coulomb friction that reproduces its own angle at any iteration count, rolling resistance, and
+a uniform-grid broad phase. A body's contact with the ground is one constraint rather than one
+per end, which is what stops a lying capsule drifting.
+
+**What has settled leaves the simulation.** Bodies that stop moving are put to sleep in islands
+and woken by anything that reaches them, so a heap at rest costs a scan of one bit per body:
+ten thousand capsules asleep step in tens of nanoseconds rather than milliseconds. The
+threshold is not a tuned constant -- a body is settling when it moves less than a small
+fraction of *its own size* over the time it would take to fall that far, so one rule serves a
+finger bone and a torso.
+
+Its behaviour is pinned by `tests/articulated_laws.rs`, which tests through the public API only
+and asserts the things that must hold however the solver is written: that the answer is
+bit-identical run to run and independent of how many threads computed it, that a resting capsule
+sits exactly one radius above what it rests on, that a skeleton left to itself does not move its
+own centre of mass, and that a closed system never ends with more energy than it began with.
 
 ### Particle System Simulation
 - `Particle`: Struct for individual particles
