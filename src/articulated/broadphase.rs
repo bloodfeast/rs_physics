@@ -119,7 +119,7 @@ pub(super) struct Grid {
     starts: Vec<u32>,
     cursor: Vec<u32>,
     /// Where each chunk of the parallel scan puts its pairs before they are concatenated,
-    /// and the sleeping bodies it found next to an awake one. Owned so that a step
+    /// and the sleeping bodies it found next to a moving one. Owned so that a step
     /// allocates nothing.
     scratch: Vec<Vec<(usize, usize)>>,
     woken: Vec<Vec<usize>>,
@@ -201,11 +201,13 @@ impl Grid {
     /// **Only bodies in `frontier` are swept.** A body outside it is still a collider and
     /// is still reported as the other half of a pair; it simply does not look around
     /// itself, which is what lets a sleeping heap cost nothing here. It is also why the
-    /// caller sweeps in rounds: a body found in neither `frontier` nor `swept` was
-    /// asleep, so it is appended to `reached` and the caller sweeps from it next.
+    /// caller sweeps in rounds: a body found in neither `frontier` nor `swept` was asleep,
+    /// so it is appended to `reached` and the caller sweeps from it next -- but **only when
+    /// the body that found it is in `moving`**, which is what stops the rounds spreading
+    /// out to the whole component. See [`super::Skeleton::find_pairs`].
     ///
-    /// Each pair is still produced exactly once, and the rule that makes it so is now
-    /// three cases rather than one:
+    /// Each pair is still produced exactly once, and the rule that makes it so is three
+    /// cases rather than one:
     ///
     /// * both ends sweeping -- the lower index reports it, as before;
     /// * the other end already `swept` -- it reported the pair when it was the one
@@ -215,8 +217,8 @@ impl Grid {
     ///
     /// With everything awake the second and third cases never arise and this is the sweep
     /// it replaced, which is what
-    /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an
-    /// all-set frontier.
+    /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an all-set
+    /// frontier.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pairs(
         &mut self,
@@ -225,6 +227,7 @@ impl Grid {
         jointed: Jointed<'_>,
         frontier: &BitSet,
         swept: &BitSet,
+        moving: &BitSet,
         out: &mut Vec<(usize, usize)>,
         reached: &mut Vec<usize>,
     ) {
@@ -234,7 +237,8 @@ impl Grid {
         }
         if shaped < PARALLEL_FLOOR {
             self.scan(
-                0, shaped, position, inv_mass, jointed, frontier, swept, out, reached,
+                0, shaped, position, inv_mass, jointed, frontier, swept, moving, out,
+                reached,
             );
             return;
         }
@@ -260,7 +264,8 @@ impl Grid {
                 let from = chunk * CHUNK;
                 let upto = (from + CHUNK).min(shaped);
                 self.scan(
-                    from, upto, position, inv_mass, jointed, frontier, swept, into, wake,
+                    from, upto, position, inv_mass, jointed, frontier, swept, moving,
+                    into, wake,
                 );
             });
         for filled in scratch[..chunks].iter() {
@@ -284,6 +289,7 @@ impl Grid {
         jointed: Jointed<'_>,
         frontier: &BitSet,
         swept: &BitSet,
+        moving: &BitSet,
         out: &mut Vec<(usize, usize)>,
         reached: &mut Vec<usize>,
     ) {
@@ -292,6 +298,9 @@ impl Grid {
             if !frontier.get(a) {
                 continue;
             }
+            // Whether anything this body finds asleep is woken by finding it. Read once
+            // for the whole neighbourhood, like everything else about the outer body.
+            let disturbing = moving.get(a);
             // Everything about the outer body, read once for its whole neighbourhood
             // rather than for each of the three hundred candidates in it.
             let here = position[a];
@@ -351,10 +360,9 @@ impl Grid {
                                 continue;
                             }
                             out.push((a.min(b), a.max(b)));
-                            // Close enough to be worth a narrow-phase test, and nobody
-                            // has looked from it: it was asleep, and something is beside
-                            // it now.
-                            if !looking {
+                            // Asleep, and something that is moving is now a body's length
+                            // away from it.
+                            if disturbing && !looking {
                                 reached.push(b);
                             }
                         }
