@@ -3668,7 +3668,27 @@ impl Skeleton {
         // and a join cost 30 to 70 us on their own, and the whole predict is under a
         // millisecond -- the scheduling was a real fraction of it.
         let g = gravity;
-        let wide = self.position.len() >= PARALLEL_FLOOR;
+        // **Sized by what is awake, not by what exists**, which on the workload sleeping
+        // is for is the whole of the difference. The sweep walks the awake set a word at a
+        // time and does nothing for a clear bit, so a heap of ten thousand with three
+        // body moving in it has one body's worth of work here -- and asking the pool for it
+        // cost three forks, at the 26 to 72 us a fork this module has measured elsewhere.
+        // Measured on 9,999 capsules resting in stacks of three, one body woken each step,
+        // the two predicates alternated over three rounds:
+        //
+        // ```text
+        //   by body count    709.2  734.0  732.5 us a step
+        //   by awake count   468.0  463.3  464.6 us a step
+        // ```
+        //
+        // Disjoint every round, and a third of the step gone. On `pile`, where everything
+        // is awake, the same build reads 6.23 and 6.60 ms against a 6.0 to 6.4 baseline --
+        // no signal, which is what the paragraph below predicts.
+        //
+        // With everything awake the two predicates are the same predicate, so nothing that
+        // was parallel stops being parallel. `BitSet::count` is a popcount per sixty-four
+        // bodies, which is the sweep's own loop again and did not show.
+        let wide = self.awake.count() >= PARALLEL_FLOOR;
 
         let predict = |((((p, v), q), &inv_m), w): (
             (((&mut (f64, f64, f64), &mut (f64, f64, f64)), &mut Quaternion), &f64),
@@ -3839,7 +3859,27 @@ impl Skeleton {
     /// once to give the velocity pass the state it reads, and once to deliver what that
     /// pass decided. See the module header on the velocity pass.
     fn read_velocities(&mut self, dt: f64) {
-        let wide = self.position.len() >= PARALLEL_FLOOR;
+        // **Sized by what is awake, not by what exists**, which on the workload sleeping
+        // is for is the whole of the difference. The sweep walks the awake set a word at a
+        // time and does nothing for a clear bit, so a heap of ten thousand with three
+        // body moving in it has one body's worth of work here -- and asking the pool for it
+        // cost three forks, at the 26 to 72 us a fork this module has measured elsewhere.
+        // Measured on 9,999 capsules resting in stacks of three, one body woken each step,
+        // the two predicates alternated over three rounds:
+        //
+        // ```text
+        //   by body count    709.2  734.0  732.5 us a step
+        //   by awake count   468.0  463.3  464.6 us a step
+        // ```
+        //
+        // Disjoint every round, and a third of the step gone. On `pile`, where everything
+        // is awake, the same build reads 6.23 and 6.60 ms against a 6.0 to 6.4 baseline --
+        // no signal, which is what the paragraph below predicts.
+        //
+        // With everything awake the two predicates are the same predicate, so nothing that
+        // was parallel stops being parallel. `BitSet::count` is a popcount per sixty-four
+        // bodies, which is the sweep's own loop again and did not show.
+        let wide = self.awake.count() >= PARALLEL_FLOOR;
         // And one sweep to read both velocities back, for the same reason the predict is
         // one.
         let inv_dt = 1.0 / dt;
