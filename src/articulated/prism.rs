@@ -112,12 +112,48 @@
 //! records being caught by elsewhere. So the margin stays at the derived quantity and is
 //! not tuned. Piles never settled at any of them.
 //!
-//! What is left is that 0.3 per cent. A held axis stops the *common* flip -- a pair rocking
-//! across the boundary between two faces -- and does not stop a pair that has genuinely
-//! moved onto a new face and back. Remembering the *feature* rather than the direction, so
-//! that the pair is tied to the face pair it was resting on until the face itself is
-//! clearly wrong, is the next thing to try, and it is the shape the rest of this module's
-//! anchors already take.
+//! # Remembering the feature rather than the direction
+//!
+//! What is remembered is now a [`Feature`] -- which face, or which pair of edges -- and not
+//! a direction. A direction has to be stored in some frame, and whichever body's frame it
+//! is stored in, the *other* body turning moves the face it was resting on out from under
+//! it. A feature has no frame: the axis is rebuilt from both orientations every step.
+//!
+//! **Two bugs came out of doing it, and both were worth more than the change.**
+//!
+//! The first: the feature was being stored in the same loop that builds the *revival* list,
+//! which is gated on a pair having carried normal impulse. Those two lists look alike and
+//! are for opposite things -- reviving a constraint is about what a pair *did*, steadying a
+//! normal is about what a pair *is* -- so four fifths of a heap's contacts were choosing an
+//! axis afresh every step. Measured: forty-four pairs remembered out of two hundred and
+//! eleven contacts.
+//!
+//! The second, and the larger: a prism pair that came momentarily clear fell back to its
+//! *bounding capsule's* contact. So a resting pair alternated between a face normal while
+//! it overlapped and a between-the-axes direction while it did not -- a bigger swing than
+//! the one the manifold exists to stop -- and the revived contact carried no feature, so
+//! the pair forgot what it was resting on every time it let go. A revived prism pair now
+//! keeps the feature it was resting on and is solved along it.
+//!
+//! ```text
+//!                                   remembered / contacts   flips      worst
+//!   nothing held (twenty rigs)                    0 / 308   4.0 %      0.7934
+//!   direction held, load-gated                   44 / 212   4.2 %      0.0085
+//!   feature held, every contact                 207 / 357   0.75 %     0.0603
+//! ```
+//!
+//! **And no pile settles, at any of them.** A lone rig settles erratically -- 254 steps as
+//! capsules, and 1921, 1389, 1005 or never as prisms across these variants -- which is one
+//! draw of a chaotic system and not a measurement of anything. What can be said is the flip
+//! rate, which is what the manifold was built to move, and it moved by five and a half
+//! times.
+//!
+//! So the shape is **not yet a net win** and `facets` stays opt-in. What it has bought is a
+//! contact with a real moment arm and a direction that mostly holds still; what it has not
+//! bought is a pile that sleeps. The worst single swing is still eighty-six degrees
+//! somewhere in a heap of twenty, and until that is understood rather than averaged away,
+//! a caller wanting piles to settle should use capsules and read [`super`]'s header for
+//! where that stands.
 //!
 //! `facets` is opt-in throughout, so a caller who does not ask for flats is not affected:
 //! every capsule path is the one it always was.
@@ -142,6 +178,93 @@ pub(super) const MOST_FACETS: u32 = 16;
 pub(super) struct Touch {
     pub normal: (f64, f64, f64),
     pub points: [Option<((f64, f64, f64), f64)>; 2],
+    /// **Which feature of the two bodies the normal came from**, so the pair can be handed
+    /// it back next step. See [`Feature`].
+    pub feature: u32,
+}
+
+/// Which of the two prisms' features a separating axis was built from.
+///
+/// **A feature and not a direction, and the difference is the whole of why this is better
+/// than what it replaced.** A direction remembered across a step has to be stored in some
+/// frame, and whichever body's frame it is stored in, the *other* body turning moves the
+/// face it was resting on out from under it. A feature index has no frame: the axis is
+/// rebuilt from both orientations every step, so it follows both bodies exactly and there
+/// is nothing to drift.
+///
+/// Packed into a `u32` because it travels on every [`super::contacts::Contact`] and that
+/// type is on the hot stream -- the module header records what growing it cost the last
+/// time. The high bits are the kind and the low bits are which face or rim edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Feature {
+    /// Neither: a pair with nothing remembered yet.
+    None,
+    /// The cap of one prism or the other.
+    CapA,
+    CapB,
+    /// A side face, by its index in the cross-section.
+    FaceA(usize),
+    FaceB(usize),
+    /// The two axes crossed, which is the edge-against-edge case for the side edges.
+    Axes,
+    /// One prism's axis crossed with the other's rim edge.
+    AxisARimB(usize),
+    RimAAxisB(usize),
+}
+
+impl Feature {
+    const KIND: u32 = 32;
+
+    pub(super) fn code(self) -> u32 {
+        match self {
+            Feature::None => 0,
+            Feature::CapA => Feature::KIND,
+            Feature::CapB => 2 * Feature::KIND,
+            Feature::FaceA(k) => 3 * Feature::KIND + k as u32,
+            Feature::FaceB(k) => 4 * Feature::KIND + k as u32,
+            Feature::Axes => 5 * Feature::KIND,
+            Feature::AxisARimB(k) => 6 * Feature::KIND + k as u32,
+            Feature::RimAAxisB(k) => 7 * Feature::KIND + k as u32,
+        }
+    }
+
+    pub(super) fn of(code: u32) -> Feature {
+        let k = (code % Feature::KIND) as usize;
+        match code / Feature::KIND {
+            1 => Feature::CapA,
+            2 => Feature::CapB,
+            3 => Feature::FaceA(k),
+            4 => Feature::FaceB(k),
+            5 => Feature::Axes,
+            6 => Feature::AxisARimB(k),
+            7 => Feature::RimAAxisB(k),
+            _ => Feature::None,
+        }
+    }
+
+    /// The axis this feature names, built from where the two prisms are **now**.
+    fn axis(self, a: &Shape, b: &Shape) -> Option<(f64, f64, f64)> {
+        let rim = |shape: &Shape, k: usize| {
+            sub(shape.corners[(k + 1) % shape.facets], shape.corners[k])
+        };
+        let face = |shape: &Shape, k: usize| {
+            add(shape.corners[k], shape.corners[(k + 1) % shape.facets])
+        };
+        let within = |shape: &Shape, k: usize| k < shape.facets;
+        match self {
+            Feature::None => None,
+            Feature::CapA => Some(a.axis),
+            Feature::CapB => Some(b.axis),
+            Feature::FaceA(k) if within(a, k) => Some(face(a, k)),
+            Feature::FaceB(k) if within(b, k) => Some(face(b, k)),
+            Feature::Axes => Some(cross(a.axis, b.axis)),
+            Feature::AxisARimB(k) if within(b, k) => Some(cross(a.axis, rim(b, k))),
+            Feature::RimAAxisB(k) if within(a, k) => Some(cross(rim(a, k), b.axis)),
+            // A face that no longer exists, because the caller changed the shape under the
+            // pair. Nothing to hold on to, and the ordinary search answers.
+            _ => None,
+        }
+    }
 }
 
 /// One prism's geometry in world space, built once per test.
@@ -314,7 +437,7 @@ impl Shape {
 /// than `decisive`**, and that is what makes the direction of a resting contact steady: see
 /// [`touch_keeping`].
 pub(super) fn touch(a: &Shape, b: &Shape) -> Option<Touch> {
-    touch_keeping(a, b, None, 0.0)
+    touch_keeping(a, b, Feature::None, 0.0)
 }
 
 /// The same test, told what it said last time.
@@ -351,7 +474,7 @@ pub(super) fn touch(a: &Shape, b: &Shape) -> Option<Touch> {
 pub(super) fn touch_keeping(
     a: &Shape,
     b: &Shape,
-    held: Option<(f64, f64, f64)>,
+    held: Feature,
     decisive: f64,
 ) -> Option<Touch> {
     let between = sub(b.at, a.at);
@@ -360,16 +483,21 @@ pub(super) fn touch_keeping(
     // direction the pair is not actually trying to escape in.
     let mut best = f64::INFINITY;
     let mut normal = (0.0, 0.0, 0.0);
-    let mut consider = |axis: (f64, f64, f64)| -> bool {
+    let mut chosen = Feature::None;
+    let overlap_along = |axis: (f64, f64, f64)| {
+        a.reach_along(axis) + b.reach_along(axis) - dot(between, axis).abs()
+    };
+    let mut consider = |axis: (f64, f64, f64), what: Feature| -> bool {
         let Some(axis) = normalized(axis) else {
             return true;
         };
-        let overlap = a.reach_along(axis) + b.reach_along(axis) - dot(between, axis).abs();
+        let overlap = overlap_along(axis);
         if overlap <= 0.0 {
             return false;
         }
         if overlap < best {
             best = overlap;
+            chosen = what;
             // Pointing from `a` towards `b`, whichever way the axis was built.
             normal = if dot(between, axis) < 0.0 {
                 scale(axis, -1.0)
@@ -380,33 +508,35 @@ pub(super) fn touch_keeping(
         true
     };
 
-    if !consider(a.axis) || !consider(b.axis) {
+    if !consider(a.axis, Feature::CapA) || !consider(b.axis, Feature::CapB) {
         return None;
     }
     for k in 0..a.facets {
-        if !consider(add(a.corners[k], a.corners[(k + 1) % a.facets])) {
+        let face = add(a.corners[k], a.corners[(k + 1) % a.facets]);
+        if !consider(face, Feature::FaceA(k)) {
             return None;
         }
     }
     for k in 0..b.facets {
-        if !consider(add(b.corners[k], b.corners[(k + 1) % b.facets])) {
+        let face = add(b.corners[k], b.corners[(k + 1) % b.facets]);
+        if !consider(face, Feature::FaceB(k)) {
             return None;
         }
     }
     // Edge against edge, minus the rim-against-rim pairs: see the module header for what
     // that leaves out and why it is the case nobody rests in.
-    if !consider(cross(a.axis, b.axis)) {
+    if !consider(cross(a.axis, b.axis), Feature::Axes) {
         return None;
     }
     for k in 0..b.facets {
         let rim = sub(b.corners[(k + 1) % b.facets], b.corners[k]);
-        if !consider(cross(a.axis, rim)) {
+        if !consider(cross(a.axis, rim), Feature::AxisARimB(k)) {
             return None;
         }
     }
     for k in 0..a.facets {
         let rim = sub(a.corners[(k + 1) % a.facets], a.corners[k]);
-        if !consider(cross(rim, b.axis)) {
+        if !consider(cross(rim, b.axis), Feature::RimAAxisB(k)) {
             return None;
         }
     }
@@ -414,18 +544,21 @@ pub(super) fn touch_keeping(
         return None;
     }
 
-    // **And the axis this pair was using keeps its job unless it has been clearly beaten.**
-    if let Some(held) = normalized(held.unwrap_or((0.0, 0.0, 0.0))) {
-        let overlap = a.reach_along(held) + b.reach_along(held) - dot(between, held).abs();
+    // **And the feature this pair was resting on keeps its job unless it has been clearly
+    // beaten.** Rebuilt from where the two bodies are now, so it follows both of them.
+    if let Some(axis) = held.axis(a, b).and_then(normalized) {
+        let overlap = overlap_along(axis);
         if overlap <= 0.0 {
-            // Separated along the axis it was using, which is separated.
+            // Separated along the feature it was resting on, which is separated.
             return None;
         }
         if overlap - best <= decisive {
-            normal = if dot(between, held) < 0.0 {
-                scale(held, -1.0)
+            best = overlap;
+            chosen = held;
+            normal = if dot(between, axis) < 0.0 {
+                scale(axis, -1.0)
             } else {
-                held
+                axis
             };
         }
     }
@@ -433,6 +566,7 @@ pub(super) fn touch_keeping(
     Some(Touch {
         normal,
         points: deepest_two(a, b, normal),
+        feature: chosen.code(),
     })
 }
 
@@ -591,23 +725,57 @@ pub(super) fn prism_contact(
     half_length: &[f64],
     facets: &[u32],
     alive: bool,
-    // The axis this pair was separated along last step, in `a`'s own frame, so that it
-    // follows the body rather than staying put while the body turns under it.
-    held: Option<(f64, f64, f64)>,
+    // The feature this pair was resting on last step, or zero for a pair with nothing
+    // remembered. See [`Feature`].
+    held: u32,
     decisive: f64,
 ) -> [Option<super::contacts::Contact>; 2] {
     let first = Shape::of(position[a], orientation[a], radius[a], half_length[a], facets[a]);
     let second = Shape::of(position[b], orientation[b], radius[b], half_length[b], facets[b]);
-    let held = held.map(|axis| rotate(orientation[a], axis));
 
-    let Some(hit) = touch_keeping(&first, &second, held, decisive) else {
+    let Some(hit) = touch_keeping(&first, &second, Feature::of(held), decisive) else {
         // Clear of each other. A pair that was carrying load last step still wants its
-        // constraint back, and the only place to put it is where they are closest -- which
-        // for two convex bodies apart is a question this test does not answer, so the
-        // bounding capsules answer it. The constraint is inert while the gap is open.
+        // constraint back: a stack that has settled perfectly overlaps by nothing, and a
+        // constraint that only exists while it overlaps vanishes at exactly the moment it
+        // is doing its job.
         if !alive {
             return [None, None];
         }
+        // **Along the feature it was resting on, if it has one.** Handing a prism pair its
+        // bounding capsule's normal here was measured and is a defect: a resting pair then
+        // alternates between a face normal while it overlaps and a between-the-axes
+        // direction while it does not, which is a bigger swing than the one the whole
+        // manifold exists to stop. It also leaves the revived contact with no feature, so
+        // the pair forgets what it was resting on every time it comes momentarily clear --
+        // measured on a heap of twenty, only forty-four of two hundred and twelve contacts
+        // carried a feature at all.
+        if let Some(axis) = Feature::of(held)
+            .axis(&first, &second)
+            .and_then(normalized)
+        {
+            let normal = if dot(sub(second.at, first.at), axis) < 0.0 {
+                scale(axis, -1.0)
+            } else {
+                axis
+            };
+            let surface_a = add(first.at, scale(normal, first.reach_along(normal)));
+            let surface_b = sub(second.at, scale(normal, second.reach_along(scale(normal, -1.0))));
+            return [
+                Some(super::contacts::Contact {
+                    a,
+                    b,
+                    local_a: rotate_inv(orientation[a], sub(surface_a, position[a])),
+                    local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
+                    normal,
+                    span: (0.0, 0.0, 0.0),
+                    revived: true,
+                    feature: held,
+                }),
+                None,
+            ];
+        }
+        // Nothing remembered, so there is nothing to be consistent with and the bounding
+        // capsules answer where the pair is closest.
         return super::contacts::capsule_contact(
             a,
             b,
@@ -639,6 +807,7 @@ pub(super) fn prism_contact(
             normal: hit.normal,
             span,
             revived: false,
+            feature: hit.feature,
         });
     }
     out

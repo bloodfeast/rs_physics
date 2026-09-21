@@ -325,6 +325,14 @@ pub(super) struct Contact {
     /// carried load last step. See [`capsule_contact`], and [`solve_contact_normal`] for
     /// the one thing it changes.
     pub revived: bool,
+    /// **Which pair of features this contact came from**, for a pair of prisms, and zero
+    /// for everything else. Handed back to the next step so the pair keeps resting on what
+    /// it was resting on: see [`super::prism::Feature`].
+    ///
+    /// It travels here because this is where a contact's identity already lives, and it
+    /// fits in the padding after `revived` rather than growing the type -- which this
+    /// module's header records the cost of the last time it happened.
+    pub feature: u32,
 }
 
 /// The closest pair of points between segment `p1..q1` and segment `p2..q2`.
@@ -576,6 +584,9 @@ fn touching(
         // loaded last step.** Whatever overlap the step then finds here was made by the
         // step, not driven into by the bodies: see [`solve_contact_normal`].
         revived: depth <= 0.0,
+        // A capsule has no features to remember: its normal is the direction between two
+        // closest points on two segments, which moves smoothly and never jumps.
+        feature: 0,
     })
 }
 

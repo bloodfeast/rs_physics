@@ -2584,16 +2584,21 @@ pub struct Skeleton {
     /// phase can keep their contact alive for one more step while they are clear. See
     /// [`Skeleton::persist_contacts`].
     persisting: Vec<(u32, u32)>,
-    /// **The axis each of those pairs was separated along**, in the first body's own frame,
-    /// sorted by the pair. Only pairs where both bodies have flats: a capsule's normal
-    /// moves smoothly and has nothing to remember.
+    /// **The pair of features each of those pairs was resting on**, sorted by the pair.
+    /// Only pairs where both bodies have flats: a capsule's normal moves smoothly and has
+    /// nothing to remember.
     ///
     /// This is the persistent manifold, and [`prism::touch_keeping`] is what it is for: a
     /// separating-axis test near a face-to-edge transition has two equally good answers,
     /// and which one it gives depends on the last bit of two nearly equal numbers. Without
     /// this the direction a resting pair is pushed apart along jumps between neighbouring
     /// face normals as the bodies shift by a micron.
-    held_axis: Vec<(u32, u32, (f64, f64, f64))>,
+    ///
+    /// **A feature rather than a direction**, because a direction has to be stored in some
+    /// frame and whichever body's frame it is stored in, the *other* body turning moves the
+    /// face it was resting on out from under it. A feature is rebuilt from both
+    /// orientations every step and so follows both. See [`prism::Feature`].
+    held_axis: Vec<(u32, u32, u32)>,
     /// Where each chunk of the narrow phase puts its contacts before they are
     /// concatenated. See [`Skeleton::build_contacts`].
     contact_scratch: Vec<Vec<Contact>>,
@@ -3881,8 +3886,8 @@ impl Skeleton {
             if flat {
                 let held = held_axis
                     .binary_search_by_key(&(a as u32, b as u32), |&(x, y, _)| (x, y))
-                    .ok()
-                    .map(|at| held_axis[at].2);
+                    .map(|at| held_axis[at].2)
+                    .unwrap_or(0);
                 prism::prism_contact(
                     a, b, position, orientation, radius, half_length, facets, alive, held,
                     decisive,
@@ -4950,17 +4955,19 @@ impl Skeleton {
         for (k, contact) in self.contacts.iter().enumerate() {
             if self.contact_impulse[k].normal > 0.0 {
                 persisting.push((contact.a as u32, contact.b as u32));
-                // **The direction, kept in the first body's own frame.** A world direction
-                // remembered across a step would stay put while the body turned under it,
-                // which is the opposite of following the face it came from. See
-                // [`prism::touch_keeping`].
-                if self.facets[contact.a] >= 3 && self.facets[contact.b] >= 3 {
-                    held_axis.push((
-                        contact.a as u32,
-                        contact.b as u32,
-                        rotate_inv(self.orientation[contact.a], contact.normal),
-                    ));
-                }
+            }
+            // **Every contact that has a feature, and not only the loaded ones.** These two
+            // lists look alike and are for opposite things: reviving a constraint is about
+            // what a pair *did*, so it is gated on the pair having carried load, while
+            // steadying a normal is about what a pair *is*, and a contact carrying no
+            // impulse this step has a direction that matters just as much next step.
+            //
+            // Gating both on the load was measured and is how this was found: a heap of
+            // twenty rigs remembered forty-one pairs of the two hundred and eleven contacts
+            // it had, so four fifths of them were choosing an axis afresh every step and the
+            // manifold was doing almost nothing.
+            if contact.feature != 0 {
+                held_axis.push((contact.a as u32, contact.b as u32, contact.feature));
             }
         }
         persisting.sort_unstable();
