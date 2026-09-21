@@ -63,6 +63,7 @@ pub mod physics;
 pub mod interactions;
 pub mod forces;
 pub mod constraints;
+pub mod articulated;
 pub mod rotational_dynamics;
 pub mod fluid_dynamics;
 pub mod thermodynamics;
