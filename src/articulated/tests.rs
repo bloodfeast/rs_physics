@@ -729,6 +729,89 @@ fn crowd(side: usize) -> Skeleton {
     s
 }
 
+// -- self collision ----------------------------------------------------------------
+
+/// A root with two one-capsule arms at a right angle off it, whose anchors put the two
+/// arms' axes 0.113 m apart while their radii sum to 0.12: the joints hold them inside
+/// one another and no solve can take them out.
+fn folded(into: &mut Skeleton, x: f64) {
+    let root = into.add_body(Body::capsule(8.0, 0.1, 0.16, (x, 0.5, 0.0)));
+    for (dx, dz) in [(1.0, 0.0), (0.0, 1.0)] {
+        let mut arm = Body::capsule(4.0, 0.06, 0.25, (x + dx * 0.205, 0.5, dz * 0.205));
+        arm.orientation = Quaternion::from_axis_angle((0.0, 1.0, 0.0), -dz * std::f64::consts::FRAC_PI_2)
+            .multiply(&Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2));
+        let arm = into.add_body(arm);
+        into.add_joint(Joint::Ball {
+            a: root,
+            b: arm,
+            anchor_a: (dx * 0.08, 0.0, dz * 0.08),
+            anchor_b: (0.0, 0.125, 0.0),
+        });
+    }
+}
+
+/// **Turning self-collision off takes away a skeleton's contacts with itself, and takes
+/// away nothing else.**
+///
+/// The failure this catches is the one the implementation invites: labelling by
+/// joint-connected component and then testing the labels too loosely, so that two rigs
+/// standing in each other stop colliding as well and a crowd falls through itself. The
+/// third case is the guard -- the two rigs are built overlapping on purpose.
+#[test]
+fn self_collision_off_only_takes_away_a_skeleton_s_contacts_with_itself() {
+    let mut touching = Skeleton::new();
+    folded(&mut touching, 0.0);
+    touching.step(DT, G, 8);
+    assert!(
+        touching.contact_count() > 0,
+        "the fixture is meant to hold its two arms inside one another and found no contact",
+    );
+
+    let mut apart = Skeleton::new();
+    folded(&mut apart, 0.0);
+    apart.set_self_collision(false);
+    apart.step(DT, G, 8);
+    assert_eq!(
+        apart.contact_count(),
+        0,
+        "a skeleton that may not touch itself still reported contacts with itself",
+    );
+
+    // Two of them, overlapping each other rather than themselves. The bodies of one are
+    // inside the bodies of the other, and those contacts must survive.
+    let mut crowd = Skeleton::new();
+    folded(&mut crowd, 0.0);
+    folded(&mut crowd, 0.05);
+    crowd.set_self_collision(false);
+    crowd.step(DT, G, 8);
+    assert!(
+        crowd.contact_count() > 0,
+        "two separate skeletons standing inside one another stopped colliding; the \
+         component labels are matching across skeletons",
+    );
+}
+
+/// A body with no joints belongs to no skeleton, so it collides with everything however
+/// the switch is set. Without this the labelling could give every loose body the same
+/// label and a pile would pass through itself.
+#[test]
+fn loose_bodies_collide_whatever_self_collision_says() {
+    for collide in [true, false] {
+        let mut s = stack(3);
+        s.set_self_collision(collide);
+        // Long enough for the stack to have closed the gap it is built with and be
+        // resting on itself.
+        for _ in 0..30 {
+            s.step(DT, G, 8);
+        }
+        assert!(
+            s.contact_count() > 0,
+            "a stack of three unjointed capsules found no contacts with self collision \
+             {collide}",
+        );
+    }
+}
+
 // -- sleeping ---------------------------------------------------------------------
 
 /// **A pile that has arrived stops costing anything.** The whole claim of [`super::sleep`]:

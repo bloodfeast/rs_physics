@@ -399,6 +399,34 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
 /// the plane was, and `capsule_contact` still emits the two ends as two independent
 /// contacts. Measured, two capsules stacked drift at 2.3 mm a second where a lone capsule
 /// on the ground now drifts at nothing measurable.
+///
+/// # How much of the ratio is the solver and how much is the draw
+///
+/// **Not as much as it looks, and this is a warning to whoever reads a number out of
+/// here.** A settled pile is chaotic: perturbing each body's starting height by a
+/// relative seven parts in a million million -- far below anything the solver could be
+/// said to resolve -- and running the same measurement eight times gives, on this
+/// implementation, ratios of 15.0 to 40.3 on a pile of sixty and 16.3 to 31.3 on a pile
+/// of forty. The bound of 28 sits inside both spreads, so which side of it a given
+/// arrangement falls is the arrangement and not the solve. The long window is the steadier
+/// half of the pair -- 0.123 to 0.171 of a reach over the same eight draws at forty
+/// bodies, a quarter of the spread the ratio has, because the short window is a small
+/// number in a denominator.
+///
+/// What that means in practice: a single run of this law moving from 18 to 33 is not
+/// evidence of anything, and a change to the solver has to be judged on several draws of
+/// the median long window rather than on one ratio.
+///
+/// **A predicate that does not have that problem** is the straightness of the travel: walk
+/// the same four hundred and eighty steps as thirty-two windows of fifteen, and compare
+/// each body's net displacement with the sum of the thirty-two window displacements it
+/// walked. A body that is drifting has a ratio of one; a body wandering over `n`
+/// independent windows has `1 / sqrt(n)`, which is 0.177 here. Both halves come off the
+/// same trajectory and the denominator is a sum of thirty-two terms, so there is nothing
+/// small under the line. It is not adopted here because it does not pass: measured on this
+/// pile it is **0.905**, and on a settled rig 0.99, which is the honest statement that
+/// both of them really are drifting and that the ratio predicate cannot see it. Adopting
+/// it belongs with the fix, not before it.
 #[test]
 fn a_settled_pile_wanders_but_does_not_drift() {
     // The fraction of its own reach a body may move over a settling window and still be
@@ -544,7 +572,126 @@ fn a_heap_settles_and_stays_where_it_settled() {
     );
 }
 
+/// **A jointed rig dropped on the plane comes to rest, if it does not collide with
+/// itself.**
+///
+/// The whole of what `set_self_collision` is for, and the reason it exists rather than
+/// being a hard-coded choice. A contact between two bodies of one skeleton closes a loop
+/// with the joints: the joints hold the pair in a small overlap, the contact pushes them
+/// apart, the joints put them back, and the two corrections are applied one after the
+/// other. Rigid displacements about different points do not compose back to where they
+/// started, and since the configuration repeats every step so does the leftover, which
+/// integrates into a straight walk. Measured on this rig: net travel is 0.99 of the path
+/// walked getting there, at twenty to forty millimetres a second, for ever.
+///
+/// With the loop removed the rig lands, stops, and leaves the simulation. The bound is
+/// generous on purpose -- a rig with limbs to fold takes a few seconds of settling and
+/// the exact count is chaotic -- because what this law claims is that it happens at all,
+/// which is the difference between sixty nanoseconds a step and milliseconds.
+///
+/// It does **not** claim the same of a rig that may touch itself. That one does not
+/// settle, and nothing short of solving the loop's constraints together will make it:
+/// the residual is the same at eight, thirty-two and sixty-four iterations, with and
+/// without friction, with and without rolling resistance, and with every relative
+/// velocity and every spin zeroed at the end of each step.
+#[test]
+fn a_rig_that_does_not_touch_itself_comes_to_rest() {
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    s.set_self_collision(false);
+    let bones = rig(&mut s, 1.0);
+    assert!(!s.self_collision(), "the switch did not take");
+
+    let mut slept = None;
+    for step in 1..=3000 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            slept = Some(step);
+            break;
+        }
+    }
+    let slept = slept.unwrap_or_else(|| {
+        panic!(
+            "a rig of {bones} bones that cannot touch itself was still being solved after \
+             fifty seconds; {} of {bones} bodies awake, the median one moving at {:.4} m/s",
+            s.awake_count(),
+            {
+                let mut v: Vec<f64> = (0..s.len()).map(|i| speed(s.velocity(i))).collect();
+                v.sort_by(|a, b| a.partial_cmp(b).expect("no body is at a NaN"));
+                v[v.len() / 2]
+            },
+        )
+    });
+    assert!(
+        slept > 30,
+        "it slept at step {slept}, which is inside the time it takes to fall from a metre \
+         -- something is calling a rig still while it is still in the air",
+    );
+    for i in 0..s.len() {
+        assert!(
+            s.position(i).1 > -1e-3,
+            "bone {i} came to rest at y {:.4}, below the ground",
+            s.position(i).1,
+        );
+    }
+}
+
 // -- fixtures ---------------------------------------------------------------------
+
+/// A seventeen-bone rig with nothing holding it up: a pelvis, a spine of four up to a
+/// head, and four limbs of three -- shoulders and hips as balls, elbows and knees as
+/// hinges with a range -- dropped from `y`.
+fn rig(into: &mut Skeleton, y: f64) -> usize {
+    let base = into.len();
+    let pelvis = into.add_body(Body::capsule(8.0, 0.1, 0.16, (0.0, y, 0.0)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, y + 0.2 + 0.2 * i as f64, 0.0)));
+        into.add_joint(Joint::Ball {
+            a: up,
+            b: link,
+            anchor_a: (0.0, 0.1, 0.0),
+            anchor_b: (0.0, -0.1, 0.0),
+        });
+        up = link;
+    }
+    for limb in 0..4 {
+        let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
+        let side_z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            let body = into.add_body(Body::capsule(
+                4.0,
+                0.06,
+                0.25,
+                (0.0, y + side * 0.25 * segment as f64, side_z),
+            ));
+            // Shoulders and hips turn every way; elbows and knees do not.
+            let joint = if segment == 0 {
+                Joint::Ball {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, 0.0, side_z),
+                    anchor_b: (0.0, 0.125, 0.0),
+                }
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            into.add_joint(joint);
+            previous = body;
+        }
+    }
+    into.len() - base
+}
 
 /// A capsule turned to lie along x. A body's length runs down its own +Y, so this is the
 /// quarter turn that puts it on its side.

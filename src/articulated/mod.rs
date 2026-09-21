@@ -184,13 +184,11 @@
 //! forgiven by the next one, which re-anchors at the new position. A persistent contact
 //! carrying its own anchor, re-anchored when the cone is exceeded, is what would hold it.
 //!
-//! The same thing keeps a rig awake, and the measurement that localises it is worth
-//! keeping: two bodies and one ball joint dropped on the plane are asleep by step 28; a
-//! seventeen-bone rig is still moving at 34 mm a second after a hundred seconds, and the
-//! same seventeen bodies with the joints removed mostly sleep. The residual grows with
-//! the size of the constraint graph, which is the same Gauss-Seidel story as the
-//! iteration count -- and it does not fall off with more passes, which is what says the
-//! forgiveness is across steps rather than within one.
+//! And what is left of it is **straight**. A settled pile's net travel over four hundred
+//! and eighty steps is 0.905 of the path it walked getting there, where a pile jostling in
+//! place would be about a fifth of it. That is not slip being forgiven, it is a ratchet:
+//! see the section below on what keeps a rig awake, which is the same mechanism with a
+//! joint in the loop instead of a second contact.
 //!
 //! # The ground patch, and the four corrections that could not stand in for it
 //!
@@ -212,11 +210,85 @@
 //! settling to asleep at step 1319, and a settled pile of twenty from covering 0.275 of a
 //! body's reach in eight seconds to 0.094.
 //!
-//! What is left is the same fault one level up: [`contacts::capsule_contact`] emits the
-//! two ends of a *pair* patch as two independent contacts, and two capsules stacked drift
-//! at 2.3 mm a second where a lone one now drifts at nothing measurable. The ground was
-//! the place to prove this because the plane does not move; the pair case is the same
-//! change against a reference that does.
+//! The same change one level up -- [`contacts::capsule_contact`] emitting the two ends of
+//! a *pair* patch as one constraint rather than two -- has been built and measured and is
+//! not merged. It buys what it was meant to (two capsules stacked go from drifting at
+//! 2.3 mm a second to nothing measurable, a ten-high stack from settling in 1866 steps to
+//! 318) and it does not make a rig sleep, because a rig's self-contacts are crossed
+//! rather than parallel and a crossed pair takes the same one-end branch either way.
+//!
+//! It was held back because a settled pile of sixty drifted further under it, and that
+//! reason turns out not to survive the measurement. The pile statistic it failed on is
+//! chaotic -- see `a_settled_pile_wanders_but_does_not_drift`, where eight starting
+//! heights differing by seven parts in a million million give ratios from 15.0 to 40.3 on
+//! the branch that passes -- so the single number it failed by sits inside the spread of
+//! the branch it was compared against. Giving the unified constraint the rolling authority
+//! its two contacts had between them, which was the standing hypothesis for the
+//! regression, was measured and is not it: the uncoupled per-end budget takes a ten-high
+//! stack from settling in 318 steps to 1370 and moves the pile's drift by less than its
+//! own spread. Whoever picks the pair patch up again should judge it on the median long
+//! window over several draws, not on one ratio.
+//!
+//! # Why a rig will not sleep, and it is a ratchet rather than a leak
+//!
+//! **A contact between two bodies of the same skeleton closes a loop with the joints.**
+//! The joints hold the pair in a small overlap -- 0.3 to 2.1 mm, measured on a settled
+//! seventeen-bone rig -- the contact pushes them apart, the joints put them back, and the
+//! two corrections are applied one after the other rather than together. Rigid
+//! displacements about different points do not commute, so the round trip does not return
+//! the loop to where it started. The configuration repeats every step, so the leftover is
+//! the same small screw every step, and it integrates.
+//!
+//! What says it is a ratchet and not a leak is that it is **straight**: measured over
+//! thirty-two windows of fifteen steps, a settled rig's net travel is 0.99 of the path it
+//! walked getting there, against 0.18 for a body wandering in place. And solving the
+//! stages in the opposite order every other step takes that from 0.996 to 0.008 on an
+//! eleven-bone rig -- the ratchet reverses when the order of composition does, which is
+//! what nothing else about the step would do.
+//!
+//! Everything else was measured and is not it. The residual is the same at eight, at
+//! thirty-two and at sixty-four iterations; with pair friction off, with pair rolling
+//! resistance off, with both off; with ground friction off and with ground rolling
+//! resistance off; with hinges and with balls; with the hinge limits taken off; and with
+//! every body's velocity relative to the rig's own momentum and every body's spin **zeroed
+//! at the end of each step**, which is what says the motion is manufactured inside the
+//! step rather than carried into it. The rig's kinetic energy sits at a third of a joule
+//! for as long as it is watched while its potential energy does not move: a steady state
+//! with the solver feeding one side of it and Coulomb taking from the other.
+//!
+//! It is not the sleep criterion being wrong, either. The rig translates as a rigid body
+//! -- the median bone moves 0.039 m relative to the rig's centre while the centre moves
+//! 0.276 m -- at twenty to forty millimetres a second, which is two metres a minute and
+//! not something a viewer would fail to see.
+//!
+//! **The smallest thing that fails is three bodies**: a root with two one-capsule arms
+//! ball-jointed to it at a right angle, whose anchors put the arms' axes 0.113 m apart
+//! while their radii sum to 0.12. Move the anchors out to 0.10 m so the arms clear one
+//! another and it sleeps at step 118; leave them touching and it never sleeps. A jointed
+//! line of capsules sleeps at step 22 because a line has no loop in it, and two capsules
+//! crossed on the ground with no joints at all sleep at step 20 at every crossing angle
+//! from parallel to square.
+//!
+//! **What removes it, and it is the only thing that does.** Not solving a skeleton's
+//! contacts with itself. Measured on thirteen rigs built by taking the pieces of a
+//! seventeen-bone one away, six never sleep with self-collision on and all thirteen sleep
+//! with it off, the seventeen-bone rig at step 1373. That is what
+//! [`Skeleton::set_self_collision`] is, and it is a switch rather than a fix because it
+//! costs a rig the right to stop its own limbs passing through each other.
+//!
+//! Narrowing it by joint-graph distance is not the answer and was measured: the
+//! self-contacts a settled rig cannot shed sit two, three, four and six joints apart, and
+//! rejecting everything within two joints fixes three of the thirteen and breaks a fourth
+//! that used to sleep. How far apart two bodies are in the joint graph does not say
+//! whether the joints will let them separate.
+//!
+//! **The real fix is the one the ground patch already demonstrated, one level up again.**
+//! A body's two ground samples used to skate for exactly this reason and stopped when they
+//! became one block solve, because a single correction has nothing to fail to commute
+//! with. A joint and a contact cannot be merged that way -- they are different constraints
+//! on different pairs -- so the loop has to be solved as a loop: a block or direct solve
+//! over the island's whole constraint set, in place of coloured Gauss-Seidel over it. That
+//! is a different solver, not a rule, and it is what the next attempt is for.
 //!
 //! # Allocation
 //!
@@ -738,6 +810,11 @@ pub struct Skeleton {
     /// generation can skip them. Rebuilt with the colouring. See [`Jointed`].
     jointed_start: Vec<u32>,
     jointed_to: Vec<u32>,
+    /// Which skeleton each body belongs to, as the smallest body index its joints can
+    /// reach. Filled only while [`Skeleton::set_self_collision`] is off, and empty
+    /// otherwise, which is what the broad phase tests.
+    jointed_component: Vec<u32>,
+    self_collision: bool,
     /// Candidate pairs from the broad phase, and the contacts that survived the narrow
     /// one. Both are cleared and refilled per step rather than reallocated.
     pairs: Vec<(usize, usize)>,
@@ -869,6 +946,8 @@ impl Default for Skeleton {
             prev_orientation: Vec::new(),
             jointed_start: Vec::new(),
             jointed_to: Vec::new(),
+            jointed_component: Vec::new(),
+            self_collision: true,
             pairs: Vec::new(),
             contacts: Vec::new(),
             contact_scratch: Vec::new(),
@@ -949,6 +1028,69 @@ impl Skeleton {
         // The floor moving is the one thing that can reach a sleeping body without
         // touching it.
         self.wake_all();
+    }
+
+    /// **Whether the bodies of one skeleton collide with each other.** On by default, and
+    /// the one lever that lets a jointed rig come to rest.
+    ///
+    /// # What it is for, and it is not a performance switch
+    ///
+    /// A contact between two bodies of the same skeleton closes a loop: the joints hold
+    /// the pair in a small overlap, the contact pushes them apart, the joints put them
+    /// back, and the two corrections are applied one after the other rather than together.
+    /// Rigid displacements about different points do not commute, so the round trip does
+    /// not return the loop to where it started; the leftover is the same small screw every
+    /// step, because the configuration is the same every step, and it integrates. Measured
+    /// on a seventeen-bone rig lying on the plane, the whole thing walks in a straight line
+    /// -- net travel over a hundred and sixty steps is 0.99 of the path it walked getting
+    /// there -- at twenty to forty millimetres a second, for as long as it is watched.
+    ///
+    /// That is what keeps a rig out of [`sleep`], and it is nothing else: it is the same
+    /// at eight, thirty-two and sixty-four iterations, with and without friction, with and
+    /// without rolling resistance, with hinges and with balls, and with the hinge limits
+    /// taken off. The bodies of a rig with every relative velocity and every spin zeroed
+    /// at the end of each step still walk, which is what says the motion is made inside
+    /// the step rather than carried into it.
+    ///
+    /// Measured on thirteen rigs built by taking the pieces of a seventeen-bone one away:
+    /// with self-collision on, six of them never sleep; with it off, all thirteen do, and
+    /// the seventeen-bone rig sleeps at step 1373. A settled island costs about sixty
+    /// nanoseconds a step against milliseconds awake, so that is the whole of the
+    /// difference.
+    ///
+    /// # What it costs
+    ///
+    /// Limbs pass through one another. A knee can fold into a thigh and a hand can lie
+    /// inside a chest, and nothing will stop them. Contacts with *other* skeletons and
+    /// with loose bodies are untouched -- only a body and its own skeleton stop seeing
+    /// each other -- so a heap of rigs still piles up as a heap.
+    ///
+    /// It is off rather than on by default because the trade is the caller's: a rig that
+    /// is looked at closely wants its limbs to collide, and a rig in a crowd wants to stop
+    /// costing anything once it has landed.
+    ///
+    /// # Why the narrower rejection already in here is not enough
+    ///
+    /// Bodies either side of one joint have never collided, because their capsules overlap
+    /// by construction -- see [`broadphase::Jointed`]. Widening that to two joints was
+    /// measured and is not the answer: the self-contacts that a settled rig cannot shed
+    /// sit two, three, four and six joints apart, at penetrations of 0.3 to 2.1 mm, and a
+    /// two-joint rejection fixes three of the thirteen rigs above and breaks a fourth that
+    /// used to sleep. How far apart two bodies are in the joint graph does not say whether
+    /// the joints will let them separate.
+    pub fn set_self_collision(&mut self, collide: bool) {
+        if self.self_collision == collide {
+            return;
+        }
+        self.self_collision = collide;
+        self.jointed_built = false;
+        self.wake_all();
+    }
+
+    /// Whether the bodies of one skeleton collide with each other. See
+    /// [`Skeleton::set_self_collision`].
+    pub fn self_collision(&self) -> bool {
+        self.self_collision
     }
 
     /// Removes the ground plane.
@@ -1187,7 +1329,43 @@ impl Skeleton {
                 cursor[from] += 1;
             }
         }
+        self.rebuild_components(bodies);
         self.jointed_built = true;
+    }
+
+    /// Which skeleton each body belongs to, as the smallest body index its joints reach.
+    ///
+    /// Left empty while a skeleton may touch itself, which is the default: the broad
+    /// phase reads the emptiness rather than a flag, so the ordinary path carries no
+    /// branch that a caller who has never heard of this could pay for.
+    ///
+    /// The labelling is a relaxation rather than a union-find: every joint pulls both its
+    /// ends down to the lower of their two labels, repeated until a sweep changes nothing.
+    /// A skeleton is a few dozen bodies wide and this runs when the rig changes rather
+    /// than per step, so the passes cost nothing worth a second structure. The result does
+    /// not depend on the order the joints are in, which a union-find's roots would.
+    fn rebuild_components(&mut self, bodies: usize) {
+        self.jointed_component.clear();
+        if self.self_collision {
+            return;
+        }
+        self.jointed_component.extend(0..bodies as u32);
+        loop {
+            let mut changed = false;
+            for joint in self.joints.iter() {
+                let (a, b) = joint.bodies();
+                let lowest = self.jointed_component[a].min(self.jointed_component[b]);
+                for end in [a, b] {
+                    if self.jointed_component[end] != lowest {
+                        self.jointed_component[end] = lowest;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     /// Which bodies each body is jointed to. See [`Jointed`].
@@ -1195,6 +1373,7 @@ impl Skeleton {
         Jointed {
             start: &self.jointed_start,
             to: &self.jointed_to,
+            component: &self.jointed_component,
         }
     }
 
@@ -1242,6 +1421,7 @@ impl Skeleton {
                 Jointed {
                     start: &self.jointed_start,
                     to: &self.jointed_to,
+                    component: &self.jointed_component,
                 },
                 &self.frontier,
                 &self.swept,

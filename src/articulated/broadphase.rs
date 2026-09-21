@@ -298,6 +298,9 @@ impl Grid {
             let reach_a = self.reach[a];
             let pinned_a = inv_mass[a] <= 0.0;
             let jointed_to = jointed.of(a);
+            // `u32::MAX` where no skeleton owns this body, which never matches another
+            // body's, so a set with self-collision off still tests loose bodies normally.
+            let skeleton_a = jointed.component.get(a).copied().unwrap_or(u32::MAX);
             let (x, y, z) = unpack(self.keys[nth]);
 
             for dx in -1..=1 {
@@ -340,6 +343,13 @@ impl Grid {
                             if jointed_to.contains(&(b as u32)) {
                                 continue;
                             }
+                            // The same rejection over a whole skeleton, when the caller
+                            // has asked for it. `skeleton_a` is `u32::MAX` when the slice
+                            // is empty, and a body's own index when it carries no joint,
+                            // so neither case can match.
+                            if jointed.component.get(b) == Some(&skeleton_a) {
+                                continue;
+                            }
                             out.push((a.min(b), a.max(b)));
                             // Close enough to be worth a narrow-phase test, and nobody
                             // has looked from it: it was asleep, and something is beside
@@ -361,6 +371,10 @@ impl Grid {
 /// an anchor point, so their capsules overlap by construction and a contact between them
 /// would be the joint and the contact fighting each other forever.
 ///
+/// [`Jointed::component`] is the same rejection widened to a whole skeleton, and it is
+/// empty unless the caller has asked for it. See [`super::Skeleton::set_self_collision`]
+/// for what it costs and what it buys.
+///
 /// A run per body rather than one sorted list of pairs, because the question is asked
 /// from inside the neighbourhood scan and the answer is the same for a whole
 /// neighbourhood: the run is found once per outer body and then read out of cache. The
@@ -370,6 +384,10 @@ impl Grid {
 pub(super) struct Jointed<'a> {
     pub start: &'a [u32],
     pub to: &'a [u32],
+    /// Which skeleton each body belongs to, as the root of its joint-connected component,
+    /// or **empty** when a skeleton is allowed to touch itself. Empty is the default and
+    /// costs one test on an already-loaded slice.
+    pub component: &'a [u32],
 }
 
 impl Jointed<'_> {

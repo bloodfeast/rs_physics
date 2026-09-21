@@ -52,6 +52,14 @@
 //!   would put a body to sleep at the top of a bounce. It scales with size the right way
 //!   -- a larger body takes longer to be believed -- and with gravity the right way.
 //!
+//! **It is not the criterion that keeps a jointed rig awake**, and that was worth ruling
+//! out rather than assuming. A rig that will not sleep is not jittering below the
+//! threshold: it translates as a rigid body at twenty to forty millimetres a second, its
+//! median bone moving 0.039 m relative to the rig's centre while the centre moves 0.276 m,
+//! and its net travel over thirty-two windows is 0.99 of the path it walked getting there.
+//! Loosening anything here would put a rig to sleep while it was visibly walking. See the
+//! header of [`super`] for what does keep it awake.
+//!
 //! What would make either wrong: a caller whose bodies are far larger than the motion
 //! that matters on them (a vehicle whose doors must be seen to settle), or one running
 //! with no gravity at all, where there is no free-fall time to compare against and the
