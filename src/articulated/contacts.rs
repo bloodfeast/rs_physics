@@ -114,7 +114,7 @@ pub(super) fn segment(
     orientation: Quaternion,
     half_length: f64,
 ) -> ((f64, f64, f64), (f64, f64, f64)) {
-    let axis = orientation.rotate_point((0.0, half_length, 0.0));
+    let axis = rotate(orientation, (0.0, half_length, 0.0));
     (sub(position, axis), add(position, axis))
 }
 
@@ -157,8 +157,8 @@ pub(super) fn capsule_contact(
         .unwrap_or((0.0, 1.0, 0.0));
 
     // The line case, when both are real segments and the axes nearly agree.
-    let axis_a = orientation[a].rotate_point((0.0, 1.0, 0.0));
-    let axis_b = orientation[b].rotate_point((0.0, 1.0, 0.0));
+    let axis_a = rotate(orientation[a], (0.0, 1.0, 0.0));
+    let axis_b = rotate(orientation[b], (0.0, 1.0, 0.0));
     if half_length[a] > 1e-9
         && half_length[b] > 1e-9
         && length(cross(axis_a, axis_b)) < PARALLEL_SINE
@@ -220,12 +220,8 @@ fn touching(
     Some(Contact {
         a,
         b,
-        local_a: orientation[a]
-            .inverse()
-            .rotate_point(sub(surface_a, position[a])),
-        local_b: orientation[b]
-            .inverse()
-            .rotate_point(sub(surface_b, position[b])),
+        local_a: rotate_inv(orientation[a], sub(surface_a, position[a])),
+        local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
         normal,
     })
 }
@@ -236,13 +232,8 @@ fn touching(
 /// them is computed in parallel and applied afterwards.
 pub(super) fn solve_contact(
     contact: Contact,
-    position: &[(f64, f64, f64)],
-    orientation: &[Quaternion],
-    prev_position: &[(f64, f64, f64)],
-    prev_orientation: &[Quaternion],
-    inv_mass: &[f64],
-    inv_inertia: &[(f64, f64, f64)],
-    radius: &[f64],
+    first: &Gathered,
+    second: &Gathered,
     friction: f64,
     rolling_resistance: f64,
     spent: (f64, f64, f64),
@@ -259,10 +250,10 @@ pub(super) fn solve_contact(
     out[0].body = a;
     out[1].body = b;
 
-    let ra = orientation[a].rotate_point(local_a);
-    let rb = orientation[b].rotate_point(local_b);
-    let surface_a = add(position[a], ra);
-    let surface_b = add(position[b], rb);
+    let ra = rotate(first.now.orientation, local_a);
+    let rb = rotate(second.now.orientation, local_b);
+    let surface_a = add(first.now.position, ra);
+    let surface_b = add(second.now.position, rb);
 
     // Positive when the surfaces have passed through one another along the normal. See
     // the module header for why the normal is the one frozen at generation.
@@ -274,8 +265,8 @@ pub(super) fn solve_contact(
     // How far the two surface points have moved relative to one another since the step
     // began. Measured against the stored previous transforms, which the solve does not
     // change, so every pass sees the whole of it rather than the part left over.
-    let was_a = add(prev_position[a], prev_orientation[a].rotate_point(local_a));
-    let was_b = add(prev_position[b], prev_orientation[b].rotate_point(local_b));
+    let was_a = add(first.prev_position, rotate(first.prev_orientation, local_a));
+    let was_b = add(second.prev_position, rotate(second.prev_orientation, local_b));
     let slid = sub(sub(surface_a, was_a), sub(surface_b, was_b));
 
     // The normal part of that is how much of this overlap the step itself made, and it is
@@ -283,8 +274,8 @@ pub(super) fn solve_contact(
     let driven = dot(slid, normal).clamp(0.0, depth);
     let inherited = depth - driven;
 
-    let wa = generalised_inverse_mass(orientation[a], inv_mass[a], inv_inertia[a], ra, normal);
-    let wb = generalised_inverse_mass(orientation[b], inv_mass[b], inv_inertia[b], rb, normal);
+    let wa = generalised_inverse_mass(&first.now, ra, normal);
+    let wb = generalised_inverse_mass(&second.now, rb, normal);
     let total = wa + wb;
     if total <= 1e-12 {
         return (out, spent);
@@ -296,37 +287,18 @@ pub(super) fn solve_contact(
             continue;
         }
         let push = scale(normal, share / total);
-        accumulate(
-            &mut out[0],
-            orientation[a],
-            inv_mass[a],
-            inv_inertia[a],
-            ra,
-            scale(push, -1.0),
-            free,
-        );
-        accumulate(
-            &mut out[1],
-            orientation[b],
-            inv_mass[b],
-            inv_inertia[b],
-            rb,
-            push,
-            free,
-        );
+        accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), free);
+        accumulate(&mut out[1], &second.now, rb, push, free);
     }
 
     // The rolling half of the same law, on the same carried budget. The arm is the
     // smaller radius: the tighter body is the one that rolls.
     rolling_impulse += resist_rolling(
         &mut out,
-        orientation,
-        prev_orientation,
-        inv_inertia,
-        a,
-        Some(b),
+        first,
+        Some(second),
         normal,
-        rolling_resistance * radius[a].min(radius[b]),
+        rolling_resistance * first.radius.min(second.radius),
         normal_impulse,
         rolling_impulse,
     );
@@ -339,8 +311,8 @@ pub(super) fn solve_contact(
     let Some(direction) = normalized(tangential) else {
         return (out, (normal_impulse, tangential_impulse, rolling_impulse));
     };
-    let ta = generalised_inverse_mass(orientation[a], inv_mass[a], inv_inertia[a], ra, direction);
-    let tb = generalised_inverse_mass(orientation[b], inv_mass[b], inv_inertia[b], rb, direction);
+    let ta = generalised_inverse_mass(&first.now, ra, direction);
+    let tb = generalised_inverse_mass(&second.now, rb, direction);
     let total = ta + tb;
     if total <= 1e-12 {
         return (out, (normal_impulse, tangential_impulse, rolling_impulse));
@@ -358,24 +330,8 @@ pub(super) fn solve_contact(
     }
     tangential_impulse += spend;
     let grip = scale(direction, spend);
-    accumulate(
-        &mut out[0],
-        orientation[a],
-        inv_mass[a],
-        inv_inertia[a],
-        ra,
-        scale(grip, -1.0),
-        false,
-    );
-    accumulate(
-        &mut out[1],
-        orientation[b],
-        inv_mass[b],
-        inv_inertia[b],
-        rb,
-        grip,
-        false,
-    );
+    accumulate(&mut out[0], &first.now, ra, scale(grip, -1.0), false);
+    accumulate(&mut out[1], &second.now, rb, grip, false);
     (out, (normal_impulse, tangential_impulse, rolling_impulse))
 }
 
@@ -416,7 +372,7 @@ pub(super) fn ground_contacts(
     }
     let (low, high) = segment(position, orientation, half_length);
     let ends: [(f64, f64, f64); 2] = [low, high];
-    let inverse = orientation.inverse();
+    
     for (index, end) in ends.into_iter().enumerate() {
         // A sphere's two ends are the same point, so it gets one contact rather than two
         // of the same one.
@@ -429,7 +385,7 @@ pub(super) fn ground_contacts(
         }
         out.push(GroundContact {
             body,
-            local: inverse.rotate_point(sub(surface, position)),
+            local: rotate_inv(orientation, sub(surface, position)),
         });
     }
 }
@@ -438,13 +394,7 @@ pub(super) fn ground_contacts(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_ground(
     contact: GroundContact,
-    position: &[(f64, f64, f64)],
-    orientation: &[Quaternion],
-    prev_position: &[(f64, f64, f64)],
-    prev_orientation: &[Quaternion],
-    inv_mass: &[f64],
-    inv_inertia: &[(f64, f64, f64)],
-    radius: &[f64],
+    body: &Gathered,
     friction: f64,
     rolling_resistance: f64,
     normal: (f64, f64, f64),
@@ -453,17 +403,17 @@ pub(super) fn solve_ground(
 ) -> (Correction, (f64, f64, f64)) {
     let mut out = Correction::none();
     let (mut normal_impulse, mut tangential_impulse, mut rolling_impulse) = spent;
-    let GroundContact { body, local } = contact;
-    out.body = body;
+    let GroundContact { body: index, local } = contact;
+    out.body = index;
 
-    let r = orientation[body].rotate_point(local);
-    let surface = add(position[body], r);
+    let r = rotate(body.now.orientation, local);
+    let surface = add(body.now.position, r);
     let depth = distance - dot(normal, surface);
     if depth <= 0.0 {
         return (out, spent);
     }
 
-    let was = add(prev_position[body], prev_orientation[body].rotate_point(local));
+    let was = add(body.prev_position, rotate(body.prev_orientation, local));
     let slid = sub(surface, was);
 
     // How much of the overlap this step drove into the plane, which is the only part
@@ -471,7 +421,7 @@ pub(super) fn solve_ground(
     let driven = (-dot(slid, normal)).clamp(0.0, depth);
     let inherited = depth - driven;
 
-    let w = generalised_inverse_mass(orientation[body], inv_mass[body], inv_inertia[body], r, normal);
+    let w = generalised_inverse_mass(&body.now, r, normal);
     if w <= 1e-12 {
         return (out, spent);
     }
@@ -481,28 +431,17 @@ pub(super) fn solve_ground(
         if share <= 0.0 {
             continue;
         }
-        accumulate(
-            &mut out,
-            orientation[body],
-            inv_mass[body],
-            inv_inertia[body],
-            r,
-            scale(normal, share / w),
-            free,
-        );
+        accumulate(&mut out, &body.now, r, scale(normal, share / w), free);
     }
 
     // The ground does not turn, so the whole of the resistance lands on the body.
     let mut pair = [out, Correction::none()];
     rolling_impulse += resist_rolling(
         &mut pair,
-        orientation,
-        prev_orientation,
-        inv_inertia,
         body,
         None,
         normal,
-        rolling_resistance * radius[body],
+        rolling_resistance * body.radius,
         normal_impulse,
         rolling_impulse,
     );
@@ -515,13 +454,7 @@ pub(super) fn solve_ground(
     let Some(direction) = normalized(tangential) else {
         return (out, (normal_impulse, tangential_impulse, rolling_impulse));
     };
-    let tw = generalised_inverse_mass(
-        orientation[body],
-        inv_mass[body],
-        inv_inertia[body],
-        r,
-        direction,
-    );
+    let tw = generalised_inverse_mass(&body.now, r, direction);
     if tw <= 1e-12 {
         return (out, (normal_impulse, tangential_impulse, rolling_impulse));
     }
@@ -534,14 +467,6 @@ pub(super) fn solve_ground(
         return (out, (normal_impulse, tangential_impulse, rolling_impulse));
     }
     tangential_impulse += spend;
-    accumulate(
-        &mut out,
-        orientation[body],
-        inv_mass[body],
-        inv_inertia[body],
-        r,
-        scale(direction, -spend),
-        false,
-    );
+    accumulate(&mut out, &body.now, r, scale(direction, -spend), false);
     (out, (normal_impulse, tangential_impulse, rolling_impulse))
 }
