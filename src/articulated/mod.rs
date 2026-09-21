@@ -2263,6 +2263,9 @@ pub struct Skeleton {
     // -- sleeping. See [`sleep`] for the whole of the reasoning. ------------------
     /// Whether settled bodies may be left out of a step at all.
     sleeping: bool,
+    /// How many lanes a parallel pass may use, or `None` for the default. See
+    /// [`Skeleton::set_lanes`].
+    lanes: Option<usize>,
     /// One bit per body: set means the body is simulated this step. A pinned body is
     /// never set, because it cannot move and there is nothing to simulate.
     awake: BitSet,
@@ -2371,6 +2374,7 @@ impl Default for Skeleton {
             velocity_share: Vec::new(),
             grid: Grid::default(),
             sleeping: true,
+            lanes: None,
             awake: BitSet::default(),
             retired: BitSet::default(),
             disturbing: BitSet::default(),
@@ -2858,6 +2862,54 @@ impl Skeleton {
             self.jointed_built = false;
         }
         true
+    }
+
+    /// **How many threads a parallel pass may use.** The default is the whole pool.
+    ///
+    /// This exists because a solver is a subsystem of something with a frame to fill: the
+    /// threads it may have are whatever is left after rendering, audio and the rest, and
+    /// only the caller knows what that is. A caller that wants physics to keep out of two
+    /// cores says so here.
+    ///
+    /// **It is not the dial for the cost of an oversubscribed pool, and it was nearly
+    /// shipped as one.** The measurement that started this was `pile` at eight iterations
+    /// under `RAYON_NUM_THREADS=18` against the default thirty-six, on a machine with
+    /// eighteen cores and thirty-six hardware threads -- 5.24 ms against 6.18, and a
+    /// round-to-round spread of one per cent against six. That looks exactly like a spin
+    /// barrier with more lanes than can run at once, and it was read as one. Holding the
+    /// lane count fixed and varying only the pool says otherwise:
+    ///
+    /// ```text
+    ///   pool 36, 18 lanes   6.61  6.77 ms
+    ///   pool 18, 18 lanes   5.26  5.21  5.25 ms
+    ///   pool 18,  9 lanes   7.07  7.10 ms
+    ///   pool 12,  6 lanes   8.91  9.11 ms
+    /// ```
+    ///
+    /// Eighteen lanes cost 6.6 ms in a pool of thirty-six and 5.2 in a pool of eighteen, so
+    /// what the first measurement found was **the pool**, not the lanes: the eighteen extra
+    /// workers take no lane and return from the broadcast at once, then spend the pass
+    /// looking for work that is not there, a couple of hundred times a step. And within a
+    /// given pool, fewer lanes is plainly worse -- halving them costs a third. More lanes
+    /// is better up to the pool size, which is what [`crew::lanes_for`] already said.
+    ///
+    /// So the thing a caller should not do is hand this crate a rayon pool larger than the
+    /// machine can run, and that is a property of the pool rather than anything this crate
+    /// can fix from the inside. Lowering the budget does not recover it; it makes it worse.
+    ///
+    /// Zero is read as one. The count is capped at the pool's own thread count, since a
+    /// lane the broadcast cannot deliver is a lane the gate would wait for for ever.
+    ///
+    /// **It does not change the answer.** How many lanes ran is not something the result
+    /// may depend on -- `the_answer_does_not_depend_on_how_many_threads_ran_it` is the law
+    /// -- so this is a performance dial and nothing else.
+    pub fn set_lanes(&mut self, lanes: usize) {
+        self.lanes = Some(lanes.max(1));
+    }
+
+    /// The lane budget in force. See [`Skeleton::set_lanes`].
+    pub fn lanes(&self) -> usize {
+        self.lanes.unwrap_or_else(rayon::current_num_threads)
     }
 
     /// Whether this body has been retired. See [`Skeleton::retire`].
@@ -4227,7 +4279,7 @@ impl Skeleton {
             }
         };
 
-        crew::each_stage(plan.len(), work, run);
+        crew::each_stage(plan.len(), work, self.lanes(), run);
     }
 
     /// **Which ground patches are stuck, and where they stuck**, decided once a step while

@@ -2478,3 +2478,50 @@ fn a_hinge_with_no_axis_is_refused() {
     );
     assert!(s.joints().is_empty(), "the refused joint was stored anyway");
 }
+
+/// **The lane budget is a performance dial and may not touch the answer.**
+///
+/// [`Skeleton::set_lanes`] exists because a solver inside a game does not own the machine,
+/// so a caller has to be able to keep physics out of some of its threads. What it must
+/// never buy is a different simulation: the same scene solved in one lane and in as many
+/// as the pool has must land on the same bits, for the same reason
+/// `the_answer_does_not_depend_on_how_many_threads_ran_it` requires it of the thread count.
+///
+/// Stated on a scene big enough to actually go parallel -- `crowd(24)` clears
+/// [`crew::PASS_FLOOR`] by a wide margin, where the smaller fixtures here do not and would
+/// pass by running the identical single-threaded code twice.
+#[test]
+fn the_lane_budget_does_not_change_the_answer() {
+    let reference = crowd_after(24, 60, Some(1));
+    for lanes in [2usize, 3, 8, 64] {
+        let got = crowd_after(24, 60, Some(lanes));
+        assert_eq!(
+            got, reference,
+            "the same crowd solved in {lanes} lanes landed on different bits from the \
+             same crowd solved in one, so how the work was divided reached the result",
+        );
+    }
+    let default = crowd_after(24, 60, None);
+    assert_eq!(
+        default, reference,
+        "the default lane budget landed somewhere the explicit ones did not",
+    );
+}
+
+/// `count` rigs dropped together, stepped, and read back as bits. `lanes` is the budget,
+/// or `None` for whatever the crate picks.
+fn crowd_after(count: usize, steps: usize, lanes: Option<usize>) -> Vec<(u64, u64, u64)> {
+    let mut s = crowd(count);
+    if let Some(lanes) = lanes {
+        s.set_lanes(lanes);
+    }
+    for _ in 0..steps {
+        s.step(DT, G, 8);
+    }
+    (0..s.len())
+        .map(|i| {
+            let p = s.position(i);
+            (p.0.to_bits(), p.1.to_bits(), p.2.to_bits())
+        })
+        .collect()
+}

@@ -117,30 +117,26 @@ pub(super) const PASS_FLOOR: usize = 512;
 /// cost of a yield rather than a number somebody liked.
 const SPINS_PER_YIELD: u32 = 64;
 
-/// How many lanes a pass of `work` constraints in `stages` stages should use.
+/// How many lanes a pass of `work` constraints should use, given the budget the caller
+/// has declared.
 ///
-/// **Every thread, or one.** That is not laziness, it is what the measurement says: the
-/// step at eight iterations against a forced lane count, on a thirty-six thread machine,
+/// **All of the budget, or one.** The only judgement left here is whether to go parallel
+/// at all, which is [`PASS_FLOOR`]. An earlier version derived an interior lane count by
+/// balancing the barrier against the arithmetic and chose thirty lanes for the largest
+/// case, which was forty per cent slower than using every one; the model was wrong because
+/// a barrier's cost is mostly the wait for the slowest lane to notice, which does not grow
+/// with the lane count the way contention on its counter does.
 ///
-/// ```text
-///   work    stages     1      2      4      8     12     16     24     36 lanes
-///  1,420        26   3.41   4.35   4.06   3.90   3.60   4.31   3.95   3.37 ms
-///  4,912        36  12.64   9.11   7.25   7.02   6.64   6.91   6.83   6.81 ms
-/// 12,997        34  29.14  19.21  14.70  12.02  10.96   9.80   9.01   8.66 ms
-/// 45,525        24 137.80  48.94  30.95  21.66  18.74  16.22  13.85  13.19 ms
-/// ```
-///
-/// There is no interior optimum to find. A first attempt derived a lane count by
-/// balancing the barrier against the arithmetic -- a barrier over thirty-six lanes is
-/// 15.4 us, a constraint is about 174 ns -- and it chose thirty lanes for the largest
-/// case and made it forty per cent slower than using all thirty-six. The model was wrong
-/// because a barrier's cost is mostly the wait for the slowest lane to notice, which does
-/// not grow with the lane count the way contention on its counter does.
-///
-/// So the only judgement left is whether to go parallel at all, which is [`PASS_FLOOR`].
-fn lanes_for(work: usize, threads: usize) -> usize {
+/// **What the budget is, though, is not this crate's to decide**, and reading it off
+/// `rayon::current_num_threads()` was this module assuming it owned the machine. It does
+/// not: a solver is a subsystem of something with a frame to fill, and the threads it may
+/// have are whatever is left after rendering, audio and everything else. That is what
+/// [`super::Skeleton::set_lanes`] is for, and it defaults to the whole pool because within
+/// a pool that is the fastest answer -- see there for the measurement, and for the thing it
+/// is *not* a remedy for, which is a pool with more threads than the machine can run.
+fn lanes_for(work: usize, budget: usize) -> usize {
     if work >= PASS_FLOOR {
-        threads
+        budget.max(1)
     } else {
         1
     }
@@ -267,11 +263,18 @@ impl Gate {
 ///
 /// The closure must be `Sync` because every lane calls it at once, and it must be
 /// prepared for `lanes` to be one: that is not a special case, it is the small-input path.
-pub(super) fn each_stage(stages: usize, work_items: usize, work: impl Fn(Lane) + Sync) {
+pub(super) fn each_stage(
+    stages: usize,
+    work_items: usize,
+    budget: usize,
+    work: impl Fn(Lane) + Sync,
+) {
     if stages == 0 {
         return;
     }
-    let lanes = lanes_for(work_items, rayon::current_num_threads());
+    // Never more lanes than the pool has threads to put them on, whatever the caller asked
+    // for: a lane the broadcast cannot deliver is a lane the gate would wait for for ever.
+    let lanes = lanes_for(work_items, budget.min(rayon::current_num_threads()));
     if lanes <= 1 {
         for stage in 0..stages {
             work(Lane {
@@ -354,7 +357,7 @@ mod tests {
             let hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(|_| {}));
             let fell = std::panic::catch_unwind(|| {
-                each_stage(8, usize::MAX, |lane: Lane| {
+                each_stage(8, usize::MAX, rayon::current_num_threads(), |lane: Lane| {
                     assert!(
                         !(lane.stage == 3 && lane.index == 1),
                         "the lane this test exists to knock over",
@@ -436,7 +439,7 @@ mod tests {
         let wrong = AtomicUsize::new(0);
         const STAGES: usize = 200;
 
-        each_stage(STAGES, usize::MAX, |lane| {
+        each_stage(STAGES, usize::MAX, rayon::current_num_threads(), |lane| {
             at[lane.index].store(lane.stage as u64, Ordering::Release);
             // Everything the other lanes wrote in the stage before this one is visible,
             // and nothing they write in the stage after it can be.
@@ -468,7 +471,7 @@ mod tests {
     #[test]
     fn the_narrow_path_runs_every_stage_once() {
         let seen = AtomicUsize::new(0);
-        each_stage(7, 0, |lane| {
+        each_stage(7, 0, rayon::current_num_threads(), |lane| {
             assert_eq!(lane.lanes, 1, "the narrow path should be one lane");
             assert!(lane.is_only());
             seen.fetch_add(1 << lane.stage, Ordering::Relaxed);
@@ -480,6 +483,8 @@ mod tests {
     /// takes steps.
     #[test]
     fn no_stages_is_not_a_deadlock() {
-        each_stage(0, usize::MAX, |_| unreachable!("there were no stages to run"));
+        each_stage(0, usize::MAX, rayon::current_num_threads(), |_| {
+            unreachable!("there were no stages to run")
+        });
     }
 }
