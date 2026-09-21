@@ -13,12 +13,7 @@ fn a_ball_joint_keeps_its_two_anchors_in_one_place() {
     let mut s = Skeleton::new();
     let root = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
     let limb = s.add_body(Body::capsule(5.0, 0.05, 0.4, (0.0, 1.6, 0.0)));
-    assert!(s.add_joint(Joint::Ball {
-        a: root,
-        b: limb,
-        anchor_a: (0.0, 0.0, 0.0),
-        anchor_b: (0.0, 0.2, 0.0),
-    }));
+    assert!(s.add_joint(Joint::free_ball(root, limb, (0.0, 0.0, 0.0), (0.0, 0.2, 0.0))));
 
     for _ in 0..600 {
         s.step(DT, G, 8);
@@ -41,12 +36,7 @@ fn a_pinned_body_does_not_move() {
     let mut s = Skeleton::new();
     let root = s.add_body(Body::pinned((1.0, 2.0, 3.0)));
     let limb = s.add_body(Body::capsule(50.0, 0.1, 0.8, (1.0, 1.2, 3.0)));
-    assert!(s.add_joint(Joint::Ball {
-        a: root,
-        b: limb,
-        anchor_a: (0.0, 0.0, 0.0),
-        anchor_b: (0.0, 0.4, 0.0),
-    }), "the fixture could not build its own rig");
+    assert!(s.add_joint(Joint::free_ball(root, limb, (0.0, 0.0, 0.0), (0.0, 0.4, 0.0))), "the fixture could not build its own rig");
 
     for _ in 0..300 {
         s.step(DT, G, 8);
@@ -234,12 +224,7 @@ fn no_two_joints_in_a_colour_share_a_body() {
                 0.3,
                 (0.4 + 0.3 * segment as f64, 3.0 - 0.4 * link as f64, 0.0),
             ));
-            assert!(s.add_joint(Joint::Ball {
-                a: previous,
-                b: limb,
-                anchor_a: (0.0, -0.2, 0.0),
-                anchor_b: (0.0, 0.15, 0.0),
-            }), "the fixture could not build its own rig");
+            assert!(s.add_joint(Joint::free_ball(previous, limb, (0.0, -0.2, 0.0), (0.0, 0.15, 0.0))), "the fixture could not build its own rig");
             previous = limb;
         }
     }
@@ -286,19 +271,9 @@ fn a_chain_colours_in_two() {
 fn a_joint_to_nowhere_is_refused() {
     let mut s = Skeleton::new();
     let only = s.add_body(Body::pinned((0.0, 0.0, 0.0)));
-    assert!(!s.add_joint(Joint::Ball {
-        a: only,
-        b: 7,
-        anchor_a: (0.0, 0.0, 0.0),
-        anchor_b: (0.0, 0.0, 0.0),
-    }));
+    assert!(!s.add_joint(Joint::free_ball(only, 7, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))));
     assert!(
-        !s.add_joint(Joint::Ball {
-            a: only,
-            b: only,
-            anchor_a: (0.0, 0.0, 0.0),
-            anchor_b: (0.0, 0.0, 0.0),
-        }),
+        !s.add_joint(Joint::free_ball(only, only, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))),
         "a body jointed to itself has no solution and a solver should not be asked for one",
     );
     assert!(s.joints().is_empty());
@@ -436,12 +411,7 @@ fn bones_that_share_a_joint_do_not_collide() {
     let mut s = Skeleton::new();
     let upper = s.add_body(Body::pinned((0.0, 2.0, 0.0)).shaped(0.08, 0.4));
     let lower = s.add_body(Body::capsule(4.0, 0.08, 0.4, (0.0, 1.6, 0.0)));
-    assert!(s.add_joint(Joint::Ball {
-        a: upper,
-        b: lower,
-        anchor_a: (0.0, -0.2, 0.0),
-        anchor_b: (0.0, 0.2, 0.0),
-    }));
+    assert!(s.add_joint(Joint::free_ball(upper, lower, (0.0, -0.2, 0.0), (0.0, 0.2, 0.0))));
 
     s.step(DT, G, 8);
 
@@ -1004,12 +974,7 @@ fn folded(into: &mut Skeleton, x: f64) {
         arm.orientation = Quaternion::from_axis_angle((0.0, 1.0, 0.0), -dz * std::f64::consts::FRAC_PI_2)
             .multiply(&Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2));
         let arm = into.add_body(arm);
-        assert!(into.add_joint(Joint::Ball {
-            a: root,
-            b: arm,
-            anchor_a: (dx * 0.08, 0.0, dz * 0.08),
-            anchor_b: (0.0, 0.125, 0.0),
-        }), "the fixture could not build its own rig");
+        assert!(into.add_joint(Joint::free_ball(root, arm, (dx * 0.08, 0.0, dz * 0.08), (0.0, 0.125, 0.0))), "the fixture could not build its own rig");
     }
 }
 
@@ -1299,12 +1264,10 @@ fn a_limb_hanging_from_an_anchor_goes_to_sleep() {
             0.25,
             (0.0, 2.0 - 0.125 - 0.25 * i as f64, 0.0),
         ));
-        assert!(s.add_joint(Joint::Ball {
-            a: previous,
-            b: body,
-            anchor_a,
-            anchor_b: (0.0, 0.125, 0.0),
-        }), "the fixture could not build its own rig");
+        assert!(
+            s.add_joint(Joint::free_ball(previous, body, anchor_a, (0.0, 0.125, 0.0))),
+            "the fixture could not build its own rig",
+        );
         anchor_a = (0.0, -0.125, 0.0);
         previous = body;
     }
@@ -1553,12 +1516,7 @@ fn rig(into: &mut Skeleton, x: f64) {
                 0.3,
                 (x + side * 0.1, 1.7 - 0.35 * i as f64, 0.0),
             ));
-            assert!(into.add_joint(Joint::Ball {
-                a: previous,
-                b: body,
-                anchor_a: (0.0, -0.15, 0.0),
-                anchor_b: (0.0, 0.15, 0.0),
-            }), "the fixture could not build its own rig");
+            assert!(into.add_joint(Joint::free_ball(previous, body, (0.0, -0.15, 0.0), (0.0, 0.15, 0.0))), "the fixture could not build its own rig");
             previous = body;
         }
     }
@@ -1572,12 +1530,12 @@ fn chain(links: usize) -> Skeleton {
     for i in 0..links {
         let y = 3.0 - 0.4 * (i as f64 + 1.0);
         let link = s.add_body(Body::capsule(3.0, 0.05, 0.35, (0.0, y, 0.0)));
-        assert!(s.add_joint(Joint::Ball {
-            a: previous,
-            b: link,
-            anchor_a: if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
-            anchor_b: (0.0, 0.2, 0.0),
-        }), "the fixture could not build its own rig");
+        assert!(s.add_joint(Joint::free_ball(
+    previous,
+    link,
+    if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
+    (0.0, 0.2, 0.0),
+)), "the fixture could not build its own rig");
         previous = link;
     }
     s
@@ -2176,12 +2134,7 @@ fn a_retired_body_never_wakes_and_never_appears_in_a_colour() {
     assert_eq!(s.body(1), was, "a retired body was written back into the solve");
     assert!(!s.is_awake(1), "a retired body was woken by hand");
     assert!(
-        !s.add_joint(Joint::Ball {
-            a: 0,
-            b: 1,
-            anchor_a: (0.0, 0.0, 0.0),
-            anchor_b: (0.0, 0.0, 0.0),
-        }),
+        !s.add_joint(Joint::free_ball(0, 1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))),
         "a joint was anchored to a retired body",
     );
 
@@ -2282,12 +2235,7 @@ fn limb(links: usize) -> Skeleton {
             0.3,
             (0.0, 3.7 - 0.35 * i as f64, 0.0),
         ));
-        assert!(s.add_joint(Joint::Ball {
-            a: previous,
-            b: body,
-            anchor_a: (0.0, -0.175, 0.0),
-            anchor_b: (0.0, 0.175, 0.0),
-        }), "the fixture could not build its own rig");
+        assert!(s.add_joint(Joint::free_ball(previous, body, (0.0, -0.175, 0.0), (0.0, 0.175, 0.0))), "the fixture could not build its own rig");
         previous = body;
     }
     s
@@ -2323,12 +2271,12 @@ fn colouring_after_a_retirement_matches_colouring_what_is_left() {
     for i in 0..6 {
         let a = 14 + i * 3;
         let b = 15 + i * 3;
-        assert!(s.add_joint(Joint::Ball {
+        assert!(s.add_joint(Joint::free_ball(
             a,
             b,
-            anchor_a: (0.0, -0.15, 0.0),
-            anchor_b: (0.0, 0.15, 0.0),
-        }));
+            (0.0, -0.15, 0.0),
+            (0.0, 0.15, 0.0)
+        )));
     }
 
     let mut taken: Vec<Vec<usize>> = vec![Vec::new(); s.len()];
@@ -2554,5 +2502,135 @@ fn a_step_of_no_time_or_of_nonsense_does_nothing() {
     }
 }
 
+// -- the cone on a ball joint ------------------------------------------------------
+
+/// A pinned anchor with one capsule hung off it, thrown sideways at `speed`. Returns the
+/// furthest the limb ever gets from the cone's axis and where it finishes, in radians.
+///
+/// `cone` of `None` is [`Joint::free_ball`], which is the control for all of this.
+fn swung(cone: Option<f64>, speed: f64) -> (f64, f64) {
+    let mut s = Skeleton::new();
+    let anchor = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+    let limb = s.add_body(Body::capsule(4.0, 0.06, 0.4, (0.0, 1.6, 0.0)));
+    // The cone points straight down from the anchor and the limb's axis is its own
+    // length, so a limb hanging at rest sits at an angle of zero.
+    let joint = match cone {
+        Some(cone) => Joint::socket(
+            anchor,
+            limb,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.4, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            cone,
+        ),
+        None => Joint::free_ball(anchor, limb, (0.0, 0.0, 0.0), (0.0, 0.4, 0.0)),
+    };
+    assert!(s.add_joint(joint), "the fixture could not build its own joint");
+    s.set_velocity(limb, (speed, 0.0, 0.0));
+
+    let angle = |s: &Skeleton| {
+        let down = rotate(s.orientation(anchor), (0.0, -1.0, 0.0));
+        let along = rotate(s.orientation(limb), (0.0, -1.0, 0.0));
+        dot(down, along).clamp(-1.0, 1.0).acos()
+    };
+    let mut worst: f64 = 0.0;
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        worst = worst.max(angle(&s));
+    }
+    (worst, angle(&s))
+}
+
+/// **A ball joint with a cone keeps its limb inside the cone.**
+///
+/// This is the constraint a shoulder has and this module did not. Without it the only
+/// thing stopping a limb rotating into the body it hangs off is a self-collision contact,
+/// which is both dearer and worse: two fifths of a heap's contacts are a rig against
+/// itself, and they are the single-point contacts a pile rocks on. See [`Joint::Ball`].
+///
+/// Stated across a range of cones rather than at one, because a limit that happens to hold
+/// at one angle and not at others is not a limit. What it asserts is where the limb comes
+/// to **rest**, plus a bounded overshoot on the way: a positional solver stops a limb over
+/// a fixed number of passes, so a hard enough throw always crosses the line before it is
+/// turned back, exactly as [`Joint::Hinge`]'s range does. The control below is what says
+/// the cone is doing this and not the swing running out on its own.
+#[test]
+fn a_ball_joint_keeps_its_limb_inside_its_cone() {
+    // Each cone with a throw that clears it: the swing is a pendulum, so reaching further
+    // costs more than linearly and one speed cannot test both ends of this range.
+    for (cone, speed) in [(0.3f64, 2.5f64), (0.6, 3.0), (1.0, 3.5), (1.4, 4.0), (2.0, 6.0)] {
+        // Thrown hard enough that an unlimited joint would go well past the cone.
+        let (free_worst, _) = swung(None, speed);
+        assert!(
+            free_worst > cone + 0.3,
+            "the throw only reached {free_worst:.3} rad without a cone, which is not far \
+             enough past {cone:.2} to be testing anything",
+        );
+        let (worst, rest) = swung(Some(cone), speed);
+        assert!(
+            rest <= cone + 0.01,
+            "a limb on a cone of {cone:.2} rad came to rest {rest:.3} rad from the axis, \
+             outside its own cone",
+        );
+        assert!(
+            worst <= cone + 0.25,
+            "a limb on a cone of {cone:.2} rad overshot to {worst:.3} rad; a positional \
+             solver is allowed to cross the line before it turns the limb back, but not \
+             by a quarter of a radian",
+        );
+    }
+}
+
+/// **And inside the cone it is a ball joint**, which is the other half of being a limit.
+///
+/// A limit that also pulled the limb toward the middle of its range would be a spring, and
+/// a corpse whose limbs creep back to a rest pose is a worse artefact than one whose arm
+/// passes through its chest. So a limb given room swings into it and stops where the swing
+/// stops, not where the cone is -- bit for bit the same as a joint with no cone at all.
+#[test]
+fn inside_its_cone_a_ball_joint_is_free() {
+    // Gently enough that the limb stays well inside the cone below.
+    let (free_worst, free_rest) = swung(None, 1.5);
+    assert!(
+        free_worst < 2.0,
+        "the throw reached {free_worst:.3} rad, which is not inside the 2.5 rad cone this \
+         is about, so the comparison would not mean what it says",
+    );
+    let (worst, rest) = swung(Some(2.5), 1.5);
+    assert!(
+        (worst - free_worst).abs() < 1e-12 && (rest - free_rest).abs() < 1e-12,
+        "the same throw reached {worst:.9} rad and finished at {rest:.9} on a cone of \
+         2.5, against {free_worst:.9} and {free_rest:.9} with no cone; a cone the limb \
+         never touches is changing the simulation",
+    );
+}
+
+/// **A cone with no axis to point along is refused**, for the reason a hinge with no axis
+/// is: every branch that would enforce it is guarded by a `normalized` that hands back
+/// nothing, so it would be a ball joint wearing a limit's declaration with nothing
+/// anywhere to say so. A ball joint with no cone never reads its axes and is unaffected.
+#[test]
+fn a_cone_with_no_axis_is_refused() {
+    let mut s = Skeleton::new();
+    let anchor = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+    let limb = s.add_body(Body::capsule(4.0, 0.06, 0.4, (0.0, 1.6, 0.0)));
+    assert!(
+        !s.add_joint(Joint::socket(
+            anchor,
+            limb,
+            (0.0, 0.0, 0.0),
+            (0.0, 0.4, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0),
+            1.0,
+        )),
+        "a cone with no axis was accepted; it would enforce nothing and say nothing",
+    );
+    assert!(
+        s.add_joint(Joint::free_ball(anchor, limb, (0.0, 0.0, 0.0), (0.0, 0.4, 0.0))),
+        "a ball joint with no cone was refused over axes it never reads",
+    );
+}
 
 

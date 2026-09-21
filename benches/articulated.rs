@@ -267,12 +267,7 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
             0.2,
             (x, y + 0.2 + 0.2 * i as f64, z),
         ));
-        into.add_joint(Joint::Ball {
-            a: up,
-            b: link,
-            anchor_a: (0.0, 0.1, 0.0),
-            anchor_b: (0.0, -0.1, 0.0),
-        });
+        into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
         up = link;
     }
 
@@ -290,12 +285,7 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
             ));
             // Shoulders and hips turn every way; elbows and knees do not.
             let joint = if segment == 0 {
-                Joint::Ball {
-                    a: previous,
-                    b: body,
-                    anchor_a: (0.0, 0.0, side_z - z),
-                    anchor_b: (0.0, 0.125, 0.0),
-                }
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z - z), (0.0, 0.125, 0.0))
             } else {
                 Joint::Hinge {
                     a: previous,

@@ -1609,6 +1609,38 @@
 //! the cheaper constraint: a cone limit is one dot product and a `share_turn`, against a
 //! narrow-phase test and a solved contact for every limb pair in every rig, every step.
 //!
+//! ## What the cone was worth, which is not what it was built for
+//!
+//! It was built, and it is [`Joint::socket`]. Measured against the same rig with
+//! [`Joint::free_ball`] everywhere, with anatomical cones -- a third of a radian at each
+//! spine link, one and a half at a shoulder, one and a fifth at a hip:
+//!
+//! ```text
+//!   rigs   cones   self-collision   asleep at   contacts
+//!      1     no          on             254          2
+//!      1    yes          on            1987          5
+//!      4     no          on           never         34
+//!      4    yes          on           never         27
+//!     20     no          on           never        308
+//!     20    yes          on           never        234
+//!     20     no         off           never        111
+//!     20    yes         off           never        159
+//! ```
+//!
+//! **A quarter of the pile's contacts gone, and no pile settles that did not settle
+//! before.** Worse, a lone rig takes eight times as long: 254 steps against 1,987. The
+//! reason is the one this page keeps arriving at from different directions -- a limb
+//! resting *against* its cone is an active constraint being re-enforced every step, and a
+//! joint that is being corrected is a joint that is not still. It is the propped-rig
+//! residual reached by a new road, and a tighter cone makes it worse rather than better,
+//! which is the opposite of what a settling fix does.
+//!
+//! So the cone earns its place for what it actually is -- the anatomy a ball joint was
+//! missing, and the thing that stops a limb rotating through the chest it hangs off -- and
+//! not as a way to make heaps sleep. What would make it one is a limit that *dissipates*
+//! rather than one that only pushes back: real ligaments at the end of their range absorb,
+//! they do not bounce. The unmerged `joint-resistance` work is the nearest thing to hand.
+//!
 //! **Detached pieces are unaffected**, which is what makes this safe for a caller that cuts
 //! bodies apart. Self-collision is rejected per *jointed component*, and a piece that has
 //! been severed is no longer in the component it came from -- see
@@ -1946,19 +1978,31 @@ pub enum Joint {
     /// **A point shared by two bodies**, each anchor given in its own body's frame. The
     /// shoulder and the hip: three degrees of rotational freedom, none of translation.
     ///
-    /// **There is no range on those three, and that is a gap rather than a simplification.**
-    /// A hinge cannot fold backwards because `min` and `max` say so; a ball can rotate the
-    /// limb it carries straight through the body it hangs off, and the only thing that stops
-    /// it is a self-collision contact. A shoulder has about a hundred and twenty degrees of
-    /// cone and a hip rather less, and with that written down the contact is not needed:
-    /// measured, two fifths of a heap's contacts are a rig against itself, and a heap of
+    /// **`cone` is the range on those three**, and it is what keeps a limb out of the body
+    /// it hangs off. `axis_a` is the cone's axis in `a`'s frame, `axis_b` is the direction
+    /// the limb points in `b`'s own frame, and the joint holds the angle between them to
+    /// `cone` radians or less. A shoulder is about two fifths of a turn; a hip rather less.
+    ///
+    /// A `cone` of `PI` or more is a ball joint with no range, which is what this was
+    /// before the range existed -- [`Joint::free_ball`] spells that, and the axes are then
+    /// not read at all. The range is the caller's to state because only the caller knows
+    /// which joint this is; the crate holds no anatomy.
+    ///
+    /// **Without it a contact has to do the job.** An elbow cannot fold backwards because
+    /// [`Joint::Hinge`]'s `min` and `max` say so, but a ball could rotate its limb straight
+    /// through the chest, and the only thing stopping it was a self-collision contact.
+    /// Measured, two fifths of a heap's contacts are a rig against itself, and a heap of
     /// four rigs that never comes to rest with them comes to rest in twenty-five seconds
-    /// without. See this module's header, under where the pile's contacts come from.
+    /// without -- so the missing constraint was being paid for twice, in the narrow phase
+    /// and in a pile that would not settle. See this module's header.
     Ball {
         a: usize,
         b: usize,
         anchor_a: (f64, f64, f64),
         anchor_b: (f64, f64, f64),
+        axis_a: (f64, f64, f64),
+        axis_b: (f64, f64, f64),
+        cone: f64,
     },
     /// **A point shared, plus an axis shared, plus a range on the angle about it.** The
     /// elbow and the knee: one degree of freedom, and it does not go backwards.
@@ -1978,6 +2022,56 @@ pub enum Joint {
 }
 
 impl Joint {
+    /// **A ball joint with no range**, which is every ball joint this module had before
+    /// ranges existed. The limb may point anywhere.
+    ///
+    /// Use it where the joint really has no meaningful limit, or where the caller has not
+    /// yet measured one. A shoulder is not one of those: see [`Joint::socket`].
+    pub fn free_ball(
+        a: usize,
+        b: usize,
+        anchor_a: (f64, f64, f64),
+        anchor_b: (f64, f64, f64),
+    ) -> Joint {
+        Joint::Ball {
+            a,
+            b,
+            anchor_a,
+            anchor_b,
+            // Not read, because the cone is wider than the sphere. Any direction will do
+            // and this one is the module's own convention for a body's length.
+            axis_a: (0.0, 1.0, 0.0),
+            axis_b: (0.0, 1.0, 0.0),
+            cone: f64::INFINITY,
+        }
+    }
+
+    /// **A ball joint with a cone on it**: the shoulder and the hip.
+    ///
+    /// `axis_a` is the cone's axis in `a`'s frame and `axis_b` the limb's direction in
+    /// `b`'s, both taken as directions and normalised on the way in. `cone` is the
+    /// half-angle in radians, so a shoulder that swings two fifths of a turn from its rest
+    /// direction is `cone: 1.2` or so. `PI` or more is [`Joint::free_ball`].
+    pub fn socket(
+        a: usize,
+        b: usize,
+        anchor_a: (f64, f64, f64),
+        anchor_b: (f64, f64, f64),
+        axis_a: (f64, f64, f64),
+        axis_b: (f64, f64, f64),
+        cone: f64,
+    ) -> Joint {
+        Joint::Ball {
+            a,
+            b,
+            anchor_a,
+            anchor_b,
+            axis_a,
+            axis_b,
+            cone,
+        }
+    }
+
     fn bodies(&self) -> (usize, usize) {
         match *self {
             Joint::Ball { a, b, .. } => (a, b),
@@ -3301,7 +3395,20 @@ impl Skeleton {
         // recover, and letting it through degrades the hinge to a ball joint in silence:
         // every branch of the hinge solve is guarded by a `normalized` that would hand
         // back `None`, so the range would stop being enforced and nothing would say so.
-        if let Joint::Hinge { axis_a, axis_b, .. } = &mut joint {
+        // A cone's axes are read the same way a hinge's are, so they get the same
+        // treatment: normalised here so the contract is true rather than documented, and a
+        // joint with no direction to point in is refused. A ball with no cone never reads
+        // them, so it is left alone -- `free_ball` fills them with a placeholder and
+        // nothing may depend on what it is.
+        let coned = match joint {
+            Joint::Hinge { .. } => true,
+            Joint::Ball { cone, .. } => cone < std::f64::consts::PI,
+        };
+        if coned {
+            let (axis_a, axis_b) = match &mut joint {
+                Joint::Hinge { axis_a, axis_b, .. } => (axis_a, axis_b),
+                Joint::Ball { axis_a, axis_b, .. } => (axis_a, axis_b),
+            };
             let (Some(unit_a), Some(unit_b)) = (normalized(*axis_a), normalized(*axis_b))
             else {
                 return false;
@@ -5291,6 +5398,58 @@ fn solve_joint(joint: Joint, first: &Pose, second: &Pose) -> [Correction; 2] {
             let impulse = scale(n, c / total);
             accumulate(&mut out[0], first, ra, impulse, Charge::Moving);
             accumulate(&mut out[1], second, rb, scale(impulse, -1.0), Charge::Moving);
+        }
+    }
+
+    // -- and, for a ball with a range, the cone -----------------------------------
+    //
+    // **The same correction the hinge's alignment makes, stopped short of zero.** A hinge
+    // drives the angle between its two axes to nothing; a cone drives it to `cone`, and
+    // only when it is outside. Inside, the joint is the ball joint it always was and this
+    // does nothing at all -- which is why a limb swings freely through its range and stops
+    // dead at the edge of it, rather than being pulled toward a rest pose.
+    //
+    // It shares the hinge's arithmetic deliberately, including the two things that were
+    // wrong with it: the correction axis is `cross(world_a, world_b)`, which turns the two
+    // *together* where the other order drives them apart, and the angle takes the
+    // supplement when `a . b` is negative, because `asin` of the cross product's length
+    // cannot tell an angle from its supplement. A limb outside a cone is very often past
+    // the quarter turn where that second one bites.
+    if let Joint::Ball {
+        axis_a,
+        axis_b,
+        cone,
+        ..
+    } = joint
+    {
+        if cone < std::f64::consts::PI {
+            let world_a = rotate(first.orientation, axis_a);
+            let world_b = rotate(second.orientation, axis_b);
+            let across = cross(world_a, world_b);
+            let along = dot(world_a, world_b);
+            let acute = length(across).clamp(-1.0, 1.0).asin();
+            let angle = if along >= 0.0 {
+                acute
+            } else {
+                std::f64::consts::PI - acute
+            };
+            let excess = angle - cone;
+            if excess > 0.0 {
+                if let Some(n) = normalized(across) {
+                    share_turn(&mut out, first, second, n, excess);
+                } else if along < 0.0 {
+                    // Exactly opposed, and outside any cone short of a half turn. There is
+                    // no cross product to turn about and any perpendicular will do, for the
+                    // same reason an inverted hinge is turned back about one.
+                    share_turn(
+                        &mut out,
+                        first,
+                        second,
+                        perpendicular(world_a),
+                        excess,
+                    );
+                }
+            }
         }
     }
 

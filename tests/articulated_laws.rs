@@ -295,12 +295,12 @@ fn a_closed_system_never_gains_energy() {
             0.35,
             (0.0, 3.0 - 0.2 - 0.4 * i as f64, 0.0),
         ));
-        assert!(s.add_joint(Joint::Ball {
-            a: previous,
-            b: link,
-            anchor_a: if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
-            anchor_b: (0.0, 0.2, 0.0),
-        }));
+        assert!(s.add_joint(Joint::free_ball(
+    previous,
+    link,
+    if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
+    (0.0, 0.2, 0.0),
+)));
         previous = link;
     }
     // Shoved once, so there is real energy to account for rather than a chain at rest.
@@ -1312,12 +1312,7 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
     let mut up = pelvis;
     for i in 0..4 {
         let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, y + 0.2 + 0.2 * i as f64, 0.0)));
-        into.add_joint(Joint::Ball {
-            a: up,
-            b: link,
-            anchor_a: (0.0, 0.1, 0.0),
-            anchor_b: (0.0, -0.1, 0.0),
-        });
+        into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
         up = link;
     }
     for limb in 0..4 {
@@ -1333,12 +1328,7 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
             ));
             // Shoulders and hips turn every way; elbows and knees do not.
             let joint = if segment == 0 {
-                Joint::Ball {
-                    a: previous,
-                    b: body,
-                    anchor_a: (0.0, 0.0, side_z),
-                    anchor_b: (0.0, 0.125, 0.0),
-                }
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
             } else {
                 Joint::Hinge {
                     a: previous,

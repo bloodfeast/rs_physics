@@ -59,12 +59,18 @@
 //! // A pinned anchor, and a limb hanging off it by a ball joint.
 //! let anchor = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
 //! let limb = s.add_body(Body::capsule(4.0, 0.06, 0.4, (0.0, 1.6, 0.0)));
-//! s.add_joint(Joint::Ball {
-//!     a: anchor,
-//!     b: limb,
-//!     anchor_a: (0.0, 0.0, 0.0),
-//!     anchor_b: (0.0, 0.2, 0.0),
-//! });
+//! // A shoulder, with the range a shoulder has: the limb may swing 1.2 radians from
+//! // the anchor's own axis and no further. `Joint::free_ball` is the same joint with no
+//! // range on it.
+//! s.add_joint(Joint::socket(
+//!     anchor,
+//!     limb,
+//!     (0.0, 0.0, 0.0),
+//!     (0.0, 0.2, 0.0),
+//!     (0.0, -1.0, 0.0),
+//!     (0.0, -1.0, 0.0),
+//!     1.2,
+//! ));
 //!
 //! for _ in 0..60 {
 //!     s.step(1.0 / 60.0, (0.0, -9.80665, 0.0), 8);
