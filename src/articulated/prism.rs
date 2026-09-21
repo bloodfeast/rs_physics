@@ -267,6 +267,49 @@ impl Feature {
     }
 }
 
+/// **The unit cross-section of a regular `n`-gon**: `n` points on the unit circle, the first
+/// on `+x`.
+///
+/// # Why this is a table
+///
+/// Because it depends only on `n`, and [`Shape::of`] is built **per candidate pair** rather
+/// than per body. Measured on a heap of two hundred rigs, that is 35,364 shape constructions
+/// for 3,400 bodies -- ten times more shapes than there are prisms -- and the version this
+/// replaced spent a `sin` and a `cos` on every corner of every one of them.
+///
+/// **Bit-identical, not merely equivalent.** The table stores exactly
+/// `(TAU * k as f64 / n as f64).cos()` and its sine, which is the expression it replaces,
+/// evaluated on the same inputs. Nothing downstream can tell the difference, and measured on
+/// the same heaps the contact counts came out equal to the contact.
+///
+/// Measured, alternated within one process over three rounds: **27% off a step at eight
+/// facets** (1,825 to 1,337 us) and **31% at sixteen** (3,057 to 2,113).
+///
+/// A variant that also turned two basis vectors once rather than `n` corners each was worth
+/// a further 2.5% and is **not** bit-identical, so it is not here. The transcendentals were
+/// the cost; the rotations are not.
+///
+/// One allocation, on the first prism the process ever tests, of at most seventeen rows of
+/// at most [`MOST_FACETS`] pairs. Nothing in a step allocates.
+fn cross_section(n: usize) -> &'static [(f64, f64)] {
+    static TABLE: std::sync::OnceLock<Vec<Vec<(f64, f64)>>> = std::sync::OnceLock::new();
+    &TABLE.get_or_init(|| {
+        (0..=MOST_FACETS as usize)
+            .map(|n| {
+                // `max(1)` so that row zero exists and is empty rather than a division by
+                // zero: a body with no facets is not a prism and never reaches the loop that
+                // reads this, but the row has to be constructible for the table to be.
+                (0..n)
+                    .map(|k| {
+                        let turn = std::f64::consts::TAU * k as f64 / n.max(1) as f64;
+                        (turn.cos(), turn.sin())
+                    })
+                    .collect()
+            })
+            .collect()
+    })[n]
+}
+
 /// One prism's geometry in world space, built once per test.
 pub(super) struct Shape {
     pub at: (f64, f64, f64),
@@ -290,11 +333,12 @@ impl Shape {
         let facets = (facets as usize).min(MOST_FACETS as usize);
         let axis = rotate(orientation, (0.0, 1.0, 0.0));
         let mut corners = [(0.0, 0.0, 0.0); MOST_FACETS as usize];
+        let unit = cross_section(facets);
         for (k, slot) in corners.iter_mut().enumerate().take(facets) {
             // The cross-section is authored in the body's own XZ plane and turned with it,
             // so a prism's flats follow its bone exactly as its length does.
-            let turn = std::f64::consts::TAU * k as f64 / facets as f64;
-            *slot = rotate(orientation, (radius * turn.cos(), 0.0, radius * turn.sin()));
+            let (across, along) = unit[k];
+            *slot = rotate(orientation, (radius * across, 0.0, radius * along));
         }
         Shape {
             at: position,

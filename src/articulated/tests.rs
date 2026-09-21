@@ -3038,6 +3038,63 @@ fn damping_does_not_slow_a_rig_that_is_only_tumbling() {
     );
 }
 
+/// **A body that is given a mass falls**, which sounds too obvious to guard and was not
+/// true: [`Skeleton::set_body`] woke the body before writing its new mass, and
+/// [`Skeleton::wake_one`] refuses a massless body and stops the joint walk there -- so a
+/// body that had been pinned was never woken with the mass it had just been given, and
+/// nothing else could reach it.
+///
+/// It fails by **freezing rather than by straddling**, which is why
+/// `check_no_joint_straddles_the_awake_set` never caught it: both ends end up asleep, which
+/// is a state that assertion is happy with. The second rig here is the one that matters --
+/// a whole limb hanging in the air, indefinitely, with no invariant violated.
+#[test]
+fn a_body_given_a_mass_falls() {
+    // On its own.
+    let mut s = Skeleton::new();
+    let body = s.add_body(Body::pinned((0.0, 10.0, 0.0)));
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    s.set_body(body, Body::capsule(1.0, 0.1, 0.4, (0.0, 10.0, 0.0)));
+    assert!(s.is_awake(body), "a body given a mass was not woken with it");
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+    }
+    let fell = 10.0 - s.position(body).1;
+    assert!(
+        fell > 1.0,
+        "two seconds after being given a mass the body had fallen {fell:.4} m",
+    );
+
+    // And carrying a rig, which is the case the assertion could not see.
+    let mut s = Skeleton::new();
+    let root = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+    let limb = s.add_body(Body::capsule(3.0, 0.05, 0.3, (0.0, 1.8, 0.0)));
+    assert!(
+        s.add_joint(Joint::free_ball(root, limb, (0.0, -0.1, 0.0), (0.0, 0.15, 0.0))),
+        "the fixture could not build its own rig",
+    );
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    s.set_body(root, Body::capsule(8.0, 0.1, 0.16, (0.0, 2.0, 0.0)));
+    assert!(s.is_awake(root), "the root was not woken with the mass it was given");
+    assert!(s.is_awake(limb), "the joint walk did not reach the limb");
+    for _ in 0..120 {
+        s.step(DT, G, 8);
+    }
+    let dropped = 2.0 - s.position(root).1;
+    assert!(
+        dropped > 1.0,
+        "the rig hung in the air: its root fell {dropped:.4} m in two seconds",
+    );
+    s.check_no_joint_straddles_the_awake_set();
+}
+
 /// A square grid of heights over `y = f(x)`, invariant in z, spanning x in `[-10, 10]` at
 /// one metre a cell.
 fn terrace(f: impl Fn(f64) -> f64) -> (Vec<f64>, usize, usize, f64, (f64, f64)) {

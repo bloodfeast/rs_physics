@@ -3247,6 +3247,25 @@ impl Skeleton {
         if self.retired.get(i) {
             return;
         }
+        // **Woken on both sides of the write, and neither one is redundant.**
+        //
+        // Before, so that the component the body is leaving is thawed while the *old* mass
+        // is still in place: what has to wake is whatever was resting on or jointed to the
+        // body as it was.
+        //
+        // After, because [`Skeleton::wake_one`] refuses to set the awake bit of a body with
+        // no mass -- correctly, a pinned body is never in the solve -- and returns `false`,
+        // which also stops the joint walk. So a body that was **pinned** and is now being
+        // given a mass is not woken by the first call, and nothing else will ever wake it:
+        // the broad phase only sweeps outward from the awake set, and its jointed
+        // neighbours were not reached because the walk stopped at it.
+        //
+        // Measured before this line existed: a pinned root given a mass stayed asleep at
+        // `y = 10` through two seconds of gravity, and a limb ball-jointed to such a root
+        // hung in the air with both ends asleep for ever. It does not trip
+        // `check_no_joint_straddles_the_awake_set`, because both ends end up asleep -- it
+        // fails by freezing rather than by straddling, which is why the assertion could not
+        // see it. See `a_body_given_a_mass_falls`.
         self.wake(i);
         // A body that has been put somewhere else is not stuck to where it was. Leaving the
         // anchor live would have friction drag it back towards a place the caller has just
@@ -3262,6 +3281,10 @@ impl Skeleton {
         self.radius[i] = body.radius;
         self.half_length[i] = body.half_length;
         self.facets[i] = body.facets;
+        // The second half of the pair above: now that the body has whatever mass it has been
+        // given, wake it with that mass. A body that had one already is woken twice, which
+        // costs one joint walk on a call that is the caller's rare disturbance anyway.
+        self.wake(i);
     }
 
     pub fn position(&self, i: usize) -> (f64, f64, f64) {
@@ -4327,41 +4350,78 @@ impl Skeleton {
         if self.joint_damping <= 0.0 {
             return;
         }
-        let pose = |s: &Skeleton, i: usize| Pose {
-            position: s.position[i],
-            orientation: s.orientation[i],
-            inv_mass: s.inv_mass[i],
-            inv_inertia: s.inv_inertia[i],
-            world_inv_inertia: SymMat3::of(s.orientation[i], s.inv_inertia[i]),
-        };
-        for k in 0..self.joints.len() {
-            let joint = self.joints[k];
-            let (a, b) = joint.bodies();
-            // A joint with both ends asleep is not being solved and has nothing to damp.
-            if !self.awake.get(a) && !self.awake.get(b) {
-                continue;
-            }
-            let first = pose(self, a);
-            let second = pose(self, b);
-            let out = damp_joint(
-                joint,
-                &first,
-                &second,
-                self.angular_velocity[a],
-                self.angular_velocity[b],
-                self.joint_damping,
-                gravity,
-                dt,
-            );
-            for correction in out {
-                let i = correction.body;
-                if i == usize::MAX || correction.rotation.is_near_identity(1e-12) {
-                    continue;
+        // **Over the colours, exactly as a solve pass is**, and for the same reason it is
+        // safe: within one colour no two joints name the same body, so two lanes working
+        // different slices of a colour never touch the same body. That is [`scatter`]'s
+        // whole safety argument and this reuses it unchanged rather than making a new one.
+        //
+        // This was a serial walk, and its own comment said that was fine because it is "one
+        // pass over the joints against `iterations` passes of the solve, so it is a few per
+        // cent of a step". Measured, that was wrong by an order of magnitude: **178 ns a
+        // joint, stable to one per cent at three scales**, which on a heap of six hundred
+        // rigs is 1.7 ms -- 22 per cent of a damped step, and the only phase in the whole
+        // step that ran on one core while the other seventeen idled.
+        let damping = self.joint_damping;
+        let budget = self.lanes();
+        let Skeleton {
+            position,
+            orientation,
+            prev_position,
+            prev_orientation,
+            inv_mass,
+            inv_inertia,
+            angular_velocity,
+            colours,
+            joints,
+            joint_overflow,
+            awake,
+            ..
+        } = self;
+        let bodies = scatter::Bodies::of(position, orientation, prev_position, prev_orientation);
+        // One stage a colour, then one for what the colouring could not place.
+        let stages = colours.len() + 1;
+        let work_items = joints.len();
+        let run = |lane: crew::Lane| {
+            let damp_one = |k: usize| {
+                let joint = joints[k];
+                let (a, b) = joint.bodies();
+                // A joint with both ends asleep is not being solved and has nothing to
+                // damp.
+                if !awake.get(a) && !awake.get(b) {
+                    return;
                 }
-                let spun = correction.rotation.multiply(&self.orientation[i]);
-                self.orientation[i] = renormalized(spun);
+                // SAFETY: `a` and `b` are this lane's for the whole constraint -- within a
+                // colour by the colouring, and in the overflow because only one lane runs
+                // it. The same argument as [`Skeleton::solve_pass`], which see.
+                unsafe {
+                    let first = bodies.pose(a, inv_mass, inv_inertia);
+                    let second = bodies.pose(b, inv_mass, inv_inertia);
+                    bodies.apply(damp_joint(
+                        joint,
+                        &first,
+                        &second,
+                        angular_velocity[a],
+                        angular_velocity[b],
+                        damping,
+                        gravity,
+                        dt,
+                    ));
+                }
+            };
+            if lane.stage < colours.len() {
+                let set = &colours[lane.stage];
+                for &k in &set[lane.span(set.len())] {
+                    damp_one(k);
+                }
+            } else if lane.is_only() {
+                // Run by one lane, because the colouring could not promise these are
+                // disjoint. Empty unless a body carries more than sixty-four joints.
+                for &k in joint_overflow.iter() {
+                    damp_one(k);
+                }
             }
-        }
+        };
+        crew::each_stage(stages, work_items, budget, run);
     }
 
     /// **One step.** Predict under `gravity`, run `iterations` passes over the coloured
