@@ -1573,6 +1573,48 @@
 //! including the tempting one, a deadband under which motion is ignored, which is why it
 //! is recorded here rather than tried again.
 //!
+//! # Where the pile's contacts come from, and the constraint that is missing
+//!
+//! Two fifths of a heap's contacts are a rig against **itself**. Measured on heaps of one,
+//! four and twenty of the seventeen-bone rig, run to sixty seconds:
+//!
+//! ```text
+//!   rigs   self-collision   asleep at   contacts   of them within one rig
+//!      1        on             254          2               2
+//!      1        off             87          0               0
+//!      4        on            never        34              26
+//!      4        off           1532          1               0
+//!     20        on            never       308             126
+//!     20        off           never       111               0
+//! ```
+//!
+//! A heap of four never comes to rest with self-collision and comes to rest in
+//! twenty-five seconds without it; one rig settles three times sooner. At twenty it is not
+//! sufficient on its own -- that heap does not settle either way -- but it removes
+//! sixty-four per cent of the contacts, and by the section below, most of those were
+//! single-point contacts free to rotate. Self-collision is the largest single lever
+//! anything has found on this problem.
+//!
+//! **And the reason it is load-bearing is that a constraint is missing.** [`Joint::Hinge`]
+//! carries `min` and `max`; [`Joint::Ball`] carries no range at all. An elbow cannot fold
+//! backwards, but a shoulder can rotate an arm straight through the chest it is attached
+//! to, and the only thing that stops it is a contact. A shoulder has about a hundred and
+//! twenty degrees of cone and a hip rather less; with that written down, a limb cannot
+//! reach the body it hangs off, and the contact it is standing in for is not needed.
+//!
+//! That is the shape of the fix rather than turning self-collision off, which was ruled
+//! against for a good reason -- a rig whose limbs pass through each other is wrong in a way
+//! anybody can see. A cone on the ball joints keeps the limbs out of the torso *and* takes
+//! the contacts away, where switching self-collision off only does the second. It is also
+//! the cheaper constraint: a cone limit is one dot product and a `share_turn`, against a
+//! narrow-phase test and a solved contact for every limb pair in every rig, every step.
+//!
+//! **Detached pieces are unaffected**, which is what makes this safe for a caller that cuts
+//! bodies apart. Self-collision is rejected per *jointed component*, and a piece that has
+//! been severed is no longer in the component it came from -- see
+//! [`Skeleton::set_self_collision`] and the broad phase's `jointed.component` test. A cut
+//! arm collides with the corpse it came off; the arm still attached does not need to.
+//!
 //! # And the rocking is the shape, which this module already says somewhere else
 //!
 //! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
@@ -1903,6 +1945,15 @@ impl Body {
 pub enum Joint {
     /// **A point shared by two bodies**, each anchor given in its own body's frame. The
     /// shoulder and the hip: three degrees of rotational freedom, none of translation.
+    ///
+    /// **There is no range on those three, and that is a gap rather than a simplification.**
+    /// A hinge cannot fold backwards because `min` and `max` say so; a ball can rotate the
+    /// limb it carries straight through the body it hangs off, and the only thing that stops
+    /// it is a self-collision contact. A shoulder has about a hundred and twenty degrees of
+    /// cone and a hip rather less, and with that written down the contact is not needed:
+    /// measured, two fifths of a heap's contacts are a rig against itself, and a heap of
+    /// four rigs that never comes to rest with them comes to rest in twenty-five seconds
+    /// without. See this module's header, under where the pile's contacts come from.
     Ball {
         a: usize,
         b: usize,
