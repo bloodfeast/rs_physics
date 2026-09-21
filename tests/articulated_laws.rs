@@ -1244,7 +1244,7 @@ fn a_hinge_does_not_turn_itself_inside_out() {
     }
 
     // Every hinge in the rig, as the pair of bodies it links and the local axis in each.
-    let hinges: Vec<(usize, usize, (f64, f64, f64), (f64, f64, f64))> = s
+    let hinges: Vec<Hinge> = s
         .joints()
         .iter()
         .filter_map(|joint| match *joint {
@@ -1348,6 +1348,10 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
     }
     into.len() - base
 }
+
+/// One hinge as `a_hinge_does_not_turn_itself_inside_out` reads it: the two bodies it
+/// links and the axis each of them carries in its own frame.
+type Hinge = (usize, usize, (f64, f64, f64), (f64, f64, f64));
 
 /// A capsule turned to lie along x. A body's length runs down its own +Y, so this is the
 /// quarter turn that puts it on its side.
