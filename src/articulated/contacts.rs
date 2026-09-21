@@ -75,6 +75,10 @@ use super::*;
 pub(super) struct Spent {
     /// Normal impulse applied so far this step, always positive.
     pub normal: f64,
+    /// The share of `normal` that was charged as velocity rather than as a free
+    /// correction: the overlap the step itself drove, and so the only part of the normal
+    /// impulse the bodies were actually handed as momentum.
+    pub driven: f64,
     /// Friction impulse applied so far this step, as a world-space vector: the impulse
     /// the *first* body received. For a pair the second received its negative; against
     /// the ground there is no second, because the ground does not move.
@@ -526,14 +530,15 @@ pub(super) fn solve_contact_normal(
         return (out, spent);
     }
     spent.normal += depth / total;
+    spent.driven += driven / total;
 
-    for (share, free) in [(driven, false), (inherited, true)] {
+    for (share, charge) in [(driven, Charge::Moving), (inherited, Charge::Free)] {
         if share <= 0.0 {
             continue;
         }
         let push = scale(normal, share / total);
-        accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), free);
-        accumulate(&mut out[1], &second.now, rb, push, free);
+        accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), charge);
+        accumulate(&mut out[1], &second.now, rb, push, charge);
     }
     (out, spent)
 }
@@ -617,8 +622,8 @@ pub(super) fn solve_contact_friction(
         return (out, spent);
     }
     spent.tangential = total_grip;
-    accumulate(&mut out[0], &first.now, arm_a, grip, false);
-    accumulate(&mut out[1], &second.now, arm_b, scale(grip, -1.0), false);
+    accumulate(&mut out[0], &first.now, arm_a, grip, Charge::Moving);
+    accumulate(&mut out[1], &second.now, arm_b, scale(grip, -1.0), Charge::Moving);
     (out, spent)
 }
 
@@ -793,7 +798,8 @@ pub(super) fn solve_ground_normal(
         let driven = (-dot(slid, normal)).clamp(0.0, depth[end]);
         let part = if depth[end] > 0.0 { driven / depth[end] } else { 0.0 };
         spent.normal += share[end];
-        for (fraction, free) in [(part, false), (1.0 - part, true)] {
+        spent.driven += share[end] * part;
+        for (fraction, charge) in [(part, Charge::Moving), (1.0 - part, Charge::Free)] {
             if fraction <= 0.0 {
                 continue;
             }
@@ -802,7 +808,7 @@ pub(super) fn solve_ground_normal(
                 &body.now,
                 arm[end],
                 scale(normal, share[end] * fraction),
-                free,
+                charge,
             );
         }
     }
@@ -971,7 +977,224 @@ fn ground_friction(
     // that takes a stack of five from settling every time to settling in five, and a
     // settled pile of forty from 0.103 of a reach to 0.189. Damping the old error as well
     // is what those settle on.
-    accumulate(&mut out, &body.now, couple, grip, false);
+    accumulate(&mut out, &body.now, couple, grip, Charge::Moving);
+    out
+}
+
+/// **The velocity pass's normal half for one pair contact: a resting contact is perfectly
+/// inelastic.**
+///
+/// # What this is for
+///
+/// The positional solve pushes two overlapping surfaces apart, and a position-based step
+/// reads that push back as speed -- which is what stops a falling body, and is also what
+/// hands a resting one momentum it did not earn. Nothing in this module said what the
+/// relative normal velocity of a contact should be *after* the step, so the answer was
+/// whatever the corrections happened to leave. This says it: zero.
+///
+/// Restitution is the coefficient that would make it something else, and it is zero here
+/// because these are rigid capsules resting on one another rather than a coefficient
+/// chosen to make a scene look right. A caller who wants a bouncy contact wants
+/// `-e * closing` as the target instead of `0`, measured before the solve rather than
+/// after it, and this is the only place in the module where that number could act.
+///
+/// # The one bound, and it is not a tuning
+///
+/// **A contact cannot pull.** Cancelling a separating velocity means taking normal impulse
+/// back out of the step, and the most that can be taken out is what the positional solve
+/// put in -- `spent.normal`, which is the normal impulse this contact carried. Take more
+/// and the pair would be stuck together, which is the one thing a unilateral constraint
+/// may never do. Nothing else bounds it: the constraint is otherwise as hard as the
+/// positional one is.
+///
+/// Reads only; the caller applies. Writes no running total, because the pass runs once a
+/// step and there is nothing for a second one to carry.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_contact_velocity_normal(
+    contact: Contact,
+    first: &Gathered,
+    second: &Gathered,
+    spent: Spent,
+    dt: f64,
+    a_moves: ((f64, f64, f64), (f64, f64, f64)),
+    b_moves: ((f64, f64, f64), (f64, f64, f64)),
+    share: f64,
+) -> [Correction; 2] {
+    let mut out = [Correction::none(); 2];
+    let Contact { a, b, normal, .. } = contact;
+    out[0].body = a;
+    out[1].body = b;
+    // Friction's gate, for friction's reason: the normal sub-pass has just closed the
+    // overlap, so a depth test here reports every loaded contact as unloaded. What says a
+    // contact is resting on something is the normal impulse it carried.
+    if spent.normal <= 0.0 || share <= 0.0 {
+        return out;
+    }
+
+    let ra = rotate(first.now.orientation, contact.local_a);
+    let rb = rotate(second.now.orientation, contact.local_b);
+    let ((va, wa), (vb, wb)) = (a_moves, b_moves);
+    // The rate the overlap is growing at, which is the derivative of `Surfaces::depth`:
+    // positive is the two still driving into each other, negative is separating.
+    let closing = dot(sub(add(va, cross(wa, ra)), add(vb, cross(wb, rb))), normal);
+
+    let ka = generalised_inverse_mass(&first.now, ra, normal);
+    let kb = generalised_inverse_mass(&second.now, rb, normal);
+    let total = ka + kb;
+    if total <= 1e-12 {
+        return out;
+    }
+    // At the positional scale, like everything [`accumulate`] is handed: the impulse that
+    // leaves the surfaces neither closing nor opening, then the no-pull bound.
+    let lambda = (share * closing * dt / total).max(-spent.driven);
+    if lambda == 0.0 {
+        return out;
+    }
+    let push = scale(normal, lambda);
+    accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), Charge::Still);
+    accumulate(&mut out[1], &second.now, rb, push, Charge::Still);
+    out
+}
+
+/// **The velocity pass's tangential half for one pair contact**: Coulomb and rolling
+/// resistance on the velocity the positional solve left, out of what is left of the step's
+/// own cone.
+///
+/// # Why it spends the same budget rather than a fresh one
+///
+/// Coulomb's limit is a budget for the **step** -- that is the module header's first law
+/// about friction, and the velocity pass is part of the step. So this does not get a
+/// second `friction * spent.normal` to spend: it adds to the same resultant the positional
+/// passes accumulated in [`Spent`] and is clipped by the same cone.
+///
+/// That is not conservatism, it is the only answer that keeps the coefficient meaning what
+/// it says. Give the velocity pass a budget of its own and a contact may spend
+/// `friction * N` twice in one step, which is a coefficient of `2 * friction`: a slope
+/// that should let go at Coulomb's angle would hold to twice the tangent of it. Sharing
+/// the cone also sorts the two cases by itself, with nothing to decide. A **sliding**
+/// contact has spent its cone in the positional passes, so there is nothing here for it
+/// and it slides exactly as it did. A **sticking** one has spent only what it took to hold
+/// still, and what is left is what this may use to take the last of the movement out.
+///
+/// # And why rolling resistance is not in it, where the positional half has them together
+///
+/// Rolling resistance is the module's model of a **deformed contact patch**: a soft body
+/// flattens, the normal load moves ahead of the contact point, and the offset is a torque
+/// against the roll. It exists because Coulomb cannot see a roll at all -- the contact
+/// point of a rolling body is instantaneously still, so there is no relative surface
+/// velocity there for a velocity-level law to act on. That is the whole reason the module
+/// has it, and it is the reason it has no velocity-level half: the quantity this pass acts
+/// on is the relative velocity of two surfaces, and a roll is not one.
+///
+/// What the angular version would act on instead is the relative *spin* of the two bodies,
+/// and between two bones of one skeleton that is mostly the joints doing their job.
+/// Measured, resisting it takes the seventeen-bone rig from no draw of twenty-four
+/// travelling past the jostling allowance to six of them, the worst at 4.4 of a reach --
+/// the articulation being braked at the contacts and the rig rocking on what is left.
+pub(super) fn solve_contact_velocity_friction(
+    contact: Contact,
+    first: &Gathered,
+    second: &Gathered,
+    friction: f64,
+    spent: Spent,
+    dt: f64,
+    a_moves: ((f64, f64, f64), (f64, f64, f64)),
+    b_moves: ((f64, f64, f64), (f64, f64, f64)),
+    share: f64,
+) -> [Correction; 2] {
+    let mut out = [Correction::none(); 2];
+    let Contact {
+        a, b, normal, span, ..
+    } = contact;
+    out[0].body = a;
+    out[1].body = b;
+    if spent.normal <= 0.0 || share <= 0.0 || friction <= 0.0 {
+        return out;
+    }
+
+    let ra = rotate(first.now.orientation, contact.local_a);
+    let rb = rotate(second.now.orientation, contact.local_b);
+    let ((va, wa), (vb, wb)) = (a_moves, b_moves);
+    let slip = {
+        let relative = sub(add(va, cross(wa, ra)), add(vb, cross(wb, rb)));
+        sub(relative, scale(normal, dot(relative, normal)))
+    };
+    let Some(direction) = normalized(slip) else {
+        return out;
+    };
+    // The patch carries what of the friction couple it can, exactly as it does one level
+    // up. See [`patch_arm`].
+    let reach = 0.5 * dot(span, direction).abs();
+    let arm_a = patch_arm(ra, normal, reach, friction);
+    let arm_b = patch_arm(rb, normal, reach, friction);
+    let ta = generalised_inverse_mass(&first.now, arm_a, direction);
+    let tb = generalised_inverse_mass(&second.now, arm_b, direction);
+    let total = ta + tb;
+    if total <= 1e-12 {
+        return out;
+    }
+    // At the positional scale: the impulse that stops the slip is the one that would undo
+    // the distance the slip is about to cover, which is `slip * dt`.
+    let wanted = scale(direction, -share * length(slip) * dt / total);
+    let (grip, _) = cone(spent.tangential, wanted, friction * spent.normal);
+    if grip == (0.0, 0.0, 0.0) {
+        return out;
+    }
+    accumulate(&mut out[0], &first.now, arm_a, grip, Charge::Still);
+    accumulate(
+        &mut out[1],
+        &second.now,
+        arm_b,
+        scale(grip, -1.0),
+        Charge::Still,
+    );
+    out
+}
+
+/// **The velocity pass's normal half against the plane.** Everything
+/// [`solve_contact_velocity_normal`] says, with the second body left out because the
+/// ground has no velocity to take.
+///
+/// The arm is where the patch's load stands, which the normal sub-pass worked out and
+/// [`Patch`] carried: the plane pushes where the load is, so that is where taking some of
+/// the push back has to act.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_ground_velocity_normal(
+    contact: GroundContact,
+    body: &Gathered,
+    normal: (f64, f64, f64),
+    patch: Patch,
+    dt: f64,
+    v: (f64, f64, f64),
+    w: (f64, f64, f64),
+    share: f64,
+) -> Correction {
+    let mut out = Correction::none();
+    out.body = contact.body;
+    if patch.spent.normal <= 0.0 || share <= 0.0 {
+        return out;
+    }
+
+    let load = rotate(body.now.orientation, patch.local_load);
+    // The plane's normal points out of it, so a body leaving the plane has a positive
+    // component along it -- the opposite sign to the pair version, where the normal runs
+    // from one body into the other.
+    let leaving = dot(add(v, cross(w, load)), normal);
+    let k = generalised_inverse_mass(&body.now, load, normal);
+    if k <= 1e-12 {
+        return out;
+    }
+    let lambda = (-share * leaving * dt / k).max(-patch.spent.driven);
+    if lambda == 0.0 {
+        return out;
+    }
+    accumulate(
+        &mut out,
+        &body.now,
+        load,
+        scale(normal, lambda),
+        Charge::Still,
+    );
     out
 }
 

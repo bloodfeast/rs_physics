@@ -1153,3 +1153,112 @@ fn pile(count: usize) -> Skeleton {
     }
     s
 }
+
+/// **The third correction kind changes the speed and not the place.**
+///
+/// This is the invariant [`scatter::Bodies::apply_velocity`] exists for and the one its
+/// `unsafe` rests on being about: it writes `prev_position` and `prev_orientation` and
+/// nothing else, so the body is exactly where the positional solve left it and the
+/// velocity the step reads out of it is not. If it ever moved `position`, the velocity
+/// pass would be a positional correction in disguise -- and
+/// `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` is the law that would catch it
+/// a long way downstream, which is why it is asserted directly here.
+///
+/// It asserts the arithmetic too, not merely that something moved: the impulse is chosen
+/// so the answer is a round number, and the read-back is done exactly as
+/// [`Skeleton::read_velocities`] does it.
+#[test]
+fn a_velocity_correction_changes_the_speed_and_not_the_place() {
+    const DT: f64 = 1.0 / 60.0;
+    let mass = 4.0;
+    let pose = Pose {
+        position: (1.0, 2.0, 3.0),
+        orientation: Quaternion::from_axis_angle((0.0, 0.0, 1.0), 0.7),
+        inv_mass: 1.0 / mass,
+        inv_inertia: (1.0 / 0.5, 1.0 / 0.5, 1.0 / 0.5),
+        world_inv_inertia: SymMat3::of(
+            Quaternion::from_axis_angle((0.0, 0.0, 1.0), 0.7),
+            (1.0 / 0.5, 1.0 / 0.5, 1.0 / 0.5),
+        ),
+    };
+
+    let mut position = vec![pose.position];
+    let mut orientation = vec![pose.orientation];
+    // Where it came from: a body travelling at 1 m/s along x and not turning.
+    let mut prev_position = vec![sub(pose.position, (DT, 0.0, 0.0))];
+    let mut prev_orientation = vec![pose.orientation];
+
+    // An impulse of `mass * 0.5` along -x, at the centre, is a velocity change of half a
+    // metre a second backwards and no turn at all: see [`Charge::Still`], where the
+    // impulse is at the positional scale and the two `dt`s have cancelled.
+    let mut correction = Correction::none();
+    correction.body = 0;
+    accumulate(
+        &mut correction,
+        &pose,
+        (0.0, 0.0, 0.0),
+        (-0.5 * mass * DT, 0.0, 0.0),
+        Charge::Still,
+    );
+
+    {
+        let bodies = Bodies::of(
+            &mut position,
+            &mut orientation,
+            &mut prev_position,
+            &mut prev_orientation,
+        );
+        // SAFETY: one body, one correction, one thread. The disjointness the parallel case
+        // needs is trivially satisfied, which is the point of testing the invariant here
+        // rather than through a colour.
+        unsafe { bodies.apply_velocity([correction, Correction::none()]) };
+    }
+
+    assert_eq!(
+        position[0], pose.position,
+        "a velocity correction moved the body; it may only move where the body came from",
+    );
+    assert_eq!(
+        orientation[0], pose.orientation,
+        "a velocity correction turned the body; it may only turn where the body came from",
+    );
+
+    let read = scale(sub(position[0], prev_position[0]), 1.0 / DT);
+    assert!(
+        (read.0 - 0.5).abs() < 1e-12 && read.1.abs() < 1e-12 && read.2.abs() < 1e-12,
+        "a body at 1 m/s given half a metre a second backwards reads back at {read:?}, \
+         where it should read exactly (0.5, 0, 0)",
+    );
+
+    // And a couple at an arm turns it without moving it, by the same rule.
+    let mut correction = Correction::none();
+    correction.body = 0;
+    accumulate(
+        &mut correction,
+        &pose,
+        (0.0, 0.25, 0.0),
+        (0.0, 0.0, 0.2 * DT),
+        Charge::Still,
+    );
+    let before = (position[0], orientation[0]);
+    {
+        let bodies = Bodies::of(
+            &mut position,
+            &mut orientation,
+            &mut prev_position,
+            &mut prev_orientation,
+        );
+        // SAFETY: as above.
+        unsafe { bodies.apply_velocity([correction, Correction::none()]) };
+    }
+    assert_eq!(
+        (position[0], orientation[0]),
+        before,
+        "an angular velocity correction moved or turned the body",
+    );
+    let spun = turned_since(orientation[0], prev_orientation[0]);
+    assert!(
+        length(spun) > 1e-9,
+        "an angular velocity correction left the body reading as not turning at all",
+    );
+}
