@@ -1738,6 +1738,36 @@
 //! froze below the ground; that defect, rather than any of the shapes above, is what stands
 //! between a heap of twenty and a heap that sleeps.
 //!
+//! # Where a heap stands once sleeping is correct, which is one bone per rig
+//!
+//! With the joint defects fixed and sleeping local, the heap was measured again -- not for
+//! how long it takes but for *what is stopping it*. Of the bodies still awake after sixty
+//! seconds, how many have been still for their whole settling window, how many of those are
+//! blocked, and how the restless ones are spread:
+//!
+//! ```text
+//!    4 rigs,  68 bodies:  68 awake,  45 ready, all blocked,  23 not still, over  4 of  4 rigs
+//!   20 rigs, 340 bodies: 340 awake, 122 ready, all blocked, 218 not still, over 20 of 20 rigs
+//! ```
+//!
+//! **Every rig has at least one bone that will not stop, and one bone holds its whole rig
+//! awake.** That second half is not a defect to be fixed: the blocking unit has to be the
+//! joint component, because a live joint with one end asleep *moves* the sleeping end and
+//! nothing puts it back -- measured at 1.63 m of travel by a body that was asleep the whole
+//! time. So the rule is right and the arithmetic is simply against a heap: twenty rigs is
+//! twenty chances for one bone in seventeen to still be rocking, and all twenty take it.
+//!
+//! Which means local sleeping cannot help a jointed heap and was never going to. What it
+//! helps is a field of loose bodies, where each body is its own joint component and the
+//! block really is per body: `ploughing` went from 330 of 2,049 awake to 174. The heap got
+//! about fifteen to twenty per cent cheaper a step across all eight shape-and-joint
+//! configurations, which is bodies sleeping transiently rather than the end state moving.
+//!
+//! **So the whole of what is left is: make one rig stop rocking.** Not a pile, not a
+//! sleeping rule, not a broad phase -- a single seventeen-bone rig with one bone that keeps
+//! moving. Everything above about shapes, patches, cones and manifolds was aimed at that
+//! and none of it has landed it. The sections that follow are what is known about why.
+//!
 //! # And the rocking is the shape, which this module already says somewhere else
 //!
 //! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
