@@ -24,9 +24,8 @@ fn a_ball_joint_keeps_its_two_anchors_in_one_place() {
         s.step(DT, G, 8);
     }
 
-    let a = s.bodies[root].position;
-    let rb = s.bodies[limb].orientation.rotate_point((0.0, 0.2, 0.0));
-    let b = add(s.bodies[limb].position, rb);
+    let a = s.position(root);
+    let b = add(s.position(limb), s.orientation(limb).rotate_point((0.0, 0.2, 0.0)));
     let gap = length(sub(b, a));
     assert!(
         gap < 0.01,
@@ -54,9 +53,9 @@ fn a_pinned_body_does_not_move() {
     }
 
     assert_eq!(
-        s.bodies[root].position,
+        s.position(root),
         (1.0, 2.0, 3.0),
-        "a ten-kilo limb hanging off it dragged the anchor",
+        "a fifty-kilo limb hanging off it dragged the anchor",
     );
 }
 
@@ -84,12 +83,20 @@ fn a_hinge_stays_inside_its_range() {
     for step in 0..900 {
         if step % 150 == 0 {
             let sign = if (step / 150) % 2 == 0 { 1.0 } else { -1.0 };
-            s.bodies[shin].angular_velocity = (14.0 * sign, 0.0, 0.0);
+            s.set_angular_velocity(shin, (14.0 * sign, 0.0, 0.0));
         }
         s.step(DT, G, 8);
     }
 
-    let angle = hinge_angle(&s, thigh, shin, (1.0, 0.0, 0.0), (1.0, 0.0, 0.0));
+    let axis = normalized(s.orientation(thigh).rotate_point((1.0, 0.0, 0.0))).expect("an axis");
+    let angle = hinge_angle(
+        &[s.orientation(thigh), s.orientation(shin)],
+        0,
+        1,
+        axis,
+        (1.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+    );
     let slack = 0.25;
     assert!(
         angle >= min - slack && angle <= max + slack,
@@ -104,28 +111,15 @@ fn a_hinge_stays_inside_its_range() {
 /// and this crate's caller has met that one already.
 #[test]
 fn a_chain_settles_rather_than_gaining_energy() {
-    let mut s = Skeleton::new();
-    let root = s.add_body(Body::pinned((0.0, 3.0, 0.0)));
-    let mut previous = root;
-    for i in 0..4 {
-        let y = 3.0 - 0.4 * (i as f64 + 1.0);
-        let link = s.add_body(Body::capsule(3.0, 0.05, 0.35, (0.0, y, 0.0)));
-        s.add_joint(Joint::Ball {
-            a: previous,
-            b: link,
-            anchor_a: if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
-            anchor_b: (0.0, 0.2, 0.0),
-        });
-        previous = link;
-    }
+    let mut s = chain(4);
 
     for _ in 0..1800 {
         s.step(DT, G, 8);
     }
 
-    for (i, body) in s.bodies.iter().enumerate() {
-        let v = length(body.velocity);
-        let w = length(body.angular_velocity);
+    for i in 0..s.len() {
+        let v = length(s.velocity(i));
+        let w = length(s.angular_velocity(i));
         assert!(
             v.is_finite() && w.is_finite(),
             "body {i} went non-finite: v {v}, w {w}",
@@ -136,6 +130,57 @@ fn a_chain_settles_rather_than_gaining_energy() {
              w {w:.2} rad/s -- the solver is feeding it",
         );
     }
+}
+
+/// **The colouring is what makes a step parallel**, so it has to actually separate the
+/// joints: no two in a colour may name the same body, or two threads write one body and
+/// the answer depends on which got there first.
+#[test]
+fn no_two_joints_in_a_colour_share_a_body() {
+    let mut s = chain(12);
+    // And a branch, so the graph is a skeleton rather than a line.
+    let shoulder = s.add_body(Body::capsule(2.0, 0.04, 0.3, (0.4, 2.6, 0.0)));
+    s.add_joint(Joint::Ball {
+        a: 1,
+        b: shoulder,
+        anchor_a: (0.0, -0.2, 0.0),
+        anchor_b: (0.0, 0.15, 0.0),
+    });
+
+    let joints: Vec<Joint> = s.joints().to_vec();
+    let colours: Vec<Vec<usize>> = s.colours().to_vec();
+
+    let total: usize = colours.iter().map(|c| c.len()).sum();
+    assert_eq!(total, joints.len(), "a joint was dropped or counted twice");
+
+    for (n, colour) in colours.iter().enumerate() {
+        let mut seen = Vec::new();
+        for &k in colour {
+            let (a, b) = joints[k].bodies();
+            for body in [a, b] {
+                assert!(
+                    !seen.contains(&body),
+                    "colour {n} has two joints on body {body}; solving it in parallel \
+                     would be a data race",
+                );
+                seen.push(body);
+            }
+        }
+    }
+}
+
+/// A chain of twelve colours in two. If greedy colouring ever starts producing a colour
+/// per joint the solve is serial again and the parallelism is gone without a test failing
+/// anywhere else.
+#[test]
+fn a_chain_colours_in_two() {
+    let mut s = chain(12);
+    assert_eq!(
+        s.colours().len(),
+        2,
+        "a simple chain should alternate between two colours; {:?}",
+        s.colours().iter().map(|c| c.len()).collect::<Vec<_>>(),
+    );
 }
 
 /// A joint naming a body that is not there is refused rather than panicking. A solver
@@ -162,32 +207,32 @@ fn a_joint_to_nowhere_is_refused() {
     assert!(s.joints().is_empty());
 }
 
-/// The angle a `Hinge` is measuring, recovered the same way the solver measures it, so
-/// the test is reading the quantity the constraint is about rather than one near it.
-fn hinge_angle(
-    s: &Skeleton,
-    a: usize,
-    b: usize,
-    axis_a: (f64, f64, f64),
-    axis_b: (f64, f64, f64),
-) -> f64 {
-    let axis = normalized(s.bodies[a].orientation.rotate_point(axis_a)).expect("an axis");
-    let reference = perpendicular(axis);
-    let in_a = s.bodies[a].orientation.rotate_point(reference);
-    let in_b = s
-        .bodies[b]
-        .orientation
-        .rotate_point(rotate_into(reference, axis_b, axis_a));
-    dot(cross(in_a, in_b), axis).atan2(dot(in_b, in_a))
-}
-
 /// The size of a `Body`, stated so a layout change is a decision rather than a drift.
 #[test]
 fn a_body_is_the_size_it_looks() {
     let size = std::mem::size_of::<Body>();
     assert_eq!(
         size, 136,
-        "a Body is {size} bytes; the layout moved and the cache arithmetic in the module \
-         header moved with it",
+        "a Body is {size} bytes; the layout moved and the arithmetic in the module header \
+         moved with it",
     );
+}
+
+/// A pinned root with `links` capsules hanging off it in a line.
+fn chain(links: usize) -> Skeleton {
+    let mut s = Skeleton::new();
+    let root = s.add_body(Body::pinned((0.0, 3.0, 0.0)));
+    let mut previous = root;
+    for i in 0..links {
+        let y = 3.0 - 0.4 * (i as f64 + 1.0);
+        let link = s.add_body(Body::capsule(3.0, 0.05, 0.35, (0.0, y, 0.0)));
+        s.add_joint(Joint::Ball {
+            a: previous,
+            b: link,
+            anchor_a: if i == 0 { (0.0, 0.0, 0.0) } else { (0.0, -0.2, 0.0) },
+            anchor_b: (0.0, 0.2, 0.0),
+        });
+        previous = link;
+    }
+    s
 }

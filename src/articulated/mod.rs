@@ -16,33 +16,55 @@
 //! wrist: with ownership by value there are two copies of it, and a correction applied
 //! through the elbow is invisible to the wrist until somebody copies it across. Iterating
 //! such a set does not converge on the joint set, it oscillates between two pictures of
-//! the same limb -- and copying state in and out per constraint per iteration is both the
-//! slow way and the wrong one.
+//! the same limb.
 //!
-//! So this module keeps **one** array of bodies and gives joints indices into it. Every
-//! constraint reads and writes the same memory, which is what lets a chain converge.
+//! So this module keeps **one** set of bodies and gives joints indices into it.
 //!
-//! # What it is solved with, and why not impulses
+//! # Structure of arrays, and the reason it is not a style preference
 //!
-//! Extended Position Based Dynamics. The same family as
-//! [`crate::constraints::RopeChain3D`], which is already the solver this crate's users
-//! reach for, so a reader who knows the rope knows this: predict, correct positions and
-//! orientations directly, then read the velocities back out of what moved.
+//! The bodies are six parallel arrays rather than a `Vec<Body>`. Two things need that,
+//! and neither is cache-line arithmetic:
 //!
-//! XPBD is chosen over sequential impulses for the reason that matters at scale: it is
-//! stable at low iteration counts. A ragdoll pile does not need to be accurate, it needs
-//! to not explode when the budget says four iterations rather than forty.
+//! * **SIMD on the streaming passes.** Predicting and reading velocities back are pure
+//!   sweeps over every body. As arrays they vectorise and parallelise by chunk; as a
+//!   `Vec<Body>` each lane would be a gather out of a 136-byte struct.
+//! * **The GPU, if it is ever asked for.** A warp reading `bodies[tid].position` out of an
+//!   interleaved struct wastes most of every memory transaction -- coalescing wants the
+//!   field contiguous. Converting later would mean rewriting whatever had been built on
+//!   top, which is why it is done before contacts rather than after.
+//!
+//! [`Body`] still exists as the thing you hand to [`Skeleton::add_body`] and get back from
+//! [`Skeleton::body`]. It is a *view*, assembled on demand; the storage is the arrays.
+//!
+//! # Colouring, because the layout was only half the problem
+//!
+//! The first cut of this solver was Gauss-Seidel -- each joint reading the corrections the
+//! last one made and writing immediately -- which is **inherently serial whatever the
+//! layout is**: two joints sharing a body cannot run at once. Structure of arrays alone
+//! would have parallelised the sweeps and left the solve exactly as serial as it was, and
+//! the solve is where the time goes once contacts arrive.
+//!
+//! So the joints are partitioned into **colours**, where no two joints in a colour touch
+//! the same body. Every colour runs fully parallel; within a colour it is still
+//! Gauss-Seidel, so convergence is not traded away. A limb colours in two or three, a
+//! whole skeleton in four or five.
+//!
+//! The alternative is Jacobi -- accumulate every correction and apply them at the end --
+//! which parallelises without colouring and converges slower, so it needs more iterations
+//! to hold a knee. Colouring keeps the iteration count.
 //!
 //! # Allocation
 //!
-//! [`Skeleton::step`] allocates nothing. The predicted state and the per-body
-//! accumulators live in the struct and are reused; `step` is safe to call every frame on
-//! hundreds of skeletons. That is the price of entry this crate asks of anything new, and
-//! it is asserted by `step_allocates_nothing_after_the_first`.
+//! [`Skeleton::step`] allocates nothing. The predicted state, the colour sets and the
+//! correction scratch live in the struct and are reused. Colouring itself happens once,
+//! when the joint set changes, not per step.
+
+use rayon::prelude::*;
 
 use crate::models::Quaternion;
 
-/// A rigid body in a [`Skeleton`], in world space.
+/// A rigid body, as a value. The storage is [`Skeleton`]'s arrays; this is what crosses
+/// the API in either direction.
 ///
 /// Deliberately not [`crate::models::PhysicalObject3D`], which carries a `Vec<Force>` per
 /// body and an Euler-angle orientation. A skeleton is hundreds of these: a heap
@@ -71,8 +93,7 @@ impl Body {
     /// `radius` and segment `length`, its long axis along local **+Y**.
     ///
     /// The axis is +Y because that is where a bone's length lives in every rig this
-    /// crate's callers export -- see `ridgeline`'s ragdoll, which reads a bone's own
-    /// direction off its child offset and falls back to local +Y for a leaf.
+    /// crate's callers export.
     pub fn capsule(mass: f64, radius: f64, length: f64, position: (f64, f64, f64)) -> Self {
         // A capsule's inertia, taken as the cylinder it mostly is: `m r^2 / 2` about the
         // long axis and `m (3 r^2 + L^2) / 12` across it. The hemispherical caps move
@@ -104,7 +125,7 @@ impl Body {
     }
 }
 
-/// What holds two bodies together, by index into [`Skeleton::bodies`].
+/// What holds two bodies together, by index into the [`Skeleton`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Joint {
     /// **A point shared by two bodies**, each anchor given in its own body's frame. The
@@ -187,30 +208,68 @@ fn normalized(a: (f64, f64, f64)) -> Option<(f64, f64, f64)> {
     }
 }
 
-/// `I^-1 v` in world space, for a body whose inverse inertia is diagonal in its own
-/// frame: rotate into the body, scale, rotate back.
+/// `I^-1 v` in world space for a body whose inverse inertia is diagonal in its own frame:
+/// rotate into the body, scale, rotate back.
 #[inline]
-fn apply_inv_inertia(body: &Body, v: (f64, f64, f64)) -> (f64, f64, f64) {
-    let local = body.orientation.inverse().rotate_point(v);
-    let scaled = (
-        local.0 * body.inv_inertia.0,
-        local.1 * body.inv_inertia.1,
-        local.2 * body.inv_inertia.2,
-    );
-    body.orientation.rotate_point(scaled)
+fn apply_inv_inertia(
+    orientation: Quaternion,
+    inv_inertia: (f64, f64, f64),
+    v: (f64, f64, f64),
+) -> (f64, f64, f64) {
+    let local = orientation.inverse().rotate_point(v);
+    orientation.rotate_point((
+        local.0 * inv_inertia.0,
+        local.1 * inv_inertia.1,
+        local.2 * inv_inertia.2,
+    ))
+}
+
+/// One body's share of one joint's correction: where to move it and how to turn it.
+///
+/// Produced in parallel and applied afterwards. Within a colour no two joints name the
+/// same body, so the order corrections are applied in cannot change the answer.
+#[derive(Clone, Copy, Debug)]
+struct Correction {
+    body: usize,
+    translation: (f64, f64, f64),
+    /// The quaternion *delta* to left-multiply, already weighted. Identity when the body
+    /// is only being moved.
+    rotation: Quaternion,
+}
+
+impl Correction {
+    fn none() -> Self {
+        Correction {
+            body: usize::MAX,
+            translation: (0.0, 0.0, 0.0),
+            rotation: Quaternion::identity(),
+        }
+    }
 }
 
 /// A set of bodies and the joints between them, solved together.
 ///
-/// See the module header for why the bodies live here rather than inside the joints.
+/// See the module header for why the bodies are arrays, and why the joints are coloured.
 #[derive(Clone, Debug, Default)]
 pub struct Skeleton {
-    pub bodies: Vec<Body>,
+    position: Vec<(f64, f64, f64)>,
+    orientation: Vec<Quaternion>,
+    velocity: Vec<(f64, f64, f64)>,
+    angular_velocity: Vec<(f64, f64, f64)>,
+    inv_mass: Vec<f64>,
+    inv_inertia: Vec<(f64, f64, f64)>,
+
     joints: Vec<Joint>,
-    /// Position at the top of the step, so velocities can be read back out of what the
-    /// solver moved. Reused; see the module header on allocation.
+    /// Joint indices grouped so that no two joints in a group share a body. Rebuilt when
+    /// the joint set changes, not per step. See the module header.
+    colours: Vec<Vec<usize>>,
+    coloured: bool,
+
     prev_position: Vec<(f64, f64, f64)>,
     prev_orientation: Vec<Quaternion>,
+    /// Two corrections per joint -- one per body -- written in parallel, applied after.
+    /// Reused; `step` allocates nothing.
+    scratch: Vec<[Correction; 2]>,
 }
 
 impl Skeleton {
@@ -218,24 +277,86 @@ impl Skeleton {
         Skeleton::default()
     }
 
+    pub fn len(&self) -> usize {
+        self.position.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.position.is_empty()
+    }
+
     /// Adds a body and returns its index, which is what joints are written against.
     pub fn add_body(&mut self, body: Body) -> usize {
-        self.bodies.push(body);
+        self.position.push(body.position);
+        self.orientation.push(body.orientation);
+        self.velocity.push(body.velocity);
+        self.angular_velocity.push(body.angular_velocity);
+        self.inv_mass.push(body.inv_mass);
+        self.inv_inertia.push(body.inv_inertia);
         self.prev_position.push(body.position);
         self.prev_orientation.push(body.orientation);
-        self.bodies.len() - 1
+        self.position.len() - 1
+    }
+
+    /// One body, gathered out of the arrays.
+    pub fn body(&self, i: usize) -> Body {
+        Body {
+            position: self.position[i],
+            orientation: self.orientation[i],
+            velocity: self.velocity[i],
+            angular_velocity: self.angular_velocity[i],
+            inv_mass: self.inv_mass[i],
+            inv_inertia: self.inv_inertia[i],
+        }
+    }
+
+    /// Writes one body back. The whole body, because a caller that has one has usually
+    /// changed more than one field of it.
+    pub fn set_body(&mut self, i: usize, body: Body) {
+        self.position[i] = body.position;
+        self.orientation[i] = body.orientation;
+        self.velocity[i] = body.velocity;
+        self.angular_velocity[i] = body.angular_velocity;
+        self.inv_mass[i] = body.inv_mass;
+        self.inv_inertia[i] = body.inv_inertia;
+    }
+
+    pub fn position(&self, i: usize) -> (f64, f64, f64) {
+        self.position[i]
+    }
+
+    pub fn orientation(&self, i: usize) -> Quaternion {
+        self.orientation[i]
+    }
+
+    pub fn velocity(&self, i: usize) -> (f64, f64, f64) {
+        self.velocity[i]
+    }
+
+    pub fn angular_velocity(&self, i: usize) -> (f64, f64, f64) {
+        self.angular_velocity[i]
+    }
+
+    pub fn set_angular_velocity(&mut self, i: usize, w: (f64, f64, f64)) {
+        self.angular_velocity[i] = w;
+    }
+
+    pub fn set_velocity(&mut self, i: usize, v: (f64, f64, f64)) {
+        self.velocity[i] = v;
     }
 
     /// Adds a joint. Returns `false` and adds nothing if it names a body that does not
-    /// exist -- an out-of-range index is a caller's bug and panicking in a solver that
-    /// runs per frame is worse than refusing.
+    /// exist, or joints a body to itself -- an out-of-range index is a caller's bug and
+    /// panicking in a solver that runs per frame is worse than refusing.
     pub fn add_joint(&mut self, joint: Joint) -> bool {
         let (a, b) = joint.bodies();
-        let n = self.bodies.len();
+        let n = self.position.len();
         if a >= n || b >= n || a == b {
             return false;
         }
         self.joints.push(joint);
+        self.scratch.push([Correction::none(); 2]);
+        self.coloured = false;
         true
     }
 
@@ -243,245 +364,368 @@ impl Skeleton {
         &self.joints
     }
 
-    /// **One step.** Predict under `gravity`, run `iterations` passes over the joints,
-    /// then read the velocities back out of what moved.
+    /// How the joints were partitioned. Exposed because the colour count is the thing
+    /// that decides how parallel a step can be, and a caller tuning a rig wants to see it.
+    pub fn colours(&mut self) -> &[Vec<usize>] {
+        self.recolour();
+        &self.colours
+    }
+
+    /// **Greedy colouring**: each joint takes the lowest colour no joint already coloured
+    /// on either of its bodies is using.
+    ///
+    /// Greedy rather than optimal because optimal colouring is NP-hard and the gain would
+    /// be at most a colour or two on a graph where every vertex has degree three or four.
+    /// A skeleton lands on four or five either way.
+    fn recolour(&mut self) {
+        if self.coloured {
+            return;
+        }
+        for set in self.colours.iter_mut() {
+            set.clear();
+        }
+        // Which colours are already taken on each body. Indexed by body, holding the
+        // highest colour seen plus a bitmask of the low ones, would be faster; a small
+        // vec per body is clearer and this runs when the rig changes, not per step.
+        let mut taken: Vec<Vec<usize>> = vec![Vec::new(); self.position.len()];
+        for (index, joint) in self.joints.iter().enumerate() {
+            let (a, b) = joint.bodies();
+            let mut colour = 0;
+            while taken[a].contains(&colour) || taken[b].contains(&colour) {
+                colour += 1;
+            }
+            taken[a].push(colour);
+            taken[b].push(colour);
+            if colour >= self.colours.len() {
+                self.colours.resize_with(colour + 1, Vec::new);
+            }
+            self.colours[colour].push(index);
+        }
+        self.colours.retain(|set| !set.is_empty());
+        self.coloured = true;
+    }
+
+    /// **One step.** Predict under `gravity`, run `iterations` passes over the coloured
+    /// joint sets, then read the velocities back out of what moved.
     ///
     /// Allocates nothing. `iterations` is the quality dial: four is enough for a corpse,
     /// and the cost is linear in it.
     pub fn step(&mut self, dt: f64, gravity: (f64, f64, f64), iterations: usize) {
-        if dt <= 0.0 || self.bodies.is_empty() {
+        if dt <= 0.0 || self.position.is_empty() {
             return;
         }
+        self.recolour();
 
-        for (i, body) in self.bodies.iter_mut().enumerate() {
-            self.prev_position[i] = body.position;
-            self.prev_orientation[i] = body.orientation;
-            if body.inv_mass > 0.0 {
-                body.velocity = add(body.velocity, scale(gravity, dt));
-            }
-            body.position = add(body.position, scale(body.velocity, dt));
+        self.prev_position.copy_from_slice(&self.position);
+        self.prev_orientation.copy_from_slice(&self.orientation);
 
-            // q' = q + (dt/2) * omega_quat * q, renormalised. The small-angle integrator
-            // every position-based solver uses; exact enough over a frame and far cheaper
-            // than an exponential map.
-            let w = body.angular_velocity;
-            let spin = Quaternion {
-                w: 0.0,
-                x: w.0,
-                y: w.1,
-                z: w.2,
-            }
-            .multiply(&body.orientation);
-            let q = body.orientation;
-            body.orientation = Quaternion {
-                w: q.w + 0.5 * dt * spin.w,
-                x: q.x + 0.5 * dt * spin.x,
-                y: q.y + 0.5 * dt * spin.y,
-                z: q.z + 0.5 * dt * spin.z,
-            }
-            .normalized();
-        }
+        // Three sweeps, each over two arrays, each independently parallel. This is the
+        // shape the structure of arrays is for: no gather, and rayon can chunk it.
+        let g = gravity;
+        self.velocity
+            .par_iter_mut()
+            .zip(self.inv_mass.par_iter())
+            .for_each(|(v, &inv_m)| {
+                if inv_m > 0.0 {
+                    *v = add(*v, scale(g, dt));
+                }
+            });
+        self.position
+            .par_iter_mut()
+            .zip(self.velocity.par_iter())
+            .for_each(|(p, v)| *p = add(*p, scale(*v, dt)));
+        self.orientation
+            .par_iter_mut()
+            .zip(self.angular_velocity.par_iter())
+            .for_each(|(q, w)| *q = integrate_spin(*q, *w, dt));
 
         for _ in 0..iterations.max(1) {
-            for k in 0..self.joints.len() {
-                let joint = self.joints[k];
-                match joint {
-                    Joint::Ball {
-                        a,
-                        b,
-                        anchor_a,
-                        anchor_b,
-                    } => self.solve_point(a, b, anchor_a, anchor_b),
-                    Joint::Hinge {
-                        a,
-                        b,
-                        anchor_a,
-                        anchor_b,
-                        axis_a,
-                        axis_b,
-                        min,
-                        max,
-                    } => {
-                        self.solve_point(a, b, anchor_a, anchor_b);
-                        self.solve_hinge_axis(a, b, axis_a, axis_b);
-                        self.solve_hinge_limit(a, b, axis_a, axis_b, min, max);
-                    }
-                }
+            for colour in 0..self.colours.len() {
+                self.solve_colour(colour);
             }
         }
 
         let inv_dt = 1.0 / dt;
-        for (i, body) in self.bodies.iter_mut().enumerate() {
-            body.velocity = scale(sub(body.position, self.prev_position[i]), inv_dt);
-
-            // The rotation that happened, as an axis-angle, divided by the step. The
-            // `w < 0` flip keeps the short way round: a quaternion and its negation are
-            // the same orientation, and without the check a body can read as spinning
-            // almost a full turn when it barely moved.
-            let delta = body.orientation.multiply(&self.prev_orientation[i].inverse());
-            let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
-            body.angular_velocity = scale((delta.x, delta.y, delta.z), 2.0 * inv_dt * sign);
-        }
+        self.velocity
+            .par_iter_mut()
+            .zip(self.position.par_iter())
+            .zip(self.prev_position.par_iter())
+            .for_each(|((v, p), prev)| *v = scale(sub(*p, *prev), inv_dt));
+        self.angular_velocity
+            .par_iter_mut()
+            .zip(self.orientation.par_iter())
+            .zip(self.prev_orientation.par_iter())
+            .for_each(|((w, q), prev)| {
+                // The rotation that happened, as an axis-angle, divided by the step. The
+                // `w < 0` flip keeps the short way round: a quaternion and its negation
+                // are the same orientation, and without the check a body can read as
+                // spinning almost a full turn when it barely moved.
+                let delta = q.multiply(&prev.inverse());
+                let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
+                *w = scale((delta.x, delta.y, delta.z), 2.0 * inv_dt * sign);
+            });
     }
 
-    /// The positional half of every joint: two anchors, given in their own bodies'
-    /// frames, are the same point in the world.
-    fn solve_point(
-        &mut self,
-        a: usize,
-        b: usize,
-        anchor_a: (f64, f64, f64),
-        anchor_b: (f64, f64, f64),
-    ) {
-        let (ra, rb) = (
-            self.bodies[a].orientation.rotate_point(anchor_a),
-            self.bodies[b].orientation.rotate_point(anchor_b),
-        );
-        let world_a = add(self.bodies[a].position, ra);
-        let world_b = add(self.bodies[b].position, rb);
-        let error = sub(world_b, world_a);
-        let Some(n) = normalized(error) else { return };
-        let c = length(error);
+    /// One colour: every joint in it computes its two corrections **in parallel**, then
+    /// they are applied. No two joints in a colour name the same body, so applying them
+    /// in any order gives the same answer -- which is what makes the parallel half safe
+    /// without any unsafe.
+    fn solve_colour(&mut self, colour: usize) {
+        let joints = &self.joints;
+        let position = &self.position;
+        let orientation = &self.orientation;
+        let inv_mass = &self.inv_mass;
+        let inv_inertia = &self.inv_inertia;
+        let set = &self.colours[colour];
 
-        let wa = self.generalised_inverse_mass(a, ra, n);
-        let wb = self.generalised_inverse_mass(b, rb, n);
-        let total = wa + wb;
-        if total <= 1e-12 {
-            return;
+        // Borrowed apart so the parallel closure only sees the read-only arrays.
+        let scratch = &mut self.scratch;
+        let pairs: Vec<(usize, [Correction; 2])> = set
+            .par_iter()
+            .map(|&k| {
+                (
+                    k,
+                    solve_joint(joints[k], position, orientation, inv_mass, inv_inertia),
+                )
+            })
+            .collect();
+        for (k, corrections) in pairs {
+            scratch[k] = corrections;
         }
-        let impulse = scale(n, c / total);
-        self.apply_correction(a, ra, impulse, 1.0);
-        self.apply_correction(b, rb, impulse, -1.0);
-    }
 
-    /// The hinge's axis: `b`'s axis is brought onto `a`'s. Purely angular -- it moves no
-    /// position, which is what leaves `solve_point` in charge of where the joint is.
-    fn solve_hinge_axis(
-        &mut self,
-        a: usize,
-        b: usize,
-        axis_a: (f64, f64, f64),
-        axis_b: (f64, f64, f64),
-    ) {
-        let world_a = self.bodies[a].orientation.rotate_point(axis_a);
-        let world_b = self.bodies[b].orientation.rotate_point(axis_b);
-        let error = cross(world_b, world_a);
-        let Some(n) = normalized(error) else { return };
-        let angle = length(error).clamp(-1.0, 1.0).asin();
-        self.apply_angular(a, b, n, angle);
-    }
-
-    /// And the range of motion about it. Nothing is done while the angle is inside
-    /// `[min, max]`; outside, the excess is taken back.
-    fn solve_hinge_limit(
-        &mut self,
-        a: usize,
-        b: usize,
-        axis_a: (f64, f64, f64),
-        axis_b: (f64, f64, f64),
-        min: f64,
-        max: f64,
-    ) {
-        let Some(axis) = normalized(self.bodies[a].orientation.rotate_point(axis_a)) else {
-            return;
-        };
-        // The angle between the two bodies about the hinge, measured from a reference
-        // that is perpendicular to the axis in each -- so it is the swing, with the twist
-        // the axis constraint has already removed left out of it.
-        let reference = perpendicular(axis);
-        let in_a = self.bodies[a].orientation.rotate_point(reference);
-        let in_b = self
-            .bodies[b]
-            .orientation
-            .rotate_point(rotate_into(reference, axis_b, axis_a));
-        let x = dot(in_b, in_a);
-        let y = dot(cross(in_a, in_b), axis);
-        let angle = y.atan2(x);
-
-        let excess = if angle < min {
-            angle - min
-        } else if angle > max {
-            angle - max
-        } else {
-            return;
-        };
-        self.apply_angular(a, b, axis, excess);
-    }
-
-    /// `w = inv_m + (r x n) . I^-1 (r x n)`: how much a unit impulse along `n` applied at
-    /// `r` actually moves this body. The denominator of every correction below.
-    fn generalised_inverse_mass(
-        &self,
-        i: usize,
-        r: (f64, f64, f64),
-        n: (f64, f64, f64),
-    ) -> f64 {
-        let body = &self.bodies[i];
-        let rn = cross(r, n);
-        body.inv_mass + dot(rn, apply_inv_inertia(body, rn))
-    }
-
-    fn apply_correction(
-        &mut self,
-        i: usize,
-        r: (f64, f64, f64),
-        impulse: (f64, f64, f64),
-        sign: f64,
-    ) {
-        let body = &mut self.bodies[i];
-        if body.inv_mass <= 0.0 && body.inv_inertia == (0.0, 0.0, 0.0) {
-            return;
+        for &k in set.iter() {
+            for correction in scratch[k] {
+                if correction.body == usize::MAX {
+                    continue;
+                }
+                let i = correction.body;
+                self.position[i] = add(self.position[i], correction.translation);
+                if !correction.rotation.is_near_identity(1e-12) {
+                    self.orientation[i] = correction
+                        .rotation
+                        .multiply(&self.orientation[i])
+                        .normalized();
+                }
+            }
         }
-        let p = scale(impulse, sign);
-        body.position = add(body.position, scale(p, body.inv_mass));
-
-        let dw = apply_inv_inertia(body, cross(r, p));
-        let spin = Quaternion {
-            w: 0.0,
-            x: dw.0,
-            y: dw.1,
-            z: dw.2,
-        }
-        .multiply(&body.orientation);
-        let q = body.orientation;
-        body.orientation = Quaternion {
-            w: q.w + 0.5 * spin.w,
-            x: q.x + 0.5 * spin.x,
-            y: q.y + 0.5 * spin.y,
-            z: q.z + 0.5 * spin.z,
-        }
-        .normalized();
-    }
-
-    /// Rotate `a` and `b` apart about `axis` by `angle`, split by their inertias.
-    fn apply_angular(&mut self, a: usize, b: usize, axis: (f64, f64, f64), angle: f64) {
-        if angle.abs() < 1e-9 {
-            return;
-        }
-        let ia = dot(axis, apply_inv_inertia(&self.bodies[a], axis));
-        let ib = dot(axis, apply_inv_inertia(&self.bodies[b], axis));
-        let total = ia + ib;
-        if total <= 1e-12 {
-            return;
-        }
-        turn(&mut self.bodies[a], axis, angle * ia / total);
-        turn(&mut self.bodies[b], axis, -angle * ib / total);
     }
 }
 
-/// Turn one body about a world axis, leaving its position alone.
-fn turn(body: &mut Body, axis: (f64, f64, f64), angle: f64) {
-    if body.inv_inertia == (0.0, 0.0, 0.0) {
+/// `q` advanced by angular velocity `w` over `dt`, renormalised. The small-angle
+/// integrator every position-based solver uses: exact enough over a frame and far cheaper
+/// than an exponential map.
+#[inline]
+fn integrate_spin(q: Quaternion, w: (f64, f64, f64), dt: f64) -> Quaternion {
+    let spin = Quaternion {
+        w: 0.0,
+        x: w.0,
+        y: w.1,
+        z: w.2,
+    }
+    .multiply(&q);
+    Quaternion {
+        w: q.w + 0.5 * dt * spin.w,
+        x: q.x + 0.5 * dt * spin.x,
+        y: q.y + 0.5 * dt * spin.y,
+        z: q.z + 0.5 * dt * spin.z,
+    }
+    .normalized()
+}
+
+/// Everything one joint wants done, as two corrections. Reads only; the caller applies.
+fn solve_joint(
+    joint: Joint,
+    position: &[(f64, f64, f64)],
+    orientation: &[Quaternion],
+    inv_mass: &[f64],
+    inv_inertia: &[(f64, f64, f64)],
+) -> [Correction; 2] {
+    let mut out = [Correction::none(); 2];
+    let (a, b) = joint.bodies();
+    out[0].body = a;
+    out[1].body = b;
+
+    let (anchor_a, anchor_b) = match joint {
+        Joint::Ball {
+            anchor_a, anchor_b, ..
+        } => (anchor_a, anchor_b),
+        Joint::Hinge {
+            anchor_a, anchor_b, ..
+        } => (anchor_a, anchor_b),
+    };
+
+    // -- the positional half: the two anchors are one point ----------------------
+    let ra = orientation[a].rotate_point(anchor_a);
+    let rb = orientation[b].rotate_point(anchor_b);
+    let error = sub(add(position[b], rb), add(position[a], ra));
+    if let Some(n) = normalized(error) {
+        let c = length(error);
+        let wa = generalised_inverse_mass(orientation[a], inv_mass[a], inv_inertia[a], ra, n);
+        let wb = generalised_inverse_mass(orientation[b], inv_mass[b], inv_inertia[b], rb, n);
+        let total = wa + wb;
+        if total > 1e-12 {
+            let impulse = scale(n, c / total);
+            accumulate(
+                &mut out[0],
+                orientation[a],
+                inv_mass[a],
+                inv_inertia[a],
+                ra,
+                impulse,
+            );
+            accumulate(
+                &mut out[1],
+                orientation[b],
+                inv_mass[b],
+                inv_inertia[b],
+                rb,
+                scale(impulse, -1.0),
+            );
+        }
+    }
+
+    // -- and, for a hinge, the axis and the range on it --------------------------
+    if let Joint::Hinge {
+        axis_a,
+        axis_b,
+        min,
+        max,
+        ..
+    } = joint
+    {
+        let world_a = orientation[a].rotate_point(axis_a);
+        let world_b = orientation[b].rotate_point(axis_b);
+        if let Some(n) = normalized(cross(world_b, world_a)) {
+            let angle = length(cross(world_b, world_a)).clamp(-1.0, 1.0).asin();
+            share_turn(
+                &mut out,
+                orientation,
+                inv_inertia,
+                a,
+                b,
+                n,
+                angle,
+            );
+        }
+
+        if let Some(axis) = normalized(world_a) {
+            let angle = hinge_angle(orientation, a, b, axis, axis_a, axis_b);
+            let excess = if angle < min {
+                angle - min
+            } else if angle > max {
+                angle - max
+            } else {
+                0.0
+            };
+            if excess != 0.0 {
+                share_turn(
+                    &mut out,
+                    orientation,
+                    inv_inertia,
+                    a,
+                    b,
+                    axis,
+                    excess,
+                );
+            }
+        }
+    }
+
+    out
+}
+
+/// The angle between two bodies about a hinge, measured from a reference perpendicular to
+/// the axis in each -- so it is the swing, with the twist the axis constraint removes left
+/// out of it.
+fn hinge_angle(
+    orientation: &[Quaternion],
+    a: usize,
+    b: usize,
+    axis: (f64, f64, f64),
+    axis_a: (f64, f64, f64),
+    axis_b: (f64, f64, f64),
+) -> f64 {
+    let reference = perpendicular(axis);
+    let in_a = orientation[a].rotate_point(reference);
+    let in_b = orientation[b].rotate_point(rotate_into(reference, axis_b, axis_a));
+    dot(cross(in_a, in_b), axis).atan2(dot(in_b, in_a))
+}
+
+/// `w = inv_m + (r x n) . I^-1 (r x n)`: how much a unit impulse along `n` applied at `r`
+/// actually moves this body. The denominator of every positional correction.
+#[inline]
+fn generalised_inverse_mass(
+    orientation: Quaternion,
+    inv_mass: f64,
+    inv_inertia: (f64, f64, f64),
+    r: (f64, f64, f64),
+    n: (f64, f64, f64),
+) -> f64 {
+    let rn = cross(r, n);
+    inv_mass + dot(rn, apply_inv_inertia(orientation, inv_inertia, rn))
+}
+
+/// Fold one impulse at `r` into a body's correction.
+fn accumulate(
+    into: &mut Correction,
+    orientation: Quaternion,
+    inv_mass: f64,
+    inv_inertia: (f64, f64, f64),
+    r: (f64, f64, f64),
+    impulse: (f64, f64, f64),
+) {
+    if inv_mass <= 0.0 && inv_inertia == (0.0, 0.0, 0.0) {
         return;
     }
-    body.orientation = Quaternion::from_axis_angle(axis, angle)
-        .multiply(&body.orientation)
-        .normalized();
+    into.translation = add(into.translation, scale(impulse, inv_mass));
+
+    // The orientation update is `q + (1/2) dw q`, and `dw q` factors, so the *delta* to
+    // left-multiply is `1 + (1/2) dw` -- independent of the orientation it will be
+    // applied to, which is exactly what lets this be computed now and applied later.
+    let dw = apply_inv_inertia(orientation, inv_inertia, cross(r, impulse));
+    let delta = Quaternion {
+        w: 1.0,
+        x: 0.5 * dw.0,
+        y: 0.5 * dw.1,
+        z: 0.5 * dw.2,
+    }
+    .normalized();
+    // Composed onto whatever this body has already been asked to do by this joint.
+    into.rotation = delta.multiply(&into.rotation).normalized();
 }
 
-/// Any unit vector at right angles to `axis`. Which one does not matter -- it is only
-/// ever used as a shared reference for measuring an angle, and both bodies measure from
-/// the same one.
+/// Turn two bodies apart about a world axis, split by their inertias, into their
+/// corrections.
+fn share_turn(
+    out: &mut [Correction; 2],
+    orientation: &[Quaternion],
+    inv_inertia: &[(f64, f64, f64)],
+    a: usize,
+    b: usize,
+    axis: (f64, f64, f64),
+    angle: f64,
+) {
+    if angle.abs() < 1e-9 {
+        return;
+    }
+    let ia = dot(axis, apply_inv_inertia(orientation[a], inv_inertia[a], axis));
+    let ib = dot(axis, apply_inv_inertia(orientation[b], inv_inertia[b], axis));
+    let total = ia + ib;
+    if total <= 1e-12 {
+        return;
+    }
+    if inv_inertia[a] != (0.0, 0.0, 0.0) {
+        let turn = Quaternion::from_axis_angle(axis, angle * ia / total);
+        out[0].rotation = turn.multiply(&out[0].rotation).normalized();
+    }
+    if inv_inertia[b] != (0.0, 0.0, 0.0) {
+        let turn = Quaternion::from_axis_angle(axis, -angle * ib / total);
+        out[1].rotation = turn.multiply(&out[1].rotation).normalized();
+    }
+}
+
+/// Any unit vector at right angles to `axis`. Which one does not matter -- it is only ever
+/// a shared reference for measuring an angle, and both bodies measure from the same one.
 fn perpendicular(axis: (f64, f64, f64)) -> (f64, f64, f64) {
     let candidate = if axis.0.abs() < 0.9 {
         (1.0, 0.0, 0.0)
@@ -501,8 +745,9 @@ fn rotate_into(
     let (Some(f), Some(t)) = (normalized(from), normalized(to)) else {
         return v;
     };
-    let axis = cross(f, t);
-    let Some(axis) = normalized(axis) else { return v };
+    let Some(axis) = normalized(cross(f, t)) else {
+        return v;
+    };
     let angle = dot(f, t).clamp(-1.0, 1.0).acos();
     Quaternion::from_axis_angle(axis, angle).rotate_point(v)
 }
