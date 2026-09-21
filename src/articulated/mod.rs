@@ -1194,6 +1194,205 @@
 //! `STILL_FRACTION`: a bone that has not covered one settling window's allowance across all
 //! thirty-two of them has not gone anywhere, and asking it which direction is dividing
 //! arithmetic noise by itself.
+//!
+//! # Every hinge in the module was inside out, and it was the pile
+//!
+//! The section above and the six before it are a hunt for why a jointed rig will not go to
+//! sleep, conducted entirely on **one** rig in **one** pose: the seventeen-bone rig dropped
+//! upright from a metre. Run the same rig at a set of landing poses instead -- twenty rigs
+//! far enough apart that none touches another, so each is an independent sample, eight
+//! draws a relative 1e-12 apart, a hundred and sixty samples in all -- and it comes to rest
+//! in **89 of 160**. The pose the rest of this page was measured at is one of the good ones.
+//!
+//! The ensemble is worth stating exactly, because it is the instrument the rest of this
+//! section is read off: twenty copies of the rig `tests/articulated_laws.rs` builds, on a
+//! 2.5 m grid so that no two can reach each other, each turned by its own axis and angle
+//! before it is dropped from 0.55 m, and a rig counted as settled on the step every one of
+//! its seventeen bodies is asleep. Eight draws, differing only in a relative 1e-12 on the
+//! drop height. One skeleton holds all twenty, which costs nothing here: separate rigs
+//! never touch, so they are separate islands and each sleeps on its own.
+//!
+//! That is what makes a pile look like a different problem from a rig. It is not one. A
+//! pile sleeps as an island, so it sleeps when its *last* body does; a heap of twenty rigs
+//! sleeps only if all twenty do, and at 56 per cent each that never happens. Measured, and
+//! this is the honest baseline the fix below is against -- eight draws each, capped at
+//! sixty seconds:
+//!
+//! ```text
+//!                                  bodies   draws that came to rest
+//!   one rig, upright from a metre      17   8 of 8, at 133..867 steps
+//!   one rig, tumbling                  17   4 of 8
+//!   four rigs in a heap                68   0 of 8
+//!   twenty rigs in a heap             340   0 of 8
+//!   twenty rigs in a shallow field    340   0 of 8
+//!   forty rigs in a deep heap         680   0 of 8
+//! ```
+//!
+//! **Neither coefficient is what is wrong, and that was measured first because it would
+//! have been the cheapest answer.** A hundred and sixty samples a point, as the fraction of
+//! rigs that come to rest inside sixty seconds:
+//!
+//! ```text
+//!   friction        0.0    0.25    0.5    0.8    1.2    2.0
+//!                    5%     56%    56%    65%    76%    71%
+//!   rolling         0.0     0.25   0.5    1.0    2.0
+//!                   48%      56%   68%    43%    21%
+//! ```
+//!
+//! Friction buys something and buys it slowly -- at 1.2 the median rig takes 1400 steps to
+//! settle against 900 at 0.5 -- and rolling resistance is worse on both sides of where it
+//! is. Nothing here is a pile settling.
+//!
+//! ## What it was
+//!
+//! Bisect to the smallest thing that fails and it is one limb. On a rig that will not
+//! sleep, two bones of one arm -- the first and last of its three segments, two joints
+//! apart and so not excluded as a jointed pair -- sit **33 to 55 mm inside each other** with
+//! their radii summing to 120 mm, in an exact period-two cycle, each carrying 700 to 900 N
+//! where its own weight is 39 N, while the bone between them swings at 0.9 m/s for as long
+//! as it is watched. Pin every other body in the rig, take the ground and gravity away, and
+//! solve that one step at rising pass counts, and the overlap does not come out:
+//!
+//! ```text
+//!   passes         1       2       4       8      16      32      64     128     256
+//!   overlap     52.1    34.8    35.3    39.2    44.1    46.1    46.8    44.6    41.9  mm
+//!   load         0.7     122     336     817    1840    3534    6633   12218   20661  N
+//! ```
+//!
+//! **The impulse grows linearly with the pass count and the overlap does not move.** That is
+//! not a loop converging slowly; it is a pass applying a correction that the next constraint
+//! takes straight back out, for ever.
+//!
+//! **And the constraint that takes it back out is not the contact's partner in the loop but
+//! the hinge's own second half.** A hinge holds two things -- that the two
+//! bodies' axes are one axis, and that the swing about it stays inside `min`..`max` -- and
+//! the alignment half turned the axes onto one another about `cross(world_b, world_a)`,
+//! which is the wrong way round: that correction drives them **apart**. The cross product
+//! vanishes at a half turn as well as at none, so both are fixed points, and with the sign
+//! reversed the stable one is the wrong one. Measured on the rig, every one of its eight
+//! hinges started with its axes parallel and was **inverted within five steps** of the drop,
+//! and stayed inverted for the rest of the run:
+//!
+//! ```text
+//!   step                0     1     2     5    20   100  1500
+//!   cos(axis_a, axis_b) +1    +1    +1  -0.78 -1.00 -1.00 -1.00
+//! ```
+//!
+//! An inverted hinge still holds a single axis *line*, which is most of what a hinge looks
+//! like from outside, and that is why nothing caught it: `a_hinge_stays_inside_its_range`
+//! measures the swing with [`hinge_angle`], which reads the angle from a reference carried
+//! in each body's own frame -- so on an inverted joint it asks the same wrong question the
+//! solver does and gets a consistent answer. What is actually lost is the *zero and the
+//! sign* of the range. `min: -0.1, max: 2.2` is then enforced on a number that is not the
+//! angle anybody asked about, and the limit drives the elbow to the wrong end and holds it
+//! there against a contact that cannot win.
+//!
+//! The angle was wrong as well, in the way that made the half turn a slow place to leave
+//! rather than one a hinge passes through: `asin` of the cross product's length cannot tell
+//! an angle from its supplement, so past a quarter turn the correction *shrinks* as the
+//! error grows. The sign of `a . b` says which side of the quarter turn the pair is on,
+//! which is the whole of what `asin` cannot see -- so the repair is one compare, and it is
+//! not the dearer `atan2` because this runs on every hinge on every pass. A hinge handed to
+//! the solver exactly opposed -- no cross product to turn about -- is turned back about any
+//! perpendicular, because every one of them leaves the same hinge.
+//!
+//! ## What it buys, and what it does not
+//!
+//! The same hundred and sixty samples, and the same piles:
+//!
+//! ```text
+//!   rigs that come to rest inside 60 s     before  89/160 (56%)   after  144/160 (90%)
+//!   median steps to rest, of those          before     889        after      837
+//!   the deepest overlap inside a rig        before   33..55 mm    after   0.2..2.6 mm
+//!   one step at 256 passes, load            before   20,661 N     after   converges at 228 N
+//! ```
+//!
+//! **What moves is which rigs stop, not how long a rig that was going to stop takes.** The
+//! median is the same within its own noise, and that is the right shape for the defect: a
+//! jammed limb does not settle slowly, it never settles at all, so removing the jam moves a
+//! draw from "never" to "somewhere in the distribution" rather than shortening the ones that
+//! already worked.
+//!
+//! **And the size of that statistic's own noise is worth having**, because everything above
+//! is a count over a chaotic fixture. The angle was first written as `atan2(|a x b|, a . b)`
+//! and then as the arithmetically identical `asin` with the supplement taken when the dot
+//! product is negative -- the same algorithm, differing in the last bits -- and the two give
+//! 136 and 144 of 160. Read a difference of five points as nothing.
+//!
+//! **The pass count stops being a lever, which is the clearest thing the fix does to the
+//! rest of this page.** Before it, raising the count was the only thing that moved the
+//! settling rate at all, and it moved it a long way -- that was passes partly overcoming a
+//! jam rather than passes converging. After it, they buy speed and not certainty:
+//!
+//! ```text
+//!   passes                    8      16      32      64
+//!   rigs that come to rest   90%     93%     90%     93%     (before the fix: 56 76 90 93)
+//!   median steps, of those   837     484     365     304
+//! ```
+//!
+//! A fixture that settles twice as fast at sixteen passes and no more often is a fixture
+//! whose failures are not a convergence shortfall. Whatever holds the last tenth awake is
+//! something eight passes already reach.
+//!
+//! The coefficients do not come back either. Re-run on the fixed solver, friction at 1.2
+//! gives 68 of 80 against the same build's 68 of 80 at 0.5, and rolling resistance at 0.5
+//! gives 65 -- so the gain friction showed before the fix was it papering over the jam, and
+//! there is nothing left for it to buy.
+//!
+//! **And the piles still do not sleep**, which is the honest end of this section. A tenth
+//! of landing poses still hold a rig awake, an island sleeps when its last body
+//! does, and twenty rigs is twenty chances to fail. What is left looks nothing like what was
+//! removed -- millimetres of overlap rather than centimetres, a solve that converges rather
+//! than one that never does -- and it is the propped-rig residual the sections above are
+//! about, met again at the poses those sections never ran. Measured on one such rig after
+//! the fix: bones with 0.2 to 2.6 mm of overlap, moving at 0.03 to 0.15 m/s, where the
+//! settling window allows about 0.01, and three hundred of that scene's three hundred and
+//! forty bodies never move at all.
+//!
+//! **So the next person to go after a pile should go after one rig at the poses that fail,
+//! and should measure the fraction rather than the time.** The two statistics say different
+//! things -- the time is what a rig that settles takes and it is chaotic over a factor of
+//! five, the fraction is what fails outright and a pile is the product of it over every rig
+//! it holds. Eight draws of a heap were 0 of 8 before this and are 0 of 8 after, which is
+//! the same number and a different scene behind it.
+//!
+//! **What it costs is nothing anybody can measure, and the arithmetic says so first.** The
+//! correction is the same `asin` it always was, plus a dot product and a compare, on a
+//! branch that already computed a cross product, a normalisation and two
+//! `Quaternion::from_axis_angle` calls -- five flops against a few hundred, per hinge per
+//! pass. `atan2` would not have been free at that rate, which is why the supplement is
+//! taken by hand. Three alternating rounds of prebuilt binaries, at eight passes, medians:
+//!
+//! ```text
+//!                    before                      after
+//!   joints_only/8    4.57  4.66  3.17 ms      5.08  4.57  4.83 ms
+//!   one/8            114.6  87.6  88.6 us     86.4  88.3  96.7 us
+//!   pile/8           9.87  8.46  5.09 ms      8.29  7.96  7.91 ms
+//! ```
+//!
+//! `joints_only` is the control the claim rests on -- it is nine thousand six hundred
+//! joints, half of them hinges, and no contacts at all, so it is the fixture where this
+//! branch is the largest fraction of the step. **Its own spread on one unchanged binary is
+//! 3.17 to 4.66 ms**, a factor of one and a half, against six per cent between the two
+//! medians. The other two fixtures are not comparable at all in the strict sense, because
+//! the fix changes how their rigs settle and so which scene is being timed.
+//!
+//! **One thing it changes that a caller can meet.** A hinge that is inverted now comes
+//! back, and a rigid constraint undoing a half turn does it in about a step: measured on a
+//! knee handed to the solver exactly inside out, the shin peaks at 120 rad/s against the
+//! 188 that delivering the whole error once would be, and is at rest again within ten
+//! seconds. That is the same thing this module already does to a body spawned a metre from
+//! its anchor, and the bound worth guarding is not the size of the snap but that there is
+//! one of it rather than one per pass --
+//! `a_hinge_inverted_exactly_turns_itself_back` holds it to `PI / dt`. Before, such a hinge
+//! stayed inverted for ever and nothing was reported at all.
+//!
+//! `a_hinge_does_not_turn_itself_inside_out` is the law that would have caught it, and it is
+//! stated where the geometry puts it rather than next to the measurement: the correction has
+//! two fixed points, no angle at all and a half turn, and only one of them is a hinge, so the
+//! watershed between their basins is a quarter turn and a working hinge never reaches one.
+//! Against the defect it reports a cosine of -1.0000.
+//!
 //! # What a body is carrying, and why it is `driven` rather than `normal`
 //!
 //! [`Skeleton::normal_load`] reports, per body, the normal impulse the last step actually
@@ -4663,10 +4862,44 @@ fn solve_joint(joint: Joint, first: &Pose, second: &Pose) -> [Correction; 2] {
     {
         let world_a = rotate(first.orientation, axis_a);
         let world_b = rotate(second.orientation, axis_b);
-        let misaligned = cross(world_b, world_a);
-        if let Some(n) = normalized(misaligned) {
-            let angle = length(misaligned).clamp(-1.0, 1.0).asin();
+        // **The two axes are turned onto one another, and both halves of that sentence
+        // had to be fixed.**
+        //
+        // The axis to turn about is `a x b` -- turning `a` the positive way about it
+        // carries `a` towards `b`, and [`share_turn`] turns `b` the other way, so the two
+        // meet. Written `b x a` the same correction drives them *apart*, and since the
+        // cross product vanishes at a half turn as well as at none, the axes then settle
+        // **anti-parallel**: the constraint reports itself satisfied while the child is
+        // flipped end for end about the joint. Measured on a seventeen-bone rig, every one
+        // of its eight hinges started parallel and was inverted within five steps and held
+        // there for the rest of the run.
+        //
+        // The angle is the whole angle and not `asin|a x b|`, because the sine alone
+        // cannot tell an angle from its supplement: past a quarter turn `asin` reports the
+        // supplement, so the correction *shrinks* as the error grows and a hinge crawls
+        // the last quarter turn instead of covering it. The reversed axis is what made the
+        // half turn an attractor; this is what made it a slow one to leave. The sign of
+        // `a . b` says which side of the quarter turn the pair is on, which is the whole of
+        // what `asin` cannot see -- so the repair is one compare rather than the dearer
+        // `atan2`, and this runs on every hinge on every pass.
+        //
+        // A hinge that is *exactly* opposed has no cross product to turn about and needs
+        // one, or it stays inverted for ever: any axis perpendicular to the two will undo
+        // the half turn, and which one is arbitrary because they all leave the same hinge.
+        let across = cross(world_a, world_b);
+        let along = dot(world_a, world_b);
+        let acute = length(across).clamp(-1.0, 1.0).asin();
+        let angle = if along >= 0.0 {
+            acute
+        } else {
+            std::f64::consts::PI - acute
+        };
+        if let Some(n) = normalized(across) {
             share_turn(&mut out, first, second, n, angle);
+        } else if along < 0.0 {
+            // `perpendicular` already hands back a unit vector, and a zero axis cannot
+            // reach here because it has no negative dot product to report.
+            share_turn(&mut out, first, second, perpendicular(world_a), std::f64::consts::PI);
         }
 
         if let Some(axis) = normalized(world_a) {

@@ -1196,6 +1196,102 @@ fn asking_for_more_passes_does_not_make_a_settled_rig_worse() {
     }
 }
 
+/// **A hinge keeps its axis pointing the way it was handed.**
+///
+/// # Why this is a law and not a detail
+///
+/// A hinge holds two things: that the bodies' axes are the *same* axis, and that the swing
+/// about it stays inside the range. The second is only meaningful if the first is -- the
+/// angle is measured from a reference carried in each body's own frame, so a child that has
+/// been turned end for end about the joint reports its swing from a zero that is half a turn
+/// out and with the opposite sign. `min` and `max` are then enforced on a number that is not
+/// the angle anybody asked about, and the limit drives the limb to the wrong end of its
+/// range and holds it there.
+///
+/// # The bound, and where it comes from
+///
+/// The alignment correction turns the two axes onto one another about `a x b`, and that
+/// cross product vanishes in two places: at no angle at all, and at a half turn. **Both are
+/// fixed points and only one of them is a hinge.** The watershed between their basins is a
+/// quarter turn, so the property a working hinge has is that it never reaches one -- the
+/// cosine between the two axes stays positive. That is a statement about the geometry of
+/// the constraint rather than a tolerance, which is why it is the bound here; the margin in
+/// practice is far larger, and the message reports what was actually seen so that a change
+/// which eats the margin is visible before it fails.
+///
+/// Measured on this rig, turned on its side so that it lands on its limbs: the worst cosine
+/// any hinge reaches is **0.796**, and it is at step 1, while the joints are still hauling
+/// the rig together out of the pose its bodies were authored in. Once it has landed, the
+/// worst over the remaining twelve hundred steps is 0.9988. Before the correction's axis was
+/// written the right way round, all eight hinges were inverted -- cosine -1.0000 -- within
+/// five steps of the drop, and stayed there, and the limbs jammed 50 mm inside one another
+/// for as long as they were watched.
+#[test]
+fn a_hinge_does_not_turn_itself_inside_out() {
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    let bones = rig(&mut s, 1.0);
+    // Turned onto its side so that it lands on its limbs rather than on its feet, which is
+    // what drives the hinges hard enough to be worth watching.
+    for i in 0..s.len() {
+        let mut body = s.body(i);
+        let turn =
+            rs_physics::models::Quaternion::from_axis_angle((0.0, 0.0, 1.0), 1.2);
+        let p = turn.rotate_point((body.position.0, body.position.1 - 1.0, body.position.2));
+        body.position = (p.0, p.1 + 1.0, p.2);
+        body.orientation = turn.multiply(&body.orientation).normalized();
+        s.set_body(i, body);
+    }
+
+    // Every hinge in the rig, as the pair of bodies it links and the local axis in each.
+    let hinges: Vec<(usize, usize, (f64, f64, f64), (f64, f64, f64))> = s
+        .joints()
+        .iter()
+        .filter_map(|joint| match *joint {
+            Joint::Hinge {
+                a,
+                b,
+                axis_a,
+                axis_b,
+                ..
+            } => Some((a, b, axis_a, axis_b)),
+            Joint::Ball { .. } => None,
+        })
+        .collect();
+    assert!(
+        hinges.len() >= 8,
+        "a {bones}-bone rig should carry the elbows and knees this law is about, and has \
+         {} hinges",
+        hinges.len(),
+    );
+
+    let mut worst = 1.0_f64;
+    let mut worst_at = (0usize, 0usize, 0usize);
+    for step in 1..=1200 {
+        s.step(DT, G, 8);
+        for &(a, b, axis_a, axis_b) in hinges.iter() {
+            let wa = s.orientation(a).rotate_point(axis_a);
+            let wb = s.orientation(b).rotate_point(axis_b);
+            let cosine = (wa.0 * wb.0 + wa.1 * wb.1 + wa.2 * wb.2)
+                / (speed(wa) * speed(wb)).max(1e-12);
+            if cosine < worst {
+                worst = cosine;
+                worst_at = (step, a, b);
+            }
+        }
+    }
+
+    assert!(
+        worst > 0.0,
+        "the hinge between bodies {} and {} reached a cosine of {worst:.4} at step {} -- \
+         past the quarter turn that separates a hinge from a hinge turned inside out, which \
+         is the other place its own alignment correction is satisfied",
+        worst_at.1,
+        worst_at.2,
+        worst_at.0,
+    );
+}
+
 // -- fixtures ---------------------------------------------------------------------
 
 /// A seventeen-bone rig with nothing holding it up: a pelvis, a spine of four up to a
