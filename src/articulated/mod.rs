@@ -1635,11 +1635,56 @@
 //! residual reached by a new road, and a tighter cone makes it worse rather than better,
 //! which is the opposite of what a settling fix does.
 //!
-//! So the cone earns its place for what it actually is -- the anatomy a ball joint was
-//! missing, and the thing that stops a limb rotating through the chest it hangs off -- and
-//! not as a way to make heaps sleep. What would make it one is a limit that *dissipates*
-//! rather than one that only pushes back: real ligaments at the end of their range absorb,
-//! they do not bounce. The unmerged `joint-resistance` work is the nearest thing to hand.
+//! **A limit that dissipates was the obvious next idea and it was built.** Charging the
+//! cone's correction as [`Charge::Free`] turns the limb back inside its range and turns the
+//! orientation it came from with it, so the step reads back no spin from the move -- which
+//! is what a ligament does at the end of its travel, where a spring gives the energy back.
+//! Measured against the ordinary cone:
+//!
+//! ```text
+//!   rigs   self-collision   no cone   cone   absorbing cone
+//!      1        on            254     1987      never
+//!      1        off            87      194        105
+//!      4        off          1532     1384      never
+//!     20        off       111 contacts  159         95
+//! ```
+//!
+//! It is not better, it is differently bad, and the reason is the one this page has now
+//! arrived at five times: **the settling test asks how far a body moved, and a free
+//! correction moves it exactly as far.** It only stops the move counting as speed. Every
+//! intervention on the velocity channel -- zeroing it, halving it, zeroing the angular part
+//! alone, and now absorbing a joint limit -- lands in the same place, because the residual
+//! is positional.
+//!
+//! ## And a cone does not replace self-collision, which was the hope
+//!
+//! The whole reason to want cones was that two fifths of a heap's contacts are a rig
+//! against itself. If a limb cannot reach the body it hangs off, the contact is not needed.
+//! Measured on four rigs, the worst any rig's own bones ever overlap each other, for pairs
+//! no joint already holds apart, against a bone radius of 0.060 m:
+//!
+//! ```text
+//!   cones   self-collision   worst ever   where it finishes
+//!     no         no            0.1600 m       0.1591 m
+//!    yes         no            0.1564         0.1245
+//!     no        yes            0.1747         0.0019
+//!    yes        yes            0.1554         0.0021
+//! ```
+//!
+//! **No.** Without self-collision the bones finish a tenth of a metre inside each other --
+//! more than two radii, which is one limb wholly inside another -- and the cone takes that
+//! from 0.159 to 0.125, which is not a fix. With self-collision the figure is 0.002 m,
+//! which is bodies touching.
+//!
+//! The reason is structural rather than a matter of choosing better cones. **A cone is
+//! joint-local and interpenetration is global.** A cone holds a limb against its own
+//! parent; a folded rig brings *non-adjacent* bones together, a hand into a thigh, a shin
+//! across the opposite shin, and no per-joint limit can see those pairs at all.
+//!
+//! So self-collision stays, the contacts stay, and the thing to fix is what those contacts
+//! *are* -- which is the section below, and the reason for it is now measured rather than
+//! argued: if a pile must carry three hundred contacts, they should be contacts that
+//! resist the motion the pile is failing to stop.
 //!
 //! **Detached pieces are unaffected**, which is what makes this safe for a caller that cuts
 //! bodies apart. Self-collision is rejected per *jointed component*, and a piece that has
@@ -5435,6 +5480,15 @@ fn solve_joint(joint: Joint, first: &Pose, second: &Pose) -> [Correction; 2] {
             };
             let excess = angle - cone;
             if excess > 0.0 {
+                // **Charged as an ordinary correction, and absorbing it was measured and
+                // is worse.** A limit that reads back no velocity is what a ligament does
+                // -- it takes the energy out rather than returning it -- and
+                // [`share_turn_charged`]'s doc is that, and it does not help,
+                // because the settling test measures how far a body *moved* and a free
+                // correction moves it just as far; it only stops the move counting as
+                // speed. Measured on a lone rig with self-collision, against 254 steps
+                // with no cones and 1,987 with these: absorbing never settled at all. See
+                // this module's header, under what is left of the pile.
                 if let Some(n) = normalized(across) {
                     share_turn(&mut out, first, second, n, excess);
                 } else if along < 0.0 {
@@ -5628,6 +5682,29 @@ fn share_turn(
     axis: (f64, f64, f64),
     angle: f64,
 ) {
+    share_turn_charged(out, a, b, axis, angle, Charge::Moving);
+}
+
+/// **A turn that absorbs rather than returns was built here and is not kept.** Charging
+/// the correction as [`Charge::Free`] turns the bodies and turns the orientation they came
+/// from with them, so the step reads back no angular velocity from the move -- which is
+/// what a ligament does at the end of its travel, and the obvious answer to a joint limit
+/// that behaves like a spring. It does not work, for a reason that has now been measured
+/// five different ways: the settling test asks how far a body *moved*, and a free
+/// correction moves it exactly as far. It only stops the move counting as speed. Measured
+/// on a lone rig with self-collision, against 254 steps with no cones and 1,987 with
+/// ordinary ones, the absorbing version never settled at all. See [`super`]'s header.
+///
+/// Turns `a` by `+angle` about `axis` and `b` by `-angle`, split by how hard each is to
+/// turn about it, into whichever of [`Correction`]'s two channels `charge` names.
+fn share_turn_charged(
+    out: &mut [Correction; 2],
+    a: &Pose,
+    b: &Pose,
+    axis: (f64, f64, f64),
+    angle: f64,
+    charge: Charge,
+) {
     if angle.abs() < 1e-9 {
         return;
     }
@@ -5637,13 +5714,25 @@ fn share_turn(
     if total <= 1e-12 {
         return;
     }
+    let into = |slot: &mut Correction, turn: Quaternion| match charge {
+        Charge::Moving | Charge::Still => {
+            slot.rotation = renormalized(turn.multiply(&slot.rotation));
+        }
+        Charge::Free => {
+            slot.free_rotation = renormalized(turn.multiply(&slot.free_rotation));
+        }
+    };
     if a.inv_inertia != (0.0, 0.0, 0.0) {
-        let turn = Quaternion::from_axis_angle(axis, angle * ia / total);
-        out[0].rotation = renormalized(turn.multiply(&out[0].rotation));
+        into(
+            &mut out[0],
+            Quaternion::from_axis_angle(axis, angle * ia / total),
+        );
     }
     if b.inv_inertia != (0.0, 0.0, 0.0) {
-        let turn = Quaternion::from_axis_angle(axis, -angle * ib / total);
-        out[1].rotation = renormalized(turn.multiply(&out[1].rotation));
+        into(
+            &mut out[1],
+            Quaternion::from_axis_angle(axis, -angle * ib / total),
+        );
     }
 }
 
