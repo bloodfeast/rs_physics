@@ -629,12 +629,8 @@ fn a_heap_settles_and_stays_where_it_settled() {
 /// the exact count is chaotic -- because what this law claims is that it happens at all,
 /// which is the difference between sixty nanoseconds a step and milliseconds.
 ///
-/// It does **not** claim the same of a rig that may touch itself. That one no longer walks
-/// -- see `a_settled_rig_stays_where_it_settled` -- but at eight passes it does not go to
-/// *sleep* at all: none of sixteen draws, where two of sixteen used to. What holds it awake
-/// is the rig jostling in place rather than going anywhere, and it is a convergence
-/// shortfall rather than a direction: at ten passes four draws of sixteen sleep and at
-/// twenty-four, eight. The solver's own module header has the sweep and the argument.
+/// A rig that may touch itself is the harder case and used to be a separate question
+/// entirely; it is now a law of its own, immediately below.
 ///
 /// The bound here is generous for the same reason it always was, but the numbers behind it
 /// have moved again: over six draws this rig sleeps in all of them, between steps 80 and
@@ -680,6 +676,83 @@ fn a_rig_that_does_not_touch_itself_comes_to_rest() {
             s.position(i).1,
         );
     }
+}
+
+/// **And so does a rig that may touch itself.**
+///
+/// The same claim as the law above, for the case it deliberately did not make for most of
+/// this module's life. With self-collision on, a contact between two of a skeleton's own
+/// bones closes a loop with the joints, and every defect in the solver's module header
+/// lives in that loop: first the rig walked, then it sat on a limit cycle, and last a
+/// single bone propped on another buzzed on alternate steps because its contact existed
+/// only every other one. A rig that never stops being solved costs milliseconds a step for
+/// ever, where one that has stopped costs a bitset scan.
+///
+/// # Why this is stated over draws
+///
+/// A settling rig is chaotic. Eight starts a relative 1e-12 apart -- one unit in the last
+/// place -- fall into visibly different heaps, and a law run on one of them reports which
+/// heap it happened to pick. The same reason `a_settled_rig_stays_where_it_settled` weighs
+/// eight draws, and here the law is the stronger one: **every** draw has to come to rest,
+/// because a rig that stops on seven starts in eight and runs for ever on the eighth has
+/// not stopped.
+///
+/// # The bound
+///
+/// Generous on purpose, like the law above and for the same reason: what is claimed is that
+/// it happens at all. Measured over thirty-two draws, the rig sleeps in all of them between
+/// steps 112 and 296, where before the narrow phase kept a loaded pair's contact alive it
+/// slept in nine of sixteen, between steps 312 and 1312. Two thousand steps is thirty-three
+/// seconds and six times the worst draw.
+#[test]
+fn a_rig_that_touches_itself_comes_to_rest() {
+    const DRAWS: usize = 8;
+    const CAP: usize = 2000;
+
+    let mut slept = Vec::new();
+    let mut bones = 0;
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        bones = rig(&mut s, 1.0 * (1.0 + draw as f64 * 1e-12));
+        assert!(s.self_collision(), "this law is about a rig that may touch itself");
+
+        let mut when = None;
+        for step in 1..=CAP {
+            s.step(DT, G, 8);
+            if s.awake_count() == 0 {
+                when = Some(step);
+                break;
+            }
+        }
+        let when = when.unwrap_or_else(|| {
+            panic!(
+                "draw {draw} of a {bones}-bone rig that may touch itself was still being \
+                 solved after {CAP} steps; {} of {bones} bodies awake, the median one \
+                 moving at {:.4} m/s. Draws so far slept at {slept:?}",
+                s.awake_count(),
+                {
+                    let mut v: Vec<f64> = (0..s.len()).map(|i| speed(s.velocity(i))).collect();
+                    v.sort_by(|a, b| a.partial_cmp(b).expect("no body is at a NaN"));
+                    v[v.len() / 2]
+                },
+            )
+        });
+        assert!(
+            when > 30,
+            "draw {draw} slept at step {when}, which is inside the time it takes to fall \
+             from a metre -- something is calling a rig still while it is still in the air",
+        );
+        for i in 0..s.len() {
+            assert!(
+                s.position(i).1 > -1e-3,
+                "bone {i} of draw {draw} came to rest at y {:.4}, below the ground",
+                s.position(i).1,
+            );
+        }
+        slept.push(when);
+    }
+    assert_eq!(slept.len(), DRAWS, "every draw has to have come to rest");
 }
 
 /// **A settled rig stays where it settled, even where it touches itself.**

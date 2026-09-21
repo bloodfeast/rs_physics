@@ -860,9 +860,11 @@
 //! whether it has anything velocity-level to say or not. That is why the third correction
 //! kind shares the first's fields rather than adding its own. See [`Charge`].
 //!
-//! # What is left is one bone, and it is a contact that exists on alternate steps
+//! # What was left is one bone, and it was a contact that existed on alternate steps
 //!
-//! The section above ends on the measurement that localised this: at four velocity sweeps
+//! **This is closed**; read it for the mechanism, the two fixes that were rejected for it,
+//! and then the section that ends them. The section above ends on the measurement that
+//! localised this: at four velocity sweeps
 //! the rig is the stillest it has ever been and sleeps in none of sixteen draws, so what is
 //! still moving is one or two bones rather than the rig. It is **one bone**, and it is the
 //! same one in all sixteen draws.
@@ -936,11 +938,135 @@
 //! half acting only on the passes its normal half reached is the third time this page has
 //! found that intermittent friction is what the rig walks on. Whatever closes this has to
 //! give the pair a constraint without giving it a stale frame -- which is a narrow phase that
-//! can run inside the solve, not a margin on the one that runs before it.
+//! can run inside the solve, not a margin on the one that runs before it. See the section
+//! below for what that turned out to need, which is less than it sounds.
 //!
 //! **The velocity share taken over the loaded constraints only.** The arithmetically exact
 //! reading of a simultaneous pass, and measured worse on its own. See
 //! [`Skeleton::share_velocity`], which carries the numbers.
+//!
+//! # What closed it: a contact outlives the step it stopped being needed in
+//!
+//! The section above asks for a narrow phase that can run inside the solve, so that a pair
+//! resting exactly against another is still known to be touching and its normal is current
+//! rather than a step stale. **The cheaper half of that is enough, and it is the half with
+//! no stale frame in it at all.** Re-running the narrow phase between passes is what costs:
+//! it is about 1.4 ms on the heap, and eight passes of it would add ten. What the defect
+//! actually needs is for the contact to *stop vanishing* -- and a contact that survives the
+//! step boundary has its normal and its surface points re-derived from the predicted
+//! positions at the top of the next step, which is exactly as fresh as every other
+//! contact's and is not a frozen frame spent later.
+//!
+//! So [`contacts::capsule_contact`] takes one more argument: whether this pair was carrying
+//! normal impulse last step. If it was, it keeps its contact whether or not the surfaces
+//! still overlap. [`Skeleton::persist_contacts`] is the list, rebuilt from scratch every
+//! step out of the contacts that spent anything, so a pair is kept for exactly one step
+//! past the last one it did work in.
+//!
+//! **This is not a speculative contact, and the difference is the whole of why it works.**
+//! A speculative contact is generated from a *distance*: every pair inside a margin gets
+//! one, including pairs that are merely approaching and will never touch, and its frame is
+//! fixed while the pair is still millimetres apart. There is no distance in this rule. What
+//! renews a contact is that the contact *did work* -- so the set is causally derived from
+//! what was actually loaded, a pair that has never touched is never given one, and a pair
+//! flung apart loses its own after a single inert step. And a revived contact is provably
+//! free while the gap is open: [`contacts::solve_contact_normal`] returns on `depth <= 0`
+//! and every other half returns on `spent.normal <= 0`, so the only behaviour it can change
+//! is a gap that closes *during* the step, which is the case it exists for.
+//!
+//! **One bound had to be found, and the stack of three found it.** A near-parallel pair is
+//! a patch with a contact at each end, and a pair resting at a slight relative tilt has one
+//! end loaded and the other clear. Reviving that clear end gives a second constraint to a
+//! pair that already had one -- and a settled stack of three then shears 0.354 m sideways
+//! and leans 1.6 degrees, so `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` misses
+//! the stack and lands beside it. That is the same 0.354 m the speculative variant measured
+//! when it was applied to both branches of the narrow phase, arriving a second time by a
+//! different route. **A revived contact is for a pair that has lost every constraint**, so
+//! the patch is asked for as it stands first and revived only if that leaves it with
+//! nothing. Under that rule a settled stack of three is **bit-identical** to what it was.
+//!
+//! ## What it buys
+//!
+//! The rig is the seventeen-bone one, self-collision on, eight passes, draws a relative
+//! 1e-12 apart. Columns are capsules lying flat on the plane, sixteen draws, capped at
+//! twelve thousand steps; piles are eight draws of the median body's surface travel over
+//! four hundred and eighty steps.
+//!
+//! ```text
+//!   rig, how many draws sleep inside 2000 steps
+//!     before   9 of 16, 14 of 32, at steps 312..1312
+//!     after   16 of 16, 32 of 32, at steps 112..296
+//!   rig, 24 draws, drift over 32 windows and the worst straightness
+//!     before   0 past 0.113, worst 0.083 at 0.12, median 0.0017
+//!     after    0 past 0.113, worst 0.014 at 0.14, median 0.0034
+//!   rig, settled residual as a fraction of g dt, eight draws
+//!     before   0.038 .. 0.182, median 0.143
+//!     after    0.037 .. 0.099, median 0.089
+//!   rig, kinetic energy held by a settled rig over six thousand steps
+//!     before   0.39 .. 0.68 J, sitting 199.3 J up
+//!     after    0.02 .. 0.04 J, sitting 187.0 J up
+//!
+//!   steps to sleep    column of 3    4         5          6          7          8
+//!   before                    362  629..766   224..338   203..563   745..919   303..426
+//!   after                     362  468..715        199   428..458   364..480   462..693
+//!
+//!   settled pile of                20              40              60
+//!   before                 0.000..0.090    0.073..0.124    0.077..0.218
+//!   after                  0.000..0.000    0.000..0.113    0.054..0.153
+//! ```
+//!
+//! **The period-two cycle is gone.** Traced on a settled rig with sleeping off, the nearest
+//! self-contacting pair's surface gap alternated between +0.31 mm and -7.70 mm on
+//! consecutive steps while the contact count swung between seven and nine; it now sits
+//! between +0.21 and +0.57 mm with the count steady, and the median bone's speed falls
+//! from 0.022..0.046 m/s to 0.010..0.024 and keeps falling. **And the walk did not come
+//! back**, which is what disqualified the speculative version: no draw of twenty-four is
+//! past the jostling allowance, the worst straightness is 0.14 where the law's line is 0.5,
+//! and the worst draw's drift is six times smaller than it was.
+//!
+//! The rig also stops propping itself up on its own friction, which is the defect the
+//! staggered sub-passes left behind: it settles twelve joules of potential lower and holds
+//! a twentieth of the kinetic energy, flat over six thousand steps.
+//!
+//! ## What it costs
+//!
+//! Three alternating rounds of prebuilt binaries and then five more, because this machine's
+//! noise is larger than the effect: `joints_only` is the control and its point estimate
+//! moved by a factor of two on the *unchanged* binary between rounds, so what follows is
+//! medians of eight rounds rather than a range.
+//!
+//! ```text
+//!                   contacts             before     after
+//!   joints_only/8          0 ->     0    2.42 ms    2.52 ms
+//!   one/8                 14 ->    13     116 us      95 us
+//!   pile/8             8,400 -> 7,800    10.00 ms    7.67 ms
+//!   arriving/8         8,950 ->12,000    10.78 ms   11.15 ms
+//! ```
+//!
+//! **A workload with no contacts pays exactly nothing**, and that is arithmetic rather than
+//! a measurement: [`Skeleton::persist_contacts`] walks a contact list that is empty and the
+//! narrow phase searches a list that is empty, so `joints_only`'s two figures are one figure
+//! plus this machine's noise. Where a scene is settling the change pays for itself -- `one`
+//! and `pile` are both faster, because a rig that goes to sleep and a pile that settles
+//! further are less work, and `pile` carries six hundred fewer contacts than it did.
+//!
+//! **Where it costs is a scene in flight.** `arriving` is a heap on its way down, where
+//! pairs touch and part every step, and every one of them carries an inert contact for one
+//! step afterwards: a third more contacts, for four per cent on the median, with the two
+//! ranges overlapping. That is the honest price of a rule with no distance in it -- the
+//! grace is one step whether the pair parted by a micron or by a metre -- and it buys the
+//! absence of a margin to tune.
+//!
+//! ## And one thing it moves that is worth recording
+//!
+//! [`VELOCITY_SWEEPS`] is one, and the count above it was already known to be a coefficient
+//! rather than an iteration -- good at one, catastrophic at two, best at three, useless at
+//! four. Revived contacts move *which* counts are which: at four sweeps, where the rig used
+//! to be the stillest it had ever been at 0.004 to 0.013 m/s, it now thrashes at 2.5 m/s.
+//! At the shipped count of one a settled rig's total energy is flat to a part in ten
+//! thousand over six thousand steps, which is the measurement that matters; the four-sweep
+//! figure is recorded because it is the second time this page has caught that count behaving
+//! like a tuned number, and the next person to reach for it should know it has moved again.
 //!
 //! # Allocation
 //!
@@ -1018,6 +1144,14 @@ use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTI
 /// a fresh budget, reached by a different route. That accounting is what makes the row
 /// above a measurement of iteration rather than of a coefficient being multiplied, and at
 /// one sweep it is provably free: the answer is bit-identical with and without it.
+///
+/// **And the row has moved since**, which is the strongest thing anybody has said about it
+/// being a coefficient. Once the narrow phase started keeping a loaded pair's contact alive
+/// -- see the module header -- four sweeps went from the stillest the rig had ever been, at
+/// 0.004 to 0.013 m/s, to thrashing at 2.5 m/s. At one sweep a settled rig's total energy is
+/// flat to a part in ten thousand over six thousand steps. So the row above is a record of
+/// what that count did on one commit rather than a property of the pass, and anybody raising
+/// it has to re-measure the whole row.
 const VELOCITY_SWEEPS: usize = 1;
 
 /// Below this many items, a sweep or a colour runs on the calling thread.
@@ -1592,6 +1726,10 @@ pub struct Skeleton {
     /// one. Both are cleared and refilled per step rather than reallocated.
     pairs: Vec<(usize, usize)>,
     contacts: Vec<Contact>,
+    /// **The pairs that carried normal impulse last step**, sorted, so that the narrow
+    /// phase can keep their contact alive for one more step while they are clear. See
+    /// [`Skeleton::persist_contacts`].
+    persisting: Vec<(u32, u32)>,
     /// Where each chunk of the narrow phase puts its contacts before they are
     /// concatenated. See [`Skeleton::build_contacts`].
     contact_scratch: Vec<Vec<Contact>>,
@@ -1756,6 +1894,7 @@ impl Default for Skeleton {
             self_collision: true,
             pairs: Vec::new(),
             contacts: Vec::new(),
+            persisting: Vec::new(),
             contact_scratch: Vec::new(),
             contact_colours: Vec::new(),
             contact_colours_near: Vec::new(),
@@ -1914,6 +2053,12 @@ impl Skeleton {
 
     /// How many contacts the last [`Skeleton::step`] found. The number a broad phase is
     /// judged against, and the one that says whether a pile is resting or interpenetrating.
+    ///
+    /// **A few of them may not be overlapping.** A pair that carried load last step keeps
+    /// its constraint for one more, so that the step which solves a resting pair exactly
+    /// together does not leave it unconstrained -- see the module header. Such a contact is
+    /// inert while its gap is open, so this counts constraints in the step rather than
+    /// surfaces in collision, and the two differ by the pairs that have just parted.
     pub fn contact_count(&self) -> usize {
         self.contacts.len()
     }
@@ -2281,8 +2426,12 @@ impl Skeleton {
         let orientation = &self.orientation;
         let radius = &self.radius;
         let half_length = &self.half_length;
+        // Sorted, so this is a binary search over a list the size of last step's loaded
+        // contact set. See [`Skeleton::persist_contacts`].
+        let persisting = &self.persisting;
         let test = |&(a, b): &(usize, usize)| {
-            capsule_contact(a, b, position, orientation, radius, half_length)
+            let alive = persisting.binary_search(&(a as u32, b as u32)).is_ok();
+            capsule_contact(a, b, position, orientation, radius, half_length, alive)
                 .into_iter()
                 .flatten()
         };
@@ -2647,6 +2796,9 @@ impl Skeleton {
         // stuck is the Coulomb total the whole step spent, which only exists once the last
         // pass has run. See [`Skeleton::anchor_ground`].
         self.anchor_ground();
+        // And for the same reason: which pairs were carrying load is a fact about the
+        // whole step. See [`Skeleton::persist_contacts`].
+        self.persist_contacts();
     }
 
     /// **One sweep to read both velocities back out of how far everything moved**, for
@@ -3223,6 +3375,33 @@ impl Skeleton {
         for &i in self.ground_sticking.iter() {
             self.ground_stuck.set(i as usize);
         }
+    }
+
+    /// **Which pairs carried normal impulse this step**, so that the narrow phase can give
+    /// them a constraint next step whether or not they are still overlapping.
+    ///
+    /// A pair is kept for exactly one step past the last one it did anything in: this list
+    /// is rebuilt from scratch every step out of the contacts that spent normal impulse, so
+    /// a constraint that was alive for a whole step and never once found positive depth is
+    /// not renewed. A pair flung apart therefore carries an inert constraint for one step
+    /// and then loses it, and a pair resting exactly against another keeps one for as long
+    /// as it rests. There is no distance in this rule and no margin to choose: what renews
+    /// a contact is that it did work.
+    ///
+    /// The two contacts of a line patch name the same pair, so the list is deduplicated
+    /// after sorting -- it is a set of pairs, and the narrow phase asks it one question per
+    /// pair.
+    fn persist_contacts(&mut self) {
+        let mut persisting = std::mem::take(&mut self.persisting);
+        persisting.clear();
+        for (k, contact) in self.contacts.iter().enumerate() {
+            if self.contact_impulse[k].normal > 0.0 {
+                persisting.push((contact.a as u32, contact.b as u32));
+            }
+        }
+        persisting.sort_unstable();
+        persisting.dedup();
+        self.persisting = persisting;
     }
 
     /// Every colour, checked to name each body at most once. The precondition of every

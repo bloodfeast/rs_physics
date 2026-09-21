@@ -406,6 +406,96 @@ fn parallel_capsules_meet_along_a_line_and_crossed_ones_at_a_point() {
     );
 }
 
+/// **A pair that was carrying load keeps its contact through the step it is solved exactly
+/// together.**
+///
+/// The positional solve removes the whole overlap, so a resting pair ends a step touching
+/// to within microns; the narrow phase's own test is `distance >= r_a + r_b`, so the next
+/// step finds it clear and gives it nothing at all. That is the step the joints get to pull
+/// the pair together unopposed, and the module header has the period-two cycle it closes.
+///
+/// The gap here is the one measured on the bone that carried that cycle: thirty-two
+/// microns, a hundredth of what one step of gravity can close.
+#[test]
+fn a_loaded_pair_keeps_its_contact_when_it_is_solved_exactly_together() {
+    let position = [(0.0, 0.0, 0.0), (0.0, 0.2 + 3.19e-5, 0.0)];
+    let orientation = [
+        // Along x, and across it: a crossed pair, which is the shape a rig's self-contacts
+        // have.
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2),
+        Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2),
+    ];
+    let radius = [0.1, 0.1];
+    let half_length = [0.5, 0.5];
+
+    let gone = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false);
+    assert_eq!(
+        gone.iter().flatten().count(),
+        0,
+        "a pair clear by thirty-two microns is clear, and a narrow phase that has not been \
+         told otherwise says so",
+    );
+
+    let kept = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true);
+    let kept: Vec<Contact> = kept.iter().flatten().copied().collect();
+    assert_eq!(
+        kept.len(),
+        1,
+        "a pair that carried load last step keeps one contact, at the point it was touching",
+    );
+    let contact = kept[0];
+    let surface_a = add(position[0], rotate(orientation[0], contact.local_a));
+    let surface_b = add(position[1], rotate(orientation[1], contact.local_b));
+    let depth = dot(sub(surface_a, surface_b), contact.normal);
+    assert!(
+        (depth + 3.19e-5).abs() < 1e-9,
+        "the kept contact reports a depth of {depth:e}, where the pair is clear by 3.19e-5 \
+         -- a revived contact has to carry the gap it actually has, or it is a push rather \
+         than a constraint waiting to be needed",
+    );
+    assert!(
+        depth < 0.0,
+        "a contact at a negative depth does nothing: `solve_contact_normal` returns on it \
+         and every other half returns on the normal impulse it did not spend. That is what \
+         makes keeping one free while the gap is open",
+    );
+}
+
+/// **And a patch with one end loaded and the other clear is not given a second constraint.**
+///
+/// Two near-parallel capsules resting at a slight relative tilt touch at one end of their
+/// overlap and are clear at the other, and the loaded end already holds them apart -- the
+/// couple about it *is* the tilt. Reviving the clear end adds a constraint to a pair that
+/// had one, which is not what a lost contact needs: measured, a settled stack of three
+/// shears 0.354 m sideways under it and leans 1.6 degrees, so a body dropped on the stack
+/// misses and lands beside it. A revived contact is for the pair that has lost *every*
+/// constraint.
+#[test]
+fn a_patch_with_one_end_loaded_is_not_given_a_second() {
+    // A tilt of a milliradian puts one end of the upper capsule half a millimetre into the
+    // lower one and the other half a millimetre clear of it.
+    let position = [(0.0, 0.0, 0.0), (0.0, 0.1999, 0.0)];
+    let orientation = [
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2),
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2 + 1e-3),
+    ];
+    let radius = [0.1, 0.1];
+    let half_length = [0.5, 0.5];
+
+    let plain = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false);
+    assert_eq!(
+        plain.iter().flatten().count(),
+        1,
+        "one end of the overlap is loaded and the other is clear",
+    );
+    let revived = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true);
+    assert_eq!(
+        revived.iter().flatten().count(),
+        1,
+        "the pair still has a constraint, so nothing is revived",
+    );
+}
+
 /// The same invariant the joint colouring has, for the set that is rebuilt every step:
 /// no two contacts in a colour may name the same body, or solving the colour in parallel
 /// is two threads writing one body.
