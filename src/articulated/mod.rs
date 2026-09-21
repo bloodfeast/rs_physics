@@ -1573,12 +1573,56 @@
 //! including the tempting one, a deadband under which motion is ignored, which is why it
 //! is recorded here rather than tried again.
 //!
-//! So what is left is a convergence question about the angular half of a resting contact:
-//! a capsule lying in a heap is held by contacts at more than one point, and what the solve
-//! leaves is a turn rather than a slide. The instruments for it are in place -- the split
-//! above is two dozen lines against the settling test's own bound -- and
-//! `a_settled_rig_does_not_sit_on_a_limit_cycle` is the law that already asks the
-//! neighbouring question.
+//! # And the rocking is the shape, which this module already says somewhere else
+//!
+//! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
+//! cylinders lying against each other touch along a line, and a single point taken from
+//! the middle of it leaves them free to rotate about that point: a pile of parallel limbs
+//! then rocks forever instead of resting, however many solver iterations it is given."*
+//! That is exactly the measurement above, and the answer already built for it is the
+//! two-point patch a near-parallel pair gets.
+//!
+//! **It reaches one per cent of a pile.** Of the three hundred and five touching pairs in
+//! the heap above, three got a patch and three hundred and two got a single point, because
+//! the patch is only offered to pairs within [`contacts::PARALLEL_SINE`] of parallel -- a
+//! little under three degrees -- and a heap is not parallel:
+//!
+//! ```text
+//!   sine of the angle between the axes   p10 0.160   p25 0.407   median 0.774
+//!   the patch is offered below                                          0.05
+//! ```
+//!
+//! Ninety per cent of touching pairs are more than nine degrees from parallel and the
+//! median pair is near fifty. So ninety-nine per cent of a pile's contacts are a single
+//! point with no moment arm, and the bodies are free to turn about them. **The solve is not
+//! failing to converge; it is converging on a constraint that does not resist the motion
+//! being measured.**
+//!
+//! Which makes it a question about the shape rather than about the solver. A capsule is a
+//! swept sphere: its surface is curved everywhere, so it touches anything at a point or a
+//! line and there is no first-order resistance to rolling about that contact. A body with
+//! flats touches on a *face*, the contact is a polygon rather than a point, and tipping it
+//! lifts one edge while pressing another -- which is a restoring torque out of geometry
+//! rather than out of a coefficient. It is why a box on a table does not rock and a can
+//! does.
+//!
+//! Two ways out, and the cheap one has not been tried:
+//!
+//! * **Give every contact the patch, not only the parallel ones.** Two spheres of radii
+//!   `ra` and `rb` overlapping by `d` meet in a circle of radius about `sqrt(2 d r)` with
+//!   `r` the harmonic mean -- pure geometry, no material constant, nothing to tune, and it
+//!   grows with load because a heavier contact is a deeper one. That is a derived moment
+//!   arm for every contact in the set, where today there is one for one in a hundred.
+//! * **Give the bodies flats.** An octagonal prism is the shape that suits this: its face
+//!   normals are eight fixed directions in body space plus two caps, so there is no support
+//!   search; its inertia is closed form, so there is no polyhedral integration; and a fixed
+//!   sixteen vertices means separating-axis rather than GJK, which terminates by
+//!   construction rather than on a tolerance -- and a solver whose behaviour is pinned by a
+//!   bit-identity law should prefer the one that does not iterate. It costs perhaps twenty
+//!   to forty times a capsule pair in the narrow phase, against a settled heap costing
+//!   nothing at all, so the trade is worth measuring rather than assuming. The new failure
+//!   mode to watch for is that flats have metastable states of their own: eight faces is
+//!   eight resting orientations to flip between.
 //!
 //! # The GPU question, which double precision answers
 //!
