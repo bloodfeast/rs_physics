@@ -485,6 +485,17 @@ fn a_settled_pile_wanders_but_does_not_drift() {
         // whenever the short window reads exactly zero. The drift alone is steadier by a
         // factor of two and has no singularity, so it is what the law weighs.
         //
+        // Staggering the normal and friction solves moved those figures without moving
+        // this bound, and the shape of the change is the same one the rig shows: the tail
+        // comes in. Over eight draws a relative 1e-12 apart, long-window drift before and
+        // after:
+        //
+        // ```text
+        //     20   0.000..0.137   ->   0.000..0.008
+        //     40   0.063..0.135   ->   0.037..0.105
+        //     60   0.051..0.193   ->   0.107..0.203
+        // ```
+        //
         // The pile does still drift, and this bound does not pretend otherwise -- see the
         // header for the ratchet that causes it. This is a regression guard on a known
         // limitation, not a claim that a pile is still.
@@ -618,15 +629,17 @@ fn a_heap_settles_and_stays_where_it_settled() {
 /// the exact count is chaotic -- because what this law claims is that it happens at all,
 /// which is the difference between sixty nanoseconds a step and milliseconds.
 ///
-/// It does **not** claim the same of a rig that may touch itself. That one used to walk,
-/// and does not any more -- see `a_settled_rig_stays_where_it_settled` -- but it mostly
-/// still does not go to *sleep*: over six draws one does, where none did. What holds the
-/// rest awake is a bone or two jittering inside the loop rather than the rig going
-/// anywhere, which is a different fault from the one the anchor fixed.
+/// It does **not** claim the same of a rig that may touch itself. That one no longer walks
+/// -- see `a_settled_rig_stays_where_it_settled` -- but at eight passes it does not go to
+/// *sleep* at all: none of sixteen draws, where two of sixteen used to. What holds it awake
+/// is the rig jostling in place rather than going anywhere, and it is a convergence
+/// shortfall rather than a direction: at ten passes four draws of sixteen sleep and at
+/// twenty-four, eight. The solver's own module header has the sweep and the argument.
 ///
 /// The bound here is generous for the same reason it always was, but the numbers behind it
-/// have moved: over six draws this rig now sleeps in all of them, between steps 112 and
-/// 230, where before the anchor four of six slept and took between 198 and 1520.
+/// have moved again: over six draws this rig sleeps in all of them, between steps 80 and
+/// 117, where before the normal and friction solves were staggered it took between 127 and
+/// 342, and before the ground anchor four of six slept and took between 198 and 1520.
 #[test]
 fn a_rig_that_does_not_touch_itself_comes_to_rest() {
     let mut s = Skeleton::new();
@@ -693,10 +706,21 @@ fn a_rig_that_does_not_touch_itself_comes_to_rest() {
 /// **And it asks for straightness as well**, because that is the statistic that tells a
 /// ratchet from a wander and the reason the drift alone is not enough: net travel over the
 /// sum of the thirty-two window travels is one for a body being carried and about
-/// `1/sqrt(32)` -- 0.18 -- for one being jostled. Measured now: 0.002 of a reach and a
-/// straightness of 0.009, so both bounds have two orders of margin. They are written where
+/// `1/sqrt(32)` -- 0.18 -- for one being jostled. Measured now: 0.021 of a reach and a
+/// straightness of 0.036, so both bounds have an order of margin. They are written where
 /// the physics puts them rather than next to the measurement, so that a change which halves
 /// the margin passes and one that brings the walk back does not.
+///
+/// # The outlier is bounded by its straightness, not only by its count
+///
+/// The arm below that counts the draws past the jostling allowance was written when one
+/// draw in twelve bolted six reaches, and counting them was all that could be asked for.
+/// Since the normal and friction solves were staggered -- see the solver's module header --
+/// no draw is *carried* any more, and that is a sharper thing to assert than a rate, because
+/// it does not depend on how many draws happen to be run. Measured over twenty-four draws a
+/// relative 1e-12 apart: the worst straightness is 0.31 and the worst drift 0.19 of a reach,
+/// against 0.94 and 6.37 before. So every draw now has to look jostled, and the count arm
+/// stays as the weaker guard behind it.
 #[test]
 fn a_settled_rig_stays_where_it_settled() {
     const STILL_FRACTION: f64 = 0.02;
@@ -776,28 +800,31 @@ fn a_settled_rig_stays_where_it_settled() {
     // And the outliers are bounded rather than ignored. Measured over twelve draws on the
     // commit this bound was set from, eleven had a drift under 0.011 of a reach and one
     // bolted at 6.368 with a straightness of 0.936 -- a rig that found somewhere to go.
-    // That is a real defect and it is recorded here rather than hidden behind a median:
+    // That was a real defect and it is recorded here rather than hidden behind a median:
     // what this arm asserts is that it stays an outlier. A quarter of the draws going the
     // same way would be the fix having stopped working.
     let bolted = drifts.iter().filter(|d| **d >= jostling).count();
     assert!(
         bolted * 4 <= DRAWS,
         "{bolted} of {DRAWS} draws of a {bones}-bone rig travelled past the {jostling:.4} \
-         a jostling body covers, where the recorded rate is one in twelve. Drifts were \
-         {drifts:.4?}, straightnesses {straights:.4?}.",
+         a jostling body covers, where the recorded rate is one in twenty-four. Drifts \
+         were {drifts:.4?}, straightnesses {straights:.4?}.",
     );
 
-    // Straightness separates a rig that wandered from one that was carried, and the
-    // typical draw must look like the first.
+    // Straightness separates a rig that wandered from one that was carried, and **no draw**
+    // may look like the second -- not merely the typical one. The line is the law's own:
+    // a body being carried measures one and a jostled one about `1/sqrt(32)`, so a half is
+    // the midpoint between them and the same number the median arm used to be the only
+    // user of. See the header for the twenty-four draws behind it.
     let mut ordered = straights.clone();
     ordered.sort_by(|a, b| a.partial_cmp(b).expect("no draw is at a NaN"));
-    let typical = ordered[ordered.len() / 2];
+    let worst = ordered[ordered.len() - 1];
     assert!(
-        typical < 0.5,
-        "the median draw's median bone made {typical:.4} of the path it walked into net \
-         travel. A body being carried measures one and a jostled one about 0.18, so this \
-         is a rig with somewhere to go rather than one sitting still. Straightnesses \
-         were {straights:.4?}.",
+        worst < 0.5,
+        "a draw's median bone made {worst:.4} of the path it walked into net travel. A \
+         body being carried measures one and a jostled one about 0.18, so this is a rig \
+         with somewhere to go rather than one sitting still. Straightnesses were \
+         {straights:.4?}, drifts {drifts:.4?}.",
     );
 }
 

@@ -40,6 +40,13 @@
 //! the impulse's couple goes when the contact is a patch rather than a point (see
 //! [`patch_arm`]). Each of them on its own is enough to make a body resting below the
 //! Coulomb angle creep downhill for ever.
+//!
+//! **And it is solved in a sub-pass of its own**, after every normal correction in the pass
+//! rather than alongside its own, which is why each of the two constraints here is two
+//! functions: [`solve_contact_normal`] and [`solve_contact_friction`] for a pair,
+//! [`solve_ground_normal`] and [`solve_ground_friction`] for the plane. The module header
+//! on [`super`] has the argument and the numbers; the short of it is that friction applied
+//! next to its own normal is undone by everybody else's before the pass is out.
 
 use super::*;
 
@@ -76,6 +83,24 @@ pub(super) struct Spent {
     /// vector, and on the first body for the same reason `tangential` is. A cone for the
     /// same reason too: a roll reverses between passes exactly as a slide does.
     pub rolling: (f64, f64, f64),
+}
+
+/// What one ground patch has spent this step, and **where its load is standing**.
+///
+/// The second half is here because the ground's two halves are solved in separate
+/// sub-passes and the load point belongs to the first of them. A patch's normal load is
+/// free to move between its two ends, and [`solve_patch`] is what decides where it ends
+/// up; friction and the rolling couple then act *there*, because that is where the normal
+/// force is. Recomputing it in the tangential sub-pass would not work and would not be
+/// right: by then the normal sub-pass has closed the overlap, so the patch solve sees no
+/// depth at either end and answers that nothing is loaded.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Patch {
+    pub spent: Spent,
+    /// Where the normal load stands, in the body's own frame, as of the last sub-pass
+    /// that found any. Body-frame so that it follows the body through the corrections
+    /// applied between the two sub-passes.
+    pub local_load: (f64, f64, f64),
 }
 
 /// **Where a ground patch stuck, and the Coulomb budget it stuck under.**
@@ -421,52 +446,76 @@ fn touching(
     })
 }
 
-/// Everything one contact wants done, as two corrections. Reads only; the caller applies.
+/// **Where the two surfaces are now, and how far they have slid past one another since
+/// the step began.** Both halves of a pair contact's solve start here.
 ///
-/// The same shape as [`super::solve_joint`], and for the same reason: a colour's worth of
-/// them is computed in parallel and applied afterwards.
-pub(super) fn solve_contact(
+/// Re-derived from the bodies' current transforms every time it is asked for, which is
+/// the whole point of a position-based pass: what is corrected is the overlap there is
+/// now rather than the one measured before anything had been applied. The slide is
+/// measured against the transforms the step *began* with, which the solve never writes
+/// to, so every pass sees the whole of it rather than the part left over.
+struct Surfaces {
+    ra: (f64, f64, f64),
+    rb: (f64, f64, f64),
+    /// Positive when the surfaces have passed through one another along the normal. See
+    /// the module header for why the normal is the one frozen at generation.
+    depth: f64,
+    /// How far `a`'s surface point has moved relative to `b`'s since the step began.
+    slid: (f64, f64, f64),
+}
+
+#[inline]
+fn surfaces(contact: &Contact, first: &Gathered, second: &Gathered) -> Surfaces {
+    let ra = rotate(first.now.orientation, contact.local_a);
+    let rb = rotate(second.now.orientation, contact.local_b);
+    let surface_a = add(first.now.position, ra);
+    let surface_b = add(second.now.position, rb);
+    let was_a = add(
+        first.prev_position,
+        rotate(first.prev_orientation, contact.local_a),
+    );
+    let was_b = add(
+        second.prev_position,
+        rotate(second.prev_orientation, contact.local_b),
+    );
+    Surfaces {
+        ra,
+        rb,
+        depth: dot(sub(surface_a, surface_b), contact.normal),
+        slid: sub(sub(surface_a, was_a), sub(surface_b, was_b)),
+    }
+}
+
+/// **The normal half of one pair contact**: stop the surfaces overlapping, and record what
+/// that cost, which is the budget the tangential half is then allowed to spend.
+///
+/// Reads only; the caller applies. The same shape as [`super::solve_joint`], and for the
+/// same reason: a colour's worth of them is computed in parallel and applied afterwards.
+pub(super) fn solve_contact_normal(
     contact: Contact,
     first: &Gathered,
     second: &Gathered,
-    friction: f64,
-    rolling_resistance: f64,
     spent: Spent,
 ) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
     let mut spent = spent;
-    let Contact {
-        a,
-        b,
-        local_a,
-        local_b,
-        normal,
-        span,
-    } = contact;
+    let Contact { a, b, normal, .. } = contact;
     out[0].body = a;
     out[1].body = b;
 
-    let ra = rotate(first.now.orientation, local_a);
-    let rb = rotate(second.now.orientation, local_b);
-    let surface_a = add(first.now.position, ra);
-    let surface_b = add(second.now.position, rb);
-
-    // Positive when the surfaces have passed through one another along the normal. See
-    // the module header for why the normal is the one frozen at generation.
-    let depth = dot(sub(surface_a, surface_b), normal);
+    let Surfaces {
+        ra,
+        rb,
+        depth,
+        slid,
+    } = surfaces(&contact, first, second);
     if depth <= 0.0 {
         return (out, spent);
     }
 
-    // How far the two surface points have moved relative to one another since the step
-    // began. Measured against the stored previous transforms, which the solve does not
-    // change, so every pass sees the whole of it rather than the part left over.
-    let was_a = add(first.prev_position, rotate(first.prev_orientation, local_a));
-    let was_b = add(second.prev_position, rotate(second.prev_orientation, local_b));
-    let slid = sub(sub(surface_a, was_a), sub(surface_b, was_b));
-
-    // The normal part of that is how much of this overlap the step itself made, and it is
-    // the only part allowed to read back as velocity. See `Correction::free_translation`.
+    // The normal part of the slide is how much of this overlap the step itself made, and
+    // it is the only part allowed to read back as velocity. See
+    // `Correction::free_translation`.
     let driven = dot(slid, normal).clamp(0.0, depth);
     let inherited = depth - driven;
 
@@ -486,6 +535,44 @@ pub(super) fn solve_contact(
         accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), free);
         accumulate(&mut out[1], &second.now, rb, push, free);
     }
+    (out, spent)
+}
+
+/// **The tangential half of the same contact**: friction and rolling resistance, applied
+/// against the normal impulse the half above has already agreed on.
+///
+/// See the module header on [`super`] for why the two halves are separate sub-passes over
+/// the same colours rather than one call.
+///
+/// # What loads a contact, and why it is not the depth
+///
+/// This asks `spent.normal > 0` rather than re-testing the overlap, and the difference is
+/// the whole reason the split works. By the time this runs, the normal sub-pass has just
+/// removed the overlap it found -- so a depth test here reports *every loaded contact as
+/// unloaded*, and friction would never act at all. The physical statement is the other
+/// one anyway: friction exists wherever a normal force was carried, and the normal force
+/// this contact carried over this step is exactly `spent.normal`. A contact that carried
+/// nothing is untouched and costs one comparison.
+pub(super) fn solve_contact_friction(
+    contact: Contact,
+    first: &Gathered,
+    second: &Gathered,
+    friction: f64,
+    rolling_resistance: f64,
+    spent: Spent,
+) -> ([Correction; 2], Spent) {
+    let mut out = [Correction::none(); 2];
+    let mut spent = spent;
+    let Contact {
+        a, b, normal, span, ..
+    } = contact;
+    out[0].body = a;
+    out[1].body = b;
+    if spent.normal <= 0.0 {
+        return (out, spent);
+    }
+
+    let Surfaces { ra, rb, slid, .. } = surfaces(&contact, first, second);
 
     // The rolling half of the same law, on the same carried budget. The arm is the
     // smaller radius: the tighter body is the one that rolls.
@@ -640,19 +727,16 @@ pub(super) fn ground_contacts(
 /// branch; an upright capsule's second end is above the plane, which gives it a
 /// non-positive depth and no load.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn solve_ground(
+pub(super) fn solve_ground_normal(
     contact: GroundContact,
     body: &Gathered,
-    friction: f64,
-    rolling_resistance: f64,
     normal: (f64, f64, f64),
     distance: f64,
-    spent: Spent,
-    anchor: Option<Anchor>,
-    anchor_reach: f64,
-) -> (Correction, Spent) {
+    patch: Patch,
+) -> (Correction, Patch) {
     let mut out = Correction::none();
-    let mut spent = spent;
+    let mut patch = patch;
+    let spent = &mut patch.spent;
     let GroundContact { body: index, local } = contact;
     out.body = index;
 
@@ -666,7 +750,7 @@ pub(super) fn solve_ground(
         distance - dot(normal, at[1]),
     ];
     if depth[0] <= 0.0 && depth[1] <= 0.0 {
-        return (out, spent);
+        return (out, patch);
     }
 
     let cross_n = [cross(arm[0], normal), cross(arm[1], normal)];
@@ -678,13 +762,13 @@ pub(super) fn solve_ground(
     let k11 = body.now.inv_mass + dot(cross_n[1], turned[1]);
     let k01 = body.now.inv_mass + dot(cross_n[0], turned[1]);
     if k00 <= 1e-12 && k11 <= 1e-12 {
-        return (out, spent);
+        return (out, patch);
     }
 
     let share = solve_patch(depth, k00, k11, k01);
     let total = share[0] + share[1];
     if total <= 0.0 {
-        return (out, spent);
+        return (out, patch);
     }
 
     // Where the load ends up standing, which is where the tangential impulse and the
@@ -695,6 +779,7 @@ pub(super) fn solve_ground(
         add(scale(arm[0], share[0]), scale(arm[1], share[1])),
         1.0 / total,
     );
+    patch.local_load = rotate_inv(body.now.orientation, load);
 
     let was = |local: (f64, f64, f64)| add(body.prev_position, rotate(body.prev_orientation, local));
     for end in 0..2 {
@@ -722,6 +807,75 @@ pub(super) fn solve_ground(
         }
     }
 
+    (out, patch)
+}
+
+/// **The tangential half of the same ground patch**: friction, the anchor's stored slip,
+/// and rolling resistance, against the normal impulse the half above agreed on.
+///
+/// See [`solve_contact_friction`] for why the gate is the normal impulse this step spent
+/// rather than the overlap that is left, and the module header on [`super`] for why the
+/// two halves are separate sub-passes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn solve_ground_friction(
+    contact: GroundContact,
+    body: &Gathered,
+    friction: f64,
+    rolling_resistance: f64,
+    normal: (f64, f64, f64),
+    distance: f64,
+    patch: Patch,
+    anchor: Option<Anchor>,
+    anchor_reach: f64,
+) -> (Correction, Patch) {
+    let mut patch = patch;
+    if patch.spent.normal <= 0.0 {
+        let mut out = Correction::none();
+        out.body = contact.body;
+        return (out, patch);
+    }
+    let out = ground_friction(
+        contact,
+        body,
+        friction,
+        rolling_resistance,
+        normal,
+        distance,
+        patch.local_load,
+        &mut patch.spent,
+        anchor,
+        anchor_reach,
+    );
+    (out, patch)
+}
+
+/// The body of the above, with the running totals borrowed rather than moved through, so
+/// that its half-dozen early returns have one thing to return.
+#[allow(clippy::too_many_arguments)]
+fn ground_friction(
+    contact: GroundContact,
+    body: &Gathered,
+    friction: f64,
+    rolling_resistance: f64,
+    normal: (f64, f64, f64),
+    distance: f64,
+    local_load: (f64, f64, f64),
+    spent: &mut Spent,
+    anchor: Option<Anchor>,
+    anchor_reach: f64,
+) -> Correction {
+    let mut out = Correction::none();
+    let GroundContact { body: index, local } = contact;
+    out.body = index;
+
+    let arm = [
+        rotate(body.now.orientation, local[0]),
+        rotate(body.now.orientation, local[1]),
+    ];
+    // Where the normal sub-pass put the load, carried through whatever has moved the body
+    // since. See [`Patch`].
+    let load = rotate(body.now.orientation, local_load);
+
     // The ground does not turn, so the whole of the resistance lands on the body.
     let mut pair = [out, Correction::none()];
     spent.rolling = resist_rolling(
@@ -736,13 +890,15 @@ pub(super) fn solve_ground(
     out = pair[0];
 
     if friction <= 0.0 {
-        return (out, spent);
+        return out;
     }
     // The patch slides as one, so the drift that friction answers is the drift of the
     // point the load stands at, not of either end on its own.
-    let local = rotate_inv(body.now.orientation, load);
     let here = add(body.now.position, load);
-    let before = add(body.prev_position, rotate(body.prev_orientation, local));
+    let before = add(
+        body.prev_position,
+        rotate(body.prev_orientation, local_load),
+    );
     let flat = |v: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
     let slid = flat(sub(here, before));
     // What earlier steps failed to take off, if this patch has been stuck since -- the
@@ -765,7 +921,7 @@ pub(super) fn solve_ground(
     // The direction the whole of it lies in, which is what the patch's reach and the
     // couple it can carry are measured along.
     let Some(heading) = normalized(add(slid, stored)) else {
-        return (out, spent);
+        return out;
     };
     // The stored part is redeemable only up to the budget it was banked at, turned into a
     // distance by the same inverse mass the impulse will be divided by. This step's own
@@ -786,7 +942,7 @@ pub(super) fn solve_ground(
         }
     };
     let Some(direction) = normalized(tangential) else {
-        return (out, spent);
+        return out;
     };
     // The load stands where it stands, but the couple the impulse leaves still has to be
     // carried, and how much of it the patch can absorb is what [`patch_arm`] answers. The
@@ -797,13 +953,13 @@ pub(super) fn solve_ground(
     let couple = patch_arm(load, normal, reach, friction);
     let tw = generalised_inverse_mass(&body.now, couple, direction);
     if tw <= 1e-12 {
-        return (out, spent);
+        return out;
     }
     // Coulomb over the step, and as a cone; see the pair version and [`Spent`].
     let wanted = scale(direction, -length(tangential) / tw);
     let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
     if grip == (0.0, 0.0, 0.0) {
-        return (out, spent);
+        return out;
     }
     spent.tangential = total_grip;
     // **The whole of it reads back as velocity, the stored part included**, and that was
@@ -816,7 +972,7 @@ pub(super) fn solve_ground(
     // settled pile of forty from 0.103 of a reach to 0.189. Damping the old error as well
     // is what those settle on.
     accumulate(&mut out, &body.now, couple, grip, false);
-    (out, spent)
+    out
 }
 
 /// How much of the normal load each end of a patch carries: `K l = d` subject to `l >= 0`.

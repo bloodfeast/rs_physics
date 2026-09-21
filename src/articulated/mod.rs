@@ -427,18 +427,19 @@
 //! that was expected, and it is stated at the end.
 //!
 //! **How any of this has to be judged.** Every number below is the median and spread of
-//! sixteen draws a relative 1e-12 apart, because one draw says nothing. That matters for
-//! the numbers already on this page too: over sixteen draws *this commit* leaves two draws
-//! of a column of eight still awake after twelve thousand steps, and two draws of the
-//! seventeen-bone rig `a_settled_rig_stays_where_it_settled` is written against travel 6.37
-//! and 0.32 of a reach with straightnesses of 0.94 and 0.50 -- which is the walk, at the
-//! size it was before the ground anchor, on seeds next door to the one the law runs. The
-//! law passes on its own seed. Whoever picks this up should fix that spread rather than
-//! trust either column of figures below to two significant figures.
+//! sixteen draws a relative 1e-12 apart, because one draw says nothing. That mattered for
+//! the numbers already on this page too: over sixteen draws the commit this was written
+//! against left two draws of a column of eight still awake after twelve thousand steps, and
+//! two draws of the seventeen-bone rig `a_settled_rig_stays_where_it_settled` is written
+//! against travelled 6.37 and 0.32 of a reach with straightnesses of 0.94 and 0.50 -- which
+//! is the walk, at the size it was before the ground anchor, on seeds next door to the one
+//! the law runs. That spread is what the section below on the staggered sub-passes went
+//! after, so read the figures in this section as the comparison between three anchor shapes
+//! that they are rather than as the solver's current numbers.
 //!
 //! ```text
 //!   steps to sleep      column of 3  4         5          6          7          8
-//!   this commit                   381  366..378  531..1768  243..2305  775..2704  676..8239
+//!   before the stagger            381  366..378  531..1768  243..2305  775..2704  676..8239
 //!                                                                             and 2 of 16 never
 //!   one memory per pair patch, with the kinematic bound three paragraphs down:
 //!                       206..1269  79..1139  197..3082  132..3492  236..2059  359..1927
@@ -507,6 +508,126 @@
 //! returns energy, which a loop of two bodies can pump and the plane cannot. Anything built
 //! on top of this has to answer that before it answers anything else.
 //!
+//! # A pass solves every normal before it solves any friction
+//!
+//! The section above closes on the measurement that explains the rest of this page: a pair
+//! in a heap can sit strictly inside its Coulomb cone and still slide a millimetre, because
+//! the friction correction that removed the slide is undone *inside the same step* by the
+//! normal corrections of the contacts either body has elsewhere. It is also why the cone
+//! test proves sticking against the plane -- a reference that does not move, whose contact
+//! is solved as one patch -- and does not prove it between two bodies.
+//!
+//! A contact used to compute and apply its normal correction and its friction correction in
+//! one call, so within a single pass contact A's friction was applied and then contact B's
+//! normal correction moved one of A's bodies and undid it. **Friction was being asked to
+//! hold against a surface that was still moving underneath it.** So a pass is now two
+//! sub-passes over the same coloured stage list -- every normal correction, then every
+//! tangential one -- and friction acts on a configuration the normals have already agreed
+//! on. Nothing else about the pass changes: the colours are the colours, so a lane's slice
+//! of a stage is disjoint in exactly the way [`scatter`] requires, and the second traversal
+//! is checked by the same `check_colours_are_disjoint`.
+//!
+//! **The tangential half is the whole tangential half**, friction and rolling resistance
+//! together, and it is gated on the normal impulse the step has spent rather than on the
+//! overlap that is left -- see [`contacts::solve_contact_friction`], which is where that
+//! argument is, because getting it wrong makes friction stop acting entirely.
+//!
+//! Measured against the chaos spread rather than single runs. The rig is the seventeen-bone
+//! one `a_settled_rig_stays_where_it_settled` is written against, over twenty-four draws a
+//! relative 1e-12 apart; the columns are capsules lying flat on the plane, sixteen draws,
+//! capped at twelve thousand steps; the piles are eight draws of twenty, forty and sixty
+//! capsules dropped in a heap, the median body's surface travel over four hundred and
+//! eighty steps as a fraction of its own reach.
+//!
+//! ```text
+//!   the rig, median bone's drift over 32 windows      past 0.113   worst   straightness
+//!   before                                              3 of 24     6.37       0.94
+//!   after                                               1 of 24     0.19       0.31
+//!
+//!   steps to sleep    column of 3    4         5          6          7          8
+//!   before                    381  366..378  531..1768  243..2305  775..2704  676..8239
+//!                                                                          and 2 of 16 never
+//!   after                     325       220   207..224   298..519  648..1132  593..2961
+//!
+//!   settled pile of                20              40              60
+//!   before                 0.000..0.137    0.063..0.135    0.051..0.193
+//!   after                  0.000..0.008    0.037..0.105    0.107..0.203
+//! ```
+//!
+//! The bolt is the result. What used to happen is that one draw in a dozen found somewhere
+//! to go and travelled six reaches with a straightness of 0.94, which is a rig being
+//! carried; the worst draw of twenty-four now covers a fifth of a reach at a straightness of
+//! 0.31, which is under the 0.5 that separates carried from jostled. The columns lose their
+//! tail in the same way -- nothing fails to settle, and the spread of a column of eight
+//! falls from a factor of twelve to a factor of five. The typical rig draw is *worse*, from
+//! 0.002 of a reach to 0.021: the ratchet has become a jostle, and there is more of it.
+//!
+//! **It costs about five to ten per cent**, which is the second traversal of the stage list
+//! and its barriers, not arithmetic -- the flops are the same ones. Two runs of each, at
+//! eight iterations: `one/8` 36.1 and 37.6 us against 37.8 and 40.5; `pile/8` 3.11 and 3.07
+//! ms against 3.54 and 3.21; `arriving/8` 6.85 and 6.13 ms against 7.04 and 6.90.
+//!
+//! # The iteration count cannot come down, and that is the point
+//!
+//! The reason eight passes was the number is in the section above on the iteration count,
+//! and it is unchanged. What has changed is the direction of the error. Before this, *more
+//! passes walked further* -- 0.090 m/s at two thousand and forty-eight against 0.036 at
+//! eight -- because the bias was baked into the order and every extra pass applied it
+//! again. It is now a convergence shortfall instead, which iteration reduces. The rig,
+//! sixteen draws, how many go to sleep inside two thousand steps:
+//!
+//! ```text
+//!   passes                8       10      12      16      24
+//!   before             2/16     3/16    3/16    2/16    7/16
+//!   after              0/16     4/16    2/16    5/16    8/16
+//!   after, median window travel of a bone, as a fraction of its reach:
+//!                     0.032    0.011   0.004   0.010   0.008
+//! ```
+//!
+//! So the count may not come down; the residual at eight passes is what is left of the
+//! solve rather than a bias in it, and it sits a little above the 0.02 of a reach a body
+//! must stay inside to be called still. That is the one defect of the four this did not
+//! close: a self-colliding rig still does not reliably sleep, and at eight passes it sleeps
+//! in none of sixteen draws where it used to sleep in two. What holds it awake is no longer
+//! a direction -- it is that the rig now props itself up on its own friction instead of
+//! slumping, and a propped rig sits at a marginal equilibrium that eight passes cannot
+//! resolve to stillness. Measured, a settled rig holds 0.73 to 0.82 J of kinetic energy
+//! where it used to hold 0.07 to 0.36, and stands about a fifth higher.
+//!
+//! # Three ways of taking the energy back out, and why none of them is here
+//!
+//! * **Leave rolling resistance in the normal half**, so that only friction is staggered.
+//!   It is the natural minimal version and it is much worse than doing nothing: the rig
+//!   bolts in four draws of twelve, at 8.8, 3.9, 3.1 and 1.8 reaches, against one in twelve
+//!   before the change. A column of six gains a draw that never settles and the piles drift
+//!   further. Whatever the tangential half is doing for the rig, it is doing it as one
+//!   thing.
+//! * **Refuse friction where the contact has opened**, by more than one step of gravity's
+//!   sag -- `g dt^2`, the scale a resting contact's own overlap has, already derived here as
+//!   `anchor_reach`. It is the obvious objection to the gate the tangential half uses, and
+//!   it buys real things: the rig sleeps in three draws of sixteen, the best any of this has
+//!   produced, and the columns tighten again. It also brings the bolt straight back -- two
+//!   draws of twelve, the worst at 2.7 reaches. **Intermittent friction is what the rig
+//!   walks on.** Any variant that lets the tangential half skip a pass the normal half ran
+//!   reproduces the defect, which is the same statement as the one at the top of this
+//!   section, seen from the other side.
+//! * **Bound what a normal correction may read back as velocity** by the closing the step
+//!   itself drove, measured over the predict before any correction existed, and charge the
+//!   rest as `Correction::free_translation`. This is the "do not put the energy in" answer
+//!   and it is derived rather than tuned: the slide a pass sees includes every correction
+//!   applied since the step began, the tangential half's included, so charging the whole of
+//!   it as velocity hands the bodies the solver's own repair work as momentum they never
+//!   earned. It does not work, and the reason is worth more than the attempt: **in a
+//!   position-based solver, charging its own corrections as velocity is the only channel by
+//!   which "stopped" propagates up a stack.** Two capsules resting one on the other sag
+//!   together, so the closing measured over the predict at the contact between them is zero,
+//!   and it is the ground's correction to the lower body that closes the pair and stops the
+//!   upper one. Bound that and the upper body is never stopped at all: a body dropped on a
+//!   sleeping stack sinks three millimetres into it and a settled pile of forty never comes
+//!   to rest. Bounding only the ground's share is worse again, four unit tests rather than
+//!   two. A version of this that bounds a *body's* velocity change rather than a contact's
+//!   has not been tried and is the remaining direction.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
@@ -527,7 +648,8 @@ mod sleep;
 
 use broadphase::{Grid, Jointed};
 use contacts::{
-    capsule_contact, ground_contacts, solve_contact, solve_ground, Contact, GroundContact, Spent,
+    capsule_contact, ground_contacts, solve_contact_friction, solve_contact_normal,
+    solve_ground_friction, solve_ground_normal, Contact, GroundContact, Spent,
 };
 use scatter::Bodies;
 use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTION};
@@ -970,14 +1092,29 @@ impl Correction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Joints { colour: u32, upto: u32 },
-    Contacts { colour: u32, upto: u32 },
+    Contacts { colour: u32, upto: u32, half: Half },
     /// The contacts colouring could not place. Run by one lane, because each reads the
     /// positions the one before it wrote.
-    Overflow,
+    Overflow { half: Half },
     /// The joints colouring could not place. Empty unless a body carries more than
     /// sixty-four joints; see [`Skeleton::add_joint`].
     JointOverflow,
-    Ground,
+    Ground { half: Half },
+}
+
+/// **Which half of a contact a stage is running.**
+///
+/// A contact is two constraints that do not commute -- a normal one and a tangential one
+/// -- and a pass runs every contact's normal half before any contact's tangential half, so
+/// that friction acts on a configuration the normals have already agreed on rather than one
+/// still moving underneath it. See the module header for the measurement that demanded it.
+///
+/// The colours are the same colours in both halves, so this doubles the stage list and
+/// changes nothing about what a lane may touch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Half {
+    Normal,
+    Friction,
 }
 
 /// A set of bodies and the joints between them, solved together.
@@ -1081,7 +1218,7 @@ pub struct Skeleton {
     /// `friction` times the normal impulse over the step, which is the law itself, and
     /// the answer stops depending on the quality dial.
     contact_impulse: Vec<Spent>,
-    ground_impulse: Vec<Spent>,
+    ground_impulse: Vec<contacts::Patch>,
 
     /// Where each body's ground patch was when it stuck, and what it stuck under. Only
     /// meaningful where [`Skeleton::ground_stuck`] says so. See [`contacts::Anchor`] for
@@ -1776,7 +1913,7 @@ impl Skeleton {
         // budget is the constraint's, indexed by the constraint.
         self.ground_impulse.clear();
         self.ground_impulse
-            .resize(self.ground_contacts.len(), Spent::default());
+            .resize(self.ground_contacts.len(), contacts::Patch::default());
     }
 
     /// **Greedy colouring again, but every step**, because the contact set is new every
@@ -2179,38 +2316,46 @@ impl Skeleton {
             self.plan.push(Stage::JointOverflow);
             self.plan_near.push(Stage::JointOverflow);
         }
-        for colour in 0..self.contact_colours.len() {
-            let live = self.contact_colours[colour].len();
-            let near = self.contact_colours_near[colour];
-            if live > 0 {
-                self.plan.push(Stage::Contacts {
-                    colour: colour as u32,
-                    upto: live as u32,
-                });
-                self.plan_work += live;
+        // **Every normal half, and then every tangential half.** The two groups are
+        // built by the same loop run twice rather than interleaved, because that ordering
+        // is the point: see the module header. Nothing else about the stage list changes
+        // -- the colours are the same colours, so a lane's slice of one is still disjoint
+        // in exactly the way [`scatter`] requires.
+        for half in [Half::Normal, Half::Friction] {
+            for colour in 0..self.contact_colours.len() {
+                let live = self.contact_colours[colour].len();
+                let near = self.contact_colours_near[colour];
+                if live > 0 {
+                    self.plan.push(Stage::Contacts {
+                        colour: colour as u32,
+                        upto: live as u32,
+                        half,
+                    });
+                    self.plan_work += live;
+                }
+                if near > 0 {
+                    self.plan_near.push(Stage::Contacts {
+                        colour: colour as u32,
+                        upto: near as u32,
+                        half,
+                    });
+                    self.plan_near_work += near;
+                }
             }
-            if near > 0 {
-                self.plan_near.push(Stage::Contacts {
-                    colour: colour as u32,
-                    upto: near as u32,
-                });
-                self.plan_near_work += near;
+            if !self.contact_overflow.is_empty() {
+                self.plan.push(Stage::Overflow { half });
+                self.plan_near.push(Stage::Overflow { half });
             }
-        }
-        if !self.contact_overflow.is_empty() {
-            self.plan.push(Stage::Overflow);
-            self.plan_near.push(Stage::Overflow);
-        }
-        // The ground is never reduced and never dropped: there is one contact per body,
-        // it is the cheapest constraint in the step, and the artefact of under-solving one
-        // is a body sinking through the floor, which is the one no distance excuses. It is
-        // also one stage where it was two, because the second used to have to read what
-        // the first had spent and there is no longer a first.
-        if !self.ground_colours.is_empty() {
-            self.plan.push(Stage::Ground);
-            self.plan_near.push(Stage::Ground);
-            self.plan_work += self.ground_colours.len();
-            self.plan_near_work += self.ground_colours.len();
+            // The ground is never reduced and never dropped: there is one contact per
+            // body, it is the cheapest constraint in the step, and the artefact of
+            // under-solving one is a body sinking through the floor, which is the one no
+            // distance excuses.
+            if !self.ground_colours.is_empty() {
+                self.plan.push(Stage::Ground { half });
+                self.plan_near.push(Stage::Ground { half });
+                self.plan_work += self.ground_colours.len();
+                self.plan_near_work += self.ground_colours.len();
+            }
         }
     }
 
@@ -2280,6 +2425,13 @@ impl Skeleton {
         //   release-acquire pair is what makes one colour's writes visible to the next.
         //   That ordering used to come from the join; losing it without replacing it
         //   would be the one way this change could be unsound.
+        // * **The two halves of a contact are two stages, not one**, and that adds nothing
+        //   to this argument: a stage names a colour, the colours are unchanged, and the
+        //   tangential stage walks the same list the normal one did. A body named once in
+        //   the colour is still addressed by exactly one lane in each, `scatter::disjoint`
+        //   still runs over the whole colour, and the barrier between the two halves is the
+        //   same barrier that separates any other pair of stages -- which is what makes the
+        //   normals' writes visible to the frictions that read them.
         // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
         let run = |lane: crew::Lane| unsafe {
             match plan[lane.stage] {
@@ -2307,11 +2459,12 @@ impl Skeleton {
                         }
                     }
                 }
-                Stage::Contacts { colour, upto } => {
+                Stage::Contacts { colour, upto, half } => {
                     let set = &contact_colours[colour as usize][..upto as usize];
                     let span = lane.span(set.len());
                     solve_some_contacts(
                         &set[span],
+                        half,
                         contacts,
                         &bodies,
                         &contact_impulse,
@@ -2322,10 +2475,11 @@ impl Skeleton {
                         rolling,
                     );
                 }
-                Stage::Overflow => {
+                Stage::Overflow { half } => {
                     if lane.is_only() {
                         solve_some_contacts(
                             overflow,
+                            half,
                             contacts,
                             &bodies,
                             &contact_impulse,
@@ -2337,7 +2491,7 @@ impl Skeleton {
                         );
                     }
                 }
-                Stage::Ground => {
+                Stage::Ground { half } => {
                     let Some((normal, distance)) = ground else {
                         return;
                     };
@@ -2345,19 +2499,28 @@ impl Skeleton {
                     for &k in &set[lane.span(set.len())] {
                         let contact = ground_contacts[k];
                         let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
-                        let (correction, totals) = solve_ground(
-                            contact,
-                            &body,
-                            friction,
-                            rolling,
-                            normal,
-                            distance,
-                            ground_impulse.get(k),
-                            ground_stuck
-                                .get(contact.body)
-                                .then(|| ground_anchor[contact.body]),
-                            anchor_reach,
-                        );
+                        let (correction, totals) = match half {
+                            Half::Normal => solve_ground_normal(
+                                contact,
+                                &body,
+                                normal,
+                                distance,
+                                ground_impulse.get(k),
+                            ),
+                            Half::Friction => solve_ground_friction(
+                                contact,
+                                &body,
+                                friction,
+                                rolling,
+                                normal,
+                                distance,
+                                ground_impulse.get(k),
+                                ground_stuck
+                                    .get(contact.body)
+                                    .then(|| ground_anchor[contact.body]),
+                                anchor_reach,
+                            ),
+                        };
                         ground_impulse.set(k, totals);
                         bodies.apply([correction, Correction::none()]);
                     }
@@ -2395,7 +2558,7 @@ impl Skeleton {
         };
         for k in 0..self.ground_contacts.len() {
             let i = self.ground_contacts[k].body;
-            let spent = self.ground_impulse[k];
+            let spent = self.ground_impulse[k].spent;
             let budget = self.friction * spent.normal;
             if spent.normal <= 0.0 || length(spent.tangential) >= budget {
                 continue;
@@ -2798,6 +2961,7 @@ impl Skeleton {
 #[inline]
 unsafe fn solve_some_contacts(
     set: &[usize],
+    half: Half,
     contacts: &[Contact],
     bodies: &Bodies,
     impulse: &scatter::Cells<Spent>,
@@ -2811,12 +2975,20 @@ unsafe fn solve_some_contacts(
         let contact = contacts[k];
         let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
         let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
-        let (corrections, totals) =
-            solve_contact(contact, &first, &second, friction, rolling, impulse.get(k));
+        let (corrections, totals) = match half {
+            Half::Normal => solve_contact_normal(contact, &first, &second, impulse.get(k)),
+            Half::Friction => solve_contact_friction(
+                contact,
+                &first,
+                &second,
+                friction,
+                rolling,
+                impulse.get(k),
+            ),
+        };
         impulse.set(k, totals);
         bodies.apply(corrections);
     }
-
 }
 
 /// How far a turn of `turned` actually carries the surface of a capsule of this size.
