@@ -39,6 +39,58 @@
 //! Projection is by support function rather than by projecting every vertex: the extent of
 //! a prism along `d` is `h |d . axis|` plus the largest `d . v` over the `n` cross-section
 //! directions, so an axis costs two runs of `n` dot products instead of two runs of `2n`.
+//!
+//! # What the shape is worth, and the one thing that stops it being used
+//!
+//! **The geometry does what it was bought for.** Crossed prisms get two contact points at
+//! all forty-five poses swept over fifteen crossing angles and three rolls, where the same
+//! arrangement in capsules is a single point with no arm at all. On a heap of twenty
+//! seventeen-bone rigs, against the same rigs built from capsules:
+//!
+//! ```text
+//!   rigs   shape     asleep at   contacts   a step
+//!      1   capsule      254          2      122 us
+//!      1   prism      never          6      154
+//!      4   capsule    never         34      621
+//!      4   prism      never         27      731
+//!     20   capsule    never        308     2624
+//!     20   prism      never        190     3131
+//! ```
+//!
+//! Thirty-eight per cent fewer contacts for twenty per cent more time a step, which is far
+//! cheaper than a separating-axis test against a segment-to-segment one has any right to
+//! be -- the support function is why.
+//!
+//! **And the pile still does not settle, and a lone rig that settled now does not.** That
+//! regression is the finding. Measured on one rig after it has collapsed, how far the
+//! contact normal of a pair moves between one step and the next:
+//!
+//! ```text
+//!   capsule     0 of 1198 pair-steps moved it more than six degrees   worst agreement 1.0000
+//!   prism     107 of 2668 (4.0 per cent)                             worst agreement 0.7934
+//! ```
+//!
+//! An agreement of 0.79 is a **thirty-seven degree jump in the direction the pair is being
+//! pushed apart, between one step and the next**. That is the separating axis changing its
+//! mind: the minimum-penetration axis switches from one face normal to the neighbouring one
+//! as the bodies shift, and nothing here remembers what it said last time. A capsule's
+//! normal cannot do this -- it is the direction between two closest points on two segments,
+//! and that moves smoothly -- which is why the column above reads zero.
+//!
+//! So the shape trades a contact with no moment arm for a contact whose *direction* is
+//! intermittent, and this module's header records four separate occasions on which an
+//! intermittent constraint is exactly what a rig walks on. It is the worse of the two
+//! problems and it is the reason prisms are not yet the shape to build a pile out of.
+//!
+//! **What it needs is a persistent manifold**, which is what production engines carry for
+//! this exact reason: remember the axis a pair was separated along, and keep it until a
+//! different one is decisively better rather than merely better by a bit. The machinery to
+//! hang it on already exists -- [`super::Skeleton::persist_contacts`] keeps a pair's
+//! constraint alive across steps for a related reason -- so this is a known piece of work
+//! rather than an open question.
+//!
+//! Until then `facets` is opt-in and a caller who does not ask for flats is not affected:
+//! every capsule path is the one it always was.
 
 use super::*;
 
@@ -424,6 +476,76 @@ fn deepest_two(
         offer(*point, front_b - dot(sub(*point, b.at), back));
     }
     best
+}
+
+/// **The contact or contacts between two prisms**, in the form the solve takes.
+///
+/// The same shape [`super::contacts::capsule_contact`] returns, and for the same reasons:
+/// the surface points are carried in each body's own frame so a later pass can ask where
+/// they have moved to, and a pair that carried load last step keeps its constraint even
+/// where the surfaces have come apart -- a stack that has settled perfectly overlaps by
+/// nothing, and a constraint that only exists while it overlaps vanishes at exactly the
+/// moment it is doing its job.
+///
+/// The `span` both contacts carry is the arm between them, which is what tells the
+/// friction solve how far this patch reaches. For a prism that is not a guess: it is the
+/// distance between the two clipped points, which is a real length on a real face.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prism_contact(
+    a: usize,
+    b: usize,
+    position: &[(f64, f64, f64)],
+    orientation: &[Quaternion],
+    radius: &[f64],
+    half_length: &[f64],
+    facets: &[u32],
+    alive: bool,
+) -> [Option<super::contacts::Contact>; 2] {
+    let first = Shape::of(position[a], orientation[a], radius[a], half_length[a], facets[a]);
+    let second = Shape::of(position[b], orientation[b], radius[b], half_length[b], facets[b]);
+
+    let Some(hit) = touch(&first, &second) else {
+        // Clear of each other. A pair that was carrying load last step still wants its
+        // constraint back, and the only place to put it is where they are closest -- which
+        // for two convex bodies apart is a question this test does not answer, so the
+        // bounding capsules answer it. The constraint is inert while the gap is open.
+        if !alive {
+            return [None, None];
+        }
+        return super::contacts::capsule_contact(
+            a,
+            b,
+            position,
+            orientation,
+            radius,
+            half_length,
+            true,
+        );
+    };
+
+    let span = match (hit.points[0], hit.points[1]) {
+        (Some((one, _)), Some((two, _))) => sub(two, one),
+        _ => (0.0, 0.0, 0.0),
+    };
+    let mut out = [None, None];
+    for (slot, point) in out.iter_mut().zip(hit.points) {
+        let Some((at, depth)) = point else { continue };
+        // The point is the shared one, so each body's surface point is it: the depth is
+        // carried by how far apart they are along the normal, exactly as the capsule path
+        // carries it.
+        let surface_a = add(at, scale(hit.normal, 0.5 * depth));
+        let surface_b = sub(at, scale(hit.normal, 0.5 * depth));
+        *slot = Some(super::contacts::Contact {
+            a,
+            b,
+            local_a: rotate_inv(orientation[a], sub(surface_a, position[a])),
+            local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
+            normal: hit.normal,
+            span,
+            revived: false,
+        });
+    }
+    out
 }
 
 #[cfg(test)]

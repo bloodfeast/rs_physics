@@ -3855,11 +3855,23 @@ impl Skeleton {
         // Sorted, so this is a binary search over a list the size of last step's loaded
         // contact set. See [`Skeleton::persist_contacts`].
         let persisting = &self.persisting;
+        let facets = &self.facets;
         let test = |&(a, b): &(usize, usize)| {
             let alive = persisting.binary_search(&(a as u32, b as u32)).is_ok();
-            capsule_contact(a, b, position, orientation, radius, half_length, alive)
-                .into_iter()
-                .flatten()
+            // **Both flat or neither.** A prism against a capsule is a third test with its
+            // own geometry, and until it exists a pair with one of each is tested as the
+            // capsules they bound -- which is the shape the broad phase already sized them
+            // as, so it is sound, just blunt. See [`prism`].
+            let flat = facets[a] >= 3 && facets[b] >= 3;
+            if flat {
+                prism::prism_contact(
+                    a, b, position, orientation, radius, half_length, facets, alive,
+                )
+            } else {
+                capsule_contact(a, b, position, orientation, radius, half_length, alive)
+            }
+            .into_iter()
+            .flatten()
         };
         // Chunked into buffers this struct owns, rather than `par_extend` over a
         // flat-mapping parallel iterator. The number of contacts a pair yields is not
