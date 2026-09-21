@@ -179,16 +179,32 @@
 //! and only worse at four. It is not Coulomb slip either, because quadrupling the
 //! coefficient changes it by a tenth. The faults that were *within* a step have been
 //! fixed -- the cone, the patch couple, the pooled ground budget -- and this survived all
-//! of them, because it is **across** steps: friction compares surface points with where
-//! they were at the start of *this* step, so whatever slip a step fails to remove is
-//! forgiven by the next one, which re-anchors at the new position. A persistent contact
-//! carrying its own anchor, re-anchored when the cone is exceeded, is what would hold it.
+//! of them, because it is **across** steps: friction compared surface points with where
+//! they were at the start of *this* step, so whatever slip a step failed to remove was
+//! forgiven by the next one, which re-anchored at the new position.
 //!
-//! And what is left of it is **straight**. A settled pile's net travel over four hundred
-//! and eighty steps is 0.905 of the path it walked getting there, where a pile jostling in
-//! place would be about a fifth of it. That is not slip being forgiven, it is a ratchet:
-//! see the section below on what keeps a rig awake, which is the same mechanism with a
-//! joint in the loop instead of a second contact.
+//! And what was left of it was **straight**. A settled pile's net travel over four hundred
+//! and eighty steps was 0.905 of the path it walked getting there, where a pile jostling in
+//! place would be about a fifth of it. That is not slip being forgiven, it is a ratchet.
+//!
+//! **The patch against the plane now carries its own anchor** -- where it stuck, and the
+//! Coulomb budget it stuck under -- so the slip a step fails to take off is asked for again
+//! next step instead of being written off. See [`contacts::Anchor`] for what bounds it and
+//! [`Skeleton::anchor_ground`] for when it is dropped. Measured over eight draws a part in
+//! a hundred thousand million apart, the median body's surface drift over four hundred and
+//! eighty steps and the straightness of that travel:
+//!
+//! ```text
+//!   pile of   20            40            60
+//!   before    0.075 / 0.88  0.141 / 0.80  0.217 / 0.72
+//!   after     0.007 / 0.37  0.103 / 0.46  0.126 / 0.53
+//! ```
+//!
+//! What is left is the same fault at the contacts *between* bodies, which have no anchor:
+//! measured before this landed, with friction between bodies switched off and only the
+//! ground's left, settled piles of twenty and of forty stopped outright. Anchors on those
+//! contacts too have been tried on this branch and are not the answer -- see the section
+//! below.
 //!
 //! # The ground patch, and the four corrections that could not stand in for it
 //!
@@ -229,7 +245,17 @@
 //! own spread. Whoever picks the pair patch up again should judge it on the median long
 //! window over several draws, not on one ratio.
 //!
-//! # Why a rig will not sleep, and it is a ratchet rather than a leak
+//! # Why a rig walked, and what stopped it
+//!
+//! Read in order: this section is the fault, the one after it is everything that was tried
+//! against it and did not work, and the last of them is what did. **The walk is gone** --
+//! a settled seventeen-bone rig that may touch itself covered 0.239 of a body's reach over
+//! four hundred and eighty steps with a straightness of 0.72, and now covers 0.0003 with a
+//! straightness of 0.001, which is a rig sitting still. What is *not* fixed is that such a
+//! rig mostly still does not go to sleep: one draw of six does, where none did. The rest
+//! are held awake by a bone or two jittering inside the loop rather than by the rig going
+//! anywhere, and the sleeping test is about drift rather than jitter. See
+//! `a_settled_rig_stays_where_it_settled`, which is the law this is now held to.
 //!
 //! **A contact between two bodies of the same skeleton closes a loop with the joints.**
 //! The joints hold the pair in a small overlap -- 0.3 to 2.1 mm, measured on a settled
@@ -345,20 +371,55 @@
 //! a cure, and that is the number a block solve has to beat rather than a hope it has to
 //! carry.
 //!
-//! **The lead that took the walk to nothing is at the contact.** Friction here compares the
-//! surface with where it was at the start of *this* step, so whatever slip a step fails to
-//! remove is forgiven by the next one, which re-anchors at the new position. Give the
-//! ground patch an anchor instead -- kept while the contact stays strictly inside its
-//! friction cone, moved to where the body is the moment it slips, which is derived rather
-//! than tuned -- and the self-colliding rig's drift falls from 0.334 of a reach to 0.0000
-//! with its straightness at 0.00, a rig that cannot touch itself sleeps at step 110 instead
-//! of 1373, and a settled pile of twenty drifts 0.0000 against 0.075. It is not merged
-//! because of what it does to an impact: a stored offset is restored at whatever the
-//! current normal load allows, so a body landing on a settled stack recovers a resting
-//! step's slip at impact strength and knocks the stack over, and
-//! `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` fails. Holding the stored offset
-//! to what the resting load could carry is what that wants next, and it is where the next
-//! attempt should start.
+//! # What stopped it: the ground patch remembers where it stuck
+//!
+//! Friction compared the surface with where it was at the start of *this* step, so whatever
+//! slip a step failed to remove was forgiven by the next one, which re-anchored at the new
+//! position. The loop shakes the rig, the ground's friction rectifies the shake into
+//! travel, and nothing ever asks for the travel back. **So the patch against the plane now
+//! remembers**: where it stuck, the piece of its own surface that is stuck, and the Coulomb
+//! budget it stuck under. [`contacts::Anchor`] is the whole of what is remembered and why
+//! each part of it has to be there; [`Skeleton::anchor_ground`] decides who is stuck.
+//!
+//! Three bounds, and every one of them was measured rather than chosen. Take any of them
+//! away and something a solver must do stops working:
+//!
+//! * **It is dropped the moment the patch slips**, meaning its friction reached Coulomb's
+//!   limit. A contact at its limit is sliding, and where it used to be is not a fact about
+//!   it any more. This is also why a sliding or rolling body behaves exactly as it did
+//!   before: both spend their whole budget every step, so neither ever carries an anchor.
+//! * **It names a material point, not a place under the body.** A body that *rolls* is not
+//!   sliding, and friction has no business resisting it; tracking the piece of surface that
+//!   stuck means rolling shows up as that piece rising off the plane, which is exactly when
+//!   the memory is dropped. Anchoring the load point instead charges a rolling capsule for
+//!   the whole of its roll, and `without_rolling_resistance_the_same_pile_comes_apart`
+//!   catches it: the pile spread to 1.9 m rather than the 4 m it spreads to with nothing
+//!   holding it.
+//! * **What it remembers is bounded twice**: by the budget it was banked at, so a resting
+//!   step's slip cannot be redeemed at an impact's authority, and by how far a step of
+//!   gravity can drive a resting body into what it stands on, which is the scale of the
+//!   residue a step can leave. With neither bound the rig walks again at 0.347 of a reach,
+//!   which is where it started.
+//!
+//! What it buys, measured over several draws rather than one: a rig that may touch itself
+//! stops travelling (0.239 of a reach to 0.0003, straightness 0.72 to 0.001) and one draw
+//! in six now sleeps; a rig that cannot touch itself sleeps in all six draws at steps 112
+//! to 230, where before four of six slept and took between 198 and 1520; and a settled pile
+//! of forty and of sixty drift below the whole spread they used to sit in. It costs
+//! nothing: `one/8` 36.8 us becomes 36.0, `pile/8` 3.25 ms becomes 3.13, `arriving/8`
+//! 6.44 ms becomes 5.98, all of it settling sooner rather than arithmetic saved.
+//!
+//! **What it costs is patience with a tall jumble.** A stack of capsules dropped in a
+//! column falls into a heap that has to shake itself out, and the ground bodies underneath
+//! it can no longer creep while it does: over eight draws, stacks of three, four and five
+//! settle every time and sooner than they did, while one draw in eight of six and one of
+//! eight now take 3146 and 5574 steps where every draw used to be inside 1600. None of them
+//! fails to settle; they take longer. The cause is the asymmetry this fix has and cannot
+//! lose: the ground contact has a memory and the contacts between bodies do not, so the
+//! two disagree about where the past was. Giving pair contacts anchors of their own closes
+//! that gap and opens a worse one -- measured on this branch, each contact then carries its
+//! own historical frame, those agree only where the contacts do, a stack becomes
+//! over-determined and rings, and a stack of five stopped settling at all.
 //!
 //! # Allocation
 //!
@@ -936,6 +997,21 @@ pub struct Skeleton {
     contact_impulse: Vec<Spent>,
     ground_impulse: Vec<Spent>,
 
+    /// Where each body's ground patch was when it stuck, and what it stuck under. Only
+    /// meaningful where [`Skeleton::ground_stuck`] says so. See [`contacts::Anchor`] for
+    /// what it is for and [`Skeleton::anchor_ground`] for what maintains it.
+    ground_anchor: Vec<contacts::Anchor>,
+    /// One bit per body: its patch against the plane ended the last step strictly inside
+    /// its friction cone, so it is stuck and the anchor above is live.
+    ground_stuck: BitSet,
+    /// The bodies that will be stuck when the next step reads the set, gathered while the
+    /// last step's totals are still in hand. Scratch, reused; see
+    /// [`Skeleton::anchor_ground`].
+    ground_sticking: Vec<u32>,
+    /// The furthest a step of gravity drives a resting body into what it is standing on,
+    /// recomputed each step; the longest offset an anchor may remember.
+    anchor_reach: f64,
+
     /// The stages of a pass, in order, with the empty colours left out. Rebuilt when the
     /// colouring is, not per pass. See [`Skeleton::plan_pass`].
     plan: Vec<Stage>,
@@ -1032,6 +1108,10 @@ impl Default for Skeleton {
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
             ground_impulse: Vec::new(),
+            ground_anchor: Vec::new(),
+            ground_stuck: BitSet::default(),
+            ground_sticking: Vec::new(),
+            anchor_reach: 0.0,
             plan: Vec::new(),
             plan_near: Vec::new(),
             plan_work: 0,
@@ -1206,10 +1286,17 @@ impl Skeleton {
         self.still_from.push(body.position);
         self.still_turn.push(body.orientation);
         self.still_steps.push(0);
+        self.ground_anchor.push(contacts::Anchor {
+            position: body.position,
+            orientation: body.orientation,
+            hold: 0.0,
+            local: (0.0, 0.0, 0.0),
+        });
         self.island_of.push(NO_ISLAND);
         let i = self.position.len() - 1;
         let n = self.position.len();
         self.awake.resize(n, false);
+        self.ground_stuck.resize(n, false);
         self.swept.resize(n, false);
         self.frontier.resize(n, false);
         self.next_frontier.resize(n, false);
@@ -1247,6 +1334,10 @@ impl Skeleton {
     /// never collides with anything again.
     pub fn set_body(&mut self, i: usize, body: Body) {
         self.wake(i);
+        // A body that has been put somewhere else is not stuck to where it was. Leaving the
+        // anchor live would have friction drag it back towards a place the caller has just
+        // taken it from.
+        self.ground_stuck.unset(i);
         self.position[i] = body.position;
         // Unit on the way in; see [`Skeleton::add_body`].
         self.orientation[i] = body.orientation.normalized();
@@ -1728,6 +1819,10 @@ impl Skeleton {
             return;
         }
         self.rebuild_jointed();
+        // The furthest a step of gravity can drive a resting body into what it is standing
+        // on, which is the scale of the slip a step can leave behind. See
+        // [`contacts::Anchor`].
+        self.anchor_reach = length(gravity) * dt * dt;
 
         self.prev_position.copy_from_slice(&self.position);
         self.prev_orientation.copy_from_slice(&self.orientation);
@@ -1940,6 +2035,10 @@ impl Skeleton {
         }
 
         self.settle(dt, length(gravity));
+        // After the solve rather than inside it, because what decides whether a patch is
+        // stuck is the Coulomb total the whole step spent, which only exists once the last
+        // pass has run. See [`Skeleton::anchor_ground`].
+        self.anchor_ground();
     }
 
     /// The four body arrays every correction writes, as the disjoint-scatter view a
@@ -2066,6 +2165,9 @@ impl Skeleton {
         let friction = self.friction;
         let rolling = self.rolling_resistance;
         let ground = self.ground;
+        let ground_anchor = &self.ground_anchor;
+        let ground_stuck = &self.ground_stuck;
+        let anchor_reach = self.anchor_reach;
 
         // SAFETY: the argument is the one [`scatter`] makes, and every part of it still
         // holds here.
@@ -2165,6 +2267,10 @@ impl Skeleton {
                             normal,
                             distance,
                             ground_impulse.get(k),
+                            ground_stuck
+                                .get(contact.body)
+                                .then(|| ground_anchor[contact.body]),
+                            anchor_reach,
                         );
                         ground_impulse.set(k, totals);
                         bodies.apply([correction, Correction::none()]);
@@ -2174,6 +2280,73 @@ impl Skeleton {
         };
 
         crew::each_stage(plan.len(), work, run);
+    }
+
+    /// **Which ground patches are stuck, and where they stuck**, decided once a step while
+    /// the step's own Coulomb totals are still in hand.
+    ///
+    /// A patch is stuck when the friction it spent stayed *strictly* inside its cone:
+    /// Coulomb's limit was never reached, so nothing slid, and the piece of plane it is
+    /// standing on is the piece it was standing on. One that reached the limit did slide,
+    /// and its memory of where it was is worth nothing -- so it is dropped, and the next
+    /// step measures from where the body now is, which is what this module did everywhere
+    /// before anchors existed. That is also what makes a rolling capsule and a sliding one
+    /// behave as they always did: both spend their whole budget every step, so neither ever
+    /// carries an anchor.
+    ///
+    /// The anchor is set to where the body was at the **start** of the step it stuck in
+    /// rather than where it ended, because what is being remembered is precisely the slip
+    /// that step failed to take off.
+    ///
+    /// A body with no patch this step -- in the air, asleep, or resting on something other
+    /// than the plane -- is not in the contact list, so its bit is cleared and its memory
+    /// goes with it. An anchor is never older than the contact holding it.
+    fn anchor_ground(&mut self) {
+        self.ground_sticking.clear();
+        let Some((normal, distance)) = self.ground else {
+            self.ground_stuck.clear();
+            return;
+        };
+        for k in 0..self.ground_contacts.len() {
+            let i = self.ground_contacts[k].body;
+            let spent = self.ground_impulse[k];
+            let budget = self.friction * spent.normal;
+            if spent.normal <= 0.0 || length(spent.tangential) >= budget {
+                continue;
+            }
+            // The piece of surface that is stuck has to still be against the plane. A body
+            // that has rolled is touching somewhere else, and what its old contact point
+            // did on the way round is not a slide. See [`contacts::Anchor`].
+            let stuck = self.ground_stuck.get(i) && {
+                let anchor = self.ground_anchor[i];
+                let at = add(self.position[i], rotate(self.orientation[i], anchor.local));
+                distance - dot(normal, at) > 0.0
+            };
+            if stuck {
+                // The stored offset is the sum of what several steps banked, so the
+                // authority that covers all of it is the weakest of theirs. See
+                // [`contacts::Anchor`].
+                self.ground_anchor[i].hold = self.ground_anchor[i].hold.min(budget);
+            } else {
+                // The point of the body that is against the plane, in body coordinates:
+                // straight down the normal from the centre, as far as the centre stands.
+                let drop = dot(normal, self.prev_position[i]) - distance;
+                self.ground_anchor[i] = contacts::Anchor {
+                    position: self.prev_position[i],
+                    orientation: self.prev_orientation[i],
+                    hold: budget,
+                    local: rotate_inv(self.prev_orientation[i], scale(normal, -drop)),
+                };
+            }
+            self.ground_sticking.push(i as u32);
+        }
+        // Gathered first and written after, because the loop above has to read the set it
+        // is replacing: a body is newly stuck or still stuck, and those start different
+        // anchors.
+        self.ground_stuck.clear();
+        for &i in self.ground_sticking.iter() {
+            self.ground_stuck.set(i as usize);
+        }
     }
 
     /// Every colour, checked to name each body at most once. The precondition of every

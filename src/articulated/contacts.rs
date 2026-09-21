@@ -78,6 +78,64 @@ pub(super) struct Spent {
     pub rolling: (f64, f64, f64),
 }
 
+/// **Where a ground patch stuck, and the Coulomb budget it stuck under.**
+///
+/// Friction is otherwise asked to undo the slide since the start of *this* step, so a slip
+/// a step fails to remove is forgiven by the next one, which measures from the new
+/// position. Over a rig that is being shaken from the inside that forgiveness is the whole
+/// drift: each step banks a fraction of a millimetre and nothing ever asks for it back.
+/// An anchor is the memory that asks for it back -- the pose the patch was in when it
+/// stuck, held while the contact stays inside its cone.
+///
+/// # `hold`, and why an offset carries its own authority
+///
+/// The memory cannot be a displacement alone. A body resting on a stack banks a few tenths
+/// of a millimetre under its own weight; when something lands on it, the normal impulse for
+/// that step is tens of times larger, and Coulomb's limit with it. Redeeming a resting
+/// step's slip at an impact's authority is a sideways kick that has nothing to do with the
+/// physics -- measured, it knocks a settled stack of three over.
+///
+/// So an anchor remembers the displacement *and what it was banked at*: `hold` is the
+/// smallest Coulomb budget -- `friction` times the normal impulse over a step -- seen since
+/// the anchor was set. The stored offset may be redeemed only up to `hold`, whatever the
+/// contact could afford today; this step's own slide is answered at today's budget as it
+/// always was. The two bounds are different quantities and both are the physics: you may
+/// not undo with a hammer what was written down with a feather.
+///
+/// The minimum rather than the latest, because an offset accumulates over many steps and
+/// the parts of it were banked under whatever load was there at the time; the weakest of
+/// those is the only bound that is true of all of them. It also fails safe in the direction
+/// that matters: a patch being unloaded has its authority fall towards zero and its memory
+/// with it, so a body about to be lifted is not held down by what it remembers.
+///
+/// **What would make this wrong.** A caller whose loads swing by orders of magnitude while
+/// a contact genuinely stays stuck -- a body at the bottom of a pile that is being built --
+/// gets an anchor pinned to the lightest moment, which is conservative but weaker than the
+/// truth, and the residual it leaves is the ordinary forgiven slip. And a contact that
+/// slips without the cone reporting it -- which would mean the cone is wrong -- would keep
+/// an anchor it has no right to, and the body would be dragged back towards a place it has
+/// genuinely left.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Anchor {
+    pub position: (f64, f64, f64),
+    pub orientation: Quaternion,
+    /// The smallest Coulomb budget seen while this anchor has been live, as an impulse.
+    pub hold: f64,
+    /// **The piece of the body that is stuck**, in body coordinates: the point of its
+    /// surface that was against the plane when it stuck.
+    ///
+    /// An anchor has to name a material point rather than a place under the body, because
+    /// a body that *rolls* is not sliding and friction has no business resisting it. Track
+    /// where the body's surface is over time and rolling shows up as the stuck point
+    /// rising off the plane, which is exactly when the memory stops being about the same
+    /// piece of ground and is dropped. Anchoring the load point instead -- the place the
+    /// patch stands, which stays under the body as it rolls -- charges a rolling capsule
+    /// for the whole of its roll: measured, a pile with rolling resistance switched off
+    /// spread to 1.9 m instead of the 4 m it spreads to with nothing holding it, which is
+    /// the anchor quietly doing rolling resistance's job.
+    pub local: (f64, f64, f64),
+}
+
 /// The impulse to add this pass, given what the contact wants and what the cone allows,
 /// and the new running total.
 ///
@@ -590,6 +648,8 @@ pub(super) fn solve_ground(
     normal: (f64, f64, f64),
     distance: f64,
     spent: Spent,
+    anchor: Option<Anchor>,
+    anchor_reach: f64,
 ) -> (Correction, Spent) {
     let mut out = Correction::none();
     let mut spent = spent;
@@ -680,13 +740,51 @@ pub(super) fn solve_ground(
     }
     // The patch slides as one, so the drift that friction answers is the drift of the
     // point the load stands at, not of either end on its own.
+    let local = rotate_inv(body.now.orientation, load);
     let here = add(body.now.position, load);
-    let before = add(
-        body.prev_position,
-        rotate(body.prev_orientation, rotate_inv(body.now.orientation, load)),
-    );
-    let slid = sub(here, before);
-    let tangential = sub(slid, scale(normal, dot(slid, normal)));
+    let before = add(body.prev_position, rotate(body.prev_orientation, local));
+    let flat = |v: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
+    let slid = flat(sub(here, before));
+    // What earlier steps failed to take off, if this patch has been stuck since -- the
+    // travel of the piece of surface that is stuck, from where it stuck to where the step
+    // began. The anchor is dropped here as well as in the maintenance if that piece has
+    // risen off the plane, because then the body has rolled and the memory is about
+    // somewhere else. See [`Anchor`].
+    let anchor = anchor.filter(|anchor| {
+        let at = add(body.now.position, rotate(body.now.orientation, anchor.local));
+        distance - dot(normal, at) > 0.0
+    });
+    let stored = match anchor {
+        Some(anchor) => {
+            let stuck = add(anchor.position, rotate(anchor.orientation, anchor.local));
+            let then = add(body.prev_position, rotate(body.prev_orientation, anchor.local));
+            flat(sub(then, stuck))
+        }
+        None => (0.0, 0.0, 0.0),
+    };
+    // The direction the whole of it lies in, which is what the patch's reach and the
+    // couple it can carry are measured along.
+    let Some(heading) = normalized(add(slid, stored)) else {
+        return (out, spent);
+    };
+    // The stored part is redeemable only up to the budget it was banked at, turned into a
+    // distance by the same inverse mass the impulse will be divided by. This step's own
+    // slide keeps today's authority, which is the cone below.
+    let tangential = match anchor {
+        None => slid,
+        Some(anchor) => {
+            let span = 0.5 * dot(sub(arm[1], arm[0]), heading).abs();
+            let lever = patch_arm(load, normal, span, friction);
+            let mobility = generalised_inverse_mass(&body.now, lever, heading);
+            let most = (anchor.hold * mobility).min(anchor_reach);
+            let size = length(stored);
+            if size > most {
+                add(slid, scale(stored, most / size))
+            } else {
+                add(slid, stored)
+            }
+        }
+    };
     let Some(direction) = normalized(tangential) else {
         return (out, spent);
     };
@@ -708,6 +806,24 @@ pub(super) fn solve_ground(
         return (out, spent);
     }
     spent.tangential = total_grip;
+    // The whole of it reads back as velocity, the stored part included, and that was
+    // measured rather than assumed. Taking off slip an earlier step left behind is the
+    // correction of an error rather than something the body did, so the argument for
+    // `Correction::free_translation` -- which the normal solve a few lines above makes for
+    // exactly this reason -- appears to apply. It does not pay: charging the stored part as
+    // free leaves the body undamped by it, and measured over eight draws that takes a stack
+    // of five from settling every time to settling in four, a stack of six to five of eight,
+    // and a settled pile of forty from 0.117 of a reach to 0.146. Damping the old error too
+    // is what those settle on.
+    // **The whole of it reads back as velocity, the stored part included**, and that was
+    // measured rather than assumed. Taking off slip an earlier step left behind is the
+    // correction of an error rather than something the body did, so the argument for
+    // `Correction::free_translation` -- which the normal solve a few lines above makes for
+    // exactly this reason -- looks like it should apply to the stored share. It does not
+    // pay: charging that share as free leaves the body undamped by it, and over eight draws
+    // that takes a stack of five from settling every time to settling in five, and a
+    // settled pile of forty from 0.103 of a reach to 0.189. Damping the old error as well
+    // is what those settle on.
     accumulate(&mut out, &body.now, couple, grip, false);
     (out, spent)
 }

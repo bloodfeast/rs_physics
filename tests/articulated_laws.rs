@@ -394,11 +394,20 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
 /// patch, ratio 39.9 and long window 0.094: the growth is *more* linear and the pile has
 /// moved a third as far, which is the case the first predicate got wrong.
 ///
-/// The cause of what is left is understood and is the same one, one level up. Two
-/// capsules lying against each other are a patch sampled twice exactly as a capsule on
-/// the plane was, and `capsule_contact` still emits the two ends as two independent
-/// contacts. Measured, two capsules stacked drift at 2.3 mm a second where a lone capsule
-/// on the ground now drifts at nothing measurable.
+/// Since the ground patch was given a friction anchor, the long window over eight draws is
+/// **0.007, 0.103 and 0.126** of a reach at twenty, forty and sixty against 0.075, 0.141
+/// and 0.217 before it, and the straightness of that travel -- see below -- falls from
+/// 0.88, 0.80 and 0.72 to 0.37, 0.46 and 0.53. The forty and sixty medians are below the
+/// whole eight-draw spread they used to sit in, so that is the solver and not the draw.
+///
+/// The cause of what is left is understood and is the same one, one level up: the contacts
+/// *between* bodies have no anchor, and they carry what remains. Measured before the
+/// anchor landed, with friction between bodies switched off and only the ground's left, a
+/// settled pile of twenty and of forty stop outright. Two capsules lying against each
+/// other are also a patch sampled twice exactly as a capsule on the plane was, and
+/// `capsule_contact` still emits the two ends as two independent contacts: two capsules
+/// stacked drift at 2.3 mm a second where a lone capsule on the ground drifts at nothing
+/// measurable.
 ///
 /// # How much of the ratio is the solver and how much is the draw
 ///
@@ -423,10 +432,11 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
 /// walked. A body that is drifting has a ratio of one; a body wandering over `n`
 /// independent windows has `1 / sqrt(n)`, which is 0.177 here. Both halves come off the
 /// same trajectory and the denominator is a sum of thirty-two terms, so there is nothing
-/// small under the line. It is not adopted here because it does not pass: measured on this
-/// pile it is **0.905**, and on a settled rig 0.99, which is the honest statement that
-/// both of them really are drifting and that the ratio predicate cannot see it. Adopting
-/// it belongs with the fix, not before it.
+/// small under the line. It was not adopted here because it did not pass: measured on this
+/// pile it was **0.905**, and on a settled rig 0.99, which is the honest statement that
+/// both of them really were drifting and that the ratio predicate cannot see it. It is now
+/// what `a_settled_rig_stays_where_it_settled` asserts, because the rig has stopped; this
+/// pile is at 0.37 to 0.53 and is on its way but not there.
 #[test]
 fn a_settled_pile_wanders_but_does_not_drift() {
     // The fraction of its own reach a body may move over a settling window and still be
@@ -608,16 +618,15 @@ fn a_heap_settles_and_stays_where_it_settled() {
 /// the exact count is chaotic -- because what this law claims is that it happens at all,
 /// which is the difference between sixty nanoseconds a step and milliseconds.
 ///
-/// It does **not** claim the same of a rig that may touch itself. That one does not
-/// settle: the residual is the same at eight, thirty-two and sixty-four iterations, and it
-/// survives every relative velocity and every spin being zeroed at the end of each step.
-/// What it does not survive is friction being taken away altogether -- at a coefficient of
-/// zero the same rig's drift falls from 0.276 of a reach to 0.0001 and its straightness
-/// from 0.96 to 0.01 -- which says the loop manufactures the motion inside the rig and the
-/// contact with the ground turns it into travel. Reversing the sweep every other step,
-/// which looks like the fix and is not, would cost this very law: the rig here never
-/// sleeps under it. See the module header for that and for what a block solve is now
-/// expected to buy.
+/// It does **not** claim the same of a rig that may touch itself. That one used to walk,
+/// and does not any more -- see `a_settled_rig_stays_where_it_settled` -- but it mostly
+/// still does not go to *sleep*: over six draws one does, where none did. What holds the
+/// rest awake is a bone or two jittering inside the loop rather than the rig going
+/// anywhere, which is a different fault from the one the anchor fixed.
+///
+/// The bound here is generous for the same reason it always was, but the numbers behind it
+/// have moved: over six draws this rig now sleeps in all of them, between steps 112 and
+/// 230, where before the anchor four of six slept and took between 198 and 1520.
 #[test]
 fn a_rig_that_does_not_touch_itself_comes_to_rest() {
     let mut s = Skeleton::new();
@@ -658,6 +667,131 @@ fn a_rig_that_does_not_touch_itself_comes_to_rest() {
             s.position(i).1,
         );
     }
+}
+
+/// **A settled rig stays where it settled, even where it touches itself.**
+///
+/// This is the law the ground patch's friction anchor exists for, and it is stated the way
+/// the pile law states its own bound rather than as a recorded number.
+///
+/// # What was wrong, in one sentence
+///
+/// A contact between two bones of one skeleton closes a loop with the joints, the loop's
+/// corrections do not commute, and the leftover is the same small screw every step; the
+/// ground's friction turns that shake into travel, the way a crawling thing gets along.
+/// Measured on this rig before the anchor: 0.239 of a body's reach over four hundred and
+/// eighty steps with a straightness of 0.72, which is a walk and not a jostle.
+///
+/// # The bound, and why it is this one
+///
+/// A body is entitled to be called still while it stays within [`STILL_FRACTION`] of its
+/// own reach of where its settling window opened. Over `n` such windows, one jostling in
+/// place covers `STILL_FRACTION * sqrt(n)` -- a random walk -- and one that is travelling
+/// covers `STILL_FRACTION * n`. This watches thirty-two windows, so the jostling allowance
+/// is 0.113 of a reach and a travelling rig would cover 0.64. The law asks for the first.
+///
+/// **And it asks for straightness as well**, because that is the statistic that tells a
+/// ratchet from a wander and the reason the drift alone is not enough: net travel over the
+/// sum of the thirty-two window travels is one for a body being carried and about
+/// `1/sqrt(32)` -- 0.18 -- for one being jostled. Measured now: 0.002 of a reach and a
+/// straightness of 0.009, so both bounds have two orders of margin. They are written where
+/// the physics puts them rather than next to the measurement, so that a change which halves
+/// the margin passes and one that brings the walk back does not.
+#[test]
+fn a_settled_rig_stays_where_it_settled() {
+    const STILL_FRACTION: f64 = 0.02;
+    const WINDOWS: usize = 32;
+    const PER: usize = 15;
+
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    // Self-collision left on, which is the whole point: with it off this rig goes to sleep
+    // and there is nothing left to measure.
+    let bones = rig(&mut s, 1.0);
+    assert!(s.self_collision(), "this law is about a rig that may touch itself");
+    // Long enough to have landed and folded; the drift this measures is what is left after
+    // that, and it does not depend on where the settling stopped.
+    s.set_sleeping(false);
+    for _ in 0..1500 {
+        s.step(DT, G, 8);
+    }
+
+    let pose = |s: &Skeleton| -> Vec<((f64, f64, f64), rs_physics::models::Quaternion)> {
+        (0..s.len())
+            .map(|i| (s.position(i), s.orientation(i)))
+            .collect()
+    };
+    let start = pose(&s);
+    let mut last = start.clone();
+    let mut path = vec![0.0f64; s.len()];
+    for _ in 0..WINDOWS {
+        for _ in 0..PER {
+            s.step(DT, G, 8);
+        }
+        let now = pose(&s);
+        for i in 0..s.len() {
+            path[i] += surface_travel(&s, i, last[i], now[i]);
+        }
+        last = now;
+    }
+    let now = pose(&s);
+
+    let mut drifts: Vec<f64> = Vec::new();
+    let mut straights: Vec<f64> = Vec::new();
+    for i in 0..s.len() {
+        let net = surface_travel(&s, i, start[i], now[i]);
+        drifts.push(net);
+        straights.push(if path[i] > 0.0 { net / path[i] } else { 0.0 });
+    }
+    drifts.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+    straights.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+    let drift = drifts[drifts.len() / 2];
+    let straight = straights[straights.len() / 2];
+
+    let jostling = STILL_FRACTION * (WINDOWS as f64).sqrt();
+    let travelling = STILL_FRACTION * WINDOWS as f64;
+    assert!(
+        drift < jostling,
+        "the median bone of a {bones}-bone rig covered {drift:.4} of its own reach over \
+         {WINDOWS} windows. One jostling on the sleeping threshold would cover \
+         {jostling:.4} and one carried the whole way {travelling:.4}: this is the second.",
+    );
+    assert!(
+        straight < 0.5,
+        "the median bone's net travel was {straight:.4} of the path it walked getting \
+         there. A body being carried measures one and a jostled one about 0.18, so this \
+         is a rig with somewhere to go rather than one sitting still.",
+    );
+}
+
+/// How far body `i`'s surface moved between two poses, as a fraction of its own reach: the
+/// centre's travel, plus the turn charged at the reach except about the body's own long
+/// axis, where a surface of revolution has not gone anywhere and it is charged at the
+/// radius.
+fn surface_travel(
+    s: &Skeleton,
+    i: usize,
+    was: ((f64, f64, f64), rs_physics::models::Quaternion),
+    now: ((f64, f64, f64), rs_physics::models::Quaternion),
+) -> f64 {
+    let body = s.body(i);
+    let travel = speed((now.0 .0 - was.0 .0, now.0 .1 - was.0 .1, now.0 .2 - was.0 .2));
+    let delta = now.1.multiply(&was.1.conjugate());
+    let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
+    let turn = (
+        2.0 * sign * delta.x,
+        2.0 * sign * delta.y,
+        2.0 * sign * delta.z,
+    );
+    let axis = was.1.rotate_point((0.0, 1.0, 0.0));
+    let along = turn.0 * axis.0 + turn.1 * axis.1 + turn.2 * axis.2;
+    let across = speed((
+        turn.0 - along * axis.0,
+        turn.1 - along * axis.1,
+        turn.2 - along * axis.2,
+    ));
+    let reach = body.radius + body.half_length;
+    (travel + across * reach + along.abs() * body.radius) / reach
 }
 
 /// **A skeleton left to itself does not move its own centre of mass.** Joints and the
