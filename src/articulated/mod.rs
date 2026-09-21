@@ -1812,6 +1812,7 @@ use crate::models::Quaternion;
 mod broadphase;
 mod contacts;
 mod crew;
+mod prism;
 mod scatter;
 mod sleep;
 
