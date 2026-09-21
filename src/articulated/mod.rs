@@ -2584,6 +2584,16 @@ pub struct Skeleton {
     /// phase can keep their contact alive for one more step while they are clear. See
     /// [`Skeleton::persist_contacts`].
     persisting: Vec<(u32, u32)>,
+    /// **The axis each of those pairs was separated along**, in the first body's own frame,
+    /// sorted by the pair. Only pairs where both bodies have flats: a capsule's normal
+    /// moves smoothly and has nothing to remember.
+    ///
+    /// This is the persistent manifold, and [`prism::touch_keeping`] is what it is for: a
+    /// separating-axis test near a face-to-edge transition has two equally good answers,
+    /// and which one it gives depends on the last bit of two nearly equal numbers. Without
+    /// this the direction a resting pair is pushed apart along jumps between neighbouring
+    /// face normals as the bodies shift by a micron.
+    held_axis: Vec<(u32, u32, (f64, f64, f64))>,
     /// Where each chunk of the narrow phase puts its contacts before they are
     /// concatenated. See [`Skeleton::build_contacts`].
     contact_scratch: Vec<Vec<Contact>>,
@@ -2777,6 +2787,7 @@ impl Default for Skeleton {
             pairs: Vec::new(),
             contacts: Vec::new(),
             persisting: Vec::new(),
+            held_axis: Vec::new(),
             contact_scratch: Vec::new(),
             contact_colours: Vec::new(),
             contact_colours_near: Vec::new(),
@@ -3855,6 +3866,10 @@ impl Skeleton {
         // Sorted, so this is a binary search over a list the size of last step's loaded
         // contact set. See [`Skeleton::persist_contacts`].
         let persisting = &self.persisting;
+        // And the axis each of those pairs was separated along, in the first body's own
+        // frame. See [`prism::touch_keeping`] for why a pair has to be remembered.
+        let held_axis = &self.held_axis;
+        let decisive = self.anchor_reach;
         let facets = &self.facets;
         let test = |&(a, b): &(usize, usize)| {
             let alive = persisting.binary_search(&(a as u32, b as u32)).is_ok();
@@ -3864,8 +3879,13 @@ impl Skeleton {
             // as, so it is sound, just blunt. See [`prism`].
             let flat = facets[a] >= 3 && facets[b] >= 3;
             if flat {
+                let held = held_axis
+                    .binary_search_by_key(&(a as u32, b as u32), |&(x, y, _)| (x, y))
+                    .ok()
+                    .map(|at| held_axis[at].2);
                 prism::prism_contact(
-                    a, b, position, orientation, radius, half_length, facets, alive,
+                    a, b, position, orientation, radius, half_length, facets, alive, held,
+                    decisive,
                 )
             } else {
                 capsule_contact(a, b, position, orientation, radius, half_length, alive)
@@ -4924,15 +4944,32 @@ impl Skeleton {
     /// pair.
     fn persist_contacts(&mut self) {
         let mut persisting = std::mem::take(&mut self.persisting);
+        let mut held_axis = std::mem::take(&mut self.held_axis);
         persisting.clear();
+        held_axis.clear();
         for (k, contact) in self.contacts.iter().enumerate() {
             if self.contact_impulse[k].normal > 0.0 {
                 persisting.push((contact.a as u32, contact.b as u32));
+                // **The direction, kept in the first body's own frame.** A world direction
+                // remembered across a step would stay put while the body turned under it,
+                // which is the opposite of following the face it came from. See
+                // [`prism::touch_keeping`].
+                if self.facets[contact.a] >= 3 && self.facets[contact.b] >= 3 {
+                    held_axis.push((
+                        contact.a as u32,
+                        contact.b as u32,
+                        rotate_inv(self.orientation[contact.a], contact.normal),
+                    ));
+                }
             }
         }
         persisting.sort_unstable();
         persisting.dedup();
+        // The two contacts of one pair share a normal, so the pair appears once.
+        held_axis.sort_unstable_by_key(|&(a, b, _)| (a, b));
+        held_axis.dedup_by_key(|&mut (a, b, _)| (a, b));
         self.persisting = persisting;
+        self.held_axis = held_axis;
     }
 
     /// Every colour, checked to name each body at most once. The precondition of every

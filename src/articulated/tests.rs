@@ -2703,4 +2703,123 @@ fn a_prism_of_too_few_flats_is_a_capsule() {
 }
 
 
+/// **A resting pair of prisms keeps the direction it is being pushed apart along.**
+///
+/// A separating-axis test near a face-to-edge transition has two nearly equal answers, and
+/// which one it gives comes down to the last bit of two nearly equal numbers -- so without
+/// something to hold it, the contact normal of a settled pair jumps between neighbouring
+/// face normals as the bodies shift by a micron. A constraint whose *direction* changes
+/// every few steps is intermittent, and this module's header records four separate
+/// occasions on which an intermittent constraint is what a rig walks on.
+///
+/// Measured against a capsule rig, which cannot have this problem: its normal is the
+/// direction between two closest points on two segments and moves smoothly. Without the
+/// held axis the prism rig moved its normals more than six degrees on four per cent of
+/// pair-steps, the worst by thirty-seven; the bound below is well inside that and well
+/// outside what the capsule does, so it fails on the defect and passes on the fix.
+#[test]
+fn a_resting_prism_pair_keeps_its_contact_direction() {
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    shaped_rig(&mut s, 0.0, 1.1, 0.0, 8);
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+    }
 
+    let mut before: std::collections::BTreeMap<(usize, usize), (f64, f64, f64)> =
+        Default::default();
+    let (mut flips, mut samples) = (0usize, 0usize);
+    let mut worst: f64 = 1.0;
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+        let mut now: std::collections::BTreeMap<(usize, usize), (f64, f64, f64)> =
+            Default::default();
+        for contact in s.contacts.iter() {
+            now.insert((contact.a, contact.b), contact.normal);
+        }
+        for (pair, normal) in now.iter() {
+            if let Some(was) = before.get(pair) {
+                let agrees = dot(*was, *normal);
+                samples += 1;
+                worst = worst.min(agrees);
+                if agrees < 0.995 {
+                    flips += 1;
+                }
+            }
+        }
+        before = now;
+    }
+
+    assert!(
+        samples > 200,
+        "only {samples} pair-steps had a contact to compare, which is not enough to say \
+         anything about how steady it was",
+    );
+    let share = flips as f64 / samples as f64;
+    assert!(
+        share < 0.01,
+        "{flips} of {samples} pair-steps ({:.1} per cent) moved the contact normal more \
+         than six degrees; without the held axis this is four per cent",
+        100.0 * share,
+    );
+    assert!(
+        worst > 0.9,
+        "the worst the normal moved in one step was to an agreement of {worst:.4}, which \
+         is more than a quarter turn of the way round a face",
+    );
+}
+
+/// A seventeen-bone rig whose bones are prisms when `facets >= 3` and capsules otherwise.
+fn shaped_rig(into: &mut Skeleton, x: f64, y: f64, z: f64, facets: u32) {
+    let make = |mass: f64, radius: f64, length: f64, at: (f64, f64, f64)| {
+        if facets >= 3 {
+            Body::prism(mass, radius, length, facets, at)
+        } else {
+            Body::capsule(mass, radius, length, at)
+        }
+    };
+    let base = into.len();
+    let pelvis = into.add_body(make(8.0, 0.1, 0.16, (x, y, z)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(make(6.0, 0.08, 0.2, (x, y + 0.2 + 0.2 * i as f64, z)));
+        assert!(into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0))));
+        up = link;
+    }
+    for limb in 0..4 {
+        let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
+        let side_z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            let body = into.add_body(make(
+                4.0,
+                0.06,
+                0.25,
+                (x, y + side * 0.25 * segment as f64, z + side_z),
+            ));
+            let joint = if segment == 0 {
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            assert!(into.add_joint(joint));
+            previous = body;
+        }
+    }
+    for i in base..into.len() {
+        let n = i as f64;
+        into.set_angular_velocity(
+            i,
+            (3.0 * (n * 0.7).sin(), 3.0 * (n * 1.1).cos(), 3.0 * (n * 0.3).sin()),
+        );
+    }
+}

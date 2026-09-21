@@ -82,14 +82,44 @@
 //! intermittent constraint is exactly what a rig walks on. It is the worse of the two
 //! problems and it is the reason prisms are not yet the shape to build a pile out of.
 //!
-//! **What it needs is a persistent manifold**, which is what production engines carry for
-//! this exact reason: remember the axis a pair was separated along, and keep it until a
-//! different one is decisively better rather than merely better by a bit. The machinery to
-//! hang it on already exists -- [`super::Skeleton::persist_contacts`] keeps a pair's
-//! constraint alive across steps for a related reason -- so this is a known piece of work
-//! rather than an open question.
+//! # The persistent manifold, and what it is and is not worth
 //!
-//! Until then `facets` is opt-in and a caller who does not ask for flats is not affected:
+//! Built: [`touch_keeping`], with the axis a pair was last separated along kept in
+//! `Skeleton::held_axis` in the first body's own frame, so it follows the body rather than
+//! staying put while the body turns under it. A new axis has to beat it by more than one
+//! step's sag -- `anchor_reach`, `|g| dt^2` -- which is the scale below which a difference
+//! in overlap is indistinguishable from the residual the solve leaves anyway.
+//!
+//! **It does what it was built to do.** The same one-rig measurement, before and after:
+//!
+//! ```text
+//!   capsule               0 of 1198 pair-steps (0.0 per cent)   worst 1.0000
+//!   prism, nothing held 107 of 2668 (4.0 per cent)              worst 0.7934
+//!   prism, axis held     11 of 3471 (0.3 per cent)              worst 0.9476
+//! ```
+//!
+//! Thirteen times fewer flips and the worst jump halved, from thirty-seven degrees to
+//! eighteen. And the regression it was for is gone: a lone rig of prisms that would not
+//! settle at all now settles.
+//!
+//! **And a pile still does not settle.** Four rigs and twenty do not come to rest with
+//! prisms any more than with capsules, though a heap of twenty carries two hundred and two
+//! contacts against three hundred and eight.
+//!
+//! The margin was swept -- one, four, eight and sixteen times the sag -- and a lone rig
+//! settled at 1921, 1322, 92 and 623 steps. That is not a lever, it is one draw of a
+//! chaotic system going four different ways, which is exactly the trap [`super`]'s header
+//! records being caught by elsewhere. So the margin stays at the derived quantity and is
+//! not tuned. Piles never settled at any of them.
+//!
+//! What is left is that 0.3 per cent. A held axis stops the *common* flip -- a pair rocking
+//! across the boundary between two faces -- and does not stop a pair that has genuinely
+//! moved onto a new face and back. Remembering the *feature* rather than the direction, so
+//! that the pair is tied to the face pair it was resting on until the face itself is
+//! clearly wrong, is the next thing to try, and it is the shape the rest of this module's
+//! anchors already take.
+//!
+//! `facets` is opt-in throughout, so a caller who does not ask for flats is not affected:
 //! every capsule path is the one it always was.
 
 use super::*;
@@ -278,7 +308,52 @@ impl Shape {
 /// `None` when they are clear of one another. The normal points from `a` to `b`, so `a` is
 /// pushed against it and `b` along it, which is the convention
 /// [`super::contacts::capsule_contact`] uses.
+///
+/// `held` is the axis this pair was separated along last step, in world space, or `None`
+/// for a pair that is new or was clear. **It is kept unless another axis beats it by more
+/// than `decisive`**, and that is what makes the direction of a resting contact steady: see
+/// [`touch_keeping`].
 pub(super) fn touch(a: &Shape, b: &Shape) -> Option<Touch> {
+    touch_keeping(a, b, None, 0.0)
+}
+
+/// The same test, told what it said last time.
+///
+/// # Why a pair has to be remembered at all
+///
+/// A separating-axis test answers "which direction are these two least overlapped along",
+/// and near a face-to-edge transition two axes are *equally* good. Which one wins then
+/// depends on the last bit of two nearly equal numbers, so as the bodies shift by a
+/// micron the answer switches from one face normal to its neighbour and back. Measured on
+/// one rig collapsed on the ground, with nothing remembered: a hundred and seven of two
+/// thousand six hundred and sixty-eight pair-steps moved the contact normal by more than
+/// six degrees, the worst by thirty-seven. A capsule's normal cannot do this -- it is the
+/// direction between two closest points on two segments, which moves smoothly -- and its
+/// column of the same measurement reads zero of eleven hundred and ninety-eight.
+///
+/// A constraint whose *direction* changes every few steps is an intermittent constraint,
+/// and [`super`]'s header records four separate occasions on which one of those is what a
+/// rig walks on. It is a worse defect than the one flats were bought to fix, and it is why
+/// the shape needs this to be usable at all.
+///
+/// # What makes a new axis decisive
+///
+/// `decisive` is how much better a new axis has to be before the pair changes its mind,
+/// as a depth. The caller passes the crate's own `anchor_reach` -- `|g| dt^2`, the distance
+/// one step of gravity drives a resting body into whatever it stands on -- because that is
+/// the scale below which a difference in overlap is indistinguishable from the residual
+/// the solve leaves anyway. Two axes that differ by less than one step's sag are not
+/// meaningfully different, and switching between them is noise being amplified into a
+/// constraint.
+///
+/// **The held axis is not free**: if the pair is genuinely separated along it, they are
+/// separated, and the whole test ends there exactly as it would for any other axis.
+pub(super) fn touch_keeping(
+    a: &Shape,
+    b: &Shape,
+    held: Option<(f64, f64, f64)>,
+    decisive: f64,
+) -> Option<Touch> {
     let between = sub(b.at, a.at);
 
     // The least-penetrating axis is the one to separate along: any deeper one is a
@@ -337,6 +412,22 @@ pub(super) fn touch(a: &Shape, b: &Shape) -> Option<Touch> {
     }
     if best == f64::INFINITY {
         return None;
+    }
+
+    // **And the axis this pair was using keeps its job unless it has been clearly beaten.**
+    if let Some(held) = normalized(held.unwrap_or((0.0, 0.0, 0.0))) {
+        let overlap = a.reach_along(held) + b.reach_along(held) - dot(between, held).abs();
+        if overlap <= 0.0 {
+            // Separated along the axis it was using, which is separated.
+            return None;
+        }
+        if overlap - best <= decisive {
+            normal = if dot(between, held) < 0.0 {
+                scale(held, -1.0)
+            } else {
+                held
+            };
+        }
     }
 
     Some(Touch {
@@ -500,11 +591,16 @@ pub(super) fn prism_contact(
     half_length: &[f64],
     facets: &[u32],
     alive: bool,
+    // The axis this pair was separated along last step, in `a`'s own frame, so that it
+    // follows the body rather than staying put while the body turns under it.
+    held: Option<(f64, f64, f64)>,
+    decisive: f64,
 ) -> [Option<super::contacts::Contact>; 2] {
     let first = Shape::of(position[a], orientation[a], radius[a], half_length[a], facets[a]);
     let second = Shape::of(position[b], orientation[b], radius[b], half_length[b], facets[b]);
+    let held = held.map(|axis| rotate(orientation[a], axis));
 
-    let Some(hit) = touch(&first, &second) else {
+    let Some(hit) = touch_keeping(&first, &second, held, decisive) else {
         // Clear of each other. A pair that was carrying load last step still wants its
         // constraint back, and the only place to put it is where they are closest -- which
         // for two convex bodies apart is a question this test does not answer, so the
