@@ -284,7 +284,7 @@ fn a_joint_to_nowhere_is_refused() {
 fn a_body_is_the_size_it_looks() {
     let size = std::mem::size_of::<Body>();
     assert_eq!(
-        size, 152,
+        size, 160,
         "a Body is {size} bytes; the layout moved and the arithmetic in the module header \
          moved with it",
     );
@@ -2633,5 +2633,71 @@ fn a_cone_with_no_axis_is_refused() {
     );
 }
 
+/// **A prism's inertia is the prism's**, and it approaches the cylinder's as the flats
+/// multiply without ever reaching it.
+///
+/// A regular `n`-gon of circumradius `R` has a second moment about its own centre of
+/// `R^2 (1 + 2 cos^2(pi/n)) / 6` per unit mass, which rises to `R^2 / 2` as `n` grows and
+/// is below it for every finite `n` -- a polygon is a circle with the corners kept and
+/// everything between them cut away, so it has less of its mass out at the rim. Stated as
+/// that limit rather than as a table of numbers, because a table would restate the
+/// arithmetic rather than check it.
+#[test]
+fn a_prism_carries_its_mass_where_a_polygon_does() {
+    const MASS: f64 = 4.0;
+    const R: f64 = 0.3;
+    let spin_of = |facets: u32| {
+        let body = Body::prism(MASS, R, 0.8, facets, (0.0, 0.0, 0.0));
+        1.0 / body.inv_inertia.1
+    };
+    let cylinder = 0.5 * MASS * R * R;
 
+    let mut last = 0.0f64;
+    for facets in [3u32, 4, 6, 8, 16, 64] {
+        let spin = spin_of(facets);
+        assert!(
+            spin < cylinder,
+            "a {facets}-sided prism carries {spin:.6} about its axis, which is not less \
+             than the cylinder's {cylinder:.6}",
+        );
+        assert!(
+            spin > last,
+            "a {facets}-sided prism carries {spin:.6}, no more than the {last:.6} of the \
+             one before it; more flats is more mass out at the rim",
+        );
+        last = spin;
+    }
+    assert!(
+        (spin_of(1024) - cylinder).abs() < 1e-5 * cylinder,
+        "a thousand-sided prism carries {:.6} where a cylinder carries {cylinder:.6}",
+        spin_of(1024),
+    );
+    // And the transverse axes are the rod term plus half the spin, as a cylinder's are.
+    let body = Body::prism(MASS, R, 0.8, 8, (0.0, 0.0, 0.0));
+    let want = MASS * (0.16 / 3.0) + 0.5 / body.inv_inertia.1;
+    assert!(
+        ((1.0 / body.inv_inertia.0) - want).abs() < 1e-12,
+        "the transverse inertia is {:.9} where the rod term plus half the spin is \
+         {want:.9}",
+        1.0 / body.inv_inertia.0,
+    );
+}
 
+/// **Fewer than three flats is a capsule**, because two flats enclose nothing -- and the
+/// body that comes back is the capsule in every respect, inertia included, rather than a
+/// prism with a strange shape.
+#[test]
+fn a_prism_of_too_few_flats_is_a_capsule() {
+    for facets in [0u32, 1, 2] {
+        let prism = Body::prism(4.0, 0.3, 0.8, facets, (0.0, 0.0, 0.0));
+        let capsule = Body::capsule(4.0, 0.3, 0.8, (0.0, 0.0, 0.0));
+        assert_eq!(
+            prism.facets, 0,
+            "a prism of {facets} flats kept them; it cannot enclose anything",
+        );
+        assert_eq!(
+            prism.inv_inertia, capsule.inv_inertia,
+            "a prism of {facets} flats has an inertia the capsule does not",
+        );
+    }
+}

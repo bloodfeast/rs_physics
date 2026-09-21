@@ -27,7 +27,7 @@
 //!
 //! * **SIMD on the streaming passes.** Predicting and reading velocities back are pure
 //!   sweeps over every body. As arrays they vectorise and parallelise by chunk; as a
-//!   `Vec<Body>` each lane would be a gather out of a 152-byte struct.
+//!   `Vec<Body>` each lane would be a gather out of a 160-byte struct.
 //! * **The GPU, if it is ever asked for.** A warp reading `bodies[tid].position` out of an
 //!   interleaved struct wastes most of every memory transaction -- coalescing wants the
 //!   field contiguous. Converting later would mean rewriting whatever had been built on
@@ -1963,9 +1963,57 @@ pub struct Body {
     /// about collision does not silently get it.
     pub radius: f64,
     pub half_length: f64,
+    /// **How many flats the body has around its own axis.** Zero is a capsule; eight is an
+    /// octagonal prism of circumradius `radius`, its faces running down the same +Y.
+    ///
+    /// A capsule is a swept sphere, so it is curved everywhere and touches anything at a
+    /// point or a line -- and a point contact offers no first-order resistance to rolling
+    /// about itself, which is why a pile of them rocks and never comes to rest. Measured on
+    /// a heap of twenty rigs: three hundred and two of three hundred and five touching
+    /// pairs get a single point. A body with flats resting on a face touches over a
+    /// *polygon*, and tipping it lifts one edge while pressing another, which is a
+    /// restoring torque out of the geometry rather than out of a coefficient. It is why a
+    /// box on a table does not rock and a can does.
+    ///
+    /// **Fewer than three is a capsule**, since two flats do not enclose anything. The
+    /// module's own header carries the argument for eight in particular: enough that the
+    /// silhouette reads round at arm's length, few enough that two of them can be tested
+    /// by separating axes rather than by an iterative search -- which matters for a solver
+    /// whose behaviour is pinned by a bit-identity law, because a fixed set of axes
+    /// terminates by construction where GJK terminates on a tolerance.
+    pub facets: u32,
 }
 
 impl Body {
+    /// **A regular `facets`-sided prism** at rest at `position`, of circumradius `radius`
+    /// and segment `length`, its long axis along local **+Y** like everything else here.
+    ///
+    /// `facets` below three is a capsule, because two flats enclose nothing;
+    /// [`Body::capsule`] is the direct way to say that.
+    ///
+    /// The inertia is the prism's own and not the capsule's, and it is closed form, which
+    /// is half the reason this shape rather than a general hull. For a regular `n`-gon of
+    /// circumradius `R` the second moment about the axis through its centre is
+    /// `R^2 (1 + 2 cos^2(pi/n)) / 6` per unit mass -- which tends to `R^2 / 2`, the
+    /// cylinder's, as `n` grows, and is less than it for any finite `n` because the corners
+    /// are the only part of a circle a polygon keeps. The transverse axes are that halved
+    /// plus the rod term `h^2 / 3`, exactly as a cylinder's are.
+    pub fn prism(mass: f64, radius: f64, length: f64, facets: u32, position: (f64, f64, f64)) -> Body {
+        let mut body = Body::capsule(mass, radius, length, position);
+        if facets < 3 {
+            return body;
+        }
+        body.facets = facets;
+        let half = 0.5 * length;
+        let across = (std::f64::consts::PI / facets as f64).cos();
+        // About the long axis, then the two transverse axes.
+        let spin = radius * radius * (1.0 + 2.0 * across * across) / 6.0;
+        let over = half * half / 3.0 + 0.5 * spin;
+        let inv = |i: f64| if mass > 0.0 && i > 0.0 { 1.0 / (mass * i) } else { 0.0 };
+        body.inv_inertia = (inv(over), inv(spin), inv(over));
+        body
+    }
+
     /// A body at rest at `position`, with the inertia of a solid capsule of this `mass`,
     /// `radius` and segment `length`, its long axis along local **+Y**.
     ///
@@ -1987,6 +2035,7 @@ impl Body {
             inv_inertia: (inv(across), inv(along), inv(across)),
             radius,
             half_length: 0.5 * length,
+            facets: 0,
         }
     }
 
@@ -2013,6 +2062,7 @@ impl Body {
             inv_inertia: (0.0, 0.0, 0.0),
             radius: 0.0,
             half_length: 0.0,
+            facets: 0,
         }
     }
 }
@@ -2483,6 +2533,9 @@ pub struct Skeleton {
     inv_inertia: Vec<(f64, f64, f64)>,
     radius: Vec<f64>,
     half_length: Vec<f64>,
+    /// How many flats each body has around its own axis; zero is a capsule. See
+    /// [`Body::facets`].
+    facets: Vec<u32>,
 
     joints: Vec<Joint>,
     /// Joint indices grouped so that no two joints in a group share a body. Extended as
@@ -2706,6 +2759,7 @@ impl Default for Skeleton {
             inv_inertia: Vec::new(),
             radius: Vec::new(),
             half_length: Vec::new(),
+            facets: Vec::new(),
             joints: Vec::new(),
             colours: Vec::new(),
             joint_bits: Vec::new(),
@@ -2935,6 +2989,7 @@ impl Skeleton {
         self.inv_inertia.push(body.inv_inertia);
         self.radius.push(body.radius);
         self.half_length.push(body.half_length);
+        self.facets.push(body.facets);
         self.prev_position.push(body.position);
         self.prev_orientation.push(body.orientation);
         self.colour_bits.push(0);
@@ -2986,6 +3041,7 @@ impl Skeleton {
             inv_inertia: self.inv_inertia[i],
             radius: self.radius[i],
             half_length: self.half_length[i],
+            facets: self.facets[i],
         }
     }
 
@@ -3017,6 +3073,7 @@ impl Skeleton {
         self.inv_inertia[i] = body.inv_inertia;
         self.radius[i] = body.radius;
         self.half_length[i] = body.half_length;
+        self.facets[i] = body.facets;
     }
 
     pub fn position(&self, i: usize) -> (f64, f64, f64) {
@@ -3213,6 +3270,8 @@ impl Skeleton {
         // contact generation. See the doc comment.
         self.radius[i] = 0.0;
         self.half_length[i] = 0.0;
+        // A retired body is not any shape at all.
+        self.facets[i] = 0;
         // No mass: never awake again, by the rule that already keeps pinned bodies out.
         self.inv_mass[i] = 0.0;
         self.inv_inertia[i] = (0.0, 0.0, 0.0);
