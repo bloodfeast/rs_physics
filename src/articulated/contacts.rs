@@ -806,15 +806,6 @@ pub(super) fn solve_ground(
         return (out, spent);
     }
     spent.tangential = total_grip;
-    // The whole of it reads back as velocity, the stored part included, and that was
-    // measured rather than assumed. Taking off slip an earlier step left behind is the
-    // correction of an error rather than something the body did, so the argument for
-    // `Correction::free_translation` -- which the normal solve a few lines above makes for
-    // exactly this reason -- appears to apply. It does not pay: charging the stored part as
-    // free leaves the body undamped by it, and measured over eight draws that takes a stack
-    // of five from settling every time to settling in four, a stack of six to five of eight,
-    // and a settled pile of forty from 0.117 of a reach to 0.146. Damping the old error too
-    // is what those settle on.
     // **The whole of it reads back as velocity, the stored part included**, and that was
     // measured rather than assumed. Taking off slip an earlier step left behind is the
     // correction of an error rather than something the body did, so the argument for

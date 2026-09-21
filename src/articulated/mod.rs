@@ -415,15 +415,97 @@
 //!
 //! **What it costs is patience with a tall jumble.** A stack of capsules dropped in a
 //! column falls into a heap that has to shake itself out, and the ground bodies underneath
-//! it can no longer creep while it does: over eight draws, stacks of three, four and five
-//! settle every time and sooner than they did, while one draw in eight of six and one of
-//! eight now take 3146 and 5574 steps where every draw used to be inside 1600. None of them
-//! fails to settle; they take longer. The cause is the asymmetry this fix has and cannot
-//! lose: the ground contact has a memory and the contacts between bodies do not, so the
-//! two disagree about where the past was. Giving pair contacts anchors of their own closes
-//! that gap and opens a worse one -- measured on this branch, each contact then carries its
-//! own historical frame, those agree only where the contacts do, a stack becomes
-//! over-determined and rings, and a stack of five stopped settling at all.
+//! it can no longer creep while it does: stacks of three, four and five settle every time
+//! and sooner than they did, while the taller ones take longer and their spread widens.
+//! The cause is the asymmetry this fix has: the ground contact has a memory and the
+//! contacts between bodies do not, so the two disagree about where the past was.
+//!
+//! # Anchors on the contacts between bodies, and why they are not here
+//!
+//! Closing that gap has been built three ways and measured, and none of them is better
+//! than the asymmetry. Read this before building a fourth: the obstruction is not the one
+//! that was expected, and it is stated at the end.
+//!
+//! **How any of this has to be judged.** Every number below is the median and spread of
+//! sixteen draws a relative 1e-12 apart, because one draw says nothing. That matters for
+//! the numbers already on this page too: over sixteen draws *this commit* leaves two draws
+//! of a column of eight still awake after twelve thousand steps, and two draws of the
+//! seventeen-bone rig `a_settled_rig_stays_where_it_settled` is written against travel 6.37
+//! and 0.32 of a reach with straightnesses of 0.94 and 0.50 -- which is the walk, at the
+//! size it was before the ground anchor, on seeds next door to the one the law runs. The
+//! law passes on its own seed. Whoever picks this up should fix that spread rather than
+//! trust either column of figures below to two significant figures.
+//!
+//! ```text
+//!   steps to sleep      column of 3  4         5          6          7          8
+//!   this commit                   381  366..378  531..1768  243..2305  775..2704  676..8239
+//!                                                                             and 2 of 16 never
+//!   one memory per pair patch, with the kinematic bound three paragraphs down:
+//!                       206..1269  79..1139  197..3082  132..3492  236..2059  359..1927
+//!                                                    2 never                    1 never
+//! ```
+//!
+//! **A memory per contact is the shape that fails, and not because it is a memory.** Two
+//! near-parallel capsules are given a contact at each end of the line they touch along;
+//! anchoring those separately remembers the pair's relative *rotation* as well as its
+//! relative position, out of two configurations banked at two different moments. A column
+//! of three then goes from settling at step 381 on every draw to between 421 and 4452, and
+//! a column of eight stops settling. Pooling them -- one memory for the pair, at the point
+//! its load stands, with the budget the weakest its ends reported, which is exactly the
+//! shape [`contacts::solve_ground`] gives the ground patch -- recovers all of that. So the
+//! four bounds do change the answer, and the earlier report that a relative memory is
+//! hopeless was a report about the wrong granularity.
+//!
+//! **What is frame-independent is that two pieces of surface were touching.** A pair anchor
+//! that remembers a place fights every rigid motion the two make together; one that names a
+//! material point on each body and remembers how they stood relative to one another does
+//! not, and the ground's material-point rule then carries over unchanged -- the memory is
+//! dropped when the two points stop being pressed together, which is what a pair that has
+//! rolled looks like. So does the `hold` bound and the cap at `g dt^2`. Three of the four
+//! bounds need nothing for a moving frame.
+//!
+//! **The fourth does not carry over, and that is the real difference.** Against the plane,
+//! "the friction stayed strictly inside its cone" is a sufficient test for having stuck,
+//! because a body that is sliding spends its whole Coulomb budget doing it. Between two
+//! bodies it is not sufficient. A pair jostling in a heap can sit strictly inside its cone
+//! for a step and still have slid a millimetre across itself, because the friction
+//! correction that removed the slide is undone inside the same step by the normal
+//! corrections of the contacts either body has with everything else. The anchor then banks
+//! real motion as if it were the residue of a step, and hands it back next step as
+//! velocity, which is what redeeming an anchor does. Two bodies that can each do that to
+//! the other have a loop to pump, and it pumps: a seven-capsule heap settled into a
+//! period-three limit cycle -- its contact count cycling 9, 7, 6 -- in which every body
+//! moved at `g dt`, which is one whole step's worth of the cap spent every step. It ran
+//! sixty thousand steps without settling and repeated its state every fifteen thousand.
+//!
+//! **Adding the kinematic half of "stuck" -- the slip over the step no larger than `g dt^2`,
+//! the same residue the redemption is capped at -- removes that cycle** and is what the
+//! second row above is. It takes the worst column of eight from 8239 steps to 1927, and it
+//! moves the mode rather than removing it: a column of six gains two draws of sixteen that
+//! do not settle. Three further bounds were measured and each buys one number and spends
+//! another:
+//!
+//! * Dropping a memory that has grown past one step's residue, rather than clamping what it
+//!   may redeem -- a memory that cannot be cashed is not a fact. Three draws of sixteen of a
+//!   column of *three* then stop settling.
+//! * Charging the redeemed share as a free correction rather than as velocity, which is the
+//!   only thing that stops the pumping at the source. The self-colliding rig then sleeps in
+//!   three draws of sixteen, the best anything has managed and better than this commit's
+//!   two; a settled pile of forty drifts out to 0.30 of a reach and a column of seven takes
+//!   8827 steps.
+//! * Restricting the anchors to a spanning forest of the graph of bodies plus one node for
+//!   the ground, which is exactly the condition for a set of *relative* memories to be
+//!   jointly satisfiable and therefore the textbook cure for the over-determination. A
+//!   column of five then settles at a median of 97 steps against this commit's 900, the best
+//!   single number any of this produced -- and five draws of a hundred and twenty-eight stop
+//!   settling, and the rig travels 0.63 of a reach. **That is the result that says the
+//!   obstruction is not over-determination.** The forest makes the memories satisfiable and
+//!   the scenes still ring, so what is left is the energy the redemption puts in.
+//!
+//! So the state of it: the granularity was wrong in the earlier attempt and pooling fixes
+//! it; the moving frame costs nothing; and what is unsolved is that redeeming a memory
+//! returns energy, which a loop of two bodies can pump and the plane cannot. Anything built
+//! on top of this has to answer that before it answers anything else.
 //!
 //! # Allocation
 //!
