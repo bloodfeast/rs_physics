@@ -846,7 +846,26 @@ fn a_settled_rig_stays_where_it_settled() {
         for i in 0..s.len() {
             let net = surface_travel(&s, i, start[i], now[i]);
             bone_drift.push(net);
-            bone_straight.push(if path[i] > 0.0 { net / path[i] } else { 0.0 });
+            // **A bone that has not moved has no direction**, and asking one for a
+            // straightness is dividing arithmetic noise by itself: it answers one, which
+            // is the number this law reads as "carried". The guard used to be `> 0.0`,
+            // which only caught a bone that was still to the last bit, and it was enough
+            // while every draw still had a jostle in it. It stopped being enough the step
+            // a rig started freezing outright -- measured, four draws of eight came back
+            // with a drift of 0.0000 of a reach and a straightness of 1.0000, which is a
+            // rig sitting perfectly still failing a law about rigs that travel.
+            //
+            // The line is the law's own `STILL_FRACTION`: a body is entitled to be called
+            // still while it stays inside that fraction of its own reach over a settling
+            // window, so a bone that has not covered even one window's worth over all
+            // thirty-two of them has not gone anywhere. This makes the law stricter rather
+            // than looser -- it removes a false positive and leaves every real travel
+            // untouched, because a carried bone's path is an order above this.
+            bone_straight.push(if path[i] > STILL_FRACTION {
+                net / path[i]
+            } else {
+                0.0
+            });
         }
         bone_drift.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
         bone_straight.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
@@ -1087,6 +1106,94 @@ fn a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass() {
          bones moved {worked:.3} m: the joints and the contacts between its own bones are \
          carrying it somewhere, which no internal force can do",
     );
+}
+
+/// **Asking for more quality never makes the answer worse.**
+///
+/// `iterations` is the one dial a caller turns, and every other law in this file runs the
+/// rig at eight. That is why this defect survived: a settled seventeen-bone rig held
+/// **one to two kilojoules** at twelve, sixteen, twenty-four and thirty-two passes while
+/// eight and sixty-four were quiet, and nothing was watching. Traced, five draws of ten
+/// ended up airborne -- every bone off the ground, bodies at ten to fifteen metres a
+/// second, on three to eleven contacts between its own limbs -- and stayed there for
+/// twelve thousand steps without decaying. A rig that never touches the ground is not
+/// taking that energy from the ground.
+///
+/// # The property, and why it is stated as one bound rather than as a trend
+///
+/// The tempting statement is monotonicity -- that each count is at least as good as the
+/// one below. It is the wrong one: a settling rig is chaotic, so two counts differ by
+/// which configuration the rig happens to land in as well as by how well it was solved,
+/// and a monotone assertion would fail on noise while a real doubling of the residual
+/// slipped past. The right statement is that **the bound does not depend on the count**:
+/// whatever a caller asks for, a settled rig has to be as still as
+/// `a_settled_rig_does_not_sit_on_a_limit_cycle` requires it to be at eight, measured in
+/// the same unit and against the same number. More passes may then be better or level; it
+/// may not be a different regime.
+///
+/// The unit is one step of gravity, which is what a resting contact has finished handing a
+/// body and therefore the largest speed a settled one has any business holding. The
+/// quarter is the same quarter the eight-pass law uses, and it is not a recorded output:
+/// the cycle these laws were written against sat at a third of `g dt` on every draw, so a
+/// quarter is inside that and an order above the arithmetic.
+#[test]
+fn asking_for_more_passes_does_not_make_a_settled_rig_worse() {
+    let step_of_gravity = speed(G) * DT;
+    const DRAWS: usize = 6;
+    const SETTLE: usize = 1200;
+    const WATCH: usize = 60;
+    // Eight is what every other law runs, and the four above it are where the defect
+    // lived. Sixty-four is left out only because it costs eight times eight to say
+    // something the four already say.
+    const COUNTS: [usize; 5] = [8, 12, 16, 24, 32];
+
+    let mut residual = Vec::new();
+    let mut bones = 0;
+    for iterations in COUNTS {
+        let mut draws = Vec::new();
+        for draw in 0..DRAWS {
+            let mut s = Skeleton::new();
+            s.set_ground((0.0, 1.0, 0.0), 0.0);
+            bones = rig(&mut s, 1.0 * (1.0 + draw as f64 * 1e-12));
+            assert!(s.self_collision(), "this law is about a rig that may touch itself");
+            // Sleeping off, or a rig that settles is removed from the step and reads zero
+            // -- which would pass the law by not answering it.
+            s.set_sleeping(false);
+            for _ in 0..SETTLE {
+                s.step(DT, G, iterations);
+            }
+            let mut watched = Vec::new();
+            for _ in 0..WATCH {
+                s.step(DT, G, iterations);
+                let mut bone: Vec<f64> = (0..s.len()).map(|i| speed(s.velocity(i))).collect();
+                bone.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+                watched.push(bone[bone.len() / 2]);
+            }
+            watched.sort_by(|a, b| a.partial_cmp(b).expect("no step is at a NaN"));
+            draws.push(watched[watched.len() / 2] / step_of_gravity);
+        }
+        draws.sort_by(|a, b| a.partial_cmp(b).expect("no draw is at a NaN"));
+        residual.push((iterations, draws[draws.len() / 2], draws[draws.len() - 1]));
+    }
+
+    for &(iterations, typical, _) in residual.iter() {
+        assert!(
+            typical < 0.25,
+            "at {iterations} passes the median draw of a settled {bones}-bone rig holds {typical:.3} of one step of gravity in its median bone, where eight passes is held to a quarter. Asking for more quality moved the answer into a different regime. Residuals, as (passes, median, worst): {residual:.3?}",
+        );
+    }
+
+    // And the outlier arm, because the defect this law was written against was not in the
+    // median: at sixteen and thirty-two passes the median draw was as still as it ever is
+    // and one draw of ten held a kilojoule. A rig off the ground reads tens of steps of
+    // gravity, so this is orders clear of anything a settled rig does and will only catch
+    // a scene that has found a way to power itself.
+    for &(iterations, _, worst) in residual.iter() {
+        assert!(
+            worst < 4.0,
+            "at {iterations} passes one draw of a settled {bones}-bone rig holds {worst:.3} of one step of gravity in its median bone. That is a rig with an energy source rather than a rig settling. Residuals, as (passes, median, worst): {residual:.3?}",
+        );
+    }
 }
 
 // -- fixtures ---------------------------------------------------------------------

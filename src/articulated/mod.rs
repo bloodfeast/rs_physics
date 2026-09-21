@@ -1068,6 +1068,123 @@
 //! figure is recorded because it is the second time this page has caught that count behaving
 //! like a tuned number, and the next person to reach for it should know it has moved again.
 //!
+//! # A revived contact hands the bodies no momentum, and without that a rig flies
+//!
+//! The section above is right about what a revived contact is *for* and wrong about one
+//! thing it may do. It closes on the claim that reviving one is provably free while the gap
+//! is open, which it is; what it does not say is what happens the moment the gap closes.
+//!
+//! **A ragdoll takes off.** Measured on the seventeen-bone rig resting on the plane, ten
+//! draws a relative 1e-12 apart, settled kinetic energy after eighteen hundred steps:
+//!
+//! ```text
+//!   passes             8         12         16         24         32         64
+//!   median        0.0146   470.1123     0.0195  1277.1570     0.0117     0.0003  J
+//!   worst         0.0297   661.3257  1166.6445  2729.2404  1911.6905     0.0278  J
+//!   over 1 J     0 of 10   10 of 10    3 of 10    6 of 10    2 of 10    0 of 10
+//! ```
+//!
+//! Traced at twenty-four passes, the draws that hold a kilojoule are **airborne**: every one
+//! of seventeen bones off the ground, bodies at ten to fifteen metres a second, three to
+//! eleven contacts and all of them between the rig's own limbs, holding one to two
+//! kilojoules for **twelve thousand steps** without decaying. A rig that never touches the
+//! ground is not taking that from the ground. It is propelling itself.
+//!
+//! ## Where it comes from
+//!
+//! `Correction::free_translation` exists because a contact may turn into velocity only the
+//! overlap the step itself drove, and the share it drove is measured as the slide along the
+//! normal since the step began. **For a revived contact that measurement is meaningless.**
+//! The pair was not overlapping when the narrow phase looked, so the bodies drove into
+//! nothing; whatever overlap the constraint later finds was made by the step's own
+//! corrections -- the joints pulling a resting pair back together, which is the case
+//! revival exists for. The slide cannot tell the two apart, because it includes every
+//! correction applied since the step began. This page already says so, one section up, about
+//! a different fix: charging the whole of it as velocity hands the bodies the solver's own
+//! repair work as momentum they never earned.
+//!
+//! A revived contact is the one constraint for which that is the *whole* of what it charges,
+//! and it is charged again on every pass -- which is why the defect scales with the pass
+//! count and why eight, the count everything here was measured at, is one of the two that
+//! happen to be quiet.
+//!
+//! ## The fix, which is one line and a bit of bookkeeping
+//!
+//! [`contacts::Contact::revived`] says the narrow phase found this pair clear. A revived
+//! contact charges velocity on the **first pass that finds it loaded** and none on any pass
+//! after that. The first pass sees the closing the bodies and their joints actually made;
+//! every pass after it sees only what the earlier passes failed to remove, which is the
+//! solver's own work and not momentum anybody earned. That is the same shape every
+//! dissipative rule on this page has had to take -- a budget for the step rather than a
+//! charge per pass -- arriving for the fourth time.
+//!
+//! Charging a revived contact *nothing* was tried and is worse, which is the measurement
+//! that says the first pass matters: a rig then stops propagating "stopped" through a
+//! resting self-contact, `a_rig_that_touches_itself_comes_to_rest` loses two draws of
+//! sixteen, and `a_settled_rig_stays_where_it_settled` gains a draw that is carried. That is
+//! the objection this page raises against every bound on the read-back velocity, and it
+//! applies here too -- but only to the passes after the first.
+//!
+//! ```text
+//!   passes             8         12         16         24         32         64
+//!   median        0.1340     0.1514     0.2290     0.3077     0.0431     0.0791  J
+//!   worst         1.5218     0.8125     1.0007     2.9172     1.7477     4.3381  J
+//!   over 1 J     1 of 10    0 of 10    1 of 10    2 of 10    2 of 10    1 of 10
+//!
+//!   draws of sixteen that go to sleep, and the steps they take
+//!     before     16/16      0/16       9/16       5/16       9/16      16/16
+//!     after      16/16     15/16      14/16      14/16      15/16      16/16
+//!     after, median steps
+//!                  131       539        395        413        385        720
+//! ```
+//!
+//! **The kilojoules are gone at every count**, the worst draw anywhere is four joules
+//! against two thousand seven hundred, and the sleeping the section above bought is kept --
+//! sixteen of sixteen at eight passes at 131 steps, where it was 148 to 297, and twelve to
+//! sixteen everywhere else where it was nought to sixteen. It costs a `bool` on
+//! [`contacts::Contact`], 112 bytes to 120, and one test per contact per pass. Timed on ten
+//! thousand two hundred bodies as prebuilt binaries run alternately, the two builds settle
+//! into different scenes -- 21,100 contacts against 15,450 at the same step -- so the
+//! per-step totals are not comparable and the per-contact figures are: 1.53 to 2.42 us
+//! against 1.82 to 2.30, which is one range.
+//!
+//! ## And there is no distance bound on revival, which was measured rather than assumed
+//!
+//! The obvious guard on a revived contact is a margin -- revive only a pair clear by less
+//! than the furthest a step can close it, which this module already derives as
+//! [`contacts::Anchor`]'s `anchor_reach`. It was built, and it is **worse than either
+//! extreme**: see [`contacts::capsule_contact`] for the table. A bound is not a weaker
+//! revival, it is an **intermittent** one -- the constraint appears and disappears as the
+//! gap crosses the margin -- and this page has now recorded four separate occasions on
+//! which an intermittent constraint is what a rig walks on. Reviving always, or never, is
+//! stable; reviving sometimes is not.
+//!
+//! ## What was watching for this, and what is now
+//!
+//! Nothing was. Every law in `tests/articulated_laws.rs` ran the rig at eight passes, so a
+//! defect that is quiet at eight and at sixty-four and loud at everything between was
+//! invisible. `asking_for_more_passes_does_not_make_a_settled_rig_worse` is the law that
+//! closes that gap: it holds the rig to the same quarter of `g dt` that
+//! `a_settled_rig_does_not_sit_on_a_limit_cycle` holds it to, at eight, twelve, sixteen,
+//! twenty-four and thirty-two passes. Run against the defect it reports 12.3, 22.6 and 17.2
+//! steps of gravity at twelve, twenty-four and thirty-two against 0.091 at eight.
+//!
+//! It asserts one bound at every count rather than a trend, and that is deliberate: a
+//! settling rig is chaotic, so two counts differ by which configuration the rig lands in as
+//! well as by how well it was solved, and a monotone assertion would fail on noise while a
+//! real doubling slipped past. **The property is that the bound does not depend on the
+//! dial.**
+//!
+//! `a_settled_rig_stays_where_it_settled` needed its straightness predicate fixed to survive
+//! this, and the fix makes it stricter. A bone's straightness is its net travel over the path
+//! it walked, guarded by `path > 0.0` -- which only catches a bone that is still to the last
+//! bit. Once rigs started freezing outright, four draws of eight came back with a drift of
+//! 0.0000 of a reach and a straightness of **1.0000**, which is a rig sitting perfectly
+//! still failing a law about rigs that travel. The guard is now the law's own
+//! `STILL_FRACTION`: a bone that has not covered one settling window's allowance across all
+//! thirty-two of them has not gone anywhere, and asking it which direction is dividing
+//! arithmetic noise by itself.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour

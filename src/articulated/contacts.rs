@@ -255,6 +255,10 @@ pub(super) struct Contact {
     /// they touch at a point. Both contacts of a line contact carry the same one. See
     /// [`patch_arm`] for what a patch does that a point cannot.
     pub span: (f64, f64, f64),
+    /// **This constraint came back for a pair that is not overlapping**, because the pair
+    /// carried load last step. See [`capsule_contact`], and [`solve_contact_normal`] for
+    /// the one thing it changes.
+    pub revived: bool,
 }
 
 /// The closest pair of points between segment `p1..q1` and segment `p2..q2`.
@@ -345,6 +349,31 @@ const PARALLEL_SINE: f64 = 0.05;
 /// while the gap is open -- [`solve_contact_normal`] returns on `depth <= 0` and every
 /// other half returns on `spent.normal <= 0` -- so it changes nothing at all unless
 /// something closes the gap *during* the step, which is exactly the case it is for.
+///
+/// **What it may not do is hand the bodies momentum**, and that is [`Contact::revived`].
+/// See [`solve_contact_normal`]: without it a rig flies.
+///
+/// # There is no distance bound on it, and that was measured rather than assumed
+///
+/// The obvious guard is to revive only a pair that is clear by less than the furthest a
+/// step can close it -- `|g| dt^2`, which [`Anchor`] already derives as `anchor_reach`.
+/// It was built and it is **worse than either extreme**. Settled kinetic energy of a rig at
+/// eight passes, twenty-four draws a relative 1e-12 apart, as median / worst / draws over
+/// one joule:
+///
+/// ```text
+///   no revival at all        0.42 /   1.37 /  1 of 24
+///   bounded at half          0.39 /   1.67 /  7 of 24
+///   bounded at one           7.23 / 104.31 / 14 of 24
+///   bounded at two           2.62 / 220.02 / 13 of 24
+///   no bound                 0.015/   0.037/  0 of 24
+/// ```
+///
+/// A bound is not a weaker revival, it is an **intermittent** one: the constraint appears
+/// and disappears as the gap crosses it, and the module header records three separate
+/// occasions on which an intermittent constraint is what a rig walks on. Reviving always,
+/// or never, is stable; reviving sometimes is not. So the rule stays "it carried load last
+/// step", which is a fact about the pair rather than a distance.
 pub(super) fn capsule_contact(
     a: usize,
     b: usize,
@@ -466,7 +495,8 @@ fn touching(
     // the patch is clear. The depth it is solved at is re-derived from the bodies' current
     // transforms on every pass, so a negative one here is a constraint that does nothing
     // until the step itself closes the gap. See [`capsule_contact`].
-    if !alive && dot(sub(surface_a, surface_b), normal) <= 0.0 {
+    let depth = dot(sub(surface_a, surface_b), normal);
+    if depth <= 0.0 && !alive {
         return None;
     }
     Some(Contact {
@@ -476,6 +506,10 @@ fn touching(
         local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
         normal,
         span,
+        // **The pair is not overlapping and this constraint exists only because it was
+        // loaded last step.** Whatever overlap the step then finds here was made by the
+        // step, not driven into by the bodies: see [`solve_contact_normal`].
+        revived: depth <= 0.0,
     })
 }
 
@@ -549,7 +583,25 @@ pub(super) fn solve_contact_normal(
     // The normal part of the slide is how much of this overlap the step itself made, and
     // it is the only part allowed to read back as velocity. See
     // `Correction::free_translation`.
-    let driven = dot(slid, normal).clamp(0.0, depth);
+    //
+    // **A revived contact may turn none of it into velocity, and that is what makes
+    // reviving one safe.** The pair was not overlapping when the narrow phase looked, so
+    // the bodies did not drive into anything: whatever overlap this constraint finds was
+    // made by the step's own corrections -- the joints pulling a resting pair back
+    // together, which is the case revival exists for -- and charging the solver's own
+    // repair work as momentum the bodies never earned is how a rig ends up flying. The
+    // slide cannot tell the two apart, because the slide includes every correction applied
+    // since the step began; the narrow phase can, and it has already said so.
+    //
+    // It does not close the channel by which "stopped" propagates up a stack, which is
+    // what the module header warns any bound on the read-back velocity about. A body that
+    // arrives with momentum drives a *genuine* overlap, so its contact is not revived and
+    // charges as it always did. Only a pair that was already resting together gets this.
+    let driven = if contact.revived && spent.normal > 0.0 {
+        0.0
+    } else {
+        dot(slid, normal).clamp(0.0, depth)
+    };
     let inherited = depth - driven;
 
     let wa = generalised_inverse_mass(&first.now, ra, normal);
