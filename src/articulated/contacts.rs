@@ -174,6 +174,72 @@ pub(super) struct Anchor {
 /// -- which is `wanted` exactly whenever the cone is not binding, and points back towards
 /// the cone rather than nowhere when it is.
 #[inline]
+/// **Coulomb's cone is charged against the wrong quantity, and this is what is known.**
+///
+/// Not fixed. Recorded here because three fixes were built and measured and all three are
+/// worse than the defect, and the next attempt should start from that rather than from the
+/// beginning.
+///
+/// The limit passed to [`cone`] is `friction * spent.normal`, and `spent.normal` counts the
+/// whole normal impulse -- including the share spent *unburying* a body that was placed
+/// inside something. Friction then scales with how carelessly a body was put down. One
+/// step, a capsule sliding at 4 m/s with nothing resting on it, friction 0.5:
+///
+/// ```text
+///   buried 0.00 m   4.0000 -> 3.9183 m/s     the honest weight-driven figure
+///   buried 0.01 m   4.0000 -> 3.6183
+///   buried 0.05 m   4.0000 -> 2.4183
+///   buried 0.20 m   4.0000 -> 0.6883         five sixths of the momentum, to a contact
+///                                            force that does not exist
+///   buried 1.00 m   4.0000 -> 0.6883         saturated: the cone no longer binds at all
+/// ```
+///
+/// This module already made the argument one accessor over: `Skeleton::normal_load` reads
+/// `Spent::driven` and not `Spent::normal`, precisely because "`normal` would make a badly
+/// placed body the most crushed thing in the scene". The same objection applies to the
+/// cone and was not carried across. [`resist_rolling`]'s limit has it too.
+///
+/// # The three that did not work, and what each one proves
+///
+/// The instrument for all of them is the drop family: a capsule dropped on a settled stack
+/// of three from twenty-eight heights a tenth of a metre apart, counting how many pass
+/// through. It is the right instrument because a single height is one sample of a chaotic
+/// family -- `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` is that single sample,
+/// and it passes and fails for reasons that have nothing to do with the change under test.
+/// **Today's baseline is 9 of 28 through**, which is its own open defect: a first contact
+/// deeper than a capsule's radius drives two parallel capsules into each other and they
+/// never separate.
+///
+/// * **`driven` alone.** Kills the defect outright -- 3.9183 m/s at *every* burial depth,
+///   which is friction becoming depth-independent, which is the physics. But a *revived*
+///   contact has its `driven` forced to zero on purpose, its overlap being the solver's own
+///   repair work rather than earned momentum, so a settled pair ends up with no friction at
+///   all. A body under a pile read 171.5 N where it carries 196.1.
+/// * **`driven` plus the inherited overlap capped at `|g| dt^2`**, the sag one step of
+///   gravity makes. Right in shape and wrong in magnitude: the residual of a *loaded*
+///   contact is larger than one body's sag in proportion to what it carries, so the cap
+///   starves exactly the contacts at the bottom of a pile. 194.15 N against 196.13, a one
+///   per cent shortfall that was systematic rather than noise -- and it double-counts
+///   unless netted against `driven`, since a buried body sags too.
+/// * **The causal rule: all of the inherited overlap when `Contact::revived`, none of it
+///   otherwise.** This is the one that looked right -- it is the same question `driven`
+///   already asks, the residual scales with load because it is the residual, and it passed
+///   the burial test and the pile-weight test together. It takes the drop family from 9 of
+///   28 through to **28 of 28**. The reason is the plane: a ground contact is never
+///   revived, because the plane does not go away and the contact is rebuilt from the body
+///   every step, so under this rule the ground keeps only `driven` -- and a body that has
+///   settled is not moving, so its `driven` decays towards nothing and ground friction goes
+///   with it. The stack slides out from under whatever lands on it.
+///
+/// # What the next attempt needs
+///
+/// A ground contact needs the same distinction the pair contacts get, and it cannot borrow
+/// `revived` to get it. The question is "was this contact bearing load before this step",
+/// and for the plane the crate already keeps something close to the answer in
+/// `Skeleton::ground_stuck` and in [`Anchor`]. Whatever carries it, the test of a candidate
+/// is all four of these at once, because each of the three above passed some and not
+/// others: the burial table, `a_body_under_a_pile_reads_what_the_pile_weighs`, the drop
+/// family at no worse than 9 of 28, and `friction_holds_a_slope_and_lets_go_past_coulombs_angle`.
 pub(super) fn cone(
     already: (f64, f64, f64),
     wanted: (f64, f64, f64),
