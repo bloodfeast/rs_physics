@@ -347,6 +347,124 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
     }
 }
 
+/// **A settled pile wanders; it does not drift.** A known limitation, measured rather
+/// than hidden, and the bound is the one the solver currently meets.
+///
+/// # What is measured and why it is a ratio
+///
+/// Watch a settled pile for thirty-two times as long and a body that is *drifting* has
+/// gone thirty-two times as far, while a body that is only jostling against its
+/// neighbours has not. No absolute bound tells those apart -- loose enough for the
+/// jostling and it admits a slow drift, tight enough to exclude the drift and the
+/// jostling fails it. So this asks how the distance grows with the window: 15 steps
+/// against 480.
+///
+/// The **surface** and not the centre, because a capsule turning on the spot has moved
+/// against whatever it rests on exactly as much as one that slid, and in this pile the
+/// turning is the larger half. So the centre's travel, plus the angle turned times the
+/// reach, except about the capsule's own long axis where it is times the radius: a
+/// surface of revolution spinning about its own axis has not gone anywhere, and charging
+/// that at the reach makes a resting pile look far worse than it is.
+///
+/// # Where the solver is, and why it matters
+///
+/// Measured at pile sizes twenty, forty and sixty: **23.6, 18.7 and 18.4**, mean 20.3.
+/// Against 32 for a body simply sliding the whole time, that is close to linear -- the
+/// pile is still going, and it is why a pile of forty never sleeps while a stack of five
+/// does. Sleeping is worth a hundredfold on a settled workload, so this is the one number
+/// standing between the solver and its largest win.
+///
+/// The cause is understood: friction here measures each step's drift from the start of
+/// *that* step, so whatever slip a step fails to remove is forgiven by the next one,
+/// whose mark is the new position. The error per step is a fraction of a millimetre and
+/// the forgiveness is total, so it accumulates linearly for ever.
+///
+/// # The fix that was tried, and what it cost
+///
+/// Carrying each contact's unremoved slip across steps -- a friction anchor, re-anchored
+/// when the slip passes what Coulomb could pull back -- **does** fix this: the same three
+/// sizes become 7.3, 4.7 and 8.0, mean 6.7, and a lone capsule on level ground goes from
+/// sliding at a constant 15 mm a second to still to the last bit.
+///
+/// It was not taken, because it costs the thing it was for. An anchor gives each contact
+/// its own historical reference point, and those points are only mutually consistent when
+/// the contacts are: one body on a plane is fine, a stack is not. Measured, steps to fall
+/// asleep went 18, 22, 409, 358 at stack heights one, two, three and five, and with
+/// anchors 18, 22, 686, **never** -- the five-stack topples instead. A pile of forty
+/// drifts half as far and jitters twice as much. Per-step forgiveness is what makes every
+/// friction target agree with every other one each step; removing it buys the creep back
+/// and sells the settling.
+///
+/// So the bound below is where the solver is. Tightening it wants friction that remembers
+/// *and* stays consistent across a constraint graph, which is a harder thing than either
+/// half alone.
+#[test]
+fn a_settled_pile_wanders_but_does_not_drift() {
+    for count in [20usize, 40, 60] {
+        let mut s = heap(count);
+        for _ in 0..1500 {
+            s.step(DT, G, 8);
+        }
+        let short = median_drift(&mut s, 15);
+        let long = median_drift(&mut s, 480);
+        assert!(
+            short > 0.0,
+            "a pile of {count} stopped dead, so this test has measured nothing -- which \
+             would be very good news and means this law wants rewriting as an equality",
+        );
+        let ratio = long / short;
+        assert!(
+            ratio < 28.0,
+            "a pile of {count} moved {ratio:.1} times as far in thirty-two times the \
+             window ({short:.5} then {long:.5}); at 32 every body is sliding the whole \
+             time, the solver measures about 20, and anything worse is a new fault on top \
+             of the known one",
+        );
+    }
+}
+
+/// How far the middle body of a pile's surface moves over `steps`, as a fraction of its
+/// own reach. The median rather than the mean, because one body rolling off the top of a
+/// pile is not what this is asking about.
+fn median_drift(s: &mut Skeleton, steps: usize) -> f64 {
+    let before: Vec<_> = (0..s.len())
+        .map(|i| (s.position(i), s.orientation(i)))
+        .collect();
+    for _ in 0..steps {
+        s.step(DT, G, 8);
+    }
+    let mut ratios: Vec<f64> = (0..s.len())
+        .map(|i| {
+            let (was, now) = (before[i], (s.position(i), s.orientation(i)));
+            let body = s.body(i);
+            let travel = speed((now.0 .0 - was.0 .0, now.0 .1 - was.0 .1, now.0 .2 - was.0 .2));
+
+            // The turn since, as an axis-angle vector, split into the part about the
+            // capsule's own long axis and the rest. See the law above for why the two are
+            // charged at different radii.
+            let delta = now.1.multiply(&was.1.conjugate());
+            let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
+            let turn = (
+                2.0 * sign * delta.x,
+                2.0 * sign * delta.y,
+                2.0 * sign * delta.z,
+            );
+            let axis = was.1.rotate_point((0.0, 1.0, 0.0));
+            let along = turn.0 * axis.0 + turn.1 * axis.1 + turn.2 * axis.2;
+            let across = speed((
+                turn.0 - along * axis.0,
+                turn.1 - along * axis.1,
+                turn.2 - along * axis.2,
+            ));
+
+            let reach = body.radius + body.half_length;
+            (travel + across * reach + along.abs() * body.radius) / reach
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.partial_cmp(b).expect("no body is at a NaN"));
+    ratios[ratios.len() / 2]
+}
+
 /// **A heap settles, stays where it settled, and stays out of the ground.**
 ///
 /// The three failures this catches are different: bodies still moving means the solver is
