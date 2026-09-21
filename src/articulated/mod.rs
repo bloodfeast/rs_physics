@@ -1530,6 +1530,60 @@
 //! other fixture in `benches` measures a scene that costs what it costs; this is the one
 //! number that goes *down* as its fixture runs.
 //!
+//! # The GPU question, which double precision answers
+//!
+//! A graph-coloured constraint solve is a GPU-shaped workload: a colour is thousands of
+//! independent constraints and nothing in it crosses. That is what PhysX and FleX do, and
+//! it is the obvious thing to reach for when a step costs milliseconds. An earlier attempt
+//! here was withdrawn on the grounds that its entire margin was the host's fork overhead --
+//! a verdict since made doubtful, because the host side it was compared against was
+//! measured on an oversubscribed pool and with the benchmark ordering defect
+//! `benches/articulated.rs` now documents.
+//!
+//! **So it was measured again, and the thing that decides it is not the solver at all. It
+//! is that this module is `f64`.**
+//!
+//! Consumer NVIDIA silicon runs double precision at a fraction of its single-precision
+//! rate -- one sixty-fourth on Ampere. Measured on an RTX 3090 against an i9-10980XE,
+//! through CubeCL's CUDA runtime, a dependent FMA chain with eight independent accumulators
+//! per thread so that both sides are throughput-bound rather than latency-bound:
+//!
+//! ```text
+//!   gpu f32    18.6 .. 19.8 TFLOP/s
+//!   gpu f64     0.536 .. 0.538      97 per cent of the card's f64 peak
+//!   cpu f64     0.244 .. 0.267      with `-C target-cpu=native`
+//! ```
+//!
+//! **Thirty-five times between the GPU's own two precisions, and two times between the GPU
+//! and the CPU in the one this crate uses.** That two is a ceiling, not an estimate: it is
+//! pure arithmetic with no kernel launches, no transfers, no divergence and no irregular
+//! access, and a coloured solve has all four. Twenty-six stages times eight passes is two
+//! hundred launches a step before any work happens.
+//!
+//! Two things about that measurement are worth keeping, because both were nearly reported
+//! wrong. The CPU figure moved by a factor of forty when `-C target-cpu=native` was added:
+//! without it `f64::mul_add` compiles to a libm call, a correctly-rounded software FMA, and
+//! the CPU appeared to lose by eighty times rather than two. And a single accumulator per
+//! thread measures FMA *latency* rather than throughput, which flatters whichever side has
+//! more threads to hide it with -- always the GPU. A comparison that gets either wrong
+//! produces a confident number pointing the wrong way.
+//!
+//! # So the precision is the fork, not the vendor
+//!
+//! Dropping to `f32` recovers a factor of thirty-five and costs
+//! `the_same_simulation_twice_is_bit_identical`, which is not a trade this module can make:
+//! a caller running lockstep needs the same bits on every machine, and GPU float behaviour
+//! varies by driver and by vendor. A caller who does *not* need that -- one animating
+//! bodies nobody's simulation state depends on -- is a different caller, and for them the
+//! thirty-five is the whole story.
+//!
+//! That is the shape a GPU path here would have to take: not this solver moved to the
+//! device, but a separate single-precision one for bodies whose positions nothing reads
+//! back. `src/particles/particle_backend.rs` already carries the machinery for deciding
+//! when such a path pays -- a measured cost model with a `crossover` that returns `None`
+//! when the answer is never -- and it is the right instrument to point at this before any
+//! kernel is written.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
