@@ -2266,6 +2266,9 @@ pub struct Skeleton {
     /// How many lanes a parallel pass may use, or `None` for the default. See
     /// [`Skeleton::set_lanes`].
     lanes: Option<usize>,
+    /// Whether the last solve pass was divided across lanes. See
+    /// [`Skeleton::solved_in_parallel`].
+    solved_in_parallel: bool,
     /// One bit per body: set means the body is simulated this step. A pinned body is
     /// never set, because it cannot move and there is nothing to simulate.
     awake: BitSet,
@@ -2375,6 +2378,7 @@ impl Default for Skeleton {
             grid: Grid::default(),
             sleeping: true,
             lanes: None,
+            solved_in_parallel: false,
             awake: BitSet::default(),
             retired: BitSet::default(),
             disturbing: BitSet::default(),
@@ -2914,6 +2918,27 @@ impl Skeleton {
     /// The lane budget in force. See [`Skeleton::set_lanes`].
     pub fn lanes(&self) -> usize {
         self.lanes.unwrap_or_else(rayon::current_num_threads)
+    }
+
+    /// **Whether the last solve divided its work across lanes**, rather than running the
+    /// whole of it on the calling thread.
+    ///
+    /// This is here because of what it is like to be without it. The crate's sharpest
+    /// promise is that the answer does not depend on how many threads computed it, and the
+    /// law that states it ran a heap of forty bodies at one, two and eight threads and
+    /// compared the results. That heap's widest pass is about two hundred constraints
+    /// against a [`crew::PASS_FLOOR`] of five hundred and twelve, so every one of those
+    /// runs took the serial path: the law was comparing single-threaded output with
+    /// single-threaded output and could not have failed. The parallel writes it was
+    /// written to police are the raw-pointer scatter in [`scatter`], so it was the guard on
+    /// the unsafe as well.
+    ///
+    /// A fixture can drift under a floor without anybody noticing, and no amount of care
+    /// in the test will see it, because the thing to assert is not visible from outside. So
+    /// it is visible now. A caller sizing scenes can use it for the same reason: it says
+    /// whether a scene is large enough to be worth the pool at all.
+    pub fn solved_in_parallel(&self) -> bool {
+        self.solved_in_parallel
     }
 
     /// Whether this body has been retired. See [`Skeleton::retire`].
@@ -4313,7 +4338,8 @@ impl Skeleton {
             }
         };
 
-        crew::each_stage(plan.len(), work, self.lanes(), run);
+        let lanes = crew::each_stage(plan.len(), work, self.lanes(), run);
+        self.solved_in_parallel = lanes > 1;
     }
 
     /// **Which ground patches are stuck, and where they stuck**, decided once a step while

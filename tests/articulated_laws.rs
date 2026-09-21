@@ -35,8 +35,8 @@ const G: (f64, f64, f64) = (0.0, -9.80665, 0.0);
 /// same answer as the run somebody reported.
 #[test]
 fn the_same_simulation_twice_is_bit_identical() {
-    let first = settled_heap_state(40, 300);
-    let second = settled_heap_state(40, 300);
+    let first = settled_heap_state(300);
+    let second = settled_heap_state(300);
     assert_eq!(
         first.len(),
         second.len(),
@@ -62,6 +62,15 @@ fn the_same_simulation_twice_is_bit_identical() {
 /// shared arrays is sound only if the indices really are disjoint; if they are not, the
 /// result depends on which thread arrived first, and that shows up here as a divergence
 /// long before it shows up as a crash.
+///
+/// **Which is why the heap has to be big enough to actually go parallel, and why the law
+/// now asserts that it did.** It used to run forty bodies, whose widest pass is around two
+/// hundred constraints against a pass floor of five hundred and twelve: every one of the
+/// three thread counts took the serial path, so this compared single-threaded output with
+/// single-threaded output and could not have failed. A fixture can drift under a floor
+/// without anybody noticing, and no care taken in the test can see it, because whether the
+/// parallel path ran is not visible from outside -- so `Skeleton::solved_in_parallel`
+/// exists and is checked here.
 #[test]
 fn the_answer_does_not_depend_on_how_many_threads_ran_it() {
     let counts = [1usize, 2, 8];
@@ -71,7 +80,7 @@ fn the_answer_does_not_depend_on_how_many_threads_ran_it() {
             .num_threads(threads)
             .build()
             .expect("a thread pool");
-        answers.push(pool.install(|| settled_heap_state(40, 300)));
+        answers.push(pool.install(|| settled_heap_state(300)));
     }
 
     for (n, other) in answers.iter().enumerate().skip(1) {
@@ -1500,11 +1509,18 @@ fn heap(count: usize) -> Skeleton {
 
 /// A heap stepped `steps` times, reduced to the exact state of every body. Bit patterns
 /// rather than floats, so that a comparison is a comparison and not a tolerance.
-fn settled_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64)> {
-    let mut s = heap(count);
+fn settled_heap_state(steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64)> {
+    let mut s = crowded_heap();
+    let mut ever_parallel = false;
     for _ in 0..steps {
         s.step(DT, G, 8);
+        ever_parallel |= s.solved_in_parallel();
     }
+    assert!(
+        ever_parallel || rayon::current_num_threads() == 1,
+        "not one of the {steps} steps divided its work across lanes, so whatever this run \
+         is being compared against, both sides of the comparison ran on one thread",
+    );
     (0..s.len())
         .map(|i| {
             let p = s.position(i);
@@ -1536,14 +1552,76 @@ fn settled_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u6
 /// different body a step earlier and the two runs would not even be comparable. Returning
 /// it alongside the positions is what makes this a sharper determinism test than the one
 /// without retirements rather than a weaker one.
-fn ploughed_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64, usize)> {
+/// The side of the square [`crowded_heap`] drops bodies over, and how many it stacks on
+/// each square of it.
+///
+/// Sized so that a pass clears the crate's internal floor on going parallel by a wide
+/// margin for the whole run rather than for a step or two at the start -- which is the
+/// difference between a law that exercises the parallel path and one that merely touched
+/// it. The number is checked rather than trusted: both readers below assert that the steps
+/// they timed actually divided their work, which is the whole reason
+/// `Skeleton::solved_in_parallel` is public.
+const CROWD_SIDE: usize = 18;
+const CROWD_DEEP: usize = 4;
+
+/// **A heap that is wide rather than tall**, for the two laws about determinism.
+///
+/// [`heap`] drops its bodies down a single narrow column, which suits the laws that use it
+/// -- but a column is a queue: the bodies meet the floor a few at a time, so however many
+/// are in it, the number touching *at once* stays around one per body and a pass of it
+/// never reaches the size at which the solve is divided across lanes. Measured, a column of
+/// two thousand crossed the floor on its first step and on none of the two hundred and
+/// ninety-nine after it.
+///
+/// So this drops them over a square instead, a few deep, and they collapse into a broad
+/// heap that keeps thousands of contacts live for the whole run. That matters here and
+/// nowhere else: these two laws are the ones asserting that the answer does not depend on
+/// how many threads computed it, and they are therefore the guard on the raw-pointer
+/// scatter in the crate's `scatter` module. A guard that runs the serial path is not a
+/// guard at all -- which is what they did, on a heap of forty, for as long as they have
+/// existed.
+fn crowded_heap() -> Skeleton {
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    for high in 0..CROWD_DEEP {
+        for row in 0..CROWD_SIDE {
+            for column in 0..CROWD_SIDE {
+                let n = (high * CROWD_SIDE * CROWD_SIDE + row * CROWD_SIDE + column) as f64;
+                let mut body = Body::capsule(
+                    4.0,
+                    0.08,
+                    0.4,
+                    (
+                        column as f64 * 0.55 + 0.02 * (n * 1.7).sin(),
+                        0.3 + 0.55 * high as f64,
+                        row as f64 * 0.55 + 0.02 * (n * 2.3).cos(),
+                    ),
+                );
+                // Turned every which way, so the heap collapses into something disorderly
+                // rather than into a lattice that would settle without ever touching.
+                let axis = (1.0, 0.3 * (n * 0.9).sin(), 0.7 * (n * 1.3).cos());
+                let norm = speed(axis);
+                body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+                    (axis.0 / norm, axis.1 / norm, axis.2 / norm),
+                    0.4 * n,
+                );
+                s.add_body(body);
+            }
+        }
+    }
+    s
+}
+
+fn ploughed_heap_state(steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64, usize)> {
     /// Newtons. See above: the caller's judgement, stated in the caller.
     const CRUSHED: f64 = 1600.0;
 
-    let mut s = heap(count);
-    let mut retired_at = vec![usize::MAX; count];
+    let mut s = crowded_heap();
+    let mut ever_parallel = false;
+    let mut retired_at = vec![usize::MAX; s.len()];
     for step in 0..steps {
         s.step(DT, G, 8);
+        ever_parallel |= s.solved_in_parallel();
         for i in 0..s.len() {
             if !s.is_retired(i) && s.normal_load(i) > CRUSHED {
                 assert!(s.retire(i), "a live body refused to be retired");
@@ -1551,6 +1629,11 @@ fn ploughed_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u
             }
         }
     }
+    assert!(
+        ever_parallel || rayon::current_num_threads() == 1,
+        "not one of the {steps} steps divided its work across lanes, so both sides of \
+         whatever this run is compared against ran on one thread",
+    );
     (0..s.len())
         .map(|i| {
             let p = s.position(i);
@@ -1583,8 +1666,8 @@ fn ploughed_heap_state(count: usize, steps: usize) -> Vec<(u64, u64, u64, u64, u
 /// [`ploughed_heap_state`].
 #[test]
 fn retiring_bodies_mid_run_is_still_bit_identical_and_still_schedule_free() {
-    let first = ploughed_heap_state(40, 300);
-    let second = ploughed_heap_state(40, 300);
+    let first = ploughed_heap_state(300);
+    let second = ploughed_heap_state(300);
     let retired = first.iter().filter(|b| b.6 != usize::MAX).count();
     assert!(
         retired > 0 && retired < first.len(),
@@ -1605,7 +1688,7 @@ fn retiring_bodies_mid_run_is_still_bit_identical_and_still_schedule_free() {
             .num_threads(threads)
             .build()
             .expect("a thread pool");
-        let answer = pool.install(|| ploughed_heap_state(40, 300));
+        let answer = pool.install(|| ploughed_heap_state(300));
         for (i, (a, b)) in first.iter().zip(answer.iter()).enumerate() {
             assert_eq!(
                 a, b,

@@ -263,14 +263,18 @@ impl Gate {
 ///
 /// The closure must be `Sync` because every lane calls it at once, and it must be
 /// prepared for `lanes` to be one: that is not a special case, it is the small-input path.
+/// Returns how many lanes it used, which is one when it ran on the calling thread. The
+/// caller keeps that so it can be asked -- see [`super::Skeleton::solved_in_parallel`],
+/// which exists because a law that cannot tell whether the parallel path ran is a law that
+/// passes by running the serial one twice.
 pub(super) fn each_stage(
     stages: usize,
     work_items: usize,
     budget: usize,
     work: impl Fn(Lane) + Sync,
-) {
+) -> usize {
     if stages == 0 {
-        return;
+        return 0;
     }
     // Never more lanes than the pool has threads to put them on, whatever the caller asked
     // for: a lane the broadcast cannot deliver is a lane the gate would wait for for ever.
@@ -283,7 +287,7 @@ pub(super) fn each_stage(
                 lanes: 1,
             });
         }
-        return;
+        return 1;
     }
 
     let gate = Gate::new(lanes);
@@ -323,6 +327,7 @@ pub(super) fn each_stage(
             std::panic::resume_unwind(payload);
         }
     });
+    lanes
 }
 
 #[cfg(test)]
