@@ -657,12 +657,158 @@
 //!   rejected in the section above. A sink would have to be something that removes momentum
 //!   without being asked, and this module does not have one and may not have a tuned one.
 //!
-//! So the state of it: the walk is gone and the sleeping is not, and what is left is a
-//! limit cycle at a third of one step of gravity that eight passes do not resolve and no
-//! bound on the read-back velocity can see. Anything aimed at it next has to be a genuine
-//! velocity-level solve -- one that can move `prev_position` without moving the body, which
-//! is the one correction shape this module does not have -- or it has to accept that a
-//! position-based solver at sixty hertz and eight passes leaves this much.
+//! So the state of it was: the walk gone, the sleeping not, and what was left a limit
+//! cycle at a third of one step of gravity that eight passes did not resolve and no bound
+//! on the read-back velocity could see. That closing argument is what the section below
+//! is: the one shape this module did not have.
+//!
+//! # The velocity pass, which is the half of XPBD this was missing
+//!
+//! Everything above is a **positional** solver: constraints move bodies, and velocity is
+//! whatever the movement divided by the step says it is. Muller's formulation has a second
+//! traversal after that one, over the same contacts, which corrects *velocities* directly
+//! -- it is where restitution lives, and where friction acts on what the positional solve
+//! left moving. This module never had it, and the limit cycle above is what its absence
+//! looks like: a contact push read back as speed, a joint pulling it back, and nothing
+//! anywhere in the step entitled to say what the relative velocity of two resting surfaces
+//! ought to be.
+//!
+//! **It needed a correction shape that did not exist.** `Correction::translation` moves the
+//! body and lets the step read the move back as speed; `Correction::free_translation` moves
+//! it and hides the move, by shifting where it came from as well. Neither can change a
+//! velocity without changing a position. The third kind moves where the body came from
+//! *instead* of where it is -- see [`Charge`] and [`scatter::Bodies::apply_velocity`] --
+//! and it is the only thing in the module that can take momentum out and leave the solve's
+//! answer standing. That is the sink the section above says does not exist; it exists now.
+//!
+//! ## What the pass says, and where each number comes from
+//!
+//! * **A resting contact is perfectly inelastic.** The relative normal velocity of two
+//!   loaded surfaces should be zero when the step ends, and restitution is the coefficient
+//!   that would make it something else. Zero is a statement about rigid capsules lying on
+//!   one another, not a damping constant; a caller who wants a bouncy contact wants
+//!   `-e * closing` as the target and this is the only place in the module that number
+//!   could act.
+//! * **And a contact may take back only what it gave.** Cancelling a separating velocity
+//!   means removing normal impulse from the step, and the most that can be removed is the
+//!   part the contact actually handed the bodies as momentum -- the *driven* share, which
+//!   is the overlap the step itself made and the only share charged as velocity. Take more
+//!   and the pair is being pulled together, which a unilateral constraint may never do.
+//!   [`contacts::Spent::driven`] is that total; it is the same "budget for the step" shape
+//!   Coulomb's cone already has, one law over.
+//! * **Coulomb at the velocity level, out of the same cone.** The tangential half asks for
+//!   the impulse that stops the slip and adds it to the resultant the positional passes
+//!   accumulated, clipped by the same `friction * spent.normal`. It does **not** get a
+//!   second budget, and that is not conservatism: a contact that could spend
+//!   `friction * N` twice in one step has a coefficient of twice `friction`, and a slope
+//!   that should let go at Coulomb's angle would hold to twice its tangent. Sharing the
+//!   cone also sorts the two cases with nothing to decide -- a sliding contact has spent it
+//!   in the positional passes and slides exactly as it did, and a sticking one has spent
+//!   only what it took to hold still.
+//!
+//! ## It is simultaneous, and that is the whole difference
+//!
+//! The first version was an ordered sweep over the coloured stages, like the positional
+//! solve, and it is the same mistake one level up. A Gauss-Seidel sweep round a loop leaves
+//! the same small bias every step and the ground rectifies it into travel -- which is the
+//! diagnosis this page already carries for the positional ratchet, arriving a second time
+//! by the same route. Measured on the seventeen-bone rig over twenty-four draws: the worst
+//! drift went from 0.19 of a reach to 6.1 and its straightness from 0.31 to 0.90, and
+//! *converging* that pass -- eight sweeps instead of one -- made all twenty-four walk two
+//! reaches at a straightness of 0.56, which is what a fixed point that depends on the order
+//! looks like.
+//!
+//! So the pass reads one state and every constraint answers against it. The read-back sweep
+//! runs **before** the pass as well as after: the first gives it the velocities, the second
+//! delivers what it decided. Nothing rewrites those arrays while the pass is running, so
+//! the answer does not depend on which contact was visited first, and determinism is
+//! unaffected -- within a colour the bodies are disjoint exactly as [`scatter`] requires,
+//! and across colours the barrier order is fixed.
+//!
+//! What a simultaneous pass costs is that a body named by three contacts is asked for three
+//! full corrections at once. [`Skeleton::velocity_share`] is the mean that answers it, and
+//! **both ends of a pair take the same one** -- the smaller of the two -- because the share
+//! of an impulse that is momentum exchange cannot be one figure for the body receiving it
+//! and another for the body giving it. Charging each end against its own is the mistake
+//! that moved a free skeleton's centre of mass by 1.8 m, and
+//! `a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass` is the guard on it.
+//!
+//! ## Two things deliberately left out of it
+//!
+//! * **The plane's tangential half.** The ground patch already remembers where it stuck and
+//!   what it stuck under, and its friction answers this step's slip and the slip earlier
+//!   steps left behind, at two different authorities -- that memory is what stopped the walk
+//!   in the first place. A velocity-level friction on the same patch answers the same slip
+//!   a second time with none, and the two disagree about what the past was. Measured, adding
+//!   it takes the rig from nine draws of sixteen going to sleep to one, while the drift does
+//!   not move. The plane is the one surface whose tangential half is already complete.
+//! * **Rolling resistance.** It is the module's model of a *deformed patch* -- the load
+//!   moves ahead of the contact point and the offset is a torque -- and it exists precisely
+//!   because Coulomb cannot see a roll: the contact point of a rolling body is
+//!   instantaneously still, so there is no relative surface velocity there for a
+//!   velocity-level law to act on. What an angular version would act on instead is the
+//!   relative spin of the two bodies, which between two bones of one skeleton is mostly the
+//!   joints doing their job. Measured, resisting it takes the rig from no draw of
+//!   twenty-four travelling past the jostling allowance to six, the worst at 4.4 reaches.
+//!
+//! ## What it buys
+//!
+//! The rig is the seventeen-bone one, self-collision on, eight passes. The residual is the
+//! median bone's speed on a settled rig, six draws, as a fraction of `g dt`; the cycle is
+//! what the section above measured at a third of one step of gravity, the same third on
+//! every draw. Columns are capsules lying flat on the plane, sixteen draws, capped at
+//! twelve thousand steps; piles are eight draws of the median body's surface travel over
+//! four hundred and eighty steps.
+//!
+//! ```text
+//!   rig, 16 draws, how many sleep inside 2000 steps at 8 passes
+//!     before   0 of 16                      after   9 of 16   (14 of 32)
+//!   rig, settled residual as a fraction of g dt
+//!     before   0.335 .. 0.388               after   0.062 .. 0.182
+//!   rig, 24 draws, drift over 32 windows and the worst straightness
+//!     before   1 past 0.113, worst 0.19 at 0.31
+//!     after    0 past 0.113, worst 0.083 at 0.12
+//!
+//!   steps to sleep    column of 3    4         5          6          7          8
+//!   before                    325       220   207..224   298..519  648..1132  593..2961
+//!   after                     363   630..767   225..339   204..564   746..920   304..427
+//!
+//!   settled pile of                20              40              60
+//!   before                 0.000..0.008    0.037..0.105    0.107..0.203
+//!   after                  0.000..0.090    0.073..0.124    0.077..0.218
+//! ```
+//!
+//! **The limit cycle is dissipated**: the residual falls by a factor of two to five and,
+//! more to the point, stops being the same third on every draw -- it is a spread now rather
+//! than an attractor. The rig also stops propping itself up: its total energy settles 10 to
+//! 25 per cent lower and does not creep, where before it held 0.73 to 0.82 J of kinetic
+//! energy for as long as it was watched. And the walk does not come back -- the worst draw
+//! of twenty-four is better than it was on every one of the three statistics the law
+//! weighs.
+//!
+//! **What it does not close.** Nine draws of sixteen is not most of them, and at
+//! twenty-four passes the rig goes to sleep in five draws of sixteen where it used to
+//! manage eight -- more passes no longer help as much, because what is left is not a
+//! convergence shortfall. Two of sixteen draws still sit at 0.43 and 0.58 of `g dt`, so
+//! the attractor is gone but something in the same band is still reachable. A settled pile
+//! of twenty gains a tail it did not have (0.008 to 0.090 over eight draws) and one of
+//! forty drifts about a fifth further, both well inside what
+//! `a_settled_pile_wanders_but_does_not_drift` allows and both a real cost. A column of
+//! four takes three times as long to settle, while a column of eight takes a seventh as
+//! long and the worst column of any height falls from 2961 steps to 920.
+//!
+//! **What it costs.** A traversal and a half -- two velocity stages over the contacts, one
+//! over the ground, and the extra read-back sweep -- against eight positional passes.
+//! Measured as a matched pair back to back, because this machine's variance between
+//! sessions is larger than the effect: `one/8` 38.5..42.0 us becomes 51.6..53.6,
+//! `pile/8` 3.24..4.10 ms becomes 4.71..4.92, `arriving/8` 7.10..7.21 ms becomes
+//! 7.75..8.04. So a quarter to a third on the small scene and rather less on the large
+//! ones, and part of even that is not arithmetic: the pile bench steps a scene that is
+//! still arriving, so a change that alters what has settled by the time it is timed alters
+//! the timing. **And two more vectors on [`Correction`] cost more than the pass does** --
+//! taking it from 120 bytes to 176 put `one/8` at 53.6 us and `pile/8` at 4.92 ms with
+//! the pass itself unchanged, which is why the third correction kind shares the first's
+//! fields rather than adding its own. See [`Charge`].
 //!
 //! # Allocation
 //!
@@ -685,7 +831,8 @@ mod sleep;
 use broadphase::{Grid, Jointed};
 use contacts::{
     capsule_contact, ground_contacts, solve_contact_friction, solve_contact_normal,
-    solve_ground_friction, solve_ground_normal, Contact, GroundContact, Spent,
+    solve_contact_velocity_friction, solve_contact_velocity_normal, solve_ground_friction,
+    solve_ground_normal, solve_ground_velocity_normal, Contact, GroundContact, Spent,
 };
 use scatter::Bodies;
 use sleep::{settling_steps, BitSet, Components, Islands, NO_ISLAND, STILL_FRACTION};
@@ -1114,6 +1261,41 @@ impl Correction {
     }
 }
 
+/// **Which of the three things one impulse folded into a correction is.**
+///
+/// The first two are the two pairs of fields on [`Correction`]. The third is the same
+/// fields as the first, delivered by [`scatter::Bodies::apply_velocity`] instead of
+/// [`scatter::Bodies::apply`] -- and it is a third kind rather than a spelling of the
+/// first, because what the applying half does with it is the opposite: it moves where the
+/// body *came from* instead of where it is, so the read-back velocity changes and the
+/// position does not.
+///
+/// It is the shape a position-based solver needs and does not otherwise have, and without
+/// it a contact's energy has nowhere to go: charging a correction as velocity puts
+/// momentum in, charging it as free leaves the momentum where it was, and there is no
+/// third answer until something can take momentum out without moving anything. See the
+/// module header's section on the velocity pass.
+///
+/// **Sharing the fields is a measurement rather than a shortcut.** Two more vectors on
+/// [`Correction`] took it from 120 bytes to 176, and every joint and every contact in the
+/// positional solve carries one whether or not it has anything velocity-level to say:
+/// measured, `one/8` went from 38.8 to 53.6 us and `pile/8` from 3.24 to 4.92 ms, where
+/// the pass itself is one traversal in nine. A correction is either positional or
+/// velocity-level and never both -- the velocity pass has its own stages -- so the fields
+/// are the same fields and the stage decides what they mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Charge {
+    /// Move the body, and let the step read the move back as velocity. Every joint, and
+    /// the share of a contact's overlap the step itself drove.
+    Moving,
+    /// Move the body without the step reading it back: the overlap a contact inherited
+    /// rather than made.
+    Free,
+    /// Change what the step reads back without moving the body. The velocity pass, and
+    /// nothing else.
+    Still,
+}
+
 /// One indivisible piece of a solver pass: a colour, or the serial tail.
 ///
 /// A pass is a list of these, and every lane walks the same list. They exist as a list
@@ -1151,6 +1333,24 @@ enum Stage {
 enum Half {
     Normal,
     Friction,
+    /// The velocity pass's normal half: a resting contact is perfectly inelastic, so it
+    /// may not leave the two surfaces separating. Runs once a step, after the passes.
+    VelocityNormal,
+    /// The velocity pass's tangential half: Coulomb and rolling resistance on what the
+    /// positional solve left moving, out of what is left of the step's own cone.
+    VelocityFriction,
+}
+
+/// **Which plan a call to [`Skeleton::solve_pass`] is walking.**
+///
+/// The three differ only in which stage list they name, which is why they are one
+/// function: the whole positional plan, the foreground prefix of it a background island
+/// gets, and the velocity pass. See [`Skeleton::plan_pass`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Which {
+    Full,
+    Near,
+    Velocity,
 }
 
 /// A set of bodies and the joints between them, solved together.
@@ -1277,8 +1477,26 @@ pub struct Skeleton {
     /// The same pass with every background island's constraints left out. See
     /// [`Skeleton::plan_pass`].
     plan_near: Vec<Stage>,
+    /// The velocity pass's plan: the same contact colours and the same ground set, in the
+    /// two velocity-level halves, and no joints. See [`Skeleton::plan_pass`].
+    plan_velocity: Vec<Stage>,
     plan_work: usize,
     plan_near_work: usize,
+    plan_velocity_work: usize,
+    /// **What fraction of one constraint's velocity-level correction a body may take.**
+    ///
+    /// The velocity pass reads one frozen state and every constraint answers against it,
+    /// so a body named by three contacts is asked for three full corrections and would be
+    /// corrected three times over. The reciprocal of how many constraints name it is the
+    /// mean of what they asked for, which is what a simultaneous pass means.
+    ///
+    /// A pair takes the **smaller** of its two ends' shares, and takes it at both ends.
+    /// The two must be one number: the share of an impulse that is momentum exchange
+    /// cannot be one figure for the body receiving it and another for the body giving it,
+    /// or the pair stops being equal and opposite and
+    /// `a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass` fails. Measured on
+    /// an earlier version of exactly this mistake, a free skeleton's centre moved 1.8 m.
+    velocity_share: Vec<f64>,
 
     /// The broad phase. See [`broadphase`] for why it is a grid.
     grid: Grid,
@@ -1373,8 +1591,11 @@ impl Default for Skeleton {
             anchor_reach: 0.0,
             plan: Vec::new(),
             plan_near: Vec::new(),
+            plan_velocity: Vec::new(),
             plan_work: 0,
             plan_near_work: 0,
+            plan_velocity_work: 0,
+            velocity_share: Vec::new(),
             grid: Grid::default(),
             sleeping: true,
             awake: BitSet::default(),
@@ -2193,9 +2414,59 @@ impl Skeleton {
         // constraint. See [`Skeleton::set_background`].
         let background = self.background_iterations.clamp(1, iterations);
         for pass in 0..iterations {
-            self.solve_pass(self.any_background && pass >= background);
+            let which = if self.any_background && pass >= background {
+                Which::Near
+            } else {
+                Which::Full
+            };
+            self.solve_pass(which, dt);
         }
 
+        self.read_velocities(dt);
+
+        // **The velocity pass**, which is the one thing an XPBD solver has that this did
+        // not: a traversal that corrects velocities rather than positions, where zero
+        // restitution and Coulomb's law act on what the positional solve left moving.
+        //
+        // It is **simultaneous**, and that is not an optimisation: every constraint reads
+        // the velocities the sweep above has just written and none of them is rewritten
+        // until the sweep below runs again, so the answer does not depend on the order the
+        // contacts were visited in. An *ordered* velocity sweep was built first and is the
+        // same mistake the positional solve's own header describes one level up -- a
+        // Gauss-Seidel sweep round a loop leaves the same small bias every step, and the
+        // ground rectifies it into travel. Measured on the seventeen-bone rig over
+        // twenty-four draws, the ordered version took the worst drift from 0.19 of a reach
+        // to 6.1 and its straightness from 0.31 to 0.90, and converging it harder made
+        // every one of the twenty-four walk two reaches at a straightness of 0.56, which
+        // is the signature of a fixed point that depends on the order.
+        //
+        // What a simultaneous pass costs is that a body named by several contacts is asked
+        // for several full corrections at once; [`Skeleton::velocity_share`] is the mean
+        // that answers it, and why both ends of a pair must take the same one.
+        //
+        // Skipped when there is nothing to solve, which is a skeleton with no contacts of
+        // any kind -- a free chain, a pendulum -- so that those pay nothing for it.
+        if !self.plan_velocity.is_empty() {
+            self.share_velocity();
+            self.solve_pass(Which::Velocity, dt);
+            self.read_velocities(dt);
+        }
+
+        self.settle(dt, length(gravity));
+        // After the solve rather than inside it, because what decides whether a patch is
+        // stuck is the Coulomb total the whole step spent, which only exists once the last
+        // pass has run. See [`Skeleton::anchor_ground`].
+        self.anchor_ground();
+    }
+
+    /// **One sweep to read both velocities back out of how far everything moved**, for
+    /// the same reason the predict is one sweep.
+    ///
+    /// A method rather than a tail of [`Skeleton::step`] because the step runs it twice:
+    /// once to give the velocity pass the state it reads, and once to deliver what that
+    /// pass decided. See the module header on the velocity pass.
+    fn read_velocities(&mut self, dt: f64) {
+        let wide = self.position.len() >= PARALLEL_FLOOR;
         // And one sweep to read both velocities back, for the same reason the predict is
         // one.
         let inv_dt = 1.0 / dt;
@@ -2292,14 +2563,7 @@ impl Skeleton {
                 )
                 .for_each(block);
         }
-
-        self.settle(dt, length(gravity));
-        // After the solve rather than inside it, because what decides whether a patch is
-        // stuck is the Coulomb total the whole step spent, which only exists once the last
-        // pass has run. See [`Skeleton::anchor_ground`].
-        self.anchor_ground();
     }
-
     /// The four body arrays every correction writes, as the disjoint-scatter view a
     /// colour is applied through. See [`scatter`] for why, and for the safety argument.
     #[inline]
@@ -2328,8 +2592,10 @@ impl Skeleton {
     fn plan_pass(&mut self) {
         self.plan.clear();
         self.plan_near.clear();
+        self.plan_velocity.clear();
         self.plan_work = 0;
         self.plan_near_work = 0;
+        self.plan_velocity_work = 0;
         for colour in 0..self.live_joints.len() {
             let live = self.live_joints[colour].len();
             let near = self.live_joints_near[colour];
@@ -2393,6 +2659,77 @@ impl Skeleton {
                 self.plan_near_work += self.ground_colours.len();
             }
         }
+
+        // **And the velocity pass's own plan**, which is the same list twice more: every
+        // contact's velocity-level normal half, then every contact's velocity-level
+        // tangential half.
+        //
+        // **No joints**, and that was measured rather than assumed. A joint has an obvious
+        // velocity constraint -- the two anchors are one point, so they have one velocity
+        // -- and solving the contacts without it looks over-determined, since a contact's
+        // velocity correction leaves the joint's violated. It is much worse: twenty-three
+        // draws of twenty-four travel, the worst eighteen reaches. The reason is that the
+        // velocity of a material point read back from a position-based step is
+        // `(position - prev_position) / dt` plus `w x r`, and for a body that has turned
+        // over the step those two do not add up to where the point actually went. The
+        // error is second order in the turn, it is not zero for a rigid articulated
+        // motion, and a bilateral constraint hammers it every step. A contact's normal and
+        // tangent tolerate it because they are unilateral and bounded by what the
+        // positional solve spent; a joint has no such bound.
+        //
+        // It names the whole of each list rather than a foreground prefix. A background
+        // island is given fewer *passes*; this runs once a step whatever the pass count
+        // is, so there is nothing in it to reduce and a reduced copy would be the same
+        // list.
+        for half in [Half::VelocityNormal, Half::VelocityFriction] {
+            for colour in 0..self.contact_colours.len() {
+                let live = self.contact_colours[colour].len();
+                if live > 0 {
+                    self.plan_velocity.push(Stage::Contacts {
+                        colour: colour as u32,
+                        upto: live as u32,
+                        half,
+                    });
+                    self.plan_velocity_work += live;
+                }
+            }
+            if !self.contact_overflow.is_empty() {
+                self.plan_velocity.push(Stage::Overflow { half });
+            }
+            // **The plane's tangential half is not in this pass**, and that is the one
+            // asymmetry in it. See [`contacts::solve_ground_friction`]: the ground patch
+            // already carries a memory of where it stuck and what it stuck under, and its
+            // friction answers this step's slip and the slip earlier steps left behind, at
+            // two different authorities. A velocity-level friction on the same patch
+            // answers the same slip a second time with no memory, and the two disagree
+            // about what the past was. Measured on the seventeen-bone rig at eight passes,
+            // adding it takes the draws that go to sleep from nine of sixteen to one,
+            // while the drift does not move. The plane is the one surface whose tangential
+            // half is already complete.
+            if half == Half::VelocityNormal && !self.ground_colours.is_empty() {
+                self.plan_velocity.push(Stage::Ground { half });
+                self.plan_velocity_work += self.ground_colours.len();
+            }
+        }
+    }
+
+    /// How many constraints name each body this step, as the reciprocal. See
+    /// [`Skeleton::velocity_share`].
+    fn share_velocity(&mut self) {
+        self.velocity_share.clear();
+        self.velocity_share.resize(self.position.len(), 0.0);
+        for contact in self.contacts.iter() {
+            self.velocity_share[contact.a] += 1.0;
+            self.velocity_share[contact.b] += 1.0;
+        }
+        for contact in self.ground_contacts.iter() {
+            self.velocity_share[contact.body] += 1.0;
+        }
+        for share in self.velocity_share.iter_mut() {
+            if *share > 0.0 {
+                *share = 1.0 / *share;
+            }
+        }
     }
 
     /// **One pass over every colour**, handed to the pool once.
@@ -2402,7 +2739,7 @@ impl Skeleton {
     /// the next one starts, which is what the colouring requires, but it costs a barrier
     /// rather than a fork. See [`crew`] for the measurement that demanded it and for why
     /// this adds no unsafety to what [`scatter`] already argued.
-    fn solve_pass(&mut self, near_only: bool) {
+    fn solve_pass(&mut self, which: Which, dt: f64) {
         #[cfg(debug_assertions)]
         self.check_colours_are_disjoint();
 
@@ -2412,10 +2749,10 @@ impl Skeleton {
         let contact_impulse = scatter::Cells::of(&mut self.contact_impulse);
         let ground_impulse = scatter::Cells::of(&mut self.ground_impulse);
 
-        let (plan, work) = if near_only {
-            (&self.plan_near, self.plan_near_work)
-        } else {
-            (&self.plan, self.plan_work)
+        let (plan, work) = match which {
+            Which::Full => (&self.plan, self.plan_work),
+            Which::Near => (&self.plan_near, self.plan_near_work),
+            Which::Velocity => (&self.plan_velocity, self.plan_velocity_work),
         };
         let colours = &self.live_joints;
         let contact_colours = &self.contact_colours;
@@ -2435,6 +2772,12 @@ impl Skeleton {
         let ground_anchor = &self.ground_anchor;
         let ground_stuck = &self.ground_stuck;
         let anchor_reach = self.anchor_reach;
+        // Read-only, and frozen for the whole of a velocity pass: the read-back sweep
+        // wrote them before the pass began and the next one will rewrite them after it.
+        // That is what makes the pass simultaneous rather than a second ordered sweep.
+        let velocity = &self.velocity;
+        let angular_velocity = &self.angular_velocity;
+        let velocity_share = &self.velocity_share;
 
         // SAFETY: the argument is the one [`scatter`] makes, and every part of it still
         // holds here.
@@ -2468,6 +2811,14 @@ impl Skeleton {
         //   still runs over the whole colour, and the barrier between the two halves is the
         //   same barrier that separates any other pair of stages -- which is what makes the
         //   normals' writes visible to the frictions that read them.
+        // * **The velocity pass is two more stages of the same kind**, over the same
+        //   colours and the same ground set, so it adds nothing to this argument either --
+        //   and it adds one thing that makes it easier rather than harder: it writes no
+        //   running impulse at all. There is one velocity-level correction per contact per
+        //   step, so there is nothing to carry between passes; it reads what the positional
+        //   solve spent and leaves it alone. The arrays it writes are `prev_position` and
+        //   `prev_orientation`, which are two of the four [`scatter::Bodies`] already
+        //   covers.
         // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
         let run = |lane: crew::Lane| unsafe {
             match plan[lane.stage] {
@@ -2509,6 +2860,10 @@ impl Skeleton {
                         radius,
                         friction,
                         rolling,
+                        dt,
+                        velocity,
+                        angular_velocity,
+                        velocity_share,
                     );
                 }
                 Stage::Overflow { half } => {
@@ -2524,6 +2879,10 @@ impl Skeleton {
                             radius,
                             friction,
                             rolling,
+                            dt,
+                            velocity,
+                            angular_velocity,
+                            velocity_share,
                         );
                     }
                 }
@@ -2535,30 +2894,55 @@ impl Skeleton {
                     for &k in &set[lane.span(set.len())] {
                         let contact = ground_contacts[k];
                         let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
-                        let (correction, totals) = match half {
-                            Half::Normal => solve_ground_normal(
+                        let patch = ground_impulse.get(k);
+                        let correction = match half {
+                            Half::Normal => {
+                                let (correction, totals) =
+                                    solve_ground_normal(contact, &body, normal, distance, patch);
+                                ground_impulse.set(k, totals);
+                                correction
+                            }
+                            Half::Friction => {
+                                let (correction, totals) = solve_ground_friction(
+                                    contact,
+                                    &body,
+                                    friction,
+                                    rolling,
+                                    normal,
+                                    distance,
+                                    patch,
+                                    ground_stuck
+                                        .get(contact.body)
+                                        .then(|| ground_anchor[contact.body]),
+                                    anchor_reach,
+                                );
+                                ground_impulse.set(k, totals);
+                                correction
+                            }
+                            // One of each a step, so nothing is carried and nothing is
+                            // written back.
+                            Half::VelocityNormal => solve_ground_velocity_normal(
                                 contact,
                                 &body,
                                 normal,
-                                distance,
-                                ground_impulse.get(k),
+                                patch,
+                                dt,
+                                velocity[contact.body],
+                                angular_velocity[contact.body],
+                                velocity_share[contact.body],
                             ),
-                            Half::Friction => solve_ground_friction(
-                                contact,
-                                &body,
-                                friction,
-                                rolling,
-                                normal,
-                                distance,
-                                ground_impulse.get(k),
-                                ground_stuck
-                                    .get(contact.body)
-                                    .then(|| ground_anchor[contact.body]),
-                                anchor_reach,
-                            ),
+                            // The plane has no tangential half in the velocity pass, so it
+                            // is never given the stage. See [`Skeleton::plan_pass`].
+                            Half::VelocityFriction => Correction::none(),
                         };
-                        ground_impulse.set(k, totals);
-                        bodies.apply([correction, Correction::none()]);
+                        match half {
+                            Half::Normal | Half::Friction => {
+                                bodies.apply([correction, Correction::none()])
+                            }
+                            Half::VelocityNormal | Half::VelocityFriction => {
+                                bodies.apply_velocity([correction, Correction::none()])
+                            }
+                        }
                     }
                 }
             }
@@ -3006,24 +3390,59 @@ unsafe fn solve_some_contacts(
     radius: &[f64],
     friction: f64,
     rolling: f64,
+    dt: f64,
+    velocity: &[(f64, f64, f64)],
+    angular_velocity: &[(f64, f64, f64)],
+    velocity_share: &[f64],
 ) {
     for &k in set {
         let contact = contacts[k];
         let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
         let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
-        let (corrections, totals) = match half {
-            Half::Normal => solve_contact_normal(contact, &first, &second, impulse.get(k)),
-            Half::Friction => solve_contact_friction(
+        let spent = impulse.get(k);
+        let corrections = match half {
+            Half::Normal => {
+                let (corrections, totals) = solve_contact_normal(contact, &first, &second, spent);
+                impulse.set(k, totals);
+                corrections
+            }
+            Half::Friction => {
+                let (corrections, totals) =
+                    solve_contact_friction(contact, &first, &second, friction, rolling, spent);
+                impulse.set(k, totals);
+                corrections
+            }
+            // The velocity pass runs once a step, so there is one of each of these per
+            // contact: nothing accumulates, and what the positional solve spent is read
+            // rather than added to.
+            // Applied through [`scatter::Bodies::apply_velocity`], which is the difference
+            // between the two halves above and the two below.
+            Half::VelocityNormal => solve_contact_velocity_normal(
+                contact,
+                &first,
+                &second,
+                spent,
+                dt,
+                (velocity[contact.a], angular_velocity[contact.a]),
+                (velocity[contact.b], angular_velocity[contact.b]),
+                velocity_share[contact.a].min(velocity_share[contact.b]),
+            ),
+            Half::VelocityFriction => solve_contact_velocity_friction(
                 contact,
                 &first,
                 &second,
                 friction,
-                rolling,
-                impulse.get(k),
+                spent,
+                dt,
+                (velocity[contact.a], angular_velocity[contact.a]),
+                (velocity[contact.b], angular_velocity[contact.b]),
+                velocity_share[contact.a].min(velocity_share[contact.b]),
             ),
         };
-        impulse.set(k, totals);
-        bodies.apply(corrections);
+        match half {
+            Half::Normal | Half::Friction => bodies.apply(corrections),
+            Half::VelocityNormal | Half::VelocityFriction => bodies.apply_velocity(corrections),
+        }
     }
 }
 
@@ -3095,8 +3514,8 @@ fn solve_joint(joint: Joint, first: &Pose, second: &Pose) -> [Correction; 2] {
         let total = wa + wb;
         if total > 1e-12 {
             let impulse = scale(n, c / total);
-            accumulate(&mut out[0], first, ra, impulse, false);
-            accumulate(&mut out[1], second, rb, scale(impulse, -1.0), false);
+            accumulate(&mut out[0], first, ra, impulse, Charge::Moving);
+            accumulate(&mut out[1], second, rb, scale(impulse, -1.0), Charge::Moving);
         }
     }
 
@@ -3165,22 +3584,30 @@ fn generalised_inverse_mass(body: &Pose, r: (f64, f64, f64), n: (f64, f64, f64))
     body.inv_mass + dot(rn, body.world_inv_inertia.apply(rn))
 }
 
-/// Fold one impulse at `r` into a body's correction.
+/// Fold one impulse at `r` into a body's correction, as one of the three things a
+/// correction may be. See [`Charge`] and [`Correction`].
+///
+/// **The impulse is at the positional scale whichever kind it is**, which is what lets
+/// this be one function: a velocity-level impulse `J` moves a body by `J * inv_mass * dt`
+/// over the step it acts in, and a positional impulse `J * dt` moves it by exactly the
+/// same, so the two arrive here as the same number and the caller converts once where the
+/// velocity is read.
 fn accumulate(
     into: &mut Correction,
     body: &Pose,
     r: (f64, f64, f64),
     impulse: (f64, f64, f64),
-    free: bool,
+    charge: Charge,
 ) {
     if !body.movable() {
         return;
     }
     let move_by = scale(impulse, body.inv_mass);
-    if free {
-        into.free_translation = add(into.free_translation, move_by);
-    } else {
-        into.translation = add(into.translation, move_by);
+    match charge {
+        // `Still` lands in the same fields as `Moving`: see [`Charge`] for why, and
+        // [`scatter::Bodies::apply_velocity`] for what is then done with them.
+        Charge::Moving | Charge::Still => into.translation = add(into.translation, move_by),
+        Charge::Free => into.free_translation = add(into.free_translation, move_by),
     }
 
     // The orientation update is `q + (1/2) dw q`, and `dw q` factors, so the *delta* to
@@ -3194,10 +3621,11 @@ fn accumulate(
         z: 0.5 * dw.2,
     });
     // Composed onto whatever this body has already been asked to do by this joint.
-    if free {
-        into.free_rotation = renormalized(delta.multiply(&into.free_rotation));
-    } else {
-        into.rotation = renormalized(delta.multiply(&into.rotation));
+    match charge {
+        Charge::Moving | Charge::Still => {
+            into.rotation = renormalized(delta.multiply(&into.rotation))
+        }
+        Charge::Free => into.free_rotation = renormalized(delta.multiply(&into.free_rotation)),
     }
 }
 

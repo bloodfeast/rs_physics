@@ -282,6 +282,52 @@ impl Bodies {
                     .multiply(&self.prev_orientation.get(i));
                 self.prev_orientation.set(i, renormalized(spun));
             }
+
+        }
+    }
+
+    /// **The third correction kind: move where the body came from instead of where it
+    /// is.** The velocity pass, and nothing else, is applied through here.
+    ///
+    /// [`Bodies::apply`] moves `position`, and moves `prev_position` with it for the free
+    /// share so that the read-back sees nothing of that share. This moves `prev_position`
+    /// *instead*, so the read-back sees only this and the body stays exactly where the
+    /// positional solve left it. The fields are the same fields -- see [`Charge`] for why
+    /// -- and `translation` is the same quantity it always was, an impulse times an
+    /// inverse mass, because a velocity change `dv` held for one step is a displacement of
+    /// `dv * dt` and a velocity-level impulse `J` is a positional impulse `J * dt`. The
+    /// two `dt`s cancel and nothing on this path carries one.
+    ///
+    /// # Safety
+    /// As [`Bodies::apply`]: every body named must be owned by this thread, which within a
+    /// colour it is. The two arrays written are two of the four that function writes, so
+    /// the module header's argument covers this without an addition.
+    #[inline]
+    pub(super) unsafe fn apply_velocity(&self, corrections: [Correction; 2]) {
+        for correction in corrections {
+            if correction.body == usize::MAX {
+                continue;
+            }
+            let i = correction.body;
+            // Subtracted rather than added: pulling the start of the step backwards is
+            // what makes the body read as having travelled further over it.
+            if correction.translation != (0.0, 0.0, 0.0) {
+                let was = self.prev_position.get(i);
+                self.prev_position.set(i, sub(was, correction.translation));
+            }
+            // The turn takes one more step than the translation, because the read-back is
+            // a quotient rather than a difference. What the sweep reads is
+            // `orientation * prev_orientation^-1`; composing the delta onto that and
+            // solving back for `prev_orientation` -- `(delta * turn)^-1 * orientation` --
+            // is the assignment that changes the quotient and leaves `orientation` exactly
+            // where the positional solve put it.
+            if !correction.rotation.is_near_identity(1e-12) {
+                let now = self.orientation.get(i);
+                let turn = now.multiply(&self.prev_orientation.get(i).conjugate());
+                let wanted = correction.rotation.multiply(&turn);
+                self.prev_orientation
+                    .set(i, renormalized(wanted.conjugate().multiply(&now)));
+            }
         }
     }
 }

@@ -828,6 +828,80 @@ fn a_settled_rig_stays_where_it_settled() {
     );
 }
 
+/// **A resting contact is perfectly inelastic, so a settled rig does not sit on a limit
+/// cycle.**
+///
+/// # The quantity, and why it is this one
+///
+/// Gravity gives every body `g dt` of speed in a step and the contact it is resting on
+/// takes the same `g dt` back out; a body that is genuinely at rest ends the step with
+/// neither. Whatever speed a settled body *is* left carrying is what the contact failed to
+/// take back, measured in the only unit the question has -- one step of gravity. So the
+/// law is stated as a fraction of `g dt` rather than in metres a second, and it does not
+/// move if the step or the gravity does.
+///
+/// # What it caught
+///
+/// Before the velocity pass -- see the solver's module header -- this rig's median bone
+/// held 0.335, 0.342, 0.388, 0.357, 0.347 and 0.335 of `g dt` on six draws a relative
+/// 1e-12 apart. **The same third on every draw**, which is an attractor rather than a
+/// spread: the solve was feeding one side of a cycle and Coulomb was taking from the
+/// other, and nothing in the module was entitled to say what the relative velocity of two
+/// resting surfaces ought to be. A quarter of a step of gravity is below every one of
+/// those six and above the typical draw now, which is what a regression guard on that
+/// defect has to be.
+///
+/// # And why the median draw
+///
+/// A settling rig is chaotic, and one draw says nothing -- the same reason
+/// [`a_settled_rig_stays_where_it_settled`] weighs its median. Measured over sixteen draws
+/// the residual runs 0.038 to 0.198 with two outliers at 0.425 and 0.578, so the attractor
+/// is gone but something in its band is still reachable; that is recorded in the module
+/// header as one of the things the pass did not close, and this arm is deliberately not
+/// the one that would fail for it.
+#[test]
+fn a_settled_rig_does_not_sit_on_a_limit_cycle() {
+    // What one step of gravity is worth as a speed, which is the unit the question has.
+    let step_of_gravity = speed(G) * DT;
+    const DRAWS: usize = 8;
+    const SETTLE: usize = 1500;
+    const WATCH: usize = 60;
+
+    let mut residual = Vec::new();
+    let mut bones = 0;
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        // Self-collision on, which is the case the cycle lived in: with it off this rig
+        // goes to sleep and there is nothing to measure.
+        bones = rig(&mut s, 1.0 * (1.0 + draw as f64 * 1e-12));
+        assert!(s.self_collision(), "this law is about a rig that may touch itself");
+        // Sleeping off, or a rig that settles is removed from the step and reads zero --
+        // which would pass the law by not answering it.
+        s.set_sleeping(false);
+        for _ in 0..SETTLE {
+            s.step(DT, G, 8);
+        }
+        let mut watched = Vec::new();
+        for _ in 0..WATCH {
+            s.step(DT, G, 8);
+            let mut bone: Vec<f64> = (0..s.len()).map(|i| speed(s.velocity(i))).collect();
+            bone.sort_by(|a, b| a.partial_cmp(b).expect("no bone is at a NaN"));
+            watched.push(bone[bone.len() / 2]);
+        }
+        watched.sort_by(|a, b| a.partial_cmp(b).expect("no step is at a NaN"));
+        residual.push(watched[watched.len() / 2] / step_of_gravity);
+    }
+
+    let mut ordered = residual.clone();
+    ordered.sort_by(|a, b| a.partial_cmp(b).expect("no draw is at a NaN"));
+    let typical = ordered[ordered.len() / 2];
+    assert!(
+        typical < 0.25,
+        "the median draw of a settled {bones}-bone rig holds {typical:.3} of one step of          gravity in its median bone. A body a resting contact has finished with holds          none of it, and the cycle this law was written against held a third of it on          every draw. Residuals were {residual:.3?}.",
+    );
+}
+
 /// How far body `i`'s surface moved between two poses, as a fraction of its own reach: the
 /// centre's travel, plus the turn charged at the reach except about the body's own long
 /// axis, where a surface of revolution has not gone anywhere and it is charged at the
