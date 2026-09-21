@@ -104,6 +104,52 @@ const SETTLED: usize = 1800;
 const STACKS: usize = 3333;
 const STACK_HIGH: usize = 3;
 
+/// Capsules in the ploughed field, laid in single file down a lane.
+///
+/// **A lane and not a sheet, and that is the broad phase's doing rather than a taste.**
+/// The grid's cell is twice the largest reach in the set, so a roller wide enough to
+/// cover a broad field coarsens the cell for every small body in it: at four times a
+/// field body's reach a cell held forty of them, each scanning twenty-seven cells, and
+/// the step cost more in candidate pairs than in everything else together. A lane keeps
+/// the roller within twice a field body's reach, which is what the grid is sized for.
+/// See [`roller`].
+const FIELD_LONG: usize = 800;
+
+/// How far apart the field's capsules stand down the lane.
+///
+/// A capsule of radius 0.1 and segment 0.5 reaches 0.1 across its own axis, so this is
+/// five centimetres of clearance: near enough that the field is a surface rather than
+/// scattered bodies, and not touching at the moment it is built, since a spawn overlap is
+/// a different thing to be measuring.
+const FIELD_ALONG: f64 = 0.25;
+
+/// Steps of settling before the roller arrives. The field is laid a centimetre above the
+/// plane and has only to fall that far and stop.
+const FIELD_SETTLE: usize = 120;
+
+/// How fast the roller is driven, in metres a second.
+///
+/// A sixth of a metre a step, which is less than the roller's own diameter: any faster
+/// and it would step over a body between one narrow phase and the next, and the fixture
+/// would be measuring tunnelling rather than ploughing.
+const ROLLER_SPEED: f64 = 10.0;
+
+/// Steps of the drive at which the fixture is timed.
+///
+/// The first is thirty rather than zero so that the roller is already inside the field and
+/// the four figures are four points on one curve; at zero it is still outside, and a step
+/// that is only the settled field would be a different fixture. The last leaves a quarter
+/// of the lane in front of it.
+const PLOUGHED: [usize; 4] = [30, 330, 630, 930];
+
+/// **The load at which this bench's caller decides a body has been crushed**, in newtons.
+///
+/// Twenty times a field body's own weight. It is here and not in the crate on purpose:
+/// `rs_physics` reports the load and holds no threshold, no material strength and nothing
+/// resembling one, because what load breaks a body depends entirely on what the bodies
+/// are taken to be. A bench is a caller, so a bench may have an opinion.
+const CRUSHED: f64 = 20.0 * 8.0 * 9.80665;
+
 /// `count` rigs dropped onto the plane in a grid close enough that they land on one
 /// another. Nothing is pinned, so the heap has somewhere to put its energy.
 fn dropped(count: usize) -> Skeleton {
@@ -678,6 +724,129 @@ fn joining(c: &mut Criterion) {
     group.finish();
 }
 
+
+/// **A settled field with a heavy body driven through it, retiring what it crushes.**
+///
+/// The fixture for `Skeleton::retire`, and the number it exists to show is the one that
+/// *falls*: destruction here is subtraction, so a field driven through has fewer bodies
+/// behind the roller than in front of it and the step gets cheaper as it goes. Every
+/// other fixture in this file measures a scene that costs what it costs; this one is the
+/// only place the shape of that claim can be seen.
+///
+/// **Sleeping is off, and that is what makes the number mean what it says.** With it on, a
+/// settled field is already out of the step and what a step costs is the awake
+/// neighbourhood around the roller, which travels with the roller and stays about the same
+/// size -- so the cost would be flat and would say nothing about how many bodies are left.
+/// With it off, every live body is solved every step, so the step cost is a measurement of
+/// the live body count and the fall is the thing being claimed.
+///
+/// The rule for what counts as crushed is [`CRUSHED`], and it is **here rather than in the
+/// crate** on purpose: what load breaks a body is a material judgement and `rs_physics`
+/// holds no threshold anywhere.
+///
+/// # What it shows
+///
+/// Medians of four runs, since one run of anything on this machine says nothing:
+///
+/// ```text
+///   steps driven        30      330      630      930
+///   bodies still live  784      585      387      189
+///   a step            3.24 ms  2.12 ms  1.71 ms  0.89 ms
+///   per live body     4.13 us  3.62 us  4.42 us  4.70 us
+/// ```
+///
+/// **The cost falls by a factor of 3.6 while the drive is going on**, and the bottom row
+/// is why: the cost per live body is flat to within the spread, so what the step is paying
+/// for is the bodies that are left and there are fewer of them every step. That is the
+/// whole claim of retirement being subtraction, and it is the one number in this file that
+/// goes down as a fixture runs.
+fn ploughing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/ploughing");
+    group.sample_size(20);
+
+    let mut s = field();
+    for _ in 0..FIELD_SETTLE {
+        s.step(DT, G, 8);
+    }
+    println!(
+        "  ploughing: {} bodies, {} contacts in the settled field",
+        s.len(),
+        s.contact_count(),
+    );
+    let roller = s.add_body(roller());
+
+    let mut driven = 0usize;
+    for upto in PLOUGHED {
+        while driven < upto {
+            plough(&mut s, roller);
+            driven += 1;
+        }
+        let live = (0..s.len()).filter(|&i| !s.is_retired(i)).count();
+        println!(
+            "  ploughing after {upto} steps: {live} of {} bodies live, {} contacts, \
+             roller at x {:.1}",
+            s.len(),
+            s.contact_count(),
+            s.position(roller).0,
+        );
+        group.bench_with_input(BenchmarkId::new("driven", upto), &upto, |b, _| {
+            steady(b, &s, |s| plough(s, black_box(roller)));
+        });
+    }
+    group.finish();
+}
+
+/// One step of the drive: hold the roller's speed, step, and retire whatever the step
+/// says has been crushed.
+///
+/// The scan is a pass over every body, which is what a caller doing this pays and so
+/// belongs inside the measurement. It is also why retiring has to be cheap to *ask* about:
+/// `Skeleton::normal_load` is a load from an array and `Skeleton::is_retired` a bit.
+fn plough(s: &mut Skeleton, roller: usize) {
+    s.set_velocity(roller, (ROLLER_SPEED, s.velocity(roller).1, 0.0));
+    s.step(DT, G, 8);
+    for i in 0..s.len() {
+        if i != roller && !s.is_retired(i) && s.normal_load(i) > CRUSHED {
+            s.retire(i);
+        }
+    }
+}
+
+/// A lane of capsules lying flat on the plane, each across the lane and near enough to its
+/// neighbours to be a surface rather than scattered bodies.
+fn field() -> Skeleton {
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    s.set_sleeping(false);
+    for column in 0..FIELD_LONG {
+        let mut body = Body::capsule(8.0, 0.1, 0.5, (column as f64 * FIELD_ALONG, 0.11, 0.0));
+        // Lying flat with its axis across the lane, so the roller meets each one side on.
+        body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+            (1.0, 0.0, 0.0),
+            std::f64::consts::FRAC_PI_2,
+        );
+        s.add_body(body);
+    }
+    s
+}
+
+/// The heavy body that is driven through it: a dense roller lying across the lane, two
+/// hundred and fifty times the mass of what it drives over.
+///
+/// **Only twice a field body's reach**, which is a constraint the broad phase puts on the
+/// fixture rather than a modelling choice: the grid's cell is twice the largest reach in
+/// the set, so one large collider coarsens the grid for every small body in it. See
+/// [`FIELD_LONG`] for what that cost when the roller was four times the size.
+fn roller() -> Body {
+    let mut body = Body::capsule(2000.0, 0.25, 0.8, (-1.0, 0.25, 0.0));
+    body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+        (1.0, 0.0, 0.0),
+        std::f64::consts::FRAC_PI_2,
+    );
+    body.velocity = (ROLLER_SPEED, 0.0, 0.0);
+    body
+}
+
 criterion_group!(
     benches,
     one_skeleton,
@@ -687,6 +856,7 @@ criterion_group!(
     a_heap_arriving,
     a_heap_at_thirty_seconds,
     a_heap_that_has_settled,
-    joining
+    joining,
+    ploughing
 );
 criterion_main!(benches);

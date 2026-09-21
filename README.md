@@ -133,6 +133,16 @@ threshold is not a tuned constant -- a body is settling when it moves less than 
 fraction of *its own size* over the time it would take to fall that far, so one rule serves a
 finger bone and a torso.
 
+**What is crushed can leave it too.** `Skeleton::normal_load` reports, per body, how hard the
+last step squeezed it -- the normal impulse it was actually handed, as a mean force in newtons,
+so that a capsule lying on the plane reads its own weight. `Skeleton::retire` then takes a body
+and its joints out of the solve for good: nothing is emitted and no body is created, so
+destruction here makes the simulation *cheaper*, and a field driven through leaves fewer bodies
+behind than in front. Measured on a lane of eight hundred capsules with a heavy roller driven
+down it, a step falls from 3.24 ms to 0.89 ms as the live count falls from 784 to 189. There is
+no threshold in the crate and there will not be one: what load breaks a body depends on what the
+bodies are taken to be, so the solver reports and the caller decides.
+
 Its behaviour is pinned by `tests/articulated_laws.rs`, which tests through the public API only
 and asserts the things that must hold however the solver is written: that the answer is
 bit-identical run to run and independent of how many threads computed it, that a resting capsule

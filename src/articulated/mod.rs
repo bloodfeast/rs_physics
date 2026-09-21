@@ -1184,6 +1184,108 @@
 //! `STILL_FRACTION`: a bone that has not covered one settling window's allowance across all
 //! thirty-two of them has not gone anywhere, and asking it which direction is dividing
 //! arithmetic noise by itself.
+//! # What a body is carrying, and why it is `driven` rather than `normal`
+//!
+//! [`Skeleton::normal_load`] reports, per body, the normal impulse the last step actually
+//! handed it, as a mean force in newtons. It is the quantity a caller needs to decide that
+//! something has been crushed -- and the crate has no opinion on how much is too much,
+//! because what load breaks a body is a material judgement that varies by what the bodies
+//! represent. There is no threshold in here and there may not be one.
+//!
+//! **The quantity already existed, and only one of the two totals is it.**
+//! [`contacts::Spent`] separates `normal`, the whole normal impulse, from `driven`, the
+//! part the step itself drove and so the only part charged to the bodies as momentum. A
+//! body recovering from a careless spawn is separated by an enormous `normal` while
+//! nothing whatever presses on it; `driven` reads zero through the same separation. Using
+//! `normal` would make a badly placed body the most crushed thing in the scene, which
+//! `an_overlapping_spawn_is_not_a_crushed_body` is the guard against.
+//!
+//! **It is two divisions by the step, and that is not cosmetic.** The solver's impulses
+//! are in the convention `correction = impulse * inv_mass`, so a raw one is kilogram
+//! metres -- not the newton seconds the word suggests. One division gives the momentum,
+//! two give the mean force over the step. Reporting the raw total would make the same
+//! physical squeeze read four times smaller at half the timestep, and silently change the
+//! meaning of whatever rule a caller had written against it. The calibration is that a
+//! body lying on the plane reads its own weight, exactly: it sags `g dt^2`, the plane
+//! drives that back out, and `m g dt^2 / dt^2` is `m g`.
+//!
+//! **It costs nothing in the inner loop.** Every contact and every ground patch already
+//! carries its `Spent` across the passes, because Coulomb's cone needs the step's totals
+//! and the velocity pass needs to know what it is allowed to take back. So the load is
+//! already computed when the step ends, and [`Skeleton::gather_normal_load`] is one pass
+//! over two lists that are still in cache rather than a write inside eight passes over
+//! them. It runs *after* the velocity pass, so what it reports is the net the step handed
+//! the body rather than the gross the positional passes applied before some of it was
+//! taken back.
+//!
+//! **And it measures as free.** Three alternating rounds of prebuilt binaries, medians, at
+//! eight iterations:
+//!
+//! ```text
+//!                   contacts     before     after
+//!   joints_only/8          0    3.78 ms   3.73 ms
+//!   one/8                 13     102 us     98 us
+//!   pile/8             7,800    8.77 ms   8.28 ms
+//!   arriving/8        12,000    16.0 ms   16.2 ms
+//! ```
+//!
+//! Every figure is inside the run-to-run spread and the point estimates move in both
+//! directions, which is what no cost looks like on a machine whose noise is larger than the
+//! effect. `joints_only` is the check that says so by arithmetic rather than by
+//! measurement: it has no contacts of any kind, so the gather walks two empty lists and
+//! cannot cost anything. Five further rounds were taken and are not quoted -- another
+//! process was benchmarking on the same machine throughout them, and `arriving` reported
+//! 269 ms on one of them against its usual sixteen.
+//!
+//! One consequence is worth stating where a caller will meet it: **a sleeping body reads
+//! zero**. A step that does not solve a body drives nothing into it, so what this reports
+//! is load arriving. A caller whose rule has to see a static load has to keep those bodies
+//! awake.
+//!
+//! # Retirement, which is destruction as subtraction
+//!
+//! [`Skeleton::retire`] takes a body and its joints out of the solve for good. Structural
+//! failure under load is general physics and belongs here; what load counts as failure is
+//! a material judgement that does not, so the crate reports and the caller decides.
+//!
+//! **It makes the simulation cheaper rather than dearer.** Nothing is emitted, nothing
+//! flies off, and no body is created: a field driven through leaves fewer bodies behind it
+//! than in front. That is the opposite of the usual shape of destruction and it is most of
+//! why this is worth having as a primitive -- and it is the general primitive, since
+//! taking a body and its joints out is what cutting a skeleton apart needs too.
+//!
+//! Four things it has to be, and each is a decision rather than an implementation detail;
+//! [`Skeleton::retire`] carries the argument for each. **Its joints go with it**, so
+//! retiring a hip lets the leg come away. **Body indices stay stable**, because callers
+//! hold them and the ground anchors are indexed by body -- the arrays are never compacted,
+//! and joint indices do shift. **It costs nothing afterwards**, and not by being tested
+//! for: a body with no radius is invisible to the broad phase and to the plane, and a body
+//! with no mass can never be woken, which are the two rules that already keep an anchor
+//! body and a pinned body out of the work. And **its neighbours wake**, because taking a
+//! support away changes the situation for whatever was leaning on it.
+//!
+//! Removing joints is the one thing the incremental colouring cannot absorb, which
+//! [`Skeleton::add_joint`] anticipated: a full recolour is wanted "if a caller removes
+//! joints, or never". Retirement is rare, so it pays for one -- and the replay is the same
+//! greedy rule over the joints that remain in the order they arrived, so what it leaves
+//! behind is the state adding those joints would have produced, which is what keeps the
+//! incremental path *correct* across a removal rather than merely unbroken.
+//!
+//! **What it is worth, measured.** `benches`'s `ploughing` fixture is a settled lane of
+//! eight hundred capsules with a heavy roller driven down it, retiring what it crushes.
+//! Medians of four runs:
+//!
+//! ```text
+//!   steps driven        30      330      630      930
+//!   bodies still live  784      585      387      189
+//!   a step            3.24 ms  2.12 ms  1.71 ms  0.89 ms
+//!   per live body     4.13 us  3.62 us  4.42 us  4.70 us
+//! ```
+//!
+//! The cost falls by a factor of 3.6 while the drive runs, and the bottom row says why:
+//! the cost per live body is flat, so a step pays for the bodies that are left. Every
+//! other fixture in `benches` measures a scene that costs what it costs; this is the one
+//! number that goes *down* as its fixture runs.
 //!
 //! # Allocation
 //!
@@ -1894,6 +1996,16 @@ pub struct Skeleton {
     contact_impulse: Vec<Spent>,
     ground_impulse: Vec<contacts::Patch>,
 
+    /// **How hard each body was squeezed over the last step**, as a mean force in
+    /// newtons. See [`Skeleton::normal_load`], which is the whole of the argument for
+    /// what the number is and why it is that one.
+    normal_load: Vec<f64>,
+    /// Which entries of `normal_load` the last step wrote, so that clearing it costs the
+    /// bodies that carried load rather than the whole set. A body may appear twice; the
+    /// clear is idempotent, and a list that is never searched is cheaper to fill
+    /// carelessly than to keep unique.
+    normal_loaded: Vec<u32>,
+
     /// Where each body's ground patch was when it stuck, and what it stuck under. Only
     /// meaningful where [`Skeleton::ground_stuck`] says so. See [`contacts::Anchor`] for
     /// what it is for and [`Skeleton::anchor_ground`] for what maintains it.
@@ -1945,6 +2057,10 @@ pub struct Skeleton {
     /// One bit per body: set means the body is simulated this step. A pinned body is
     /// never set, because it cannot move and there is nothing to simulate.
     awake: BitSet,
+    /// One bit per body: the caller has taken it out of the solve for good. See
+    /// [`Skeleton::retire`], which is also where the argument for why this is a bit
+    /// rather than a shape test is.
+    retired: BitSet,
     /// The bodies the broad phase has already swept as it walks outward from the awake
     /// set, and the ones it is sweeping now. See [`Skeleton::find_pairs`].
     swept: BitSet,
@@ -2024,6 +2140,8 @@ impl Default for Skeleton {
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
             ground_impulse: Vec::new(),
+            normal_load: Vec::new(),
+            normal_loaded: Vec::new(),
             ground_anchor: Vec::new(),
             ground_stuck: BitSet::default(),
             ground_sticking: Vec::new(),
@@ -2038,6 +2156,7 @@ impl Default for Skeleton {
             grid: Grid::default(),
             sleeping: true,
             awake: BitSet::default(),
+            retired: BitSet::default(),
             swept: BitSet::default(),
             frontier: BitSet::default(),
             next_frontier: BitSet::default(),
@@ -2218,9 +2337,11 @@ impl Skeleton {
             local: (0.0, 0.0, 0.0),
         });
         self.island_of.push(NO_ISLAND);
+        self.normal_load.push(0.0);
         let i = self.position.len() - 1;
         let n = self.position.len();
         self.awake.resize(n, false);
+        self.retired.resize(n, false);
         self.ground_stuck.resize(n, false);
         self.swept.resize(n, false);
         self.frontier.resize(n, false);
@@ -2257,7 +2378,14 @@ impl Skeleton {
     /// **Wakes the body's island.** A caller writing a body is the one disturbance the
     /// solver cannot see coming, and a teleported body that stays asleep is a body that
     /// never collides with anything again.
+    ///
+    /// **Does nothing to a retired body**, silently. Retirement is permanent by
+    /// definition -- see [`Skeleton::retire`] -- and a write that restored a shape and a
+    /// mass would quietly bring one back into the solve with no joints and no history.
     pub fn set_body(&mut self, i: usize, body: Body) {
+        if self.retired.get(i) {
+            return;
+        }
         self.wake(i);
         // A body that has been put somewhere else is not stuck to where it was. Leaving the
         // anchor live would have friction drag it back towards a place the caller has just
@@ -2290,10 +2418,277 @@ impl Skeleton {
         self.angular_velocity[i]
     }
 
+    /// **How hard this body was squeezed by the last step**, as a mean force in newtons.
+    ///
+    /// The sum over every normal constraint that named the body -- pair contacts and the
+    /// plane alike -- of the normal impulse it was actually handed, divided by the step.
+    /// Zero for a body nothing pressed on, and for a body that has never been stepped.
+    ///
+    /// # Which impulse, and why the other one is wrong
+    ///
+    /// [`contacts::Spent`] distinguishes two totals, and only one of them is a load.
+    /// `normal` is the whole normal impulse a contact applied, which includes the solver
+    /// lifting the bodies out of an overlap they were **already** in when the step began;
+    /// `driven` is the part the step itself drove, and so the only part the bodies were
+    /// handed as momentum. This is the sum of `driven`.
+    ///
+    /// The difference is the difference between a crushed body and a carelessly placed
+    /// one. A body spawned half inside another is separated over its first few steps by
+    /// an enormous `normal` while nothing whatever is pressing on it, and reading that
+    /// would make a spawn look like an impact. `driven` reads near zero through the same
+    /// separation, because the overlap was inherited rather than made. See
+    /// [`contacts::solve_contact_normal`], where the split is taken, and
+    /// `an_overlapping_spawn_is_not_a_crushed_body`, which is the guard on it.
+    ///
+    /// # What the number is, dimensionally
+    ///
+    /// The solver's impulses are in the convention `correction = impulse * inv_mass`, so
+    /// a raw one is a mass times a distance -- kilogram metres, not the newton seconds a
+    /// reader would assume from the word. Dividing by the step turns it into the momentum
+    /// the body was handed (`kg m / s`, which *is* newton seconds) and dividing again
+    /// turns that into the mean force over the step, in newtons. **This is the second
+    /// one**, and it is divided by `dt` twice for that reason.
+    ///
+    /// Newtons rather than the raw total because the raw total scales with `dt * dt`: a
+    /// caller who halved their timestep would find the same physical squeeze reading a
+    /// quarter as large, and whatever rule they had written against it would silently
+    /// change meaning. A force does not move. The check that it is the right force is
+    /// that **a body lying on the plane reads its own weight**: it sags `g dt^2` in a
+    /// step, the plane drives that back out, the impulse is `m g dt^2`, and two divisions
+    /// by `dt` leave `m g`.
+    ///
+    /// # Turning it into a stress
+    ///
+    /// Divide by the area the load is carried over. The crate does not know that area --
+    /// a capsule's contact patch depends on how far the two surfaces flatten, which is a
+    /// property of the material and not of the geometry -- so a caller who wants a stress
+    /// supplies it. `2 * radius * half_length` is the projected side of a capsule and is
+    /// the usual stand-in; the resulting pascals are then comparable with a compressive
+    /// strength.
+    ///
+    /// # What it sums, and what that means for two-sided load
+    ///
+    /// The sum of the **magnitudes** of the normal impulses, not their vector sum. Two
+    /// opposed forces -- the plane below and something heavy above -- add, which is what
+    /// being crushed is; a body merely being accelerated by one push adds the same way,
+    /// which overstates it by the factor the second surface would have contributed.
+    /// A body genuinely in a vice is the case this is for, and it is the case the scalar
+    /// sum is exactly right for.
+    ///
+    /// The crate has no opinion on how much is too much. What load breaks a body is a
+    /// material judgement that varies by what the bodies represent, and there is no
+    /// threshold, no strength, and nothing resembling one anywhere in here: the solver
+    /// reports, and the caller decides. [`Skeleton::retire`] is what a caller who has
+    /// decided reaches for.
+    pub fn normal_load(&self, i: usize) -> f64 {
+        self.normal_load[i]
+    }
+
+    /// **Takes a body and its joints out of the solve, for good.** Returns `false` and
+    /// changes nothing for an index that does not exist or a body that was already
+    /// retired.
+    ///
+    /// What it is for is structural failure: a body has been loaded past what whatever it
+    /// represents can carry -- [`Skeleton::normal_load`] is how a caller sees that -- and
+    /// what is left is no longer a rigid body. **Destruction here is subtraction.**
+    /// Nothing is emitted, nothing flies off, and no body is created; the simulation gets
+    /// *cheaper*, so a field driven through leaves fewer bodies behind than in front of
+    /// it. The crate holds no threshold and no material strength: what load is too much
+    /// varies by what the bodies represent, so the solver reports and the caller decides.
+    ///
+    /// It is also the general primitive rather than a special case of crushing -- taking
+    /// a body and its joints out is what cutting a skeleton apart needs too.
+    ///
+    /// # Its joints go with it
+    ///
+    /// A smashed bone that still anchors its neighbours is wrong: retiring a hip has to
+    /// let the leg come away. So every joint naming the body is removed, which is the one
+    /// thing the incremental colouring cannot absorb -- see [`Skeleton::recolour_joints`],
+    /// which is paid here because retirement is rare.
+    ///
+    /// **Joint indices shift.** [`Skeleton::joints`] is a vector and removing from the
+    /// middle of it moves everything after; a caller holding an index into that slice has
+    /// to re-read it. Body indices do not, which is the next section.
+    ///
+    /// # Indices stay stable
+    ///
+    /// The arrays are **not compacted**. Callers hold body indices, the ground anchors are
+    /// indexed by body, and a body index has meant the same body for the skeleton's life
+    /// because bodies are only ever added. [`Skeleton::len`] therefore counts retired
+    /// bodies, and [`Skeleton::body`] still answers for one -- with the shape and the mass
+    /// taken off it, at the place it was retired.
+    ///
+    /// # It costs nothing afterwards, and not by being tested for
+    ///
+    /// There is no "is it retired" branch anywhere in the step. Two facts already in the
+    /// solver do the whole of it, and each of them is load-bearing:
+    ///
+    /// * **No radius means no broad phase and no plane.** [`broadphase::Grid::rebuild`]
+    ///   puts a body in the grid only if `radius > 0`, so a retired body is neither an
+    ///   outer body of the scan nor a candidate in anybody else's neighbourhood; and
+    ///   [`contacts::ground_contacts`] returns on the same test. It can therefore take no
+    ///   contact of any kind, and appears in no contact colour and in no ground colour.
+    /// * **No mass means never awake.** [`Skeleton::wake`] sets the awake bit only for a
+    ///   body with `inv_mass > 0` and [`Skeleton::wake_all`] clears it again for one
+    ///   without, which is how a *pinned* body is already kept out of every sweep. So a
+    ///   retired body is permanently unready as well: [`Skeleton::settle`] only ever looks
+    ///   at awake bodies, so it can never be marked still, never join an island, and never
+    ///   be woken by a neighbour.
+    ///
+    /// The bit this sets is not consulted by the step at all. It exists so that retirement
+    /// is *permanent* -- [`Skeleton::set_body`] would otherwise restore a shape and a mass
+    /// and quietly bring the body back with no joints and no history, and
+    /// [`Skeleton::add_joint`] would otherwise anchor a new joint to it.
+    ///
+    /// # A joint the caller still holds is handled, not refused
+    ///
+    /// Retiring a body some joint still names is the ordinary case rather than an error:
+    /// it is what "the leg comes away" means. So the joints go quietly and nothing is
+    /// refused. The precedent is [`Skeleton::add_joint`], which returns `false` for a bad
+    /// index rather than panicking -- a solver called every frame on data a caller
+    /// assembled is the wrong place to unwind -- and the same reading applies here: the
+    /// only `false` is for a body that is not there or is already gone, and a caller that
+    /// does not look has still not been surprised.
+    ///
+    /// # Its neighbours wake
+    ///
+    /// Taking a support away changes the situation for whatever was leaning on it, and
+    /// everything that was is asleep precisely because it had stopped. So the body's own
+    /// island is thawed -- which is what wakes a sleeping stack it was part of -- and then
+    /// everything jointed to it and everything the broad phase last paired it with. The
+    /// broad phase's pairs rather than the narrow phase's contacts, for the reason
+    /// [`Skeleton::settle`] gives: two bodies resting exactly against one another overlap
+    /// by nothing and have no contact, and the better the solve gets the more often that
+    /// is true.
+    pub fn retire(&mut self, i: usize) -> bool {
+        if i >= self.position.len() || self.retired.get(i) {
+            return false;
+        }
+
+        // First, while the body is still in the graph. Its own island goes with it: a body
+        // asleep in a stack is asleep *with* the bodies it is holding up.
+        self.wake(i);
+        for k in 0..self.joints.len() {
+            let (a, b) = self.joints[k].bodies();
+            if a == i {
+                self.wake(b);
+            } else if b == i {
+                self.wake(a);
+            }
+        }
+        for k in 0..self.pairs.len() {
+            let (a, b) = self.pairs[k];
+            if a == i {
+                self.wake(b);
+            } else if b == i {
+                self.wake(a);
+            }
+        }
+
+        self.retired.set(i);
+        // No extent: out of the grid, out of every neighbourhood, and out of the plane's
+        // contact generation. See the doc comment.
+        self.radius[i] = 0.0;
+        self.half_length[i] = 0.0;
+        // No mass: never awake again, by the rule that already keeps pinned bodies out.
+        self.inv_mass[i] = 0.0;
+        self.inv_inertia[i] = (0.0, 0.0, 0.0);
+        // Nothing left reads these, but a stale velocity on a body a caller can still ask
+        // about would be a lie about a body that is not moving.
+        self.velocity[i] = (0.0, 0.0, 0.0);
+        self.angular_velocity[i] = (0.0, 0.0, 0.0);
+        self.prev_position[i] = self.position[i];
+        self.prev_orientation[i] = self.orientation[i];
+        self.awake.unset(i);
+        self.ready.unset(i);
+        self.ground_stuck.unset(i);
+        self.island_of[i] = NO_ISLAND;
+        self.still_steps[i] = 0;
+        self.normal_load[i] = 0.0;
+
+        let before = self.joints.len();
+        self.joints.retain(|joint| {
+            let (a, b) = joint.bodies();
+            a != i && b != i
+        });
+        if self.joints.len() != before {
+            self.recolour_joints();
+            // The jointed-neighbour runs and the component labels are both built from the
+            // joint set.
+            self.jointed_built = false;
+        }
+        true
+    }
+
+    /// Whether this body has been retired. See [`Skeleton::retire`].
+    pub fn is_retired(&self, i: usize) -> bool {
+        self.retired.get(i)
+    }
+
+    /// Forgets the last step's loads. Costs the bodies that carried one, not the set.
+    fn clear_normal_load(&mut self) {
+        for &i in self.normal_loaded.iter() {
+            self.normal_load[i as usize] = 0.0;
+        }
+        self.normal_loaded.clear();
+    }
+
+    /// **The per-body total of [`Skeleton::normal_load`]**, gathered once at the end of
+    /// the step out of the running totals the constraints already keep.
+    ///
+    /// Nothing is added to the inner loop for this. Every contact and every ground patch
+    /// already carries its `Spent` across the passes, because Coulomb's cone needs the
+    /// step's totals and the velocity pass needs to know what it is allowed to take back;
+    /// so the load is already computed by the time the step ends and this is one pass over
+    /// two lists that are in cache, not a write inside eight passes over them. Running it
+    /// after the velocity pass rather than after the positional one is deliberate as well:
+    /// that pass **removes** normal impulse where a resting contact ended the step
+    /// separating, and what a caller wants is the net momentum the step handed the body
+    /// rather than the gross the positional passes applied before it was taken back.
+    ///
+    /// Deterministic because it sums in list order, and both lists are built in a fixed
+    /// order on every machine -- the contacts by the narrow phase's fixed-size chunks, the
+    /// ground patches by increasing body index.
+    fn gather_normal_load(&mut self, dt: f64) {
+        self.clear_normal_load();
+        // Twice, and the second division is what makes this a force rather than a
+        // momentum. See [`Skeleton::normal_load`].
+        let per_step = 1.0 / (dt * dt);
+        for (k, contact) in self.contacts.iter().enumerate() {
+            let driven = self.contact_impulse[k].driven;
+            if driven <= 0.0 {
+                continue;
+            }
+            let load = driven * per_step;
+            for end in [contact.a, contact.b] {
+                if self.normal_load[end] == 0.0 {
+                    self.normal_loaded.push(end as u32);
+                }
+                self.normal_load[end] += load;
+            }
+        }
+        for (k, ground) in self.ground_contacts.iter().enumerate() {
+            let driven = self.ground_impulse[k].spent.driven;
+            if driven <= 0.0 {
+                continue;
+            }
+            let i = ground.body;
+            if self.normal_load[i] == 0.0 {
+                self.normal_loaded.push(i as u32);
+            }
+            self.normal_load[i] += driven * per_step;
+        }
+    }
+
     /// Sets a body's angular velocity, and **wakes its island**: a caller pushing a body
     /// is a disturbance the settling test cannot see, and it has to reach the bodies
     /// leaning on it as well as the one that was pushed.
+    ///
+    /// Does nothing to a retired body, for the reason [`Skeleton::set_body`] gives.
     pub fn set_angular_velocity(&mut self, i: usize, w: (f64, f64, f64)) {
+        if self.retired.get(i) {
+            return;
+        }
         self.wake(i);
         self.angular_velocity[i] = w;
     }
@@ -2301,13 +2696,18 @@ impl Skeleton {
     /// Sets a body's velocity, and **wakes its island**. See
     /// [`Skeleton::set_angular_velocity`].
     pub fn set_velocity(&mut self, i: usize, v: (f64, f64, f64)) {
+        if self.retired.get(i) {
+            return;
+        }
         self.wake(i);
         self.velocity[i] = v;
     }
 
     /// Adds a joint. Returns `false` and adds nothing if it names a body that does not
-    /// exist, or joints a body to itself -- an out-of-range index is a caller's bug and
-    /// panicking in a solver that runs per frame is worse than refusing.
+    /// exist, joints a body to itself, or names a body that has been **retired** -- an
+    /// out-of-range index is a caller's bug and panicking in a solver that runs per frame
+    /// is worse than refusing, and a retired body is exactly as absent as one that was
+    /// never added. See [`Skeleton::retire`].
     ///
     /// **Coloured on arrival, in constant time and without allocating.** The greedy rule
     /// is "the lowest colour neither body is already using", which depends on nothing but
@@ -2329,29 +2729,12 @@ impl Skeleton {
     pub fn add_joint(&mut self, joint: Joint) -> bool {
         let (a, b) = joint.bodies();
         let n = self.position.len();
-        if a >= n || b >= n || a == b {
+        if a >= n || b >= n || a == b || self.retired.get(a) || self.retired.get(b) {
             return false;
         }
         let index = self.joints.len();
         self.joints.push(joint);
-
-        let taken = self.joint_bits[a] | self.joint_bits[b];
-        if taken == u64::MAX {
-            // Sixty-five joints on one body. Nothing a skeleton does reaches it, and a
-            // serial tail is a better answer than a colour nobody can parallelise.
-            self.joint_overflow.push(index);
-        } else {
-            let colour = taken.trailing_ones() as usize;
-            let bit = 1u64 << colour;
-            self.joint_bits[a] |= bit;
-            self.joint_bits[b] |= bit;
-            if colour >= self.colours.len() {
-                self.colours.resize_with(colour + 1, Vec::new);
-                self.live_joints.resize_with(colour + 1, Vec::new);
-                self.live_joints_near.resize(colour + 1, 0);
-            }
-            self.colours[colour].push(index);
-        }
+        self.colour_joint(index);
         self.jointed_built = false;
 
         // A joint arriving between a sleeping body and anything else is a new way for a
@@ -2375,6 +2758,72 @@ impl Skeleton {
     /// either way. It happens in [`Skeleton::add_joint`], one joint at a time.
     pub fn colours(&self) -> &[Vec<usize>] {
         &self.colours
+    }
+
+    /// **One joint's colour**: the lowest one neither of its bodies is already using.
+    ///
+    /// Lifted out of [`Skeleton::add_joint`] so that the rule has one statement rather
+    /// than two. [`Skeleton::recolour_joints`] replays it over a joint set a retirement
+    /// has taken something out of, and a greedy colouring that differed between the two
+    /// would leave `joint_bits` describing an assignment `colours` did not have -- after
+    /// which the next arrival would be coloured against a fiction.
+    fn colour_joint(&mut self, index: usize) {
+        let (a, b) = self.joints[index].bodies();
+        let taken = self.joint_bits[a] | self.joint_bits[b];
+        if taken == u64::MAX {
+            // Sixty-five joints on one body. Nothing a skeleton does reaches it, and a
+            // serial tail is a better answer than a colour nobody can parallelise.
+            self.joint_overflow.push(index);
+            return;
+        }
+        let colour = taken.trailing_ones() as usize;
+        let bit = 1u64 << colour;
+        self.joint_bits[a] |= bit;
+        self.joint_bits[b] |= bit;
+        if colour >= self.colours.len() {
+            self.colours.resize_with(colour + 1, Vec::new);
+            self.live_joints.resize_with(colour + 1, Vec::new);
+            self.live_joints_near.resize(colour + 1, 0);
+        }
+        self.colours[colour].push(index);
+    }
+
+    /// **The whole joint set coloured again from nothing**, which is what removing a
+    /// joint costs.
+    ///
+    /// [`Skeleton::add_joint`] never needs this: an edge added to a proper edge-colouring
+    /// leaves it proper, so an arrival is two loads and a `trailing_ones`. Removal is the
+    /// other case, and it is the one the incremental comment there already named -- a
+    /// full recolour is wanted "if a caller removes joints, or never". Removing a joint
+    /// frees colours on both of its bodies and, because the joints are named by their
+    /// index into one vector, shifts the index of every joint after it; there is nothing
+    /// incremental left of either.
+    ///
+    /// **It is the same greedy rule in the same order**, so what it leaves behind is
+    /// exactly the state adding the surviving joints one at a time would have produced.
+    /// That is what keeps the incremental path correct across a removal rather than
+    /// merely unbroken: the next [`Skeleton::add_joint`] reads a `joint_bits` that agrees
+    /// with `colours`, which is the invariant the constant-time colouring rests on.
+    ///
+    /// Trailing empty colours are dropped, so a set that used to need four and now needs
+    /// three reports three -- the colour count is what says how parallel a step can be,
+    /// and a caller reading it should not be told about colours nothing is in.
+    fn recolour_joints(&mut self) {
+        for set in self.colours.iter_mut() {
+            set.clear();
+        }
+        self.joint_overflow.clear();
+        for bits in self.joint_bits.iter_mut() {
+            *bits = 0;
+        }
+        for index in 0..self.joints.len() {
+            self.colour_joint(index);
+        }
+        while self.colours.last().is_some_and(|set| set.is_empty()) {
+            self.colours.pop();
+        }
+        self.live_joints.truncate(self.colours.len());
+        self.live_joints_near.truncate(self.colours.len());
     }
 
     /// Rebuilds the jointed-neighbour runs, which are indexed by body and so do not
@@ -2745,6 +3194,11 @@ impl Skeleton {
         // could change, so the cheapest honest answer is the whole step: `bodies / 64`
         // word tests and no memory touched. This is what sleeping is for.
         if !self.awake.any() {
+            // Nothing was pressed on, so nothing carries a load. This walks the list of
+            // bodies that carried one last step -- empty from the second idle step on --
+            // rather than the whole set, so a settled scene still returns without
+            // touching memory that is proportional to its size.
+            self.clear_normal_load();
             return;
         }
         self.rebuild_jointed();
@@ -2916,6 +3370,10 @@ impl Skeleton {
         // And for the same reason: which pairs were carrying load is a fact about the
         // whole step. See [`Skeleton::persist_contacts`].
         self.persist_contacts();
+        // And for the same reason again, one law over: how hard a body was squeezed is
+        // the whole step's normal impulse, which only exists once the velocity pass has
+        // finished taking back what it is entitled to.
+        self.gather_normal_load(dt);
     }
 
     /// **One sweep to read both velocities back out of how far everything moved**, for
