@@ -72,8 +72,9 @@
 //! seventeen-element sweep to a thread pool costs more in scheduling than the sweep costs
 //! to run, and a solver is usually called on one skeleton at a time.
 //!
-//! So each sweep and each colour goes parallel only above [`PARALLEL_FLOOR`], and runs on
-//! the calling thread below it.
+//! So each sweep goes parallel only above [`PARALLEL_FLOOR`], and runs on the calling
+//! thread below it. The solve has its own floor, on the whole pass rather than on each
+//! colour, for the reason [`crew::PASS_FLOOR`] gives.
 //!
 //! **And a fork is dearer than it looks.** Measured on a twenty-four core machine, one
 //! `par_iter` over a few thousand items with an empty body costs 26 to 72 us before any
@@ -82,8 +83,15 @@
 //! the scheduling is a real fraction of the solve. The answers are to ask the pool for
 //! fewer, larger things: the three predict sweeps are one sweep, the narrow phase and the
 //! broad phase are one fork each over fixed-size chunks, and a colour no longer has a
-//! second traversal to apply what it computed. What is left is one fork per colour per
-//! pass, which is the floor this structure has.
+//! second traversal to apply what it computed.
+//!
+//! **And then the last of it: the solve asks once per pass, not once per colour.** A fork
+//! per colour was the floor of the previous structure and it was most of what a pass
+//! cost. [`crew`] replaces it with one broadcast for the whole pass and a barrier between
+//! colours -- 46 us once, plus 15 us a colour, against 46 us a colour -- which also means
+//! a colour too small to be worth its own fork is no longer too small to be worth
+//! anything. Measured end to end on the heap, a pass went from 5.5 ms to 1.3 ms and the
+//! step at eight iterations from 48 ms to 14 ms.
 //!
 //! # Contacts, and the two laws that turned out to be needed
 //!
@@ -125,6 +133,7 @@ use crate::models::Quaternion;
 
 mod broadphase;
 mod contacts;
+mod crew;
 mod scatter;
 
 use broadphase::{Grid, Jointed};
@@ -547,6 +556,21 @@ impl Correction {
     }
 }
 
+/// One indivisible piece of a solver pass: a colour, or the serial tail.
+///
+/// A pass is a list of these, and every lane walks the same list. They exist as a list
+/// rather than as four loops because the pool is handed the whole pass at once and has to
+/// be told what the pass *is*; see [`crew`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Joints(u32),
+    Contacts(u32),
+    /// The contacts colouring could not place. Run by one lane, because each reads the
+    /// positions the one before it wrote.
+    Overflow,
+    Ground(u32),
+}
+
 /// A set of bodies and the joints between them, solved together.
 ///
 /// See the module header for why the bodies are arrays, and why the joints are coloured.
@@ -617,6 +641,10 @@ pub struct Skeleton {
     contact_impulse: Vec<(f64, f64, f64)>,
     ground_impulse: Vec<(f64, f64, f64)>,
 
+    /// The stages of a pass, in order, with the empty colours left out. Rebuilt when the
+    /// colouring is, not per pass. See [`Skeleton::plan_pass`].
+    plan: Vec<Stage>,
+
     /// The broad phase. See [`broadphase`] for why it is a grid.
     grid: Grid,
 }
@@ -655,6 +683,7 @@ impl Default for Skeleton {
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
             ground_impulse: Vec::new(),
+            plan: Vec::new(),
             grid: Grid::default(),
         }
     }
@@ -1070,22 +1099,10 @@ impl Skeleton {
         self.find_pairs();
         self.build_contacts();
         self.colour_contacts();
+        self.plan_pass();
 
         for _ in 0..iterations.max(1) {
-            for colour in 0..self.colours.len() {
-                self.solve_colour(colour);
-            }
-            for colour in 0..self.contact_colours.len() {
-                if !self.contact_colours[colour].is_empty() {
-                    self.solve_contact_colour(colour);
-                }
-            }
-            self.solve_contact_overflow();
-            for colour in 0..2 {
-                if !self.ground_colours[colour].is_empty() {
-                    self.solve_ground_colour(colour);
-                }
-            }
+            self.solve_pass();
         }
 
         // And one sweep to read both velocities back, for the same reason the predict is
@@ -1139,180 +1156,226 @@ impl Skeleton {
         )
     }
 
-    /// One colour: every joint in it gathers its two bodies, works out its two
-    /// corrections and writes them straight back. No two joints in a colour name the same
-    /// body, so the threads never meet and the order cannot change the answer.
-    fn solve_colour(&mut self, colour: usize) {
-        #[cfg(debug_assertions)]
-        scatter::disjoint(
-            self.position.len(),
-            "joint",
-            self.colours[colour]
-                .iter()
-                .flat_map(|&k| {
-                    let (a, b) = self.joints[k].bodies();
-                    [a, b]
-                }),
-        );
-
-        let bodies = self.writable();
-        let joints = &self.joints;
-        let inv_mass = &self.inv_mass;
-        let inv_inertia = &self.inv_inertia;
-        let set = &self.colours[colour];
-
-        // SAFETY: every body this closure reads or writes is named by joint `k` and by no
-        // other joint in the colour, so no two threads address one element of any array.
-        // That partition is established by `Skeleton::recolour`, which gives each joint
-        // the lowest colour neither of its bodies already holds; a change there that let
-        // two joints on one body share a colour is what would make this a data race, and
-        // is why the `disjoint` check above runs in debug builds. See [`scatter`] for the
-        // argument in full.
-        let solve = |&k: &usize| unsafe {
-            let joint = joints[k];
-            let (a, b) = joint.bodies();
-            let first = bodies.pose(a, inv_mass, inv_inertia);
-            let second = bodies.pose(b, inv_mass, inv_inertia);
-            bodies.apply(solve_joint(joint, &first, &second));
-        };
-        if set.len() >= PARALLEL_FLOOR {
-            set.par_iter().for_each(solve);
-        } else {
-            set.iter().for_each(solve);
+    /// The stages of one pass, in the order they have to run, with the empty ones left
+    /// out so that no lane waits at a barrier for work that does not exist.
+    ///
+    /// Built once a step rather than once a pass, because the colouring does not change
+    /// between the passes of a step -- only the positions do. Reused rather than
+    /// reallocated, like everything else here.
+    fn plan_pass(&mut self) {
+        self.plan.clear();
+        for colour in 0..self.colours.len() {
+            if !self.colours[colour].is_empty() {
+                self.plan.push(Stage::Joints(colour as u32));
+            }
         }
-    }
-
-    /// One colour of contacts, the same way [`Skeleton::solve_colour`] does one colour of
-    /// joints.
-    fn solve_contact_colour(&mut self, colour: usize) {
-        #[cfg(debug_assertions)]
-        scatter::disjoint(
-            self.position.len(),
-            "contact",
-            self.contact_colours[colour]
-                .iter()
-                .flat_map(|&k| [self.contacts[k].a, self.contacts[k].b]),
-        );
-
-        let bodies = self.writable();
-        let impulse = scatter::Cells::of(&mut self.contact_impulse);
-        let contacts = &self.contacts;
-        let inv_mass = &self.inv_mass;
-        let inv_inertia = &self.inv_inertia;
-        let friction = self.friction;
-        let rolling = self.rolling_resistance;
-        let radius = &self.radius;
-        let set = &self.contact_colours[colour];
-
-        // SAFETY: every body this closure reads or writes is named by contact `k` and by
-        // no other contact in the colour, so no two threads address one element of any
-        // body array; and the running impulse is indexed by the contact, which is unique
-        // to this closure call by construction. That partition is established by
-        // `Skeleton::colour_contacts`, which gives each contact a colour neither of its
-        // bodies has a bit set for and sends a contact it cannot place to
-        // `contact_overflow` -- solved one at a time, never here. A change there that
-        // placed a contact in a colour one of its bodies already used is what would make
-        // this a data race, and is why the `disjoint` check above runs in debug builds.
-        // See [`scatter`] for the argument in full.
-        let solve = |&k: &usize| unsafe {
-            let contact = contacts[k];
-            let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
-            let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
-            let (corrections, totals) =
-                solve_contact(contact, &first, &second, friction, rolling, impulse.get(k));
-            impulse.set(k, totals);
-            bodies.apply(corrections);
-        };
-        if set.len() >= PARALLEL_FLOOR {
-            set.par_iter().for_each(solve);
-        } else {
-            set.iter().for_each(solve);
+        for colour in 0..self.contact_colours.len() {
+            if !self.contact_colours[colour].is_empty() {
+                self.plan.push(Stage::Contacts(colour as u32));
+            }
         }
-    }
-
-    /// The contacts colouring could not place, solved one at a time. Each reads the
-    /// positions the one before it wrote, which is what makes it safe without a colour --
-    /// and slow, which is why it is a tail and not the main path.
-    fn solve_contact_overflow(&mut self) {
-        if self.contact_overflow.is_empty() {
-            return;
+        if !self.contact_overflow.is_empty() {
+            self.plan.push(Stage::Overflow);
         }
-        let bodies = self.writable();
-        let impulse = scatter::Cells::of(&mut self.contact_impulse);
-        let contacts = &self.contacts;
-        let inv_mass = &self.inv_mass;
-        let inv_inertia = &self.inv_inertia;
-        let friction = self.friction;
-        let rolling = self.rolling_resistance;
-        let radius = &self.radius;
-
-        // SAFETY: one at a time on this thread, so nothing is shared at all.
-        for &k in self.contact_overflow.iter() {
-            unsafe {
-                let contact = contacts[k];
-                let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
-                let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
-                let (corrections, totals) =
-                    solve_contact(contact, &first, &second, friction, rolling, impulse.get(k));
-                impulse.set(k, totals);
-                bodies.apply(corrections);
+        for colour in 0..2 {
+            if !self.ground_colours[colour].is_empty() {
+                self.plan.push(Stage::Ground(colour as u32));
             }
         }
     }
 
-    /// One set of ground contacts, the same way a colour of pair contacts is done.
-    fn solve_ground_colour(&mut self, colour: usize) {
-        let Some((normal, distance)) = self.ground else {
-            return;
-        };
-        #[cfg(debug_assertions)]
-        scatter::disjoint(
-            self.position.len(),
-            "ground",
-            self.ground_colours[colour]
-                .iter()
-                .map(|&k| self.ground_contacts[k].body),
-        );
+    /// How much one pass has to solve. The number [`crew::PASS_FLOOR`] is weighed
+    /// against, and it is the whole constraint set rather than the biggest colour,
+    /// because the pass is now handed out once.
+    fn pass_work(&self) -> usize {
+        self.joints.len() + self.contacts.len() + self.ground_contacts.len()
+    }
 
+    /// **One pass over every colour**, handed to the pool once.
+    ///
+    /// Each lane walks the same list of stages and takes its own slice of each, waiting
+    /// at a barrier before the next -- so a colour is still finished everywhere before
+    /// the next one starts, which is what the colouring requires, but it costs a barrier
+    /// rather than a fork. See [`crew`] for the measurement that demanded it and for why
+    /// this adds no unsafety to what [`scatter`] already argued.
+    fn solve_pass(&mut self) {
+        #[cfg(debug_assertions)]
+        self.check_colours_are_disjoint();
+
+        // Taken before the shared borrows: these hold raw pointers rather than
+        // references, so the mutable borrow each one needs ends here.
         let bodies = self.writable();
-        let impulse = scatter::Cells::of(&mut self.ground_impulse);
-        let contacts = &self.ground_contacts;
+        let contact_impulse = scatter::Cells::of(&mut self.contact_impulse);
+        let ground_impulse = scatter::Cells::of(&mut self.ground_impulse);
+
+        let plan = &self.plan;
+        let colours = &self.colours;
+        let contact_colours = &self.contact_colours;
+        let ground_colours = &self.ground_colours;
+        let overflow = &self.contact_overflow;
+        let joints = &self.joints;
+        let contacts = &self.contacts;
+        let ground_contacts = &self.ground_contacts;
         let inv_mass = &self.inv_mass;
         let inv_inertia = &self.inv_inertia;
+        let radius = &self.radius;
         let friction = self.friction;
         let rolling = self.rolling_resistance;
-        let radius = &self.radius;
-        let set = &self.ground_colours[colour];
+        let ground = self.ground;
 
-        // SAFETY: the one body this closure reads or writes is named by ground contact
-        // `k` and by no other contact in the set, so no two threads address one element
-        // of any body array; the running impulse is indexed by the contact. That
-        // partition is established by `Skeleton::build_contacts`, which emits at most one
-        // contact per end of a capsule and puts a body's first in set zero and its second
-        // in set one. A change to `contacts::ground_contacts` that emitted a third
-        // contact for a body is what would make this a data race -- it would land in set
-        // one alongside the second -- and is why the `disjoint` check above runs in debug
-        // builds. See [`scatter`] for the argument in full.
-        let solve = |&k: &usize| unsafe {
-            let contact = contacts[k];
-            let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
-            let (correction, totals) = solve_ground(
-                contact,
-                &body,
-                friction,
-                rolling,
-                normal,
-                distance,
-                impulse.get(k),
-            );
-            impulse.set(k, totals);
-            bodies.apply([correction, Correction::none()]);
+        // SAFETY: the argument is the one [`scatter`] makes, and every part of it still
+        // holds here.
+        //
+        // * Within a stage, each constraint reads and writes only the bodies it names,
+        //   and no two constraints in a colour name the same body -- established by
+        //   `Skeleton::recolour` for the joints and `Skeleton::colour_contacts` for the
+        //   contacts, and checked over every colour by `check_colours_are_disjoint` in
+        //   debug builds. The ground sets come from `Skeleton::build_contacts`, which
+        //   puts a body's first contact in one set and its second in the other.
+        // * Within a colour, the lanes take the disjoint slices `Lane::span` cuts, which
+        //   partition the colour exactly -- so a body named once in the colour is
+        //   addressed by exactly one lane. The debug check covers this because it runs
+        //   over the whole colour, which is the union of the lanes' slices.
+        // * The running impulses are indexed by the constraint, not by the body, so each
+        //   is touched by the one lane that owns that constraint.
+        // * Across stages, `crew::each_stage` puts a barrier between them, and its
+        //   release-acquire pair is what makes one colour's writes visible to the next.
+        //   That ordering used to come from the join; losing it without replacing it
+        //   would be the one way this change could be unsound.
+        // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
+        let work = |lane: crew::Lane| unsafe {
+            match plan[lane.stage] {
+                Stage::Joints(colour) => {
+                    let set = &colours[colour as usize];
+                    for &k in &set[lane.span(set.len())] {
+                        let joint = joints[k];
+                        let (a, b) = joint.bodies();
+                        let first = bodies.pose(a, inv_mass, inv_inertia);
+                        let second = bodies.pose(b, inv_mass, inv_inertia);
+                        bodies.apply(solve_joint(joint, &first, &second));
+                    }
+                }
+                Stage::Contacts(colour) => {
+                    let set = &contact_colours[colour as usize];
+                    let span = lane.span(set.len());
+                    solve_some_contacts(
+                        &set[span],
+                        contacts,
+                        &bodies,
+                        &contact_impulse,
+                        inv_mass,
+                        inv_inertia,
+                        radius,
+                        friction,
+                        rolling,
+                    );
+                }
+                Stage::Overflow => {
+                    if lane.is_only() {
+                        solve_some_contacts(
+                            overflow,
+                            contacts,
+                            &bodies,
+                            &contact_impulse,
+                            inv_mass,
+                            inv_inertia,
+                            radius,
+                            friction,
+                            rolling,
+                        );
+                    }
+                }
+                Stage::Ground(colour) => {
+                    let Some((normal, distance)) = ground else {
+                        return;
+                    };
+                    let set = &ground_colours[colour as usize];
+                    for &k in &set[lane.span(set.len())] {
+                        let contact = ground_contacts[k];
+                        let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
+                        let (correction, totals) = solve_ground(
+                            contact,
+                            &body,
+                            friction,
+                            rolling,
+                            normal,
+                            distance,
+                            ground_impulse.get(k),
+                        );
+                        ground_impulse.set(k, totals);
+                        bodies.apply([correction, Correction::none()]);
+                    }
+                }
+            }
         };
-        if set.len() >= PARALLEL_FLOOR {
-            set.par_iter().for_each(solve);
-        } else {
-            set.iter().for_each(solve);
+
+        crew::each_stage(plan.len(), self.pass_work(), work);
+    }
+
+    /// Every colour, checked to name each body at most once. The precondition of every
+    /// `unsafe` block in [`scatter`], asserted rather than assumed; compiled out of
+    /// release builds.
+    #[cfg(debug_assertions)]
+    fn check_colours_are_disjoint(&self) {
+        let bodies = self.position.len();
+        for set in self.colours.iter() {
+            scatter::disjoint(
+                bodies,
+                "joint",
+                set.iter().flat_map(|&k| {
+                    let (a, b) = self.joints[k].bodies();
+                    [a, b]
+                }),
+            );
         }
+        for set in self.contact_colours.iter() {
+            scatter::disjoint(
+                bodies,
+                "contact",
+                set.iter()
+                    .flat_map(|&k| [self.contacts[k].a, self.contacts[k].b]),
+            );
+        }
+        for set in self.ground_colours.iter() {
+            scatter::disjoint(
+                bodies,
+                "ground",
+                set.iter().map(|&k| self.ground_contacts[k].body),
+            );
+        }
+    }
+}
+
+/// One lane's worth of contacts, solved and written back in place.
+///
+/// Shared between a colour's slice and the serial overflow, because the two differ only
+/// in which list they walk and how many lanes are walking it.
+///
+/// # Safety
+/// Every body named by `set` must be owned by the calling lane for the duration: within a
+/// colour that is the colouring plus [`crew::Lane::span`], and for the overflow it is the
+/// single lane that runs it. See [`Skeleton::solve_pass`] for the argument in full.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+unsafe fn solve_some_contacts(
+    set: &[usize],
+    contacts: &[Contact],
+    bodies: &Bodies,
+    impulse: &scatter::Cells<(f64, f64, f64)>,
+    inv_mass: &[f64],
+    inv_inertia: &[(f64, f64, f64)],
+    radius: &[f64],
+    friction: f64,
+    rolling: f64,
+) {
+    for &k in set {
+        let contact = contacts[k];
+        let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
+        let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);
+        let (corrections, totals) =
+            solve_contact(contact, &first, &second, friction, rolling, impulse.get(k));
+        impulse.set(k, totals);
+        bodies.apply(corrections);
     }
 }
 
