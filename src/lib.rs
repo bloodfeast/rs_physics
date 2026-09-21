@@ -33,11 +33,63 @@
 //! | [`interactions`] | Collision detection: GJK/EPA, broad-phase, continuous collision |
 //! | [`forces`] | Force generators: gravity, springs, drag |
 //! | [`constraints`] | Constraint solvers: joints, springs, iterative solver |
+//! | [`articulated`] | Skeletons of jointed capsules, contacts, and piles of them |
 //! | [`materials`] | Material properties: density, elasticity, thermal properties |
 //! | [`fluid_dynamics`] | Fluid calculations: drag, buoyancy, flow analysis |
 //! | [`thermodynamics`] | Heat transfer, thermal grids, phase transitions |
 //! | [`particles`] | Particle systems and emitters |
 //! | [`world`] | Physics world container for managing simulations |
+//!
+//! ## Skeletons and piles
+//!
+//! [`articulated`] is the newest and largest of these, and it is a different shape from
+//! [`constraints`]. A constraint there owns its two bodies by value, which is right for
+//! one joint between two things and wrong for a skeleton -- a forearm is the second body
+//! of the elbow and the first body of the wrist, and two copies of it do not converge.
+//!
+//! An [`articulated::Skeleton`] holds **one** set of bodies as parallel arrays and gives
+//! joints indices into it, so a whole figure, or a few hundred of them, is solved at once:
+//!
+//! ```rust
+//! use rs_physics::articulated::{Body, Joint, Skeleton};
+//!
+//! let mut s = Skeleton::new();
+//! s.set_ground((0.0, 1.0, 0.0), 0.0);
+//!
+//! // A pinned anchor, and a limb hanging off it by a ball joint.
+//! let anchor = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+//! let limb = s.add_body(Body::capsule(4.0, 0.06, 0.4, (0.0, 1.6, 0.0)));
+//! s.add_joint(Joint::Ball {
+//!     a: anchor,
+//!     b: limb,
+//!     anchor_a: (0.0, 0.0, 0.0),
+//!     anchor_b: (0.0, 0.2, 0.0),
+//! });
+//!
+//! for _ in 0..60 {
+//!     s.step(1.0 / 60.0, (0.0, -9.80665, 0.0), 8);
+//! }
+//!
+//! // The anchor is pinned, so it has not moved.
+//! assert_eq!(s.position(anchor), (0.0, 2.0, 0.0));
+//! ```
+//!
+//! What it provides: ball and hinge joints with a range of motion, capsule-against-capsule
+//! and capsule-against-ground contacts with Coulomb friction and rolling resistance, a
+//! uniform-grid broad phase, and a solve that is parallel across constraints -- the
+//! constraints are graph-coloured so that no two in a colour name the same body.
+//!
+//! It is **position-based** (XPBD), which is what makes a pile of hundreds of jointed
+//! bodies tractable at all: corrections are applied to positions and velocities are read
+//! back out of them, so the solve is stable at large timesteps where a force-based
+//! integrator of the same scene would need many more, much smaller, steps.
+//!
+//! Its behaviour is pinned by `tests/articulated_laws.rs`, which checks the properties
+//! that must hold however the solver is implemented: that the answer is bit-identical run
+//! to run and does not depend on how many threads computed it, that `friction` really is
+//! Coulomb's coefficient and means the same thing at any iteration count, that a resting
+//! capsule sits exactly one radius above what it rests on, and that a closed system never
+//! ends with more energy than it began with.
 //!
 //! ## Feature Flags
 //!
