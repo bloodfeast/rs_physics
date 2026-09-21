@@ -337,6 +337,14 @@ const PARALLEL_SINE: f64 = 0.05;
 /// of resting, however many solver iterations it is given. Where the overlap along the
 /// axes is real, a contact is emitted at each end of it, and the pair is held flat for
 /// the same reason a table needs more than one leg.
+///
+/// **And one when the pair is clear, if `alive` says it was carrying load last step.** A
+/// contact that is only allowed to exist while the surfaces already overlap vanishes the
+/// step a resting pair is solved exactly together, and that is a defect rather than an
+/// economy: see the module header on [`super`]. The constraint that comes back is inert
+/// while the gap is open -- [`solve_contact_normal`] returns on `depth <= 0` and every
+/// other half returns on `spent.normal <= 0` -- so it changes nothing at all unless
+/// something closes the gap *during* the step, which is exactly the case it is for.
 pub(super) fn capsule_contact(
     a: usize,
     b: usize,
@@ -344,6 +352,7 @@ pub(super) fn capsule_contact(
     orientation: &[Quaternion],
     radius: &[f64],
     half_length: &[f64],
+    alive: bool,
 ) -> [Option<Contact>; 2] {
     let none = [None, None];
     let (pa, qa) = segment(position[a], orientation[a], half_length[a]);
@@ -352,7 +361,7 @@ pub(super) fn capsule_contact(
 
     let between = sub(cb, ca);
     let reach = radius[a] + radius[b];
-    if length(between) >= reach {
+    if length(between) >= reach && !alive {
         return none;
     }
 
@@ -376,16 +385,15 @@ pub(super) fn capsule_contact(
         let low = first.min(second).max(-half_length[a]);
         let high = first.max(second).min(half_length[a]);
         if high - low > 1e-6 {
-            let mut out = none;
             // The two ends are the two ends of one *patch*, and the friction solve needs
             // to know how far it reaches: see [`patch_arm`].
             let span = scale(axis_a, high - low);
-            for (slot, s) in [low, high].into_iter().enumerate() {
+            let end = |s: f64, revive: bool| {
                 let point_a = add(position[a], scale(axis_a, s));
                 let t = dot(sub(point_a, position[b]), axis_b)
                     .clamp(-half_length[b], half_length[b]);
                 let point_b = add(position[b], scale(axis_b, t));
-                out[slot] = touching(
+                touching(
                     a,
                     b,
                     point_a,
@@ -395,10 +403,25 @@ pub(super) fn capsule_contact(
                     position,
                     orientation,
                     radius,
-                );
-            }
+                    revive,
+                )
+            };
+            // **Asked for as it stands first, and revived only if that leaves the pair
+            // with nothing at all.** A patch with one end loaded and the other clear is a
+            // pair resting at a slight relative tilt, and it is *already* fully
+            // constrained: the loaded end holds the pair apart and the couple about it is
+            // what the tilt is. Reviving the clear end of such a patch adds a second
+            // constraint to a pair that had one, which is not what a lost contact needs
+            // and is measurably wrong -- a settled stack of three shears 0.354 m sideways
+            // and leans 1.6 degrees under it, so a body dropped on the stack misses and
+            // lands beside it. What a revived contact is for is the pair that has lost
+            // *every* constraint, and for a patch that means both of its ends.
+            let out = [end(low, false), end(high, false)];
             if out[0].is_some() || out[1].is_some() {
                 return out;
+            }
+            if alive {
+                return [end(low, true), end(high, true)];
             }
         }
     }
@@ -415,6 +438,7 @@ pub(super) fn capsule_contact(
             position,
             orientation,
             radius,
+            alive,
         ),
         None,
     ]
@@ -434,10 +458,15 @@ fn touching(
     position: &[(f64, f64, f64)],
     orientation: &[Quaternion],
     radius: &[f64],
+    alive: bool,
 ) -> Option<Contact> {
     let surface_a = add(axis_point_a, scale(normal, radius[a]));
     let surface_b = sub(axis_point_b, scale(normal, radius[b]));
-    if dot(sub(surface_a, surface_b), normal) <= 0.0 {
+    // A pair that was carrying load last step keeps its constraint even where this end of
+    // the patch is clear. The depth it is solved at is re-derived from the bodies' current
+    // transforms on every pass, so a negative one here is a constraint that does nothing
+    // until the step itself closes the gap. See [`capsule_contact`].
+    if !alive && dot(sub(surface_a, surface_b), normal) <= 0.0 {
         return None;
     }
     Some(Contact {
