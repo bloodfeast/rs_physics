@@ -1692,6 +1692,52 @@
 //! [`Skeleton::set_self_collision`] and the broad phase's `jointed.component` test. A cut
 //! arm collides with the corpse it came off; the arm still attached does not need to.
 //!
+//! # Every dial at once, which is the table to read before turning any of them
+//!
+//! Each of the things below was measured as it was added, against a codebase that kept
+//! moving underneath. This is all of them together on one commit, four draws a millionth
+//! apart at each point, a rig settled when every one of its bodies is asleep:
+//!
+//! ```text
+//!   rigs  shape    cones  self-coll   settled   soonest   contacts   a step
+//!      1  capsule  no     yes          4 of 4       254          2    127 us
+//!      1  capsule  no     no           4 of 4        87          0     91
+//!      1  capsule  yes    yes          3 of 4      1987          5    135
+//!      1  prism    no     yes          3 of 4       130          7    157
+//!      1  prism    yes    yes          1 of 4      2001          6    164
+//!      4  capsule  no     yes          0 of 4     never         37    639
+//!      4  capsule  no     no           4 of 4       622          5    493
+//!      4  capsule  yes    no           4 of 4      1384          9    491
+//!      4  prism    no     no           4 of 4       910          9    543
+//!      4  prism    yes    no           2 of 4       840          9    532
+//!     20  anything anything any        0 of 4     never    102..331   2434..3762
+//! ```
+//!
+//! **Self-collision is the dominant variable and nothing else is close.** Four rigs settle
+//! four times out of four with it off and zero times out of four with it on, whatever the
+//! shape and whatever the joints. Every other dial moves the answer by a factor; this one
+//! moves it between "always" and "never".
+//!
+//! **And every addition is neutral or worse.** Cones cost: a lone rig goes from four draws
+//! of four at 254 steps to three of four at 1987, and four rigs from 622 steps to 1384.
+//! Prisms cost about a third more time a step and settle no better; they cut contacts when
+//! self-collision is off (119 against 102 at twenty rigs) and *raise* them when it is on
+//! (303 against 331). The best point in the whole table is plain capsules with no cones and
+//! no self-collision, which is also the one configuration that cannot be shipped -- limbs
+//! finish a tenth of a metre inside each other, measured above.
+//!
+//! So the best *shippable* point is plain capsules with self-collision on, which is where
+//! this module started. What the session bought is not a faster pile; it is knowing which
+//! of six dials matters, and that five of them do not.
+//!
+//! **And twenty rigs never settle even with self-collision off**, where four rigs always
+//! do. That is not the contacts -- at twenty rigs with it off there are only a hundred and
+//! two of them -- it is the island rule: a heap is one component and sleeps only when its
+//! *last* body does, so twenty rigs is twenty chances for one body to still be moving.
+//! Letting the settled part of a component sleep was built and withdrawn because bodies
+//! froze below the ground; that defect, rather than any of the shapes above, is what stands
+//! between a heap of twenty and a heap that sleeps.
+//!
 //! # And the rocking is the shape, which this module already says somewhere else
 //!
 //! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
