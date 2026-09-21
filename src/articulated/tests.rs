@@ -90,9 +90,8 @@ fn a_hinge_stays_inside_its_range() {
 
     let axis = normalized(s.orientation(thigh).rotate_point((1.0, 0.0, 0.0))).expect("an axis");
     let angle = hinge_angle(
-        &[s.orientation(thigh), s.orientation(shin)],
-        0,
-        1,
+        s.orientation(thigh),
+        s.orientation(shin),
         axis,
         (1.0, 0.0, 0.0),
         (1.0, 0.0, 0.0),
@@ -135,17 +134,39 @@ fn a_chain_settles_rather_than_gaining_energy() {
 /// **The colouring is what makes a step parallel**, so it has to actually separate the
 /// joints: no two in a colour may name the same body, or two threads write one body and
 /// the answer depends on which got there first.
+///
+/// Since the solve applies each correction from the thread that computed it, this is not
+/// a property of the answer any more -- it is the precondition of the `unsafe` in
+/// [`super::scatter`], and it is asserted here directly rather than inferred from a
+/// simulation looking right.
+///
+/// On a **branching** graph, not a chain: a chain colours in two whatever the algorithm
+/// does, so it cannot tell a working greedy colouring from a broken one. This is a trunk
+/// with limbs hanging off it at every joint, which is the shape a skeleton actually is
+/// and where a body reaches degree four.
 #[test]
 fn no_two_joints_in_a_colour_share_a_body() {
     let mut s = chain(12);
-    // And a branch, so the graph is a skeleton rather than a line.
-    let shoulder = s.add_body(Body::capsule(2.0, 0.04, 0.3, (0.4, 2.6, 0.0)));
-    s.add_joint(Joint::Ball {
-        a: 1,
-        b: shoulder,
-        anchor_a: (0.0, -0.2, 0.0),
-        anchor_b: (0.0, 0.15, 0.0),
-    });
+    // A limb off every link, so bodies reach degree four and the greedy colouring has to
+    // work for its answer.
+    for link in 1..12 {
+        let mut previous = link;
+        for segment in 0..2 {
+            let limb = s.add_body(Body::capsule(
+                2.0,
+                0.04,
+                0.3,
+                (0.4 + 0.3 * segment as f64, 3.0 - 0.4 * link as f64, 0.0),
+            ));
+            s.add_joint(Joint::Ball {
+                a: previous,
+                b: limb,
+                anchor_a: (0.0, -0.2, 0.0),
+                anchor_b: (0.0, 0.15, 0.0),
+            });
+            previous = limb;
+        }
+    }
 
     let joints: Vec<Joint> = s.joints().to_vec();
     let colours: Vec<Vec<usize>> = s.colours().to_vec();
@@ -516,14 +537,7 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
     let mut got = Vec::new();
     let mut grid = super::broadphase::Grid::default();
     grid.rebuild(&s.position, &s.radius, &s.half_length);
-    grid.pairs(
-        &s.position,
-        &s.radius,
-        &s.half_length,
-        &s.inv_mass,
-        &s.jointed,
-        &mut got,
-    );
+    grid.pairs(&s.position, &s.inv_mass, s.jointed(), &mut got);
     got.sort_unstable();
 
     let mut expected = Vec::new();
@@ -535,12 +549,14 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
             if s.inv_mass[a] <= 0.0 && s.inv_mass[b] <= 0.0 {
                 continue;
             }
-            if s.jointed.binary_search(&(a, b)).is_ok() {
+            if s.is_jointed(a, b) {
                 continue;
             }
             // The same near-enough test the grid applies once a pair is in hand.
-            let apart = length(sub(s.position[a], s.position[b]));
-            if apart > s.radius[a] + s.half_length[a] + s.radius[b] + s.half_length[b] {
+            let apart = sub(s.position[a], s.position[b]);
+            let allowed =
+                s.radius[a] + s.half_length[a] + s.radius[b] + s.half_length[b];
+            if dot(apart, apart) > allowed * allowed {
                 continue;
             }
             expected.push((a, b));
@@ -595,6 +611,99 @@ fn the_closest_points_are_closest() {
         (2.0, 0.0, 0.0),
     );
     assert!((length(sub(b, a)) - 2.0).abs() < 1e-9, "{a:?} to {b:?}");
+}
+
+/// **The same simulation twice gives the same bits.**
+///
+/// A colour is now solved *and applied* from whichever thread the pool handed each
+/// constraint to, so the order corrections reach the body arrays in is not the program's
+/// to choose any more. Floating-point addition is not associative, so if two constraints
+/// in one colour could touch one body the answer would depend on that order -- and it
+/// would depend on it *slightly*, which is the failure that never shows up as a crash. A
+/// heap would settle differently on a busy machine than on an idle one and every other
+/// test here would still pass.
+///
+/// So this compares raw bit patterns rather than anything with a tolerance: one run is
+/// either the same double as the other or it is not. It also asserts that the run really
+/// went through the thread pool, because a workload that stayed under
+/// [`PARALLEL_FLOOR`] would pass this without testing anything.
+#[test]
+fn the_same_crowd_twice_lands_on_the_same_bits() {
+    let run = || {
+        let mut s = crowd(24);
+        let mut widest = 0;
+        for _ in 0..40 {
+            s.step(DT, G, 4);
+            widest = widest.max(
+                s.contact_colours
+                    .iter()
+                    .map(|colour| colour.len())
+                    .max()
+                    .unwrap_or(0),
+            );
+        }
+        let mut bits = Vec::with_capacity(s.len() * 13);
+        for i in 0..s.len() {
+            let p = s.position(i);
+            let q = s.orientation(i);
+            let v = s.velocity(i);
+            let w = s.angular_velocity(i);
+            for value in [
+                p.0, p.1, p.2, q.w, q.x, q.y, q.z, v.0, v.1, v.2, w.0, w.1, w.2,
+            ] {
+                bits.push(value.to_bits());
+            }
+        }
+        (bits, widest)
+    };
+
+    let (first, widest) = run();
+    let (second, _) = run();
+
+    assert!(
+        widest >= PARALLEL_FLOOR,
+        "the biggest contact colour reached {widest}, under the {PARALLEL_FLOOR} at which \
+         a colour goes to the thread pool -- this ran entirely on one thread and proves \
+         nothing about the parallel apply",
+    );
+    let differing = first
+        .iter()
+        .zip(second.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differing, 0,
+        "{differing} of {} doubles came out different on the second run of an identical \
+         simulation; the solve is depending on the order the thread pool chose",
+        first.len(),
+    );
+}
+
+/// A slab of capsules packed closer together than their own length, on the ground, at
+/// assorted angles.
+///
+/// Dense on purpose: the contact colouring has to produce sets of hundreds before any of
+/// them crosses [`PARALLEL_FLOOR`], and a loose pile never does.
+fn crowd(side: usize) -> Skeleton {
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    for i in 0..side {
+        for j in 0..side {
+            let n = (i * side + j) as f64;
+            let position = (
+                0.18 * i as f64,
+                0.12 + 0.03 * (n * 0.7).sin(),
+                0.18 * j as f64,
+            );
+            let mut body = Body::capsule(4.0, 0.08, 0.4, position);
+            body.orientation = Quaternion::from_axis_angle(
+                normalized((1.0, 0.3 * (n * 0.9).sin(), 0.7 * (n * 1.3).cos())).expect("an axis"),
+                0.4 * n,
+            );
+            s.add_body(body);
+        }
+    }
+    s
 }
 
 /// A pinned root with `links` capsules hanging off it in a line.
