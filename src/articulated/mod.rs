@@ -53,6 +53,24 @@
 //! which parallelises without colouring and converges slower, so it needs more iterations
 //! to hold a knee. Colouring keeps the iteration count.
 //!
+//! # Going parallel is not free, and below a size it is a loss
+//!
+//! Measured, one skeleton of seventeen bodies against a pile of ten thousand:
+//!
+//! ```text
+//!   one skeleton   207 us a step    12.2 us per body
+//!   the pile       2.43 ms a step    0.24 us per body
+//! ```
+//!
+//! Fifty times worse per body on the small one, for the same arithmetic. Handing a
+//! seventeen-element sweep to a thread pool costs more in scheduling than the sweep costs
+//! to run, and a solver is usually called on one skeleton at a time.
+//!
+//! So each sweep and each colour goes parallel only above [`PARALLEL_FLOOR`], and runs on
+//! the calling thread below it. The floor is not tuned to a machine -- it is the size at
+//! which a rayon split has anything to amortise over, and being wrong about it by a factor
+//! of two costs a few percent either way.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing. The predicted state, the colour sets and the
@@ -62,6 +80,12 @@
 use rayon::prelude::*;
 
 use crate::models::Quaternion;
+
+/// Below this many items, a sweep or a colour runs on the calling thread.
+///
+/// See the module header for the measurement. A thread pool has a fixed cost per split --
+/// a task, a queue, a join -- and a few dozen elements of arithmetic does not repay it.
+const PARALLEL_FLOOR: usize = 256;
 
 /// A rigid body, as a value. The storage is [`Skeleton`]'s arrays; this is what crosses
 /// the API in either direction.
@@ -92,8 +116,8 @@ impl Body {
     /// A body at rest at `position`, with the inertia of a solid capsule of this `mass`,
     /// `radius` and segment `length`, its long axis along local **+Y**.
     ///
-    /// The axis is +Y because that is where a bone's length lives in every rig this
-    /// crate's callers export.
+    /// The axis is +Y because that is the convention skeletal formats put a bone's own
+    /// length down, so a segment authored in one arrives pointing the right way.
     pub fn capsule(mass: f64, radius: f64, length: f64, position: (f64, f64, f64)) -> Self {
         // A capsule's inertia, taken as the cylinder it mostly is: `m r^2 / 2` about the
         // long axis and `m (3 r^2 + L^2) / 12` across it. The hemispherical caps move
@@ -422,22 +446,41 @@ impl Skeleton {
         // Three sweeps, each over two arrays, each independently parallel. This is the
         // shape the structure of arrays is for: no gather, and rayon can chunk it.
         let g = gravity;
-        self.velocity
-            .par_iter_mut()
-            .zip(self.inv_mass.par_iter())
-            .for_each(|(v, &inv_m)| {
-                if inv_m > 0.0 {
-                    *v = add(*v, scale(g, dt));
-                }
-            });
-        self.position
-            .par_iter_mut()
-            .zip(self.velocity.par_iter())
-            .for_each(|(p, v)| *p = add(*p, scale(*v, dt)));
-        self.orientation
-            .par_iter_mut()
-            .zip(self.angular_velocity.par_iter())
-            .for_each(|(q, w)| *q = integrate_spin(*q, *w, dt));
+        let wide = self.position.len() >= PARALLEL_FLOOR;
+
+        let fall = |(v, &inv_m): (&mut (f64, f64, f64), &f64)| {
+            if inv_m > 0.0 {
+                *v = add(*v, scale(g, dt));
+            }
+        };
+        let travel = |(p, v): (&mut (f64, f64, f64), &(f64, f64, f64))| {
+            *p = add(*p, scale(*v, dt));
+        };
+        let spin = |(q, w): (&mut Quaternion, &(f64, f64, f64))| {
+            *q = integrate_spin(*q, *w, dt);
+        };
+
+        if wide {
+            self.velocity
+                .par_iter_mut()
+                .zip(self.inv_mass.par_iter())
+                .for_each(fall);
+            self.position
+                .par_iter_mut()
+                .zip(self.velocity.par_iter())
+                .for_each(travel);
+            self.orientation
+                .par_iter_mut()
+                .zip(self.angular_velocity.par_iter())
+                .for_each(spin);
+        } else {
+            self.velocity.iter_mut().zip(self.inv_mass.iter()).for_each(fall);
+            self.position.iter_mut().zip(self.velocity.iter()).for_each(travel);
+            self.orientation
+                .iter_mut()
+                .zip(self.angular_velocity.iter())
+                .for_each(spin);
+        }
 
         for _ in 0..iterations.max(1) {
             for colour in 0..self.colours.len() {
@@ -446,24 +489,42 @@ impl Skeleton {
         }
 
         let inv_dt = 1.0 / dt;
-        self.velocity
-            .par_iter_mut()
-            .zip(self.position.par_iter())
-            .zip(self.prev_position.par_iter())
-            .for_each(|((v, p), prev)| *v = scale(sub(*p, *prev), inv_dt));
-        self.angular_velocity
-            .par_iter_mut()
-            .zip(self.orientation.par_iter())
-            .zip(self.prev_orientation.par_iter())
-            .for_each(|((w, q), prev)| {
-                // The rotation that happened, as an axis-angle, divided by the step. The
-                // `w < 0` flip keeps the short way round: a quaternion and its negation
-                // are the same orientation, and without the check a body can read as
-                // spinning almost a full turn when it barely moved.
-                let delta = q.multiply(&prev.inverse());
-                let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
-                *w = scale((delta.x, delta.y, delta.z), 2.0 * inv_dt * sign);
-            });
+        let moved = |((v, p), prev): ((&mut (f64, f64, f64), &(f64, f64, f64)), &(f64, f64, f64))| {
+            *v = scale(sub(*p, *prev), inv_dt);
+        };
+        let turned = |((w, q), prev): ((&mut (f64, f64, f64), &Quaternion), &Quaternion)| {
+            // The rotation that happened, as an axis-angle, divided by the step. The
+            // `w < 0` flip keeps the short way round: a quaternion and its negation are
+            // the same orientation, and without the check a body can read as spinning
+            // almost a full turn when it barely moved.
+            let delta = q.multiply(&prev.inverse());
+            let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
+            *w = scale((delta.x, delta.y, delta.z), 2.0 * inv_dt * sign);
+        };
+
+        if wide {
+            self.velocity
+                .par_iter_mut()
+                .zip(self.position.par_iter())
+                .zip(self.prev_position.par_iter())
+                .for_each(moved);
+            self.angular_velocity
+                .par_iter_mut()
+                .zip(self.orientation.par_iter())
+                .zip(self.prev_orientation.par_iter())
+                .for_each(turned);
+        } else {
+            self.velocity
+                .iter_mut()
+                .zip(self.position.iter())
+                .zip(self.prev_position.iter())
+                .for_each(moved);
+            self.angular_velocity
+                .iter_mut()
+                .zip(self.orientation.iter())
+                .zip(self.prev_orientation.iter())
+                .for_each(turned);
+        }
     }
 
     /// One colour: every joint in it computes its two corrections **in parallel**, then
@@ -479,16 +540,18 @@ impl Skeleton {
         let set = &self.colours[colour];
 
         // Borrowed apart so the parallel closure only sees the read-only arrays.
+        let solve = |&k: &usize| {
+            (
+                k,
+                solve_joint(joints[k], position, orientation, inv_mass, inv_inertia),
+            )
+        };
+        let pairs: Vec<(usize, [Correction; 2])> = if set.len() >= PARALLEL_FLOOR {
+            set.par_iter().map(solve).collect()
+        } else {
+            set.iter().map(solve).collect()
+        };
         let scratch = &mut self.scratch;
-        let pairs: Vec<(usize, [Correction; 2])> = set
-            .par_iter()
-            .map(|&k| {
-                (
-                    k,
-                    solve_joint(joints[k], position, orientation, inv_mass, inv_inertia),
-                )
-            })
-            .collect();
         for (k, corrections) in pairs {
             scratch[k] = corrections;
         }

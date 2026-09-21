@@ -107,8 +107,8 @@ fn a_hinge_stays_inside_its_range() {
 
 /// A chain settles instead of running away. XPBD reads its velocities back out of the
 /// positions it corrected, so a constraint that fights itself shows up as a body that
-/// gains speed every step -- which is the failure mode that ends with a limb at 1e12 m,
-/// and this crate's caller has met that one already.
+/// gains speed every step -- and a position-based solver that feeds itself does not drift,
+/// it diverges, reaching absurd magnitudes within seconds.
 #[test]
 fn a_chain_settles_rather_than_gaining_energy() {
     let mut s = chain(4);
