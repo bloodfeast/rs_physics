@@ -34,8 +34,124 @@
 //! compared with where they were when the step began, and the tangential part of that
 //! drift is removed up to the Coulomb limit of the normal correction. A body resting on
 //! another then stays where it was put instead of sliding out from under the load.
+//!
+//! Two things about that are easy to get wrong and were: what the Coulomb limit bounds
+//! (the resultant over the step, not the distance it walked -- see [`Spent`]), and where
+//! the impulse's couple goes when the contact is a patch rather than a point (see
+//! [`patch_arm`]). Each of them on its own is enough to make a body resting below the
+//! Coulomb angle creep downhill for ever.
 
 use super::*;
+
+/// What one contact has already spent this step, carried across the solver's passes.
+///
+/// # Why the tangential half is a vector and the other two are not
+///
+/// Coulomb's limit is a budget for the whole step rather than for each pass -- see the
+/// module header on [`super`] for the two ways of dividing it that do not work. But a
+/// *budget* is the wrong word for the tangential half, and using it literally is a
+/// defect: the limit is a **cone**, `|P_t| <= friction * P_n`, and what has to stay
+/// inside it is the resultant friction impulse over the step, not the distance the
+/// resultant walked getting there.
+///
+/// The difference is not academic, because the direction genuinely reverses between
+/// passes. The normal correction acts at a lever arm from the centre of mass, so it turns
+/// the body as well as lifting it, and turning it drags the contact points tangentially;
+/// the next pass then sees a drift pointing the other way and pushes back. Charging both
+/// pushes against one running total spends budget to produce no net impulse at all, and a
+/// body near the limit runs out of friction while it is still being asked to hold.
+///
+/// So the tangential half accumulates as a vector and is projected back onto the cone
+/// when it leaves it. A reversal then returns budget rather than burning it, and the only
+/// thing bounded is the quantity the law actually bounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Spent {
+    /// Normal impulse applied so far this step, always positive.
+    pub normal: f64,
+    /// Friction impulse applied so far this step, as a world-space vector: the impulse
+    /// the *first* body received. For a pair the second received its negative; against
+    /// the ground there is no second, because the ground does not move.
+    pub tangential: (f64, f64, f64),
+    /// Rolling-resistance angular impulse applied so far this step, as a world-space
+    /// vector, and on the first body for the same reason `tangential` is. A cone for the
+    /// same reason too: a roll reverses between passes exactly as a slide does.
+    pub rolling: (f64, f64, f64),
+}
+
+/// The impulse to add this pass, given what the contact wants and what the cone allows,
+/// and the new running total.
+///
+/// `wanted` is the impulse that would cancel the whole remaining drift, and `limit` is the
+/// coefficient times the normal impulse spent so far. The running total plus `wanted` is
+/// projected back onto the cone if it has left it, and what is applied is the difference
+/// -- which is `wanted` exactly whenever the cone is not binding, and points back towards
+/// the cone rather than nowhere when it is.
+#[inline]
+pub(super) fn cone(
+    already: (f64, f64, f64),
+    wanted: (f64, f64, f64),
+    limit: f64,
+) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let mut total = add(already, wanted);
+    let size = length(total);
+    if size > limit {
+        total = if limit > 0.0 && size > 0.0 {
+            scale(total, limit / size)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+    }
+    (sub(total, already), total)
+}
+
+/// **The arm a friction impulse turns a body about, once the contact patch has taken the
+/// part of the couple it can carry.**
+///
+/// A friction impulse acts on the surface, a distance `dot(r, normal)` from the centre of
+/// mass along the normal, so it carries a couple of that times the impulse which tips the
+/// body forward over the contact. The couple is real, and for a body touching at a single
+/// point it is the whole story: the body tips, and it should.
+///
+/// A body resting on a *patch* is different, and the difference is not a detail. The
+/// normal load is free to move within the patch, and it moves exactly as far as it must to
+/// cancel the tipping couple: a patch of half-width `reach` in the direction of the slide
+/// can supply a counter-couple of `reach` times the normal impulse it carries, while the
+/// largest friction impulse Coulomb allows is `friction` times that same normal impulse.
+/// So the couple survives only in the ratio `1 - reach / (friction * offset)`, and where
+/// the patch reaches far enough it does not survive at all: the ends of the patch together
+/// resist the slide in pure translation, which is what a real contact patch does. The
+/// ratio is geometry and the coefficient, with nothing in it to tune, and the normal
+/// impulse cancels out of it entirely.
+///
+/// Leaving the whole couple in is what makes a resting body creep downhill for ever. The
+/// tipping that friction induces is repaired by the normal constraints, and those can only
+/// push: a body ratchets itself clear of the surface over the solver's passes, its
+/// contacts stop reporting any depth, and friction stops acting while the slide it was
+/// holding is still there. Measured, that is a steady creep at every angle inside the
+/// Coulomb limit, at every iteration count.
+///
+/// The geometry decides rather than a threshold. A capsule stood on one end has a patch
+/// that reaches nowhere, so it still topples; a capsule lying down and sliding *across*
+/// its own axis has a patch that reaches nowhere in that direction, so it still rolls.
+#[inline]
+fn patch_arm(
+    r: (f64, f64, f64),
+    normal: (f64, f64, f64),
+    reach: f64,
+    friction: f64,
+) -> (f64, f64, f64) {
+    let offset = dot(r, normal);
+    let couple = friction * offset.abs();
+    let survives = if couple > 1e-12 {
+        (1.0 - reach / couple).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    add(
+        sub(r, scale(normal, offset)),
+        scale(normal, offset * survives),
+    )
+}
 
 /// One touching pair, resolved to a point on each surface.
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +164,10 @@ pub(super) struct Contact {
     pub local_b: (f64, f64, f64),
     /// Unit vector from `a` towards `b`, fixed for the step.
     pub normal: (f64, f64, f64),
+    /// The vector from one end of this pair's contact patch to the other, or zero where
+    /// they touch at a point. Both contacts of a line contact carry the same one. See
+    /// [`patch_arm`] for what a patch does that a point cannot.
+    pub span: (f64, f64, f64),
 }
 
 /// The closest pair of points between segment `p1..q1` and segment `p2..q2`.
@@ -170,6 +290,9 @@ pub(super) fn capsule_contact(
         let high = first.max(second).min(half_length[a]);
         if high - low > 1e-6 {
             let mut out = none;
+            // The two ends are the two ends of one *patch*, and the friction solve needs
+            // to know how far it reaches: see [`patch_arm`].
+            let span = scale(axis_a, high - low);
             for (slot, s) in [low, high].into_iter().enumerate() {
                 let point_a = add(position[a], scale(axis_a, s));
                 let t = dot(sub(point_a, position[b]), axis_b)
@@ -181,6 +304,7 @@ pub(super) fn capsule_contact(
                     point_a,
                     point_b,
                     normal,
+                    span,
                     position,
                     orientation,
                     radius,
@@ -192,8 +316,19 @@ pub(super) fn capsule_contact(
         }
     }
 
+    // Crossed capsules touch at a point, which reaches nowhere.
     [
-        touching(a, b, ca, cb, normal, position, orientation, radius),
+        touching(
+            a,
+            b,
+            ca,
+            cb,
+            normal,
+            (0.0, 0.0, 0.0),
+            position,
+            orientation,
+            radius,
+        ),
         None,
     ]
 }
@@ -208,6 +343,7 @@ fn touching(
     axis_point_a: (f64, f64, f64),
     axis_point_b: (f64, f64, f64),
     normal: (f64, f64, f64),
+    span: (f64, f64, f64),
     position: &[(f64, f64, f64)],
     orientation: &[Quaternion],
     radius: &[f64],
@@ -223,6 +359,7 @@ fn touching(
         local_a: rotate_inv(orientation[a], sub(surface_a, position[a])),
         local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
         normal,
+        span,
     })
 }
 
@@ -236,16 +373,17 @@ pub(super) fn solve_contact(
     second: &Gathered,
     friction: f64,
     rolling_resistance: f64,
-    spent: (f64, f64, f64),
-) -> ([Correction; 2], (f64, f64, f64)) {
+    spent: Spent,
+) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
-    let (mut normal_impulse, mut tangential_impulse, mut rolling_impulse) = spent;
+    let mut spent = spent;
     let Contact {
         a,
         b,
         local_a,
         local_b,
         normal,
+        span,
     } = contact;
     out[0].body = a;
     out[1].body = b;
@@ -280,7 +418,7 @@ pub(super) fn solve_contact(
     if total <= 1e-12 {
         return (out, spent);
     }
-    normal_impulse += depth / total;
+    spent.normal += depth / total;
 
     for (share, free) in [(driven, false), (inherited, true)] {
         if share <= 0.0 {
@@ -293,46 +431,50 @@ pub(super) fn solve_contact(
 
     // The rolling half of the same law, on the same carried budget. The arm is the
     // smaller radius: the tighter body is the one that rolls.
-    rolling_impulse += resist_rolling(
+    spent.rolling = resist_rolling(
         &mut out,
         first,
         Some(second),
         normal,
         rolling_resistance * first.radius.min(second.radius),
-        normal_impulse,
-        rolling_impulse,
+        spent.normal,
+        spent.rolling,
     );
 
     if friction <= 0.0 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     }
 
     let tangential = sub(slid, scale(normal, dot(slid, normal)));
     let Some(direction) = normalized(tangential) else {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     };
-    let ta = generalised_inverse_mass(&first.now, ra, direction);
-    let tb = generalised_inverse_mass(&second.now, rb, direction);
+    // Each body feels only the part of the friction couple its share of the patch cannot
+    // cancel; see [`patch_arm`], which is where the argument is. The reach is the pair's,
+    // the offset is each body's own radius.
+    let reach = 0.5 * dot(span, direction).abs();
+    let arm_a = patch_arm(ra, normal, reach, friction);
+    let arm_b = patch_arm(rb, normal, reach, friction);
+    let ta = generalised_inverse_mass(&first.now, arm_a, direction);
+    let tb = generalised_inverse_mass(&second.now, arm_b, direction);
     let total = ta + tb;
     if total <= 1e-12 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     }
 
-    // Coulomb, over the step rather than over this pass: the tangential impulse already
-    // spent plus whatever is added now must stay under the coefficient times the normal
-    // impulse spent. Within that, the whole slide is removed and the contact holds
-    // static; at the limit, what is left over is the pair sliding.
-    let wanted = length(tangential) / total;
-    let allowed = (friction * normal_impulse - tangential_impulse).max(0.0);
-    let spend = wanted.min(allowed);
-    if spend <= 0.0 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+    // Coulomb, over the step rather than over this pass and as a cone rather than a
+    // running total: see [`Spent`]. The impulse that would cancel the whole remaining
+    // slide is added to what the step has already applied, the resultant is projected
+    // back into the cone if it has left it, and the difference is what goes on now.
+    let wanted = scale(direction, -length(tangential) / total);
+    let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
+    if grip == (0.0, 0.0, 0.0) {
+        return (out, spent);
     }
-    tangential_impulse += spend;
-    let grip = scale(direction, spend);
-    accumulate(&mut out[0], &first.now, ra, scale(grip, -1.0), false);
-    accumulate(&mut out[1], &second.now, rb, grip, false);
-    (out, (normal_impulse, tangential_impulse, rolling_impulse))
+    spent.tangential = total_grip;
+    accumulate(&mut out[0], &first.now, arm_a, grip, false);
+    accumulate(&mut out[1], &second.now, arm_b, scale(grip, -1.0), false);
+    (out, spent)
 }
 
 /// One body resting against the ground plane.
@@ -399,10 +541,13 @@ pub(super) fn solve_ground(
     rolling_resistance: f64,
     normal: (f64, f64, f64),
     distance: f64,
-    spent: (f64, f64, f64),
-) -> (Correction, (f64, f64, f64)) {
+    // The vector between the two ends of this body's contact patch with the plane, or
+    // zero where it touches at one point. See [`patch_arm`] for what it is for.
+    span: (f64, f64, f64),
+    spent: Spent,
+) -> (Correction, Spent) {
     let mut out = Correction::none();
-    let (mut normal_impulse, mut tangential_impulse, mut rolling_impulse) = spent;
+    let mut spent = spent;
     let GroundContact { body: index, local } = contact;
     out.body = index;
 
@@ -425,7 +570,7 @@ pub(super) fn solve_ground(
     if w <= 1e-12 {
         return (out, spent);
     }
-    normal_impulse += depth / w;
+    spent.normal += depth / w;
 
     for (share, free) in [(driven, false), (inherited, true)] {
         if share <= 0.0 {
@@ -436,37 +581,38 @@ pub(super) fn solve_ground(
 
     // The ground does not turn, so the whole of the resistance lands on the body.
     let mut pair = [out, Correction::none()];
-    rolling_impulse += resist_rolling(
+    spent.rolling = resist_rolling(
         &mut pair,
         body,
         None,
         normal,
         rolling_resistance * body.radius,
-        normal_impulse,
-        rolling_impulse,
+        spent.normal,
+        spent.rolling,
     );
     out = pair[0];
 
     if friction <= 0.0 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     }
     let tangential = sub(slid, scale(normal, dot(slid, normal)));
     let Some(direction) = normalized(tangential) else {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     };
-    let tw = generalised_inverse_mass(&body.now, r, direction);
+    // The couple this impulse leaves on the body once the patch has carried what it can:
+    // see [`patch_arm`], which is where the argument is.
+    let arm = patch_arm(r, normal, 0.5 * dot(span, direction).abs(), friction);
+    let tw = generalised_inverse_mass(&body.now, arm, direction);
     if tw <= 1e-12 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+        return (out, spent);
     }
-    // Coulomb over the step; see the pair version for why it is carried rather than
-    // re-spent each pass.
-    let wanted = length(tangential) / tw;
-    let allowed = (friction * normal_impulse - tangential_impulse).max(0.0);
-    let spend = wanted.min(allowed);
-    if spend <= 0.0 {
-        return (out, (normal_impulse, tangential_impulse, rolling_impulse));
+    // Coulomb over the step, and as a cone; see the pair version and [`Spent`].
+    let wanted = scale(direction, -length(tangential) / tw);
+    let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
+    if grip == (0.0, 0.0, 0.0) {
+        return (out, spent);
     }
-    tangential_impulse += spend;
-    accumulate(&mut out, &body.now, r, scale(direction, -spend), false);
-    (out, (normal_impulse, tangential_impulse, rolling_impulse))
+    spent.tangential = total_grip;
+    accumulate(&mut out, &body.now, arm, grip, false);
+    (out, spent)
 }

@@ -96,46 +96,66 @@ fn the_answer_does_not_depend_on_how_many_threads_ran_it() {
 /// sideways and sliding carries it down, then measures the component that answers the
 /// question being asked.
 ///
-/// # A known limitation, measured rather than hidden
+/// # Held to the nanometre, at every angle inside the limit
 ///
-/// Well inside the limit the body is held **exactly** still -- not nearly, exactly. Closer
-/// to the limit it creeps, at a steady speed, indefinitely. Measured at three quarters of
-/// `tan(mu)` with `mu` of 0.2, it travels 0.019 m in one second, 0.077 in four, 0.306 in
-/// sixteen and 1.226 in sixty-four: linear in time to three figures, so a genuine steady
-/// state and not a transient settling out.
+/// Anywhere below `atan(mu)` the body is held still to within a nanometre over a minute,
+/// which is arithmetic and not motion. Measured over the whole grid this test walks --
+/// four coefficients, five fractions of the limit, four iteration counts, out to
+/// sixty-four seconds -- the worst downhill travel is 1.5e-9 m, and what remains is
+/// slightly *uphill* at about a micrometre a minute, so it is a residual and not a slide.
 ///
-/// The mechanism is known. The friction constraint cancels the tangential drift of the
-/// *contact point*, and the impulse that does it acts at a lever arm from the centre of
-/// mass, so part of it spins the body rather than stopping it. A contact point held still
-/// while the body turns underneath it is a body that still travels. Setting the inverse
-/// inertia to zero removes the creep entirely at every angle, which is what confirms it;
-/// rolling resistance does not touch it, which is what rules out the obvious alternative.
+/// It was not always so, and the bound is written this tight deliberately so that
+/// slackening it is a decision somebody has to make. A previous version crept downhill at
+/// a steady 19 mm a second at three quarters of the limit with `mu` of 0.2 -- 0.019 m in
+/// one second, 0.077 in four, 0.306 in sixteen, 1.226 in sixty-four, linear in time and
+/// identical at four iterations and at thirty-two, so a genuine steady state rather than
+/// a convergence shortfall. Two things caused it and both are worth knowing, because
+/// either one coming back would look like this again:
 ///
-/// So this test asserts the law where the law is met, and a *bound* where it is not, with
-/// the bound stated in the units of the defect. Tighten it when the rotational coupling is
-/// fixed rather than leaving it as cover.
+/// * Coulomb's limit was carried across the solver's passes as a running total of
+///   *magnitude* rather than as a cone on the resultant. The friction direction genuinely
+///   reverses between passes, and charging both directions against one total spent the
+///   coefficient to produce no net impulse: measured, the whole budget was consumed
+///   while the resultant was only three quarters of it.
+/// * The friction impulse was applied at the contact point with its full lever arm, so it
+///   tipped the body forward over the contact. The normal constraints repair that tipping
+///   but they can only push, so a resting body ratcheted itself clear of the plane, its
+///   contacts stopped reporting any depth, and friction stopped acting while the slide it
+///   was holding was still there.
+///
+/// The second is the one that makes a *patch* different from a point: two ends of a
+/// capsule on a plane can shift load between them and cancel the tipping couple between
+/// themselves, and a single point cannot. Which is why a capsule stood on one end still
+/// topples and a capsule lying across the slide direction still rolls -- both have a patch
+/// of no reach in the direction that matters.
 #[test]
 fn friction_holds_a_slope_and_lets_go_past_coulombs_angle() {
+    // Ten nanometres, which is not a tolerance chosen to pass: the worst travel measured
+    // anywhere on this grid is 1.5e-9 m over sixty-four seconds, and a body that has moved
+    // a nanometre in a minute has not moved. It is an order of magnitude of headroom over
+    // arithmetic and seven orders below the creep this replaced.
+    const STILL: f64 = 1e-8;
+
     for mu in [0.2_f64, 0.3, 0.5, 0.8] {
         let limit = mu.atan().to_degrees();
         for iterations in [4usize, 8, 16, 32] {
-            // Comfortably inside the limit, where it is held exactly.
+            // Comfortably inside the limit, where it is held.
             let inside = slid_down((mu * 0.25).atan().to_degrees(), mu, iterations, 4.0);
-            assert_eq!(
-                inside, 0.0,
+            assert!(
+                inside < STILL,
                 "with mu {mu} at a quarter of the limit the body should not move at all, \
-                 and at {iterations} iterations it moved {inside} m",
+                 and at {iterations} iterations it moved {inside:e} m",
             );
 
-            // Near the limit, where it creeps. Four seconds of the measured worst rate,
-            // with room for the rate to vary across mu, but far below the metre a second
-            // that would mean it had simply let go.
+            // And near the limit, which is where the old version gave way: four seconds
+            // at the rate it used to creep would be 0.077 m.
             let near = slid_down((mu * 0.9).atan().to_degrees(), mu, iterations, 4.0);
             assert!(
-                near < 0.12,
-                "with mu {mu} at nine tenths of the limit the body crept {near:.4} m in \
-                 four seconds at {iterations} iterations; the known rotational creep is \
-                 about 0.09 m and anything much beyond it is a new fault",
+                near < STILL,
+                "with mu {mu} at nine tenths of the limit the body moved {near:e} m in \
+                 four seconds at {iterations} iterations; friction is holding it at all \
+                 the shallower angles and letting go here, which is the rotational creep \
+                 coming back",
             );
 
             // And past the limit it genuinely runs.
@@ -150,22 +170,28 @@ fn friction_holds_a_slope_and_lets_go_past_coulombs_angle() {
     }
 }
 
-/// **The creep stays a creep.** Separately from where it starts, the defect above must not
-/// grow: it is linear in time now, and a change that made it accelerate would turn a slow
-/// drift into a slide while every angle test above still passed.
+/// **And it is still held a minute later.** Separately from the angles, the hold must not
+/// decay with time: a slow leak at the contact is invisible in four seconds and obvious in
+/// a minute, and it is exactly what the rotational creep looked like before it was fixed.
+///
+/// Stated as travel that does not grow with the time it is given rather than as a rate,
+/// because a rate divides by a number that is nearly zero. Sixteen times the duration must
+/// not give sixteen times the travel; it must give the same nothing.
 #[test]
-fn the_slope_creep_is_linear_in_time_not_accelerating() {
+fn a_held_slope_stays_held_however_long_it_is_watched() {
+    const STILL: f64 = 1e-8;
     let mu = 0.2_f64;
     let angle = (mu * 0.75).atan().to_degrees();
-    let short = slid_down(angle, mu, 8, 4.0);
-    let long = slid_down(angle, mu, 8, 16.0);
-    assert!(short > 0.0, "the fixture no longer creeps at all, so this test is moot");
-    let ratio = long / short;
-    assert!(
-        (ratio - 4.0).abs() < 0.5,
-        "four times the time gave {ratio:.2} times the travel, not four; the creep is no \
-         longer a steady state and is accelerating or decaying",
-    );
+    for seconds in [4.0, 16.0, 64.0] {
+        let travelled = slid_down(angle, mu, 8, seconds);
+        assert!(
+            travelled < STILL,
+            "at three quarters of the limit the body travelled {travelled:e} m in \
+             {seconds} seconds; at four seconds it travelled {:e}, so this is a leak that \
+             grows with time rather than arithmetic that does not",
+            slid_down(angle, mu, 8, 4.0),
+        );
+    }
 }
 
 /// **Coulomb friction does not depend on mass.** The friction force rises with the normal
@@ -182,10 +208,10 @@ fn the_friction_angle_does_not_depend_on_mass() {
     for mass in [0.5, 4.0, 400.0] {
         let inside = slid_down_with_mass((mu * 0.25).atan().to_degrees(), mu, 8, 4.0, mass);
         let outside = slid_down_with_mass(limit + 6.0, mu, 8, 4.0, mass);
-        assert_eq!(
-            inside, 0.0,
-            "a {mass} kg body should be held exactly below {limit:.1} degrees; it moved \
-             {inside} m",
+        assert!(
+            inside < 1e-8,
+            "a {mass} kg body should be held below {limit:.1} degrees; it moved \
+             {inside:e} m",
         );
         assert!(
             outside > 0.5,
@@ -333,6 +359,7 @@ fn a_heap_settles_and_stays_where_it_settled() {
         s.step(DT, G, 8);
     }
     let footprint_then = footprint(&s);
+    let spread_then = spread(&s);
 
     for i in 0..s.len() {
         assert!(
@@ -349,14 +376,34 @@ fn a_heap_settles_and_stays_where_it_settled() {
 
     // And it is still there a further fifteen seconds later, which is the part that
     // separates a heap at rest from a heap drifting slowly enough to look like one.
+    //
+    // **Measured on the whole pile, not on its furthest body.** A pile of forty capsules
+    // is chaotic: which body ends up outermost, and what it is balanced on when the clock
+    // starts, swing the furthest radius by hundreds of millimetres between two runs that
+    // differ only in the iteration count. Measured across pile sizes from twenty to sixty,
+    // the furthest body's fifteen-second drift scatters over -0.02 m to 0.18 m with no
+    // trend, so a tight bound on it tests the draw rather than the solver.
+    //
+    // The mean radius does not scatter: a settled pile holds it to a few centimetres at
+    // every size, and a pile that is genuinely rolling apart -- the same fixture with
+    // rolling resistance turned off -- moves it by 0.7 m to 2.3 m. Two orders of
+    // magnitude of daylight, so this is the looser-looking number that actually
+    // discriminates.
     for _ in 0..900 {
         s.step(DT, G, 8);
     }
+    let spread_now = spread(&s);
+    assert!(
+        spread_now - spread_then < 0.1,
+        "the pile's mean radius went from {spread_then:.3} m to {spread_now:.3} m while it \
+         was supposed to be at rest; a settled pile holds it to about 0.05 m and one that \
+         is rolling apart moves it by a metre",
+    );
     let footprint_now = footprint(&s);
     assert!(
-        footprint_now - footprint_then < 0.05,
-        "the heap spread from {footprint_then:.3} m to {footprint_now:.3} m while it was \
-         supposed to be at rest",
+        footprint_now - footprint_then < 0.5,
+        "and no body should have left: the furthest went from {footprint_then:.3} m to \
+         {footprint_now:.3} m",
     );
 }
 
@@ -411,6 +458,18 @@ fn energy(s: &Skeleton) -> f64 {
         }
     }
     total
+}
+
+/// How far the pile sits from the axis it was dropped on, on average. The stable measure
+/// of a pile's size: see [`a_heap_settles_and_stays_where_it_settled`] for why the
+/// furthest body is not one.
+fn spread(s: &Skeleton) -> f64 {
+    let mut total = 0.0;
+    for i in 0..s.len() {
+        let p = s.position(i);
+        total += (p.0 * p.0 + p.2 * p.2).sqrt();
+    }
+    total / s.len().max(1) as f64
 }
 
 /// How far the furthest body is from the axis the heap was dropped on.

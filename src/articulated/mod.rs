@@ -104,7 +104,17 @@
 //!   the other way, because the first pass removes nearly all the overlap and leaves the
 //!   rest almost no normal impulse to be a fraction of. Carrying the totals across the
 //!   step gets the angle right and makes it the same at four iterations and at
-//!   thirty-two.
+//!   thirty-two. What is carried is a **cone on the resultant**, not a running total of
+//!   magnitude: the friction direction reverses between passes, and charging both
+//!   directions against one total spends the coefficient to produce no net impulse. See
+//!   [`contacts::Spent`].
+//! * **A contact patch is not a point, and the difference is a couple.** Friction acts at
+//!   the surface, below the centre of mass, so it tips a body forward over its contact.
+//!   For a body touching at one point that is the whole story and it should tip. A body
+//!   resting on a patch moves its normal load within the patch instead and does not tip,
+//!   and modelling it as a point makes a resting body ratchet itself clear of the plane
+//!   over the passes until its contacts report no depth and friction stops acting. See
+//!   [`contacts::patch_arm`].
 //! * **Friction does not resist rolling, so a heap of capsules rolls apart.** The contact
 //!   point of a rolling body is instantaneously still, so there is nothing for Coulomb to
 //!   act on. Measured, a pile of forty settled onto the ground perfectly happily and then
@@ -129,7 +139,7 @@ mod scatter;
 
 use broadphase::{Grid, Jointed};
 use contacts::{
-    capsule_contact, ground_contacts, solve_contact, solve_ground, Contact, GroundContact,
+    capsule_contact, ground_contacts, solve_contact, solve_ground, Contact, GroundContact, Spent,
 };
 use scatter::Bodies;
 
@@ -596,11 +606,19 @@ pub struct Skeleton {
     /// one contact per end, so two sets are always enough and no colouring pass is
     /// needed: the first contact found for a body goes in one, the second in the other.
     ground_colours: [Vec<usize>; 2],
+    /// One per body: the vector from one end of its contact with the plane to the other,
+    /// or zero where it touches at a point. Rebuilt with the ground contacts. See
+    /// [`contacts::patch_arm`].
+    ground_span: Vec<(f64, f64, f64)>,
     friction: f64,
     rolling_resistance: f64,
-    /// Running totals of the normal, tangential and rolling impulse each contact has
-    /// applied so
-    /// far this step, and the same for each ground contact.
+    /// What each contact has already spent this step. See [`Spent`], which is also where
+    /// the tangential half's shape is argued.
+    ///
+    /// **`contact_impulse` is indexed by contact and `ground_impulse` by body**, and the
+    /// difference is deliberate: see [`Skeleton::build_contacts`] on why the two ends of
+    /// one capsule on the plane share one budget, and [`Skeleton::solve_ground_colour`]
+    /// on why indexing it by body is still sound under the parallel scatter.
     ///
     /// **Coulomb's limit is a budget for the whole step, not for each solver pass**, and
     /// it has to be carried across the passes or the coefficient stops meaning anything.
@@ -614,8 +632,8 @@ pub struct Skeleton {
     /// Totals have neither problem: the tangential impulse over the step is held under
     /// `friction` times the normal impulse over the step, which is the law itself, and
     /// the answer stops depending on the quality dial.
-    contact_impulse: Vec<(f64, f64, f64)>,
-    ground_impulse: Vec<(f64, f64, f64)>,
+    contact_impulse: Vec<Spent>,
+    ground_impulse: Vec<Spent>,
 
     /// The broad phase. See [`broadphase`] for why it is a grid.
     grid: Grid,
@@ -651,6 +669,7 @@ impl Default for Skeleton {
             ground: None,
             ground_contacts: Vec::new(),
             ground_colours: [Vec::new(), Vec::new()],
+            ground_span: Vec::new(),
             friction: DEFAULT_FRICTION,
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
@@ -942,11 +961,13 @@ impl Skeleton {
         self.contacts = contacts;
         self.contact_impulse.clear();
         self.contact_impulse
-            .resize(self.contacts.len(), (0.0, 0.0, 0.0));
+            .resize(self.contacts.len(), Spent::default());
 
         self.ground_contacts.clear();
         self.ground_colours[0].clear();
         self.ground_colours[1].clear();
+        self.ground_span.clear();
+        self.ground_span.resize(self.position.len(), (0.0, 0.0, 0.0));
         let Some((normal, distance)) = self.ground else {
             return;
         };
@@ -968,10 +989,46 @@ impl Skeleton {
             for (nth, index) in (before..self.ground_contacts.len()).enumerate() {
                 self.ground_colours[nth.min(1)].push(index);
             }
+            // How far this body's contact with the plane reaches, as the vector from one
+            // end of it to the other, or zero where it touches at a point. See
+            // [`contacts::patch_arm`] for what a patch does that a point cannot.
+            self.ground_span[i] = match self.ground_contacts[before..] {
+                [first, second] => {
+                    let a = add(self.position[i], rotate(self.orientation[i], first.local));
+                    let b = add(self.position[i], rotate(self.orientation[i], second.local));
+                    sub(b, a)
+                }
+                _ => (0.0, 0.0, 0.0),
+            };
         }
+
+        // **One budget per body, not one per end.** A capsule lying on the plane touches
+        // it along a line and gets a contact at each end of that line, but the two are
+        // samples of a single contact *patch*: they express the same tangential
+        // constraint -- a rigid body's contact line cannot slide at one end and stay put
+        // at the other -- and Coulomb's limit belongs to the patch, `friction` times the
+        // whole normal load it carries.
+        //
+        // Giving each end its own limit out of its own share of the load is what a point
+        // contact would want, and it is wrong here in a way that shows: as the body tips
+        // the load moves between the ends, so one end's cone shrinks while it is still
+        // being asked to hold, and the pair settles into equal and opposite impulses that
+        // cancel and leave the resultant short. Pooling the budget lets whichever end is
+        // loaded supply the grip, which is what the patch does.
+        //
+        // **This is why the two ends must stay in different colours, and that is now a
+        // memory-safety requirement as well as a physical one.** The loop above puts a
+        // body's first ground contact in set zero and its second in set one, and the two
+        // sets are solved one after the other, so the pooled entry is read and written by
+        // one thread at a time: within a set, each body appears at most once. That is the
+        // same disjointness the body arrays need under [`scatter`], checked by the same
+        // `scatter::disjoint` call, which walks the set's bodies rather than its contacts
+        // -- so it covers this without extension. Coupling the ends is deliberate: set
+        // one must see what set zero spent. Putting them in one parallel set would both
+        // race the budget and defeat the pooling.
         self.ground_impulse.clear();
         self.ground_impulse
-            .resize(self.ground_contacts.len(), (0.0, 0.0, 0.0));
+            .resize(self.position.len(), Spent::default());
     }
 
     /// **Greedy colouring again, but every step**, because the contact set is new every
@@ -1282,17 +1339,26 @@ impl Skeleton {
         let friction = self.friction;
         let rolling = self.rolling_resistance;
         let radius = &self.radius;
+        let span = &self.ground_span;
         let set = &self.ground_colours[colour];
 
         // SAFETY: the one body this closure reads or writes is named by ground contact
         // `k` and by no other contact in the set, so no two threads address one element
-        // of any body array; the running impulse is indexed by the contact. That
-        // partition is established by `Skeleton::build_contacts`, which emits at most one
-        // contact per end of a capsule and puts a body's first in set zero and its second
-        // in set one. A change to `contacts::ground_contacts` that emitted a third
-        // contact for a body is what would make this a data race -- it would land in set
-        // one alongside the second -- and is why the `disjoint` check above runs in debug
-        // builds. See [`scatter`] for the argument in full.
+        // of any body array. That partition is established by `Skeleton::build_contacts`,
+        // which emits at most one contact per end of a capsule and puts a body's first in
+        // set zero and its second in set one. A change to `contacts::ground_contacts`
+        // that emitted a third contact for a body is what would make this a data race --
+        // it would land in set one alongside the second -- and is why the `disjoint`
+        // check above runs in debug builds. See [`scatter`] for the argument in full.
+        //
+        // **The running impulse here is indexed by the body, not by the contact**, which
+        // is the one place that departs from the rule [`scatter`] states, so it needs the
+        // invariant said out loud: the two ends of a capsule pool one budget, so
+        // `impulse` is addressed at `contact.body`. That is sound for exactly the reason
+        // the body arrays are, and under exactly the same check -- the `disjoint` call
+        // above walks this set's *bodies*, so it is already asserting that no two entries
+        // of this map touch one slot of `ground_impulse` either. `ground_span` is read
+        // only, and indexed by the same body.
         let solve = |&k: &usize| unsafe {
             let contact = contacts[k];
             let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
@@ -1303,9 +1369,10 @@ impl Skeleton {
                 rolling,
                 normal,
                 distance,
-                impulse.get(k),
+                span[contact.body],
+                impulse.get(contact.body),
             );
-            impulse.set(k, totals);
+            impulse.set(contact.body, totals);
             bodies.apply([correction, Correction::none()]);
         };
         if set.len() >= PARALLEL_FLOOR {
@@ -1513,8 +1580,11 @@ fn turned_since(now: Quaternion, before: Quaternion) -> (f64, f64, f64) {
 /// The resisting torque a real contact patch applies is the coefficient times the normal
 /// force times the radius, so over a step the resisting angular impulse is bounded by the
 /// coefficient times the radius times the normal impulse -- carried across the passes
-/// exactly like the tangential one, and for the same reason. Clamped so it can at most
-/// stop the rolling that happened, never reverse it into rolling the other way.
+/// exactly like the tangential one, and for the same reason, including that what is
+/// bounded is the resultant rather than the distance it walked. A pass asks for exactly
+/// the roll that has happened and no more, so resistance never turns into a push; what it
+/// may do, once the cone has clipped an earlier pass, is give back some of what that pass
+/// over-applied.
 ///
 /// Only rotation about axes *in* the contact plane is resisted. Rotation about the normal
 /// is a body spinning on the spot, which is a different effect with a different arm.
@@ -1528,19 +1598,15 @@ fn resist_rolling(
     normal: (f64, f64, f64),
     arm: f64,
     normal_impulse: f64,
-    spent: f64,
-) -> f64 {
-    let allowed = (arm * normal_impulse - spent).max(0.0);
-    if allowed <= 0.0 {
-        return 0.0;
-    }
+    spent: (f64, f64, f64),
+) -> (f64, f64, f64) {
     let mut relative = turned_since(a.now.orientation, a.prev_orientation);
     if let Some(b) = b {
         relative = sub(relative, turned_since(b.now.orientation, b.prev_orientation));
     }
     let rolled = sub(relative, scale(normal, dot(relative, normal)));
     let Some(axis) = normalized(rolled) else {
-        return 0.0;
+        return spent;
     };
     let ia = dot(axis, a.now.world_inv_inertia.apply(axis));
     let ib = match b {
@@ -1549,22 +1615,40 @@ fn resist_rolling(
     };
     let total = ia + ib;
     if total <= 1e-12 {
-        return 0.0;
+        return spent;
     }
-    let spend = (length(rolled) / total).min(allowed);
-    if spend <= 0.0 {
-        return 0.0;
-    }
-    // Split by inertia, the same way a hinge's range is, and opposing the roll.
+
+    // A cone on the resultant, not a running total of what has been spent: a roll that
+    // reverses between passes has to give its budget back, or the reversals eat the
+    // coefficient. Exactly the argument [`contacts::Spent`] makes for the tangential
+    // half, one dimension over -- and this is the dimension where reversals are most
+    // likely, because the friction impulse that turns a body is applied at an arm and the
+    // normal impulse that untilts it is applied at another.
+    let wanted = scale(axis, -length(rolled) / total);
+    let (delta, total_impulse) = contacts::cone(spent, wanted, arm * normal_impulse);
+    let size = length(delta);
+    let Some(along) = normalized(delta) else {
+        return spent;
+    };
+
+    // Split by inertia, the same way a hinge's range is, and opposing the roll. The
+    // angular impulse turns each body by its own inverse inertia along the axis it acts
+    // on, which is the axis of the correction rather than of the roll once anything has
+    // been carried over from an earlier pass.
+    let ia = dot(along, a.now.world_inv_inertia.apply(along));
+    let ib = match b {
+        Some(b) => dot(along, b.now.world_inv_inertia.apply(along)),
+        None => 0.0,
+    };
     if ia > 0.0 {
-        let turn = Quaternion::from_axis_angle(axis, -spend * ia);
+        let turn = Quaternion::from_axis_angle(along, size * ia);
         out[0].rotation = renormalized(turn.multiply(&out[0].rotation));
     }
     if ib > 0.0 {
-        let turn = Quaternion::from_axis_angle(axis, spend * ib);
+        let turn = Quaternion::from_axis_angle(along, -size * ib);
         out[1].rotation = renormalized(turn.multiply(&out[1].rotation));
     }
-    spend
+    total_impulse
 }
 
 /// Any unit vector at right angles to `axis`. Which one does not matter -- it is only ever
