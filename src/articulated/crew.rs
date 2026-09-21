@@ -43,18 +43,54 @@
 //!   by every lane that leaves. Without it, colour `n + 1` could read a stale body
 //!   through a pointer the compiler is entitled to assume nobody else touched.
 //!
-//! # Spinning, and where it is allowed
+//! # Spinning, and why it has a floor under it
 //!
-//! The gate spins before it yields, which is only acceptable because of *when* it
+//! The gate spins before it blocks, which is only acceptable because of *when* it
 //! happens: inside a `step`, between two colours that are microseconds apart, on threads
 //! that are already doing the caller's work. Nothing here spins between steps -- the
 //! broadcast returns, and rayon's own threads park as they always did. A caller who steps
 //! one small skeleton a frame never reaches this code at all; see [`PASS_FLOOR`].
 //!
-//! The spin budget is not a tuned number. A lane that spins for as long as yielding would
+//! The spin budget is not a tuned number. A lane that spins for as long as blocking would
 //! have cost has, at worst, spent what it was about to spend anyway, and at best has
-//! skipped it entirely -- so the budget is the measured cost of a yield, and being wrong
+//! skipped it entirely -- so the budget is the cost of a park and a wake, and being wrong
 //! about it by a factor of two costs a few microseconds a pass either way.
+//!
+//! **A spin barrier is correct only while every lane is actually executing, and that is a
+//! statement about the lane count rather than about the spinning.** A lane is handed to
+//! each thread the pool has, and a hardware thread is not a core: this machine reports
+//! thirty-six of the first and eighteen of the second, so at least half the lanes are
+//! descheduled at any instant *by construction*, and every one of the eighty to two
+//! hundred and fifty barriers in a step waits on a context switch rather than on a cache
+//! line. Measured on `pile` at eight iterations, one binary, three clean rounds of each:
+//!
+//! ```text
+//!   36 lanes   6.39  6.11  6.04 ms   medians spread 5.8 per cent
+//!   18 lanes   5.26  5.21  5.25 ms   medians spread 1.0 per cent
+//! ```
+//!
+//! Sixteen per cent, and the spread is the more expensive half: several sections of
+//! [`super`]'s header apologise for a variance they put down to the machine -- one fixture
+//! "moved by a factor of two on the unchanged binary between rounds" -- and then read
+//! their own small differences through it.
+//!
+//! **Blocking instead of spinning was built and it is worse, which is what says the lane
+//! count is the fix.** The reasoning was that a lane which parks hands its core to whoever
+//! is runnable, so a descheduled lane should cost one wake-up rather than every other
+//! lane's quantum. What actually happens when the pool is oversubscribed is that *every*
+//! barrier has lanes which outlast any spin budget, so the wake-up is not an exception, it
+//! is the common case, and a couple of hundred barriers a step turn into thousands of
+//! kernel round trips:
+//!
+//! ```text
+//!   spin, 36 lanes   6.39  6.11  6.04 ms        park, 36 lanes   10.74  9.92  9.68 ms
+//!   spin, 18 lanes   5.26  5.21  5.25 ms        park, 18 lanes    5.32  5.32  5.25 ms
+//! ```
+//!
+//! Parking costs nothing when the barrier's precondition holds and sixty per cent when it
+//! does not, so it does not buy the precondition -- it prices it. The lane count is what
+//! has to give, and since this crate is a subsystem rather than an application, the lane
+//! count is not the crate's to choose: see [`lanes_for`].
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -78,7 +114,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(super) const PASS_FLOOR: usize = 512;
 
 /// How many times a lane spins before yielding. See the module header for why this is the
-/// measured cost of a yield rather than a number somebody liked.
+/// cost of a yield rather than a number somebody liked.
 const SPINS_PER_YIELD: u32 = 64;
 
 /// How many lanes a pass of `work` constraints in `stages` stages should use.
@@ -151,6 +187,20 @@ struct Gate {
     arrived: AtomicUsize,
     sense: AtomicBool,
     lanes: usize,
+    /// **Set when a lane has left the stage loop early**, because its own work panicked.
+    ///
+    /// A lane that unwinds never arrives, so the count the gate waits for can never be
+    /// reached and every other lane waits for ever -- and because `rayon::broadcast` only
+    /// delivers a panic once every job has returned, the whole pool dies with it, including
+    /// callers with nothing to do with this crate. Measured before this existed: a single
+    /// panicking lane hung the process, with thirty-five threads spinning.
+    ///
+    /// The answer is to abandon the pass rather than to finish it. Once this is set, every
+    /// gate is open and every lane stops at the top of its next stage -- nothing else is
+    /// owed, because the broadcast is going to unwind regardless and the only thing the
+    /// other lanes have to do is stop. They are not racing the lane that fell over: it is
+    /// not writing anything any more.
+    abandoned: AtomicBool,
 }
 
 impl Gate {
@@ -159,7 +209,19 @@ impl Gate {
             arrived: AtomicUsize::new(0),
             sense: AtomicBool::new(false),
             lanes,
+            abandoned: AtomicBool::new(false),
         }
+    }
+
+    /// Abandon the pass. Called from the unwinding path, where it must not itself be able
+    /// to fail, which is why it is one store and no lock.
+    fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+    }
+
+    /// Whether some lane fell over and the pass is being given up.
+    fn is_abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Acquire)
     }
 
     /// Wait until every lane has arrived.
@@ -180,6 +242,11 @@ impl Gate {
         }
         let mut spins = 0u32;
         while self.sense.load(Ordering::Acquire) != *local {
+            // The lane this one is waiting for may have fallen over, in which case it is
+            // never coming and there is nothing left to wait for.
+            if self.is_abandoned() {
+                return;
+            }
             spins += 1;
             if spins < SPINS_PER_YIELD {
                 std::hint::spin_loop();
@@ -226,13 +293,31 @@ pub(super) fn each_stage(stages: usize, work_items: usize, work: impl Fn(Lane) +
             return;
         }
         let mut sense = false;
-        for stage in 0..stages {
-            work(Lane {
-                stage,
-                index: ctx.index(),
-                lanes,
-            });
-            gate.wait(&mut sense);
+        // **Every path out of the stage loop has to tell the gate.** Unwinding past it
+        // without saying so is the one way to leave a barrier that can never open: the
+        // count it waits for can no longer be reached, every other lane waits for ever,
+        // and since `rayon::broadcast` only propagates a panic once every job has
+        // returned, the whole pool dies with it -- including callers with nothing to do
+        // with this crate. See [`Gate::depart`].
+        let fell = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for stage in 0..stages {
+                if gate.is_abandoned() {
+                    return;
+                }
+                work(Lane {
+                    stage,
+                    index: ctx.index(),
+                    lanes,
+                });
+                gate.wait(&mut sense);
+            }
+        }));
+        if let Err(payload) = fell {
+            gate.abandon();
+            // Resumed rather than swallowed, so the caller gets the original panic with
+            // its own message: the broadcast collects it once every lane has returned,
+            // which is now something that happens.
+            std::panic::resume_unwind(payload);
         }
     });
 }
@@ -241,6 +326,57 @@ pub(super) fn each_stage(stages: usize, work_items: usize, work: impl Fn(Lane) +
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
+
+    /// **A lane that falls over does not take the pool with it.**
+    ///
+    /// The barrier waits for a count of arrivals, and a lane that unwinds never arrives, so
+    /// before [`Gate::abandon`] existed the count could not be reached and every other lane
+    /// spun for ever. `rayon::broadcast` only delivers a panic once every job has returned,
+    /// so the panic never surfaced either: the process hung with thirty-five threads at a
+    /// hundred per cent and no stack to look at, and the pool was dead for everything else
+    /// in the program, not only for this crate.
+    ///
+    /// It is worth being clear about why this was not a theoretical hazard. The debug
+    /// assertions inside [`super::scatter::Cells`] fire *inside a lane*. Every one of them
+    /// could only ever hang rather than report, which is the opposite of what an assertion
+    /// is for, and is why the one check that matters -- [`super::scatter::disjoint`] -- runs
+    /// on the calling thread instead.
+    ///
+    /// Stated with a timeout rather than by calling `each_stage` directly, because the
+    /// failure being guarded against is a hang, and a test that reproduces it by hanging
+    /// cannot report anything either.
+    #[test]
+    fn a_lane_that_panics_does_not_hang_the_others() {
+        let (done, listen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The panic is expected; its message would otherwise be printed by the default
+            // hook and read as a test failure.
+            let hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let fell = std::panic::catch_unwind(|| {
+                each_stage(8, usize::MAX, |lane: Lane| {
+                    assert!(
+                        !(lane.stage == 3 && lane.index == 1),
+                        "the lane this test exists to knock over",
+                    );
+                });
+            });
+            std::panic::set_hook(hook);
+            let _ = done.send(fell.is_err());
+        });
+
+        match listen.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(panicked) => assert!(
+                panicked,
+                "the pass swallowed a lane's panic; the caller would be handed a step that \
+                 silently did not happen",
+            ),
+            Err(_) => panic!(
+                "a panicking lane hung the pass for twenty seconds, so every other lane is \
+                 still waiting at a barrier that can never open",
+            ),
+        }
+    }
 
     /// The spans partition the list exactly, at every lane count and every length. A gap
     /// would drop a constraint silently and an overlap would be two threads on one body,
