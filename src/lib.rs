@@ -77,7 +77,17 @@
 //! What it provides: ball and hinge joints with a range of motion, capsule-against-capsule
 //! and capsule-against-ground contacts with Coulomb friction and rolling resistance, a
 //! uniform-grid broad phase, and a solve that is parallel across constraints -- the
-//! constraints are graph-coloured so that no two in a colour name the same body.
+//! constraints are graph-coloured so that no two in a colour name the same body, and a
+//! pass hands the whole coloured plan to a pool of workers once rather than forking per
+//! colour.
+//!
+//! **What has settled leaves the simulation.** Bodies that stop moving are put to sleep
+//! and woken by anything that reaches them, in islands, so that a heap which has come to
+//! rest costs the time it takes to scan a bit per body and nothing else. On ten thousand
+//! capsules at rest that is the difference between milliseconds a step and tens of
+//! nanoseconds. The threshold is not a tuned number: a body is settling when it moves
+//! less than a small fraction of *its own size* over the time it would take to fall that
+//! far, which means one rule serves a finger bone and a torso.
 //!
 //! It is **position-based** (XPBD), which is what makes a pile of hundreds of jointed
 //! bodies tractable at all: corrections are applied to positions and velocities are read
@@ -88,8 +98,15 @@
 //! that must hold however the solver is implemented: that the answer is bit-identical run
 //! to run and does not depend on how many threads computed it, that `friction` really is
 //! Coulomb's coefficient and means the same thing at any iteration count, that a resting
-//! capsule sits exactly one radius above what it rests on, and that a closed system never
-//! ends with more energy than it began with.
+//! capsule sits exactly one radius above what it rests on, that a skeleton left to itself
+//! does not move its own centre of mass, and that a closed system never ends with more
+//! energy than it began with.
+//!
+//! Those laws are stated as physics rather than as recorded output, and they are measured
+//! over several starting states rather than one, because a settling pile is chaotic: a
+//! difference of one unit in the last place compounds, and a law that draws once reports
+//! which draw it took rather than what the solver does. Three of them had to be rewritten
+//! during development for exactly that reason, and each says so where its bound is set.
 //!
 //! ## Feature Flags
 //!
