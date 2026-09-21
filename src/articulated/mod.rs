@@ -134,12 +134,22 @@
 //! `iterations` multiplies every joint and every contact, and none of that arithmetic
 //! changes anything for a body that has stopped moving. [`sleep`] takes settled bodies
 //! out of the step entirely -- an awake bitset walked a word at a time, islands over
-//! joints plus contacts as the unit that sleeps and wakes together -- and a step where
-//! nothing is awake returns before it touches memory. Measured on ten thousand capsules
-//! resting on the ground in stacks of three: **4.5 to 6.5 ms a step down to nothing
-//! measurable**, the spread being what a shared machine does to a twenty-step timing.
-//! With nothing asleep it costs nothing that can be told from the noise, which is what
-//! the translation-only early exit in [`Skeleton::settle`] is for.
+//! joints plus contacts as the unit that *sleeps* -- and a step where nothing is awake
+//! returns before it touches memory. Measured on ten thousand capsules resting on the
+//! ground in stacks of three: **4.5 to 6.5 ms a step down to nothing measurable**, the
+//! spread being what a shared machine does to a twenty-step timing. With nothing asleep it
+//! costs nothing that can be told from the noise, which is what the translation-only early
+//! exit in [`Skeleton::settle`] is for.
+//!
+//! **The island is not the unit that wakes**, and reading it as one cost more than
+//! anything else sleeping saved on the workload sleeping is for. A settled field is one
+//! island, so the first thing to touch any of it woke all of it: four contacts woke four
+//! hundred bodies, and a step that cost nothing went to milliseconds. What wakes a body is
+//! now that something *moving* came within reach of it, or that something touched it --
+//! [`Skeleton::find_pairs`] and [`Skeleton::wake_touched`], with the whole argument and the
+//! measurements in [`sleep`]. Measured on a field of two thousand with one heavy body
+//! ploughing through it, halfway down: 2049 of 2049 awake at 2.88 to 3.09 ms a step
+//! becomes 346 of 2049 at 1.80 to 2.43 ms, against a *higher* contact count.
 //!
 //! # Why the iteration count is what it is, and what will not move it
 //!
@@ -1828,12 +1838,16 @@ pub struct Skeleton {
     /// One bit per body: set means the body is simulated this step. A pinned body is
     /// never set, because it cannot move and there is nothing to simulate.
     awake: BitSet,
+    /// Bodies the settling test last found **moving** -- the ones whose neighbours the
+    /// broad phase wakes ahead of them. See [`Skeleton::find_pairs`] and [`sleep`].
+    disturbing: BitSet,
     /// The bodies the broad phase has already swept as it walks outward from the awake
     /// set, and the ones it is sweeping now. See [`Skeleton::find_pairs`].
     swept: BitSet,
     frontier: BitSet,
     next_frontier: BitSet,
-    /// Bodies the sweep reached that were asleep, to be woken before the next round.
+    /// Sleeping bodies the sweep found within reach of a moving one, woken before the next
+    /// round. See [`Skeleton::find_pairs`].
     reached: Vec<usize>,
     /// Bodies that have now been still for their whole settling window. The union-find
     /// below only looks at constraints with one of these at each end; see
@@ -1921,6 +1935,7 @@ impl Default for Skeleton {
             grid: Grid::default(),
             sleeping: true,
             awake: BitSet::default(),
+            disturbing: BitSet::default(),
             swept: BitSet::default(),
             frontier: BitSet::default(),
             next_frontier: BitSet::default(),
@@ -2110,6 +2125,11 @@ impl Skeleton {
         self.next_frontier.resize(n, false);
         self.ready.resize(n, false);
         self.background.resize(n, false);
+        // **A body that has just arrived counts as moving**, whatever it is doing, because
+        // it may have been put down inside a settled pile and nothing in the pile has had
+        // a chance to notice. The settling test takes the bit off again at the end of the
+        // first step it spends still.
+        self.disturbing.resize(n, true);
         // A new body arrives awake unless it is pinned, and a pinned body is never awake:
         // it does not move, so there is nothing for a step to do to it.
         if body.inv_mass > 0.0 {
@@ -2361,11 +2381,47 @@ impl Skeleton {
     /// still a collider -- it has to be, or an awake body would fall through the heap it
     /// landed on -- it simply does not go looking.
     ///
-    /// A sleeping body found within reach of an awake one is woken, and then has to be
-    /// swept itself, because *its* neighbours further into the heap have not been looked
-    /// at by anybody. So the sweep runs outward in rounds until a round wakes nothing:
-    /// the awake set first, then whatever that reached, and so on. One round on a quiet
-    /// frame, two or three where something has just landed.
+    /// **A sleeping body is woken when a body that is actually moving comes within reach
+    /// of it**, and is swept on the next step rather than this one.
+    ///
+    /// Both halves of that carry weight. Waking from the *awake* set instead is what the
+    /// island thaw does one step at a time: nearly every body in a settled field is within
+    /// a body's length of something awake, so the awake region then grows a ring a step
+    /// whether or not anything is happening, out to the whole component -- measured below,
+    /// and it is the defect this rule exists to close. What may carry the front is
+    /// therefore the set the settling test last found moving, which is the same threshold
+    /// that decides sleeping and so costs no second constant. A body woken here has not
+    /// moved, so it carries the front no further until something pushes it.
+    ///
+    /// The lead this buys is a length rather than a choice. A pair is reported as soon as
+    /// the centres are within the two reaches, so the neighbour of a moving body wakes a
+    /// body's own size before anything touches it -- and it needs that lead rather than
+    /// the touch itself, because a pile that has settled perfectly carries **no contacts**:
+    /// the solve removes the whole overlap, and it is the woken body's own sag of `g dt^2`
+    /// that gives it back a contact with what it is resting on. Waking on the touch alone
+    /// is measured in [`sleep`] and it drives a stack apart.
+    ///
+    /// Slower than that threshold there is no lead and none is needed, and
+    /// [`Skeleton::wake_touched`] is what catches it: a body the settling test calls still
+    /// is one that crosses less than [`STILL_FRACTION`] of its own reach in a window, so
+    /// the overlap it can present a sleeping neighbour with before the touch wakes it is
+    /// bounded by the same fraction of its own size.
+    ///
+    /// **The sweep still runs in rounds, and now it terminates by itself.** A body woken by
+    /// a round is still swept by the next one -- it has to be, or its own neighbours
+    /// further into the pile are never looked at by anybody, and the contact that carries
+    /// the disturbance on is a step late. What the round after it cannot do is wake
+    /// anything: a body woken and not yet moved is not in `disturbing`, so the round
+    /// produces its pairs and no wakes and the loop ends. **Two rounds, always**, where the
+    /// same loop gated on the awake set ran until it had covered the component.
+    ///
+    /// Letting a woken body carry the front one round further -- the same rounds, gated on
+    /// the round before's wakes -- was built and measured. It reproduces the island thaw
+    /// exactly on a three-body stack, which is the whole of what it can reach there, and on
+    /// the drop sweep in [`sleep`] it goes back to failing the twelve heights of
+    /// twenty-eight that the thaw fails. There is nothing to gate it with beyond that
+    /// either, which is what says the count is not a quantity: one round is "what is
+    /// moving", and every count after it is a number somebody chose.
     fn find_pairs(&mut self) {
         let mut pairs = std::mem::take(&mut self.pairs);
         pairs.clear();
@@ -2394,6 +2450,7 @@ impl Skeleton {
                 },
                 &self.frontier,
                 &self.swept,
+                &self.disturbing,
                 &mut pairs,
                 &mut reached,
             );
@@ -2401,9 +2458,9 @@ impl Skeleton {
             if reached.is_empty() {
                 break;
             }
-            // Everything the round reached is now awake, and its island with it: a body
-            // underneath the one that was touched is just as disturbed as the one that
-            // was.
+            // In the order the chunks were concatenated, which is the same order on every
+            // machine. A body may be reached by more than one neighbour; waking it twice
+            // is the second call finding it awake already.
             for &i in reached.iter() {
                 self.wake(i);
             }
@@ -2416,6 +2473,40 @@ impl Skeleton {
         self.reached = reached;
         self.grid = grid;
         self.pairs = pairs;
+    }
+
+    /// **Wakes whatever the narrow phase found something touching**, before the solve
+    /// runs, so that a contact never names a body the step is not simulating.
+    ///
+    /// **This is the floor under the threshold [`Skeleton::find_pairs`] wakes on, and it is
+    /// what makes that threshold safe rather than a tolerance.** Waking ahead of something
+    /// moving needs the thing to be moving by the settling test's own measure; below that
+    /// the front has no lead and needs none, because a body the settling test calls still
+    /// crosses less than [`STILL_FRACTION`] of its own reach in a window, so the overlap
+    /// it can present a sleeping neighbour with before this wakes it is bounded by the
+    /// same fraction of its own size. Nothing creeps into a sleeping pile unnoticed.
+    ///
+    /// It is the same causal rule [`Skeleton::persist_contacts`] already keeps a contact
+    /// alive by -- what the pair *did*, not how far apart it is -- and it needs no margin
+    /// and no second distance. What it cannot do on its own is carry a disturbance into a
+    /// pile that has settled perfectly, because such a pile has no contacts to make; see
+    /// [`sleep`] for the measurement that closed that off.
+    fn wake_touched(&mut self) {
+        if !self.sleeping {
+            return;
+        }
+        // In contact order, which is the order the narrow phase produced and therefore the
+        // same on every machine. Taken out so `wake` may borrow the rest of the struct.
+        let contacts = std::mem::take(&mut self.contacts);
+        for contact in contacts.iter() {
+            if !self.awake.get(contact.a) {
+                self.wake(contact.a);
+            }
+            if !self.awake.get(contact.b) {
+                self.wake(contact.b);
+            }
+        }
+        self.contacts = contacts;
     }
 
     /// The narrow phase: which candidates are actually touching, and where.
@@ -2466,10 +2557,17 @@ impl Skeleton {
         self.contact_impulse.clear();
         self.contact_impulse
             .resize(self.contacts.len(), Spent::default());
+    }
 
+    /// The plane's share of the narrow phase, which runs **after** [`Skeleton::wake_touched`]
+    /// so that a body woken by a contact this step still gets its ground contact in the
+    /// same step. Without that it would be pushed by the contact that woke it with nothing
+    /// under it, and would meet the plane a step late.
+    fn build_ground_contacts(&mut self) {
         self.ground_contacts.clear();
         self.ground_colours.clear();
         let Some((normal, distance)) = self.ground else {
+            self.ground_impulse.clear();
             return;
         };
         // Awake bodies only, and in increasing order, which is the order the loop this
@@ -2735,6 +2833,11 @@ impl Skeleton {
         // between passes so that nothing ever converged.
         self.find_pairs();
         self.build_contacts();
+        // Before anything that reads the awake set: a contact that names a sleeping body
+        // has to name an awake one by the time the solve reaches it, and a body woken here
+        // needs the plane under it in the same step.
+        self.wake_touched();
+        self.build_ground_contacts();
         self.colour_contacts();
         self.find_live_joints();
         self.plan_pass();
@@ -3468,12 +3571,13 @@ impl Skeleton {
         self.awake.count()
     }
 
-    /// **Wakes the body's whole island**, not the body.
+    /// **Wakes this body**, and leaves the rest of its island asleep for the broad phase
+    /// to reach.
     ///
-    /// A body in the middle of a resting stack is held still by everything around it, so
-    /// disturbing it disturbs them: waking one and leaving its neighbours asleep would
-    /// let it push through bodies that are no longer being solved. The island is stored
-    /// as the words it occupies in the awake set, so this is an OR per sixty-four bodies.
+    /// Its neighbours are woken too, if the disturbance actually reaches them:
+    /// [`Skeleton::find_pairs`] wakes what a **moving** body comes within reach of, and
+    /// [`Skeleton::wake_touched`] wakes what anything touches. Waking the component instead
+    /// is what this used to do, and [`sleep`] holds the measurement that says what it cost.
     pub fn wake(&mut self, i: usize) {
         let Skeleton {
             awake,
@@ -3489,8 +3593,10 @@ impl Skeleton {
         } = self;
         let id = island_of[i];
         if id != NO_ISLAND {
-            islands.thaw(id, awake.words_mut(), island_of, still_steps);
-            islands.compact_if_worthwhile();
+            if islands.release(id, i as u32) {
+                islands.compact_if_worthwhile();
+            }
+            island_of[i] = NO_ISLAND;
         }
         if inv_mass[i] > 0.0 {
             awake.set(i);
@@ -3569,6 +3675,7 @@ impl Skeleton {
             half_length,
             awake,
             ready,
+            disturbing,
             ..
         } = self;
         // Whether any body has now been still for its whole window. Everything below this
@@ -3606,7 +3713,13 @@ impl Skeleton {
                 still_steps[i] = 0;
                 still_from[i] = position[i];
                 still_turn[i] = orientation[i];
+                // **The same test decides what may wake its neighbours.** A body that has
+                // moved further than it is allowed to and stay asleep is exactly a body
+                // whose neighbours have no business staying asleep either, so the wake
+                // front carries no threshold of its own. See [`Skeleton::find_pairs`].
+                disturbing.set(i);
             } else {
+                disturbing.unset(i);
                 still_steps[i] += 1;
                 if still_steps[i] >= settling_steps(reach, gravity, dt) {
                     ready.set(i);

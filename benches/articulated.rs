@@ -50,6 +50,17 @@
 //! between four and seven thousand, they are the rigs' own limbs touching, and a change
 //! that costs anything per contact shows up in it. A fixture that does not say what it
 //! holds will eventually be quoted for something it is not, so they all say it now.
+//!
+//! # And one of them says how much of itself is being solved
+//!
+//! [`a_field_being_ploughed`] prints its awake count next to its contact count, and the
+//! time it reports cannot be read without it. Everything else here is timed on a scene
+//! where the awake set is what it is -- all of it, or none of it -- and a change to
+//! *sleeping* then shows up in the time or not at all. That fixture is a settled field
+//! with one thing moving through it, where the awake count is the whole measurement and
+//! the time follows it; a run whose time improved because the scene woke less is a
+//! different statement from one whose arithmetic got faster, and only the pair of numbers
+//! tells them apart.
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use rs_physics::articulated::{Body, Joint, Skeleton};
@@ -95,6 +106,34 @@ const ARRIVING: usize = 120;
 /// seconds and then creeps down. Thirty seconds is past the knee and short of the point
 /// where the run costs more than the bench.
 const SETTLED: usize = 1800;
+
+/// The field [`a_field_being_ploughed`] lays out: columns down the ram's path, rows
+/// across it, and the spacing of each.
+///
+/// **Nothing in the field touches anything else and the whole of it is one island**, which
+/// is the arrangement that makes the fixture about waking rather than about contacts.
+/// Capsules lie along the columns, so two in the same column would have to overlap to be
+/// within a broad-phase reach of each other -- hence the half-column stagger, which puts
+/// every capsule within reach of four in the rows either side while leaving a clear
+/// [`FIELD_ACROSS`] minus a diameter between their surfaces. A field that starts with
+/// contacts in it measures the solve; this one starts with none, settles well inside the
+/// sixty steps it is given, and then costs nothing at all until the ram arrives -- which
+/// the fixture asserts rather than assumes.
+const FIELD: (usize, usize) = (32, 64);
+const FIELD_ALONG: f64 = 0.75;
+const FIELD_ACROSS: f64 = 0.25;
+
+/// How fast the body driven through the field travels, in metres a second.
+///
+/// A walking pace, because that is the case sleeping is for and the one it used to handle
+/// worst: the disturbance is local and slow, and what it costs should be what it disturbs.
+/// Faster than this and the fixture stops being about a settled field, because the field
+/// does not have time to come back to rest behind it.
+const PLOUGH_SPEED: f64 = 1.4;
+
+/// Steps the ram is driven for before the fixture is timed: far enough that it is halfway
+/// down the field, with a settled half in front of it and a ploughed half behind.
+const PLOUGHED: usize = 620;
 
 /// Capsules in [`a_heap_that_has_settled`], and the height of each stack.
 ///
@@ -302,10 +341,12 @@ fn one_skeleton(c: &mut Criterion) {
     // self-collision is on by default, and the contacts that makes are solved on every
     // pass like any others. See the module header.
     println!(
-        "  one: {} bodies, {} joints, {} contacts",
+        "  one: {} bodies, {} joints, {} contacts, {} of {} awake",
         s.len(),
         s.joints().len(),
         s.contact_count(),
+        s.awake_count(),
+        s.len(),
     );
 
     for iterations in [1usize, 4, 8] {
@@ -451,11 +492,13 @@ fn the_pile(c: &mut Criterion) {
         s.step(DT, G, 8);
     }
     println!(
-        "  pile: {} bodies, {} joints, {} contacts, {} colours",
+        "  pile: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake",
         s.len(),
         s.joints().len(),
         s.contact_count(),
         s.colours().len(),
+        s.awake_count(),
+        s.len(),
     );
 
     for iterations in [1usize, 8] {
@@ -642,6 +685,113 @@ fn a_heap_that_has_settled(c: &mut Criterion) {
     group.finish();
 }
 
+/// **A large heavy body driven through a field that has gone to sleep**, which is the one
+/// thing the other fixtures here do not hold between them.
+///
+/// `arriving` is everything in flight, `has_settled` is everything asleep, `pendulums`
+/// never settles and `joining` adds one rig to a scene that is already going. None of them
+/// is a **moving disturbance through a resting field** -- a settled world that costs
+/// nothing, with one thing happening in a small part of it -- and that is both the case
+/// sleeping exists for and the one it used to handle worst, because waking was per island
+/// and a field that has settled against itself is one island.
+///
+/// What it measures is therefore the **awake count** as much as the time: two thousand
+/// capsules lying on the plane, one body ploughing a furrow through them at a walking
+/// pace, and the question of how much of the field is being solved while it does. The
+/// line printed below says both, because the time on its own cannot be read -- a step with
+/// a tenth of the field awake and one with all of it awake differ by what the sleeping
+/// bodies would have cost, which is the number the fixture is for.
+///
+/// Timed halfway down the field, so the sample has a settled half in front of the ram and
+/// a ploughed half behind it. Through [`steady`] like everything that has not come to
+/// rest, and it matters more here than anywhere: the scene under this one changes every
+/// step, the ram covering its own length every twenty-five.
+fn a_field_being_ploughed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/ploughing");
+    group.sample_size(20);
+
+    let (columns, rows) = FIELD;
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    for row in 0..rows {
+        for column in 0..columns {
+            let stagger = if row % 2 == 0 { 0.0 } else { 0.5 * FIELD_ALONG };
+            // Lying along the ram's path, resting on the plane at exactly one radius, so
+            // the field settles without having to fall first.
+            let mut body = Body::capsule(
+                4.0,
+                0.1,
+                0.5,
+                (
+                    column as f64 * FIELD_ALONG + stagger,
+                    0.1,
+                    row as f64 * FIELD_ACROSS - 0.5 * (rows as f64 - 1.0) * FIELD_ACROSS,
+                ),
+            );
+            body.orientation = rs_physics::models::Quaternion::from_axis_angle(
+                (0.0, 0.0, 1.0),
+                -std::f64::consts::FRAC_PI_2,
+            );
+            s.add_body(body);
+        }
+    }
+    // A hundred times the mass of what it is pushing, and standing clear of the field so
+    // that the field settles on its own before anything touches it.
+    let ram = s.add_body(Body::capsule(400.0, 0.4, 0.6, (-2.0, 0.7, 0.0)));
+
+    for _ in 0..60 {
+        s.set_velocity(ram, (0.0, 0.0, 0.0));
+        s.step(DT, G, 8);
+    }
+    assert_eq!(
+        s.awake_count(),
+        1,
+        "the field did not go to sleep, so this fixture cannot say anything about waking \
+         it; {} of {} awake",
+        s.awake_count(),
+        s.len(),
+    );
+    for _ in 0..PLOUGHED {
+        drive(&mut s, ram);
+        s.step(DT, G, 8);
+    }
+    println!(
+        "  ploughing: {} bodies over {:.1} by {:.1} m, {} contacts, {} of {} awake, ram at \
+         x {:.1}",
+        s.len(),
+        (columns - 1) as f64 * FIELD_ALONG,
+        (rows - 1) as f64 * FIELD_ACROSS,
+        s.contact_count(),
+        s.awake_count(),
+        s.len(),
+        s.position(ram).0,
+    );
+
+    for iterations in [1usize, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("iterations", iterations),
+            &iterations,
+            |b, &iterations| {
+                steady(b, &s, |s| {
+                    drive(s, ram);
+                    s.step(black_box(DT), black_box(G), black_box(iterations));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Holds the ram at [`PLOUGH_SPEED`] down the field, leaving whatever the plane and
+/// gravity have done to it vertically alone.
+///
+/// A driven body rather than a thrown one, because a thrown one slows as it ploughs and
+/// the fixture would then be timing a different speed at every sample.
+fn drive(s: &mut Skeleton, ram: usize) {
+    let fall = s.velocity(ram).1.min(0.0);
+    s.set_velocity(ram, (PLOUGH_SPEED, fall, 0.0));
+}
+
 /// **A rig arriving in a skeleton that already holds six hundred.**
 ///
 /// The case no bench here could see, because every other one builds the skeleton once and
@@ -687,6 +837,7 @@ criterion_group!(
     a_heap_arriving,
     a_heap_at_thirty_seconds,
     a_heap_that_has_settled,
+    a_field_being_ploughed,
     joining
 );
 criterion_main!(benches);

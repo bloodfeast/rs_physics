@@ -22,9 +22,13 @@
 //! sleeps: a body in the middle of a resting stack is not still because it has come to
 //! rest on its own, it is still because everything holding it is, and the moment one of
 //! them moves it is no longer entitled to be asleep. So the whole component goes to sleep
-//! together and the whole component wakes together, and waking is an OR of the island's
-//! stored words into the awake set rather than a walk over a graph that is no longer
-//! being built.
+//! together.
+//!
+//! **It does not wake together, and that is a separate question with a different answer.**
+//! Sleeping is a claim about a set -- nobody in it is moving -- and waking is a claim about
+//! one body, that something has happened to *it*. Reading the island as the unit of both
+//! is the defect the section below is about; [`Islands::release`] is what waking does to an
+//! island now, which is to take one body out of it and leave the rest of it asleep.
 //!
 //! **Pinned bodies do not join islands.** A body of infinite mass never moves and cannot
 //! carry a disturbance, so letting it into a component would weld every pile resting on
@@ -42,6 +46,113 @@
 //! which is the one bit that means "being solved and not settled", and
 //! `a_limb_hanging_from_an_anchor_goes_to_sleep` is the guard on it. See
 //! [`super::Skeleton::settle`].
+//!
+//! # Four contacts used to wake four hundred bodies
+//!
+//! A field of four hundred loose capsules settled flat on the plane is **one island**: they
+//! all touch, or come within a body's length of touching, so the union-find joins the lot.
+//! Waking by island then means that the first thing to disturb any of them puts every one
+//! of them back into the step. Measured on a field of two thousand and forty-eight with one
+//! heavy body driven through it at a walking pace, timed halfway down the field:
+//!
+//! ```text
+//!                       awake        contacts   1 pass          8 passes
+//!   waking the island   2049 / 2049       250   1.70 .. 1.74 ms   2.88 .. 3.09 ms
+//!   waking a body        346 / 2049       292   1.00 .. 1.06 ms   1.80 .. 2.43 ms
+//! ```
+//!
+//! That is `benches/articulated.rs`'s `ploughing`, five alternating rounds of prebuilt
+//! binaries. The field is a settled world with one thing happening in a small part of it,
+//! which is the case sleeping exists for and was the one it handled worst: the disturbance
+//! is local and the response was global. Note which way the contact count went: the field
+//! that stays asleep is a *denser* scene by the time it is timed, and is a third cheaper
+//! anyway, because what a settled body costs a step is not its contacts.
+//!
+//! # So what wakes a body is that something moving reached it
+//!
+//! Three rules, and between them they replace the island thaw. Each is stated where it
+//! runs; this is why the three of them are needed and no fewer.
+//!
+//! * **Waking takes one body out of its island** and leaves the rest of it asleep --
+//!   [`Islands::release`], and [`super::Skeleton::wake`]. On its own this changes nothing
+//!   about which bodies end up awake, because the broad phase sweeps outward in rounds from
+//!   the awake set and a settled field is connected: the thaw simply arrives a round at a
+//!   time instead of all at once. Measured, the field above went from 401 of 401 awake at
+//!   the step of first contact to 401 of 401 awake thirty steps later.
+//! * **What may carry the front outward is the set that is moving**, not the set that is
+//!   awake -- [`super::Skeleton::find_pairs`]. This is the one that bites. Nearly every
+//!   body in a settled field is within a body's length of something awake, so waking on
+//!   proximity to *anything awake* grows the awake region by a ring a step for ever; waking
+//!   on proximity to something that has moved further than [`STILL_FRACTION`] of its own
+//!   reach makes the region follow the disturbance and stop where it stops. It also makes
+//!   the rounds terminate on their own: a body that has just been woken has not moved, so
+//!   the round after the one that woke it produces pairs and no wakes.
+//! * **And a touch wakes whatever it touched**, whether or not anything was moving fast
+//!   enough to be called a disturbance -- [`super::Skeleton::wake_touched`]. That is the
+//!   floor under the second rule, and it is what makes the threshold in it safe rather than
+//!   a tolerance: below the speed at which the front leads, the overlap a body can present
+//!   a sleeping neighbour with before the contact wakes it is bounded by the same fraction
+//!   of its own reach.
+//!
+//! **Waking on the touch alone does not work, and the stack says why.** It is the tempting
+//! rule -- causal, no distances in it, the same shape as the one that keeps a contact
+//! alive -- and it drives a stack apart: a capsule dropped onto a settled stack of three
+//! went through it at fifteen of the twenty-eight drop heights swept below, twelve of them
+//! consecutive and including the one the guard uses. The reason is the fact this module has
+//! already recorded twice: **a pile
+//! that has settled perfectly carries no contacts at all**, because the solve removes the
+//! whole overlap. What re-acquires them is the woken body's own sag of `g dt^2` onto what
+//! it is resting on, and that takes a step per layer. Waking on the touch gives the pile no
+//! steps; waking on proximity gives it the body's own length divided by the speed of
+//! whatever is coming, which at a metre a second is a dozen.
+//!
+//! # What it costs everywhere else, which is the same scene doing the same work
+//!
+//! Every other fixture in `benches/articulated.rs` reaches **bit-identical named states**
+//! under both rules -- the same bodies, joints, colours, contacts and awake counts -- so
+//! there is no scene difference to read a timing as:
+//!
+//! ```text
+//!                       contacts   awake
+//!   one                       13   16 / 17
+//!   joints_only                0   10200 / 10200
+//!   pile                    7800   9600 / 10200
+//!   arriving               12000   10200 / 10200
+//!   has_settled, asleep        0   0 / 9999
+//! ```
+//!
+//! What is added to a step is a bit written per awake body in [`super::Skeleton::settle`],
+//! two bit tests per contact in [`super::Skeleton::wake_touched`], and one more bitset read
+//! per swept body in the broad phase. The timings agree: over five alternating rounds of
+//! prebuilt binaries, in both orders, every one of those fixtures has the two ranges
+//! overlapping -- `one` 100..158 us against 106..161, `joints_only` 3.3..5.7 ms against
+//! 4.0..5.6, `pile` 7.2..18.1 against 9.9..23.2, `arriving` 14.1..22.3 against 18.6..22.3.
+//! Those spreads are the machine rather than the change: `pile` moved by a factor of two
+//! and a half on the *unchanged* binary between rounds of the same session. Read them as
+//! "no signal" and re-measure on a quiet machine if a number ever has to be quoted.
+//!
+//! # What the drop guard actually measures, which is less than it appears to
+//!
+//! `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` drops a capsule from three
+//! metres onto a settled stack of three and asserts it finishes above the stack's top. It
+//! is the guard on all of the above and it is worth knowing what it can see. Swept over
+//! twenty-eight drop heights from one metre to three and seven tenths, a tenth apart:
+//!
+//! ```text
+//!   waking the island   12 of 28 go through
+//!   waking a body        9 of 28 go through
+//! ```
+//!
+//! **Both fail about a third of the heights, on the commit this was written against as much
+//! as after it.** What happens is not a body passing through a pile because the pile was
+//! slow to wake -- it is that a first contact deeper than a capsule's radius drives two
+//! parallel capsules into each other by more than the narrow phase can undo, and they stay
+//! there: the stack ends up with two of its bodies a tenth of a metre inside one another.
+//! That is a defect in the solve at a deep first overlap and it is nothing to do with
+//! sleeping; the guard is one sample of a chaotic family and its own height is one of the
+//! ones that passes. Anybody changing the waking rules should sweep the family rather than
+//! trust the single height, and anybody going after the interpenetration should know that
+//! fixing it would make this guard mean what it says.
 //!
 //! # What counts as still
 //!
@@ -167,11 +278,6 @@ impl BitSet {
     pub(super) fn words(&self) -> &[u64] {
         &self.words
     }
-
-    pub(super) fn words_mut(&mut self) -> &mut [u64] {
-        &mut self.words
-    }
-
 
     /// `self |= other`, and whether anything changed.
     pub(super) fn union(&mut self, other: &BitSet) -> bool {
@@ -321,33 +427,38 @@ impl Islands {
         }
     }
 
-    /// ORs island `id` into `awake` and releases it, clearing each member's island and
-    /// restarting its settling window. Returns whether anything was added.
-    pub(super) fn thaw(
-        &mut self,
-        id: u32,
-        awake: &mut [u64],
-        island_of: &mut [u32],
-        still_steps: &mut [u32],
-    ) -> bool {
+    /// Takes **one** body out of island `id`, leaving the rest of it asleep, and says
+    /// whether that emptied the island.
+    ///
+    /// This is the whole of what waking writes to an island, and it is one body rather
+    /// than the component for the reason in the module header: the island is the unit
+    /// that *sleeps* and the body is the unit that *wakes*. The scan is over the
+    /// island's words, which is one entry per sixty-four consecutive members -- a
+    /// seventeen-bone rig is one or two, a four-hundred-body field is seven -- and it
+    /// has to look at all of them anyway to tell whether anything is left.
+    ///
+    /// The caller clears `island_of` for the body. A word left holding no members is left
+    /// in place rather than squeezed out: nothing reads an island except this, and
+    /// [`Islands::compact_if_worthwhile`] collects the whole span once the island empties.
+    pub(super) fn release(&mut self, id: u32, i: u32) -> bool {
         let (from, upto) = self.span[id as usize];
         if from == upto {
-            return false;
+            return true;
         }
-        for &(index, word) in &self.words[from as usize..upto as usize] {
-            awake[index as usize] |= word;
-            let mut bits = word;
-            while bits != 0 {
-                let i = ((index as usize) << 6) | bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                island_of[i] = NO_ISLAND;
-                still_steps[i] = 0;
+        let word = i >> 6;
+        let mut empty = true;
+        for slot in &mut self.words[from as usize..upto as usize] {
+            if slot.0 == word {
+                slot.1 &= !(1u64 << (i & 63));
             }
+            empty &= slot.1 == 0;
         }
-        self.span[id as usize] = (0, 0);
-        self.free.push(id);
-        self.dead += (upto - from) as usize;
-        true
+        if empty {
+            self.span[id as usize] = (0, 0);
+            self.free.push(id);
+            self.dead += (upto - from) as usize;
+        }
+        empty
     }
 
     pub(super) fn clear(&mut self) {

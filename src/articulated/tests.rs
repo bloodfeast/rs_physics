@@ -629,9 +629,10 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
     let mut reached = Vec::new();
     let mut grid = super::broadphase::Grid::default();
     grid.rebuild(&s.position, &s.radius, &s.half_length);
-    // Everything sweeping and nothing already swept, which is the case the grid has to be
-    // exhaustive in. The sleeping sweep is a restriction of this one; that it loses
-    // nothing is what `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` checks.
+    // Everything sweeping, nothing already swept and everything moving, which is the case
+    // the grid has to be exhaustive in. The sleeping sweep is a restriction of this one;
+    // that it loses nothing is what
+    // `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` checks.
     let mut everything = super::sleep::BitSet::default();
     everything.resize(s.len(), true);
     let mut nothing = super::sleep::BitSet::default();
@@ -642,6 +643,7 @@ fn the_grid_finds_every_pair_the_quadratic_search_would() {
         s.jointed(),
         &everything,
         &nothing,
+        &everything,
         &mut got,
         &mut reached,
     );
@@ -995,6 +997,108 @@ fn a_sleeping_stack_wakes_all_the_way_down_when_something_lands_on_it() {
         moved > 0.0,
         "the bottom body did not move at all under the impact, so nothing was actually \
          transmitted through the stack",
+    );
+}
+
+/// **A settled field is one island, and driving something through one end of it does not
+/// wake the other end.** The claim the island thaw could not make, and the reason
+/// [`Skeleton::wake`] takes one body out of an island rather than emptying it.
+///
+/// The field is laid out so that it is a single island carrying no contacts: capsules lie
+/// along x, so two in the same column would have to overlap to be within a broad-phase
+/// reach of each other, and the half-column stagger puts every one of them within reach of
+/// four in the rows either side while leaving their surfaces clear. The union-find
+/// therefore joins the whole field -- asserted below rather than assumed, because a field
+/// that came apart into islands would pass this test for the wrong reason.
+///
+/// The spacing is wide enough that a body shoved by the ram does not reach the next one
+/// along and start a chain, which would be the disturbance genuinely travelling and
+/// nothing for the awake set to be blamed for. What is *not* excluded is the capsule the
+/// ram launches: a four-kilo body struck by a four-hundred-kilo one leaves at a few metres
+/// a second and lands well down the field, and where it lands wakes something. That is
+/// why what is asserted is a count rather than a distance -- a debris field has no front.
+#[test]
+fn a_touch_at_one_end_of_a_settled_field_does_not_wake_the_other_end() {
+    const COLUMNS: usize = 10;
+    const ROWS: usize = 15;
+    const ALONG: f64 = 1.1;
+    const ACROSS: f64 = 0.4;
+
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    for row in 0..ROWS {
+        for column in 0..COLUMNS {
+            let stagger = if row % 2 == 0 { 0.0 } else { 0.5 * ALONG };
+            s.add_body(lying(
+                Body::capsule(
+                    4.0,
+                    0.1,
+                    0.5,
+                    (
+                        column as f64 * ALONG + stagger,
+                        0.1,
+                        row as f64 * ACROSS - 0.5 * (ROWS as f64 - 1.0) * ACROSS,
+                    ),
+                ),
+                0.0,
+            ));
+        }
+    }
+    let field = s.len();
+    let ram = s.add_body(Body::capsule(400.0, 0.4, 0.6, (-2.0, 0.7, 0.0)));
+
+    // The ram is held still until the field has gone to sleep, so that what wakes any of
+    // it afterwards is the ram and nothing else.
+    for _ in 0..120 {
+        s.set_velocity(ram, (0.0, 0.0, 0.0));
+        s.step(DT, G, 8);
+        if s.awake_count() == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        s.awake_count(),
+        1,
+        "the field never settled, so this test cannot say anything about waking it",
+    );
+    let island = s.island_of[0];
+    assert!(
+        (0..field).all(|i| s.island_of[i] == island),
+        "the field settled into more than one island, so a local wake would be local \
+         whatever the rule was and this test proves nothing",
+    );
+
+    for _ in 0..180 {
+        let fall = s.velocity(ram).1.min(0.0);
+        s.set_velocity(ram, (2.0, fall, 0.0));
+        s.step(DT, G, 8);
+    }
+
+    let front = s.position(ram).0;
+    assert!(
+        front > 2.0,
+        "the ram only reached x {front:.2}, which is not far enough into the field for \
+         the far end of it to be far away",
+    );
+    // A third, which is a line rather than a tolerance: waking the island wakes every one
+    // of them, so the two answers this can give are "all of it" and "what the ram has
+    // been near", and a third is clear of both. It comes out at a fifth.
+    let awake = s.awake_count() - 1;
+    assert!(
+        awake * 3 < field,
+        "{awake} of {field} bodies are awake with the ram at x {front:.2} in a field {:.1} \
+         m long: the disturbance is being read as reaching the whole island",
+        (COLUMNS - 1) as f64 * ALONG,
+    );
+    assert!(
+        awake > 0,
+        "nothing at all woke up, so the ram is not touching the field and the assertion \
+         above is vacuous",
+    );
+    // And it reaches: the disturbance is local, not absent.
+    assert!(
+        (0..field).any(|i| s.is_awake(i) && s.position(i).0 > front),
+        "nothing in front of the ram is awake, so the field is not being ploughed at all",
     );
 }
 
