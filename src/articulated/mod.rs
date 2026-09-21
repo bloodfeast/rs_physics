@@ -1963,6 +1963,8 @@ use crate::models::Quaternion;
 mod broadphase;
 mod contacts;
 mod crew;
+mod field;
+pub use field::Field;
 mod prism;
 mod scatter;
 mod sleep;
@@ -4127,13 +4129,18 @@ impl Skeleton {
     /// so that a body woken by a contact this step still gets its ground contact in the
     /// same step. Without that it would be pushed by the contact that woke it with nothing
     /// under it, and would meet the plane a step late.
-    fn build_ground_contacts(&mut self) {
+    fn build_ground_contacts(&mut self, field: Option<Field<'_>>) {
         self.ground_contacts.clear();
         self.ground_colours.clear();
-        let Some((normal, distance)) = self.ground else {
+        // **The field wins where there is one**, and a caller that has set both has said
+        // two things: the plane is what this skeleton normally stands on, the field is what
+        // it stands on for the length of this step. The later word is the one in force.
+        // A skeleton with neither has no ground, which is a skeleton hanging in space.
+        if field.is_none() && self.ground.is_none() {
             self.ground_impulse.clear();
             return;
-        };
+        }
+        let stored = self.ground.unwrap_or(((0.0, 1.0, 0.0), 0.0));
         // Awake bodies only, and in increasing order, which is the order the loop this
         // replaced produced: a sleeping body is already resting on the plane -- that is
         // most of why it went to sleep -- and the plane cannot arrive underneath it.
@@ -4155,6 +4162,25 @@ impl Skeleton {
         } = self;
         awake.for_each_set(|i| {
             let before = out.len();
+            // **The plane under this body**, which against a field is a different plane for
+            // every body and against a stored plane is the same one for all of them.
+            //
+            // Sampled at the body's own centre, and for a capsule that is exactly the
+            // midpoint of the two ends the patch is built from -- a capsule's segment is
+            // symmetric about its centre, so there is no third point to choose between.
+            // What that buys over sampling under one end is that a body lying across a
+            // change of slope is given the average of what it is lying on rather than
+            // whichever end the code happened to look at first.
+            //
+            // One plane for both ends and not one each, which is not a saving but a
+            // requirement: the patch is a two-by-two solve in a *single* normal direction
+            // (see [`contacts::solve_ground_normal`]), and two normals would be two
+            // constraints again -- the arrangement this module tore out because solving one
+            // end and then the other skated a resting capsule 10 to 40 mm a second.
+            let (normal, distance) = match field {
+                Some(f) => f.plane_at(position[i].0, position[i].2),
+                None => stored,
+            };
             ground_contacts(
                 i,
                 position[i],
@@ -4359,6 +4385,45 @@ impl Skeleton {
     /// `a_step_of_no_time_or_of_nonsense_does_nothing` covers all four of zero, negative,
     /// NaN and infinite.
     pub fn step(&mut self, dt: f64, gravity: (f64, f64, f64), iterations: usize) {
+        self.step_over(dt, gravity, iterations, None);
+    }
+
+    /// **One step over ground that is a height field** rather than a plane, borrowed for
+    /// the length of the call.
+    ///
+    /// `None` is [`Skeleton::step`], which is the same step against whatever
+    /// [`Skeleton::set_ground`] was given. `Some` overrides that plane for this step only:
+    /// the field is read and not kept, so a caller whose ground is being churned by the
+    /// same events that are knocking the bodies over has nothing to keep in sync. See
+    /// [`Field`] for why that is the shape and what the borrow costs.
+    ///
+    /// Every body gets the plane tangent to the surface beneath its own centre, and from
+    /// there the step is the step: the same patch solve, the same friction, the same
+    /// anchors, the same sleeping, none of which ever knew there was only one plane.
+    ///
+    /// # What a caller has to know
+    ///
+    /// **Ground that moves does not wake what is standing on it.** Sleeping is a property
+    /// of the bodies, and a body asleep on a cell that has just dropped a metre stays
+    /// asleep on the cell's old height until something else wakes it. A caller that deforms
+    /// its own field must say so, with [`Skeleton::wake`] on what was standing there or
+    /// [`Skeleton::wake_all`] if it does not know. This is the same contract
+    /// [`Skeleton::set_ground`] has -- which wakes everything for exactly this reason --
+    /// and it cannot be kept here, because a borrowed field gives the skeleton nothing to
+    /// compare against.
+    ///
+    /// **A body between two cells gets the slope of the cell it is over.** A bilinear field
+    /// has a crease at every cell boundary, so the normal steps as a body crosses one, by
+    /// the angle between the two cells. It is the terrain's own step and not one the solver
+    /// invented, but a caller whose cells are coarse relative to its bodies is choosing how
+    /// big it is.
+    pub fn step_over(
+        &mut self,
+        dt: f64,
+        gravity: (f64, f64, f64),
+        iterations: usize,
+        ground: Option<Field<'_>>,
+    ) {
         if !(dt > 0.0 && dt.is_finite()) || self.position.is_empty() {
             return;
         }
@@ -4503,7 +4568,7 @@ impl Skeleton {
         // has to name an awake one by the time the solve reaches it, and a body woken here
         // needs the plane under it in the same step.
         self.wake_touched();
-        self.build_ground_contacts();
+        self.build_ground_contacts(ground);
         self.colour_contacts();
         self.find_live_joints();
         #[cfg(debug_assertions)]
@@ -4926,7 +4991,6 @@ impl Skeleton {
         let radius = &self.radius;
         let friction = self.friction;
         let rolling = self.rolling_resistance;
-        let ground = self.ground;
         let ground_anchor = &self.ground_anchor;
         let ground_stuck = &self.ground_stuck;
         let anchor_reach = self.anchor_reach;
@@ -5044,12 +5108,14 @@ impl Skeleton {
                     }
                 }
                 Stage::Ground { half } => {
-                    let Some((normal, distance)) = ground else {
-                        return;
-                    };
                     let set = ground_colours;
                     for &k in &set[lane.span(set.len())] {
                         let contact = ground_contacts[k];
+                        // The plane this contact was built against, which against a height
+                        // field is this body's own. See [`contacts::GroundContact::normal`]
+                        // for why every reading of the ground in the step takes it from
+                        // here rather than from the skeleton.
+                        let (normal, distance) = (contact.normal, contact.distance);
                         let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
                         let patch = ground_impulse.get(k);
                         let correction = match half {
@@ -5134,12 +5200,20 @@ impl Skeleton {
     /// goes with it. An anchor is never older than the contact holding it.
     fn anchor_ground(&mut self) {
         self.ground_sticking.clear();
-        let Some((normal, distance)) = self.ground else {
+        if self.ground_contacts.is_empty() {
+            // No patches this step, so no anchor is younger than its contact. This replaces
+            // a test of whether a ground plane was set, which is no longer the same
+            // question: a skeleton can have no plane and still have ground, if the step was
+            // given a height field.
             self.ground_stuck.clear();
             return;
-        };
+        }
         for k in 0..self.ground_contacts.len() {
             let i = self.ground_contacts[k].body;
+            // This body's own plane. Against a height field the anchor has to be tested
+            // against the surface the contact was actually solved against, or a body on a
+            // slope is asked whether it is still touching some other body's ground.
+            let (normal, distance) = (self.ground_contacts[k].normal, self.ground_contacts[k].distance);
             let spent = self.ground_impulse[k].spent;
             let budget = self.friction * spent.normal;
             if spent.normal <= 0.0 || length(spent.tangential) >= budget {
@@ -5506,6 +5580,124 @@ impl Skeleton {
             self.still_from[i] = self.position[i];
             self.still_turn[i] = self.orientation[i];
         }
+    }
+
+    /// **Puts bodies to sleep on the caller's word**, however they are moving, as one
+    /// island. Returns how many this call actually put down.
+    ///
+    /// The opposite number of [`Skeleton::wake`], and it exists for the same reason: the
+    /// caller knows things the solver has no way to find out. The one it usually knows is
+    /// **where the camera is**. A heap nobody is looking at is being solved to a fidelity
+    /// nobody can check, and settling it out on its own schedule means paying for it until
+    /// it gets there. Handed to this, it costs nothing from the next step on.
+    ///
+    /// [`Skeleton::set_background`] is the partial version of the same idea and the two are
+    /// worth telling apart: background says *solve this with fewer passes*, which keeps it
+    /// moving and keeps it costing something. This says *stop*.
+    ///
+    /// # Why a list and not a body, and not the whole skeleton
+    ///
+    /// Because the group is the unit that wakes. Everything handed to one call becomes one
+    /// island, and an island wakes as a whole -- so a heap passed in together comes back
+    /// together when anything reaches any of it, which is what makes it safe to freeze a
+    /// heap that is holding itself up. Sleeping the same bodies one call at a time gives
+    /// each its own island, and then retiring one out of the middle wakes only that one and
+    /// leaves the rest standing on nothing.
+    ///
+    /// Not the whole skeleton, because a caller culling by camera has one skeleton and two
+    /// answers about it. `sleep(&(0..len).collect::<Vec<_>>())` is the whole-skeleton call
+    /// for anyone who wants it.
+    ///
+    /// # What it costs the motion
+    ///
+    /// **Whatever the bodies were doing is gone**, exactly as it is for a body that sleeps
+    /// on its own: a sleeping body reads back stopped rather than carrying the last
+    /// correction into its next waking. So a heap frozen mid-fall does not resume its fall
+    /// when it wakes, it starts again from where it was left. Off camera that is the point.
+    /// On camera it would be a visible snap, and a caller that cannot tell which it has
+    /// should not be calling this.
+    ///
+    /// # What it does not do
+    ///
+    /// **It does not hold them down.** Everything that wakes a sleeping body still applies
+    /// -- a body moving nearby, a contact, a joint to something awake, an island thawed by
+    /// a retire. This is a sleep, not a pin; [`Body::pinned`] is a pin. A caller culling by
+    /// camera calls this again when the group is still out of shot and something has woken
+    /// it, which is a bit test per body.
+    ///
+    /// # The joint component comes too, and that is not negotiable
+    ///
+    /// A live joint may never straddle the awake set -- the broad phase rejects jointed
+    /// pairs on purpose, so a joint has no channel to wake the far end, and a sleeping body
+    /// jointed to an awake one gets moved by a constraint that is not allowed to move it.
+    /// So every body reachable through joints from anything in `bodies` is put down with
+    /// it, whether the caller listed it or not. A caller passing one bone of a rig sleeps
+    /// the rig.
+    ///
+    /// Bodies already asleep are left in the island they are already in rather than moved
+    /// into this one: moving them would shrink an island some other body is relying on to
+    /// wake it. Pinned bodies are skipped, being asleep in the only sense they have.
+    ///
+    /// This allocates, once, which nothing inside [`Skeleton::step`] is allowed to do. It
+    /// is a caller-driven disturbance like [`Skeleton::wake`] and [`Skeleton::add_body`],
+    /// not part of the step.
+    pub fn sleep(&mut self, bodies: &[usize]) -> usize {
+        let n = self.inv_mass.len();
+        // The joint walk, breadth-first from every body asked for. `found` is the answer
+        // and doubles as the visited set, which is why the loop tests membership by the
+        // island rather than by a second structure: a body is in `found` exactly once
+        // because it is only pushed when its awake bit is still set, and that bit is
+        // cleared below -- so the two passes cannot both take it.
+        let mut found: Vec<u32> = Vec::new();
+        let mut queue: Vec<usize> = Vec::new();
+        let mut taken = BitSet::default();
+        taken.resize(n, false);
+        for &i in bodies {
+            if i >= n || taken.get(i) || !self.awake.get(i) {
+                continue;
+            }
+            taken.set(i);
+            queue.push(i);
+            while let Some(body) = queue.pop() {
+                found.push(body as u32);
+                let (from, upto) = self.jointed_run(body);
+                for k in from..upto {
+                    let other = self.jointed_to[k] as usize;
+                    // A pinned body carries nothing across, which is the same place
+                    // [`Skeleton::wake`]'s walk stops, and an already sleeping one is the
+                    // invariant holding rather than a hole in it.
+                    if taken.get(other) || !self.awake.get(other) {
+                        continue;
+                    }
+                    taken.set(other);
+                    queue.push(other);
+                }
+            }
+        }
+        if found.is_empty() {
+            return 0;
+        }
+        // Ascending, because that is what [`sleep::Islands::freeze_sorted`] turns into
+        // whole words in one pass. The walk produces them in whatever order the joints
+        // run, so unlike `settle`'s counting sort this has to sort.
+        found.sort_unstable();
+        let id = self.islands.freeze_sorted(&found);
+        for &member in found.iter() {
+            let i = member as usize;
+            self.awake.unset(i);
+            self.island_of[i] = id;
+            self.still_steps[i] = 0;
+            self.still_from[i] = self.position[i];
+            self.still_turn[i] = self.orientation[i];
+            self.disturbing.unset(i);
+            // Read back as stopped rather than as whatever the last correction left, or it
+            // wakes with a shove. The same two lines `settle` ends on, for the same reason.
+            self.velocity[i] = (0.0, 0.0, 0.0);
+            self.angular_velocity[i] = (0.0, 0.0, 0.0);
+            self.prev_position[i] = self.position[i];
+            self.prev_orientation[i] = self.orientation[i];
+        }
+        found.len()
     }
 
     /// Marks a body as background: a constraint with background at both ends is solved

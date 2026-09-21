@@ -3037,3 +3037,345 @@ fn damping_does_not_slow_a_rig_that_is_only_tumbling() {
          {free:.6} without; a joint damper may only see the motion *through* the joint",
     );
 }
+
+/// A square grid of heights over `y = f(x)`, invariant in z, spanning x in `[-10, 10]` at
+/// one metre a cell.
+fn terrace(f: impl Fn(f64) -> f64) -> (Vec<f64>, usize, usize, f64, (f64, f64)) {
+    let (columns, rows, cell) = (21usize, 21usize, 1.0);
+    let origin = (-10.0, -10.0);
+    let mut heights = vec![0.0; columns * rows];
+    for iz in 0..rows {
+        for ix in 0..columns {
+            heights[iz * columns + ix] = f(origin.0 + ix as f64 * cell);
+        }
+    }
+    (heights, columns, rows, cell, origin)
+}
+
+/// The claim that makes every other one testable: a field that describes a plane **is** that
+/// plane, to the last bit. Everything downstream of the ground -- the patch solve, friction,
+/// the anchors, sleeping -- was written against one plane and had to keep working unchanged
+/// when the plane started varying per body, and the way to know it did is that the flat case
+/// did not move at all.
+#[test]
+fn a_flat_field_is_exactly_the_plane_it_describes() {
+    for tilt in [0.0f64, 0.15] {
+        let (heights, columns, rows, cell, origin) = terrace(|x| x * tilt.tan());
+        let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+
+        // **The plane the field reports, not the plane the fixture meant.** They are the
+        // same plane and they are not the same bits: one is reached through `sin` and
+        // `cos`, the other through `tan` and a normalise, and on a slope the last digit
+        // differs. Comparing against the field's own answer is what makes the claim here
+        // exact -- that the machinery downstream of the ground does not care whether its
+        // plane arrived per body or per skeleton. Whether the field describes the slope it
+        // was built from is a separate claim and is asserted separately below.
+        let (normal, distance) = field.plane_at(0.0, 0.0);
+        let mut on_plane = stack(3);
+        on_plane.set_ground(normal, distance);
+        let mut on_field = stack(3);
+        on_field.clear_ground();
+
+        for _ in 0..300 {
+            on_plane.step(DT, G, 8);
+            on_field.step_over(DT, G, 8, Some(field));
+        }
+        for i in 0..3 {
+            let (field_at, plane_at) = (on_field.position(i), on_plane.position(i));
+            let gap = length(sub(field_at, plane_at));
+            if tilt == 0.0 {
+                // **Level ground is bit-identical and has to be**, because there is nothing
+                // for the field to round: every vertex is zero, so the normal is exactly
+                // `(0, 1, 0)` and `dot(normal, (x, 0, z))` is exactly zero at every body.
+                // A caller whose ground is flat gets the plane's own answer to the bit.
+                assert_eq!(
+                    field_at, plane_at,
+                    "body {i} on a field describing level ground did not land on the same \
+                     bits as the plane itself",
+                );
+            } else {
+                // **On a slope it cannot be, and the reason is the design rather than a
+                // defect.** The plane is re-derived under each body, so its distance is
+                // `dot(normal, (x, x tan t, z))` evaluated at that body's own x -- which is
+                // zero in exact arithmetic and a few units in the last place away from it
+                // in a double. Every body on a slope therefore stands on a plane offset
+                // from its neighbour's by about 1e-17 m.
+                //
+                // The bound is a nanometre because that is far below anything the solver
+                // resolves -- the same fixture's own settling tolerance is a millimetre --
+                // and seven orders above the 3e-16 m this actually measures. It is there to
+                // catch the field describing a *different* plane, not to pin the rounding.
+                assert!(
+                    gap < 1e-9,
+                    "body {i} on a field describing the plane at {tilt:.2} rad came to rest \
+                     {gap:.3e} m from where the plane itself put it, at {field_at:?} against \
+                     {plane_at:?}",
+                );
+            }
+        }
+
+        // And that the field is the slope it was built from. Not bit-exact, for the reason
+        // above: this is two routes to one plane, agreeing to within the last few digits of
+        // a double rather than to the bit.
+        let wanted = (-tilt.sin(), tilt.cos(), 0.0);
+        let gap = length(sub(normal, wanted));
+        assert!(
+            gap < 1e-12,
+            "a field over y = x tan({tilt:.2}) reported the normal {normal:?}, which is \
+             {gap:.3e} from the {wanted:?} that slope has",
+        );
+        assert!(
+            distance.abs() < 1e-12,
+            "the plane through the origin came back at a distance of {distance:.3e}",
+        );
+    }
+}
+
+/// What a plane cannot do at all: two bodies far enough apart to be standing on different
+/// ground each get the ground under themselves.
+#[test]
+fn a_field_gives_each_body_the_ground_beneath_it() {
+    // Flat at zero left of x = -1, flat at two right of x = 1, a ramp between.
+    let (heights, columns, rows, cell, origin) = terrace(|x| (x + 1.0).clamp(0.0, 2.0));
+    let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+
+    let mut s = Skeleton::new();
+    let low = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (-5.0, 1.0, 0.0)), 0.0));
+    let high = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (5.0, 3.0, 0.0)), 0.0));
+    for _ in 0..600 {
+        s.step_over(DT, G, 8, Some(field));
+    }
+
+    let (rest_low, rest_high) = (s.position(low).1, s.position(high).1);
+    assert!(
+        (rest_low - 0.1).abs() < 0.02,
+        "the body on the lower terrace came to rest at {rest_low:.4}, not on ground at zero",
+    );
+    assert!(
+        (rest_high - 2.1).abs() < 0.02,
+        "the body on the upper terrace came to rest at {rest_high:.4}, not on ground at two",
+    );
+}
+
+/// The whole reason the field is borrowed rather than owned: the caller's own array is what
+/// is read, so ground that changes is read changed, with nothing to keep in sync.
+///
+/// It also pins the half of the contract the caller owns -- a deformed field does **not**
+/// wake what was standing on it, because sleeping is a property of the bodies and the step
+/// has nothing to compare a borrowed field against.
+#[test]
+fn a_field_that_changes_underneath_a_body_is_read_changed() {
+    let (mut heights, columns, rows, cell, origin) = terrace(|_| 0.0);
+
+    let mut s = Skeleton::new();
+    let body = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (0.0, 0.5, 0.0)), 0.0));
+    for _ in 0..1200 {
+        let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+        s.step_over(DT, G, 8, Some(field));
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    let settled = s.position(body).1;
+    assert!((settled - 0.1).abs() < 0.02, "the body never settled: {settled:.4}");
+    assert_eq!(s.awake_count(), 0, "the fixture needs a sleeping body to be about anything");
+
+    // The ground drops a metre out from under it, and nobody tells the skeleton.
+    for h in heights.iter_mut() {
+        *h = -1.0;
+    }
+    for _ in 0..120 {
+        let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+        s.step_over(DT, G, 8, Some(field));
+    }
+    assert_eq!(
+        s.position(body).1,
+        settled,
+        "a sleeping body followed ground that moved; the documented contract is that the \
+         caller wakes what it deforms under",
+    );
+
+    // Told, it falls the metre.
+    s.wake_all();
+    for _ in 0..1200 {
+        let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+        s.step_over(DT, G, 8, Some(field));
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    let after = s.position(body).1;
+    assert!(
+        (after + 0.9).abs() < 0.02,
+        "woken over ground a metre lower, the body came to rest at {after:.4} rather than \
+         at -0.9",
+    );
+}
+
+/// A grid that cannot describe a surface is refused rather than believed, because a single
+/// bad cell reaches the solve as a NaN normal and from there it cannot be traced back.
+#[test]
+fn a_field_refuses_a_grid_it_cannot_describe() {
+    let good = vec![0.0; 9];
+    assert!(Field::new(&good, 3, 3, 1.0, (0.0, 0.0)).is_some(), "a valid grid was refused");
+    assert!(Field::new(&good, 1, 9, 1.0, (0.0, 0.0)).is_none(), "a grid one vertex wide");
+    assert!(Field::new(&good, 3, 3, 0.0, (0.0, 0.0)).is_none(), "a spacing of no metres");
+    assert!(Field::new(&good, 3, 3, f64::NAN, (0.0, 0.0)).is_none(), "a spacing of nonsense");
+    assert!(Field::new(&good, 4, 3, 1.0, (0.0, 0.0)).is_none(), "a length that is not the shape");
+    assert!(Field::new(&good, 3, 3, 1.0, (f64::INFINITY, 0.0)).is_none(), "an origin at infinity");
+    let mut bad = good.clone();
+    bad[4] = f64::NAN;
+    assert!(Field::new(&bad, 3, 3, 1.0, (0.0, 0.0)).is_none(), "a grid with a NaN in it");
+}
+
+/// Off the edge the border extends rather than ending, so a body that leaves the field
+/// keeps ground under it at the height of the edge it left -- rather than falling for ever,
+/// which no caller can tell apart from a bug.
+#[test]
+fn a_field_extends_its_border_outwards() {
+    let (heights, columns, rows, cell, origin) = terrace(|x| (x + 1.0).clamp(0.0, 2.0));
+    let field = Field::new(&heights, columns, rows, cell, origin).expect("a valid grid");
+    // The grid's own corners, and then a long way past each of them.
+    assert!((field.height_at(-10.0, 0.0) - 0.0).abs() < 1e-12, "the low corner moved");
+    assert!((field.height_at(10.0, 0.0) - 2.0).abs() < 1e-12, "the high corner moved");
+    assert!(
+        (field.height_at(-1e6, 0.0) - 0.0).abs() < 1e-12,
+        "off the low edge the ground should stay at the height of the edge",
+    );
+    assert!(
+        (field.height_at(1e6, 1e6) - 2.0).abs() < 1e-12,
+        "off the high edge the ground should stay at the height of the edge",
+    );
+}
+
+/// The first claim [`Skeleton::sleep`] makes: a body handed to it stops being simulated,
+/// whatever it was doing. Falling is the hardest case, because gravity is applied to every
+/// awake body before any constraint gets a say.
+#[test]
+fn a_forced_sleep_stops_a_body_in_mid_air() {
+    let mut s = Skeleton::new();
+    let body = s.add_body(Body::capsule(4.0, 0.1, 0.5, (0.0, 5.0, 0.0)));
+    for _ in 0..10 {
+        s.step(DT, G, 8);
+    }
+    let falling = s.velocity(body).1;
+    assert!(falling < -1.0, "the fixture is not falling: {falling:.4} m/s");
+
+    assert_eq!(s.sleep(&[body]), 1, "one body was asked for and should have gone down");
+    let caught = s.position(body);
+    assert_eq!(s.awake_count(), 0, "the body is still being solved");
+    assert_eq!(
+        s.velocity(body),
+        (0.0, 0.0, 0.0),
+        "a sleeping body must read back stopped or it wakes with a shove",
+    );
+
+    for _ in 0..600 {
+        s.step(DT, G, 8);
+    }
+    let after = s.position(body);
+    assert_eq!(
+        after, caught,
+        "ten seconds of gravity moved a body that was put to sleep: {caught:?} to {after:?}",
+    );
+}
+
+/// The claim that is not negotiable: a live joint may never straddle the awake set, so
+/// sleeping one bone sleeps everything reachable through joints from it -- whether or not
+/// the caller listed it.
+#[test]
+fn a_forced_sleep_takes_the_whole_joint_component() {
+    let mut s = chain(3);
+    // Stepped so that the jointed runs this walks are built, then woken so the test does
+    // not depend on whether a chain hanging in equilibrium has settled by now.
+    for _ in 0..5 {
+        s.step(DT, G, 8);
+    }
+    s.wake_all();
+    assert_eq!(s.awake_count(), 3, "the fixture should have three live links");
+
+    // The middle link only. The root is pinned and was never awake; the other two are
+    // reachable only through joints.
+    let taken = s.sleep(&[2]);
+    assert_eq!(taken, 3, "sleeping one link of a chain took {taken} bodies, not the chain");
+    assert_eq!(s.awake_count(), 0, "a joint is left straddling the awake set");
+    s.check_no_joint_straddles_the_awake_set();
+}
+
+/// Why the call takes a list: the group is the unit that wakes. A heap frozen together has
+/// to come back together, or retiring a body out of the middle leaves the rest standing on
+/// nothing.
+#[test]
+fn a_forced_group_wakes_as_one_when_a_member_retires() {
+    let mut s = stack(3);
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    assert_eq!(s.sleep(&[0, 1, 2]), 3, "the whole stack was asked for");
+    assert_eq!(s.awake_count(), 0, "the stack is still being solved");
+
+    assert!(s.retire(0), "the fixture could not retire its own bottom body");
+    assert_eq!(
+        s.awake_count(),
+        2,
+        "taking the bottom out of a frozen stack left the rest asleep in mid-air",
+    );
+}
+
+/// A sleep is not a pin, and the difference is the whole reason a camera-culling caller
+/// has to keep calling it. Everything that wakes a body that fell asleep on its own wakes
+/// one that was put down by hand.
+#[test]
+fn a_forced_sleep_still_wakes_when_something_arrives() {
+    let mut s = stack(1);
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    // Woken first: a body that settled on its own is already asleep, and this test is about
+    // what wakes one that was put down by hand.
+    s.wake_all();
+    assert_eq!(s.sleep(&[0]), 1, "the fixture could not put its own body down");
+
+    // Something dropped onto it from a height it cannot be asleep through.
+    let falling = s.add_body(lying(Body::capsule(4.0, 0.1, 0.5, (0.0, 1.2, 0.0)), 0.0));
+    for _ in 0..90 {
+        s.step(DT, G, 8);
+        if s.is_awake(0) {
+            break;
+        }
+    }
+    assert!(
+        s.is_awake(0),
+        "a body put to sleep by hand was buried by {falling} and never noticed",
+    );
+}
+
+/// A body that is already asleep keeps the island it is already in, rather than being moved
+/// into the new one -- because something else is relying on that island to wake it, and an
+/// island that has been quietly shrunk fails only later and somewhere else.
+#[test]
+fn a_forced_sleep_leaves_an_island_it_finds_alone() {
+    let mut s = stack(3);
+    for _ in 0..1200 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(s.awake_count(), 0, "the fixture never settled on its own");
+
+    // Every body is already down, so there is nothing for this to do.
+    assert_eq!(
+        s.sleep(&[0, 1, 2]),
+        0,
+        "bodies that were already asleep were taken out of their island and re-frozen",
+    );
+    // And the island they settled into is still whole, which is what the count above is
+    // really asserting: retiring the bottom still wakes the two it was holding up.
+    assert!(s.retire(0), "the fixture could not retire its own bottom body");
+    assert_eq!(
+        s.awake_count(),
+        2,
+        "the natural island did not survive a forced sleep passing over it",
+    );
+}

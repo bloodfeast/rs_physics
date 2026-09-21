@@ -803,6 +803,23 @@ pub(super) struct GroundContact {
     /// split for a capsule lying flat, so there is nothing here that tests how many
     /// contacts there are.
     pub local: [(f64, f64, f64); 2],
+    /// **The plane this contact was made against**, as `dot(normal, p) = distance`.
+    ///
+    /// Carried per contact rather than read from the skeleton because the ground is not
+    /// necessarily one plane: against a height field every body gets the plane tangent to
+    /// the surface underneath it, and two bodies a metre apart on a slope get two
+    /// different ones. A skeleton whose ground *is* a plane simply stores the same pair in
+    /// every contact, which costs it thirty-two bytes on a structure that is built fresh
+    /// each step and never outlives it.
+    ///
+    /// It is also the plane the rest of the step has to keep agreeing with. The normal
+    /// solve, the friction budget and the anchor test are three separate readings of "is
+    /// this body still against the ground", and if any of them read a different plane from
+    /// the one the contact was built against, they disagree about where the ground is --
+    /// which is a body that sticks to a surface it has left. Storing it once on the
+    /// contact is what makes that impossible to get wrong rather than merely unlikely.
+    pub normal: (f64, f64, f64),
+    pub distance: f64,
 }
 
 /// Where a capsule meets the plane `dot(normal, p) = distance`, appended to `out`.
@@ -840,6 +857,8 @@ pub(super) fn ground_contacts(
     out.push(GroundContact {
         body,
         local: [inverse(first), inverse(second)],
+        normal,
+        distance,
     });
 }
 
@@ -900,7 +919,7 @@ pub(super) fn solve_ground_normal(
     let mut out = Correction::none();
     let mut patch = patch;
     let spent = &mut patch.spent;
-    let GroundContact { body: index, local } = contact;
+    let GroundContact { body: index, local, .. } = contact;
     out.body = index;
 
     let arm = [
@@ -1029,7 +1048,7 @@ fn ground_friction(
     anchor_reach: f64,
 ) -> Correction {
     let mut out = Correction::none();
-    let GroundContact { body: index, local } = contact;
+    let GroundContact { body: index, local, .. } = contact;
     out.body = index;
 
     let arm = [
