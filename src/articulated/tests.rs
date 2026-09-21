@@ -180,3 +180,14 @@ fn hinge_angle(
         .rotate_point(rotate_into(reference, axis_b, axis_a));
     dot(cross(in_a, in_b), axis).atan2(dot(in_b, in_a))
 }
+
+/// The size of a `Body`, stated so a layout change is a decision rather than a drift.
+#[test]
+fn a_body_is_the_size_it_looks() {
+    let size = std::mem::size_of::<Body>();
+    assert_eq!(
+        size, 136,
+        "a Body is {size} bytes; the layout moved and the cache arithmetic in the module \
+         header moved with it",
+    );
+}
