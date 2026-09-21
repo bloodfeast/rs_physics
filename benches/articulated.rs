@@ -66,6 +66,18 @@ const G: (f64, f64, f64) = (0.0, -9.80665, 0.0);
 /// one does not.
 const BONES: usize = 17;
 
+/// How fast the joint-only fixture's bodies turn, in radians a second.
+///
+/// Enough that the joints carry a real load -- a limb at a quarter of a metre from the
+/// axis sees a few times gravity at this rate -- and not so much that a rig tears through
+/// its own hinge limits before the fixture has settled into its measurement.
+const TUMBLE: f64 = 6.0;
+
+/// How far apart the tumbling rigs stand. Wide enough that a spinning limb cannot reach
+/// its neighbour: at the 0.8 m the other fixtures use, this one grows contacts and stops
+/// being a control.
+const TUMBLING_APART: f64 = 2.5;
+
 /// Bodies in the crowd. Six hundred is the order of magnitude a battle scene reaches,
 /// and the point at which a serial solver stops being an option.
 const PILE: usize = 600;
@@ -336,24 +348,42 @@ fn joints_only(c: &mut Criterion) {
 
     let mut s = Skeleton::new();
     s.set_self_collision(false);
-    // **Sleeping off, which is what makes this a control.**
+    // **Tumbling, and nothing is pinned.**
     //
-    // It is not off because sleeping is unwelcome -- it is off because this fixture's job
-    // is to hold everything else still while one thing changes, and a fixture that sleeps
-    // cannot do that. A pinned rig's legs hang straight down with nothing to swing them,
-    // so six of its sixteen movable bodies leave the step within half a second: with
-    // sleeping on this scene runs four tenths asleep, and its number then moves when the
-    // *sleeping* changes rather than when the joint solve does. That is exactly what
-    // happened -- a fix to which bodies are eligible to sleep took this benchmark from
-    // 4.17 ms to 2.49 ms and was briefly read as a gain in the joint path, which it was
-    // not.
+    // A control has to hold everything else still while one thing changes, and two
+    // earlier versions of this fixture could not. Pinned, a rig's legs hang straight down
+    // with nothing to swing them and six of its sixteen movable bodies leave the step
+    // within half a second, so the scene ran four tenths asleep and its number moved when
+    // the *sleeping* changed rather than the joint solve -- which duly happened, and a
+    // sleeping fix was briefly read as a gain in the joint path. Forcing sleeping off
+    // fixed the reading and left a control that disables the feature it is meant to be
+    // neutral about.
     //
-    // Awake, it measures what it says: nine thousand six hundred joints, no contacts, no
-    // contact list to build or colour. Anything that costs per contact costs nothing here,
-    // and anything that costs per sleeping body costs nothing here either.
-    s.set_sleeping(false);
+    // Falling free fixes both and needs neither. A tumbling rig is awake because it is
+    // moving, not because it was told to be, and **its joints are loaded by its own
+    // rotation**: in uniform gravity every body falls at the same rate and a joint has
+    // nothing to hold, but spin puts every limb under centripetal acceleration and the
+    // joints carry it. Measured, the cost still scales with the iteration count -- 1.80 ms
+    // at one pass against 4.11 at eight -- which is what says the joints are doing work
+    // rather than early-returning on a satisfied constraint.
+    //
+    // The spacing is what keeps it honest: at the usual 0.8 m a spinning limb reaches its
+    // neighbour and the fixture quietly grows a hundred and eighty contacts. Far enough
+    // apart, the assert below holds and this measures nine thousand six hundred joints and
+    // nothing else.
     for i in 0..PILE {
-        ragdoll(&mut s, i as f64 * 0.8, 0.0);
+        corpse(&mut s, (i % 25) as f64 * TUMBLING_APART, (i / 25) as f64 * TUMBLING_APART, 1.0);
+    }
+    for i in 0..s.len() {
+        let n = i as f64;
+        s.set_angular_velocity(
+            i,
+            (
+                TUMBLE * (n * 0.7).sin(),
+                TUMBLE * (n * 1.1).cos(),
+                TUMBLE * (n * 0.3).sin(),
+            ),
+        );
     }
     for _ in 0..30 {
         s.step(DT, G, 8);
@@ -364,8 +394,8 @@ fn joints_only(c: &mut Criterion) {
         "the joint-only fixture found contacts, so it is not measuring what it says",
     );
     println!(
-        "  joints only: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake \
-         (all of them, deliberately)",
+        "  joints only: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake, \
+         nothing pinned",
         s.len(),
         s.joints().len(),
         s.contact_count(),
