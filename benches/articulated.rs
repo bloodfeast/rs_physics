@@ -20,8 +20,38 @@
 //! Component arrays are what AVX needs -- a `Vec<(f64, f64, f64)>` is stride three and
 //! will not vectorise -- but it is a second restructure, and it only pays for the half of
 //! the step the sweeps are.
+//!
+//! # Every sample starts from the same scene, and it used not to
+//!
+//! A `Skeleton` is mutated by `step`, and criterion times a routine by running it many
+//! times over. So a fixture that has not settled is a **different scene on every sample**:
+//! the first is timed at step 1 and the last some tens of thousands of steps later, and
+//! what is being averaged is a trajectory rather than a workload. Two runs of the same
+//! binary then disagree by however much the scene changed, and two runs of *different*
+//! binaries disagree by that plus whatever the change did.
+//!
+//! Measured, that is not a rounding error. Three runs of one unmodified binary on
+//! `one/8` gave 38.5, 59.6 and 60.5 us -- a spread of 57 per cent with nothing changing
+//! at all -- and `pile/8` swung twofold on a single build while the commit it was being
+//! compared against held steady to seven per cent, because the two builds' costs scale
+//! differently with a contact count that was drifting between 4,200 and 6,600 under the
+//! benchmark. A regression was reported off that and did not exist.
+//!
+//! So every fixture that has not come to rest is timed through [`steady`], which clones
+//! the scene before each sample and times one step from the identical state. What that
+//! costs is in [`steady`]'s own documentation, because it is not free and pretending it is
+//! would be the same mistake one level down.
+//!
+//! # And every fixture says how many contacts it has
+//!
+//! `pile` printed its bodies, its joints and its colours and no contact count, and the
+//! absence was read as a zero for most of this module's life -- it printed that line
+//! before contacts existed here at all and nobody updated it when they arrived. It has
+//! between four and seven thousand, they are the rigs' own limbs touching, and a change
+//! that costs anything per contact shows up in it. A fixture that does not say what it
+//! holds will eventually be quoted for something it is not, so they all say it now.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use rs_physics::articulated::{Body, Joint, Skeleton};
 
 const DT: f64 = 1.0 / 60.0;
@@ -167,18 +197,153 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
     into.len() - base
 }
 
+/// **Time one step from the same state every sample**, by cloning the scene first.
+///
+/// The scene a bench builds is the scene every sample sees. Without this, sample `n` is
+/// timed on the state sample `n - 1` left behind, which for anything that has not settled
+/// means the measurement is an average over a trajectory and is not reproducible between
+/// runs. See the module header for what that cost the session this was written in.
+///
+/// # What it costs, which is nothing, and that was measured rather than assumed
+///
+/// The obvious objection is that copying a few megabytes before each batch evicts the
+/// caches the step is about to read, so the step is timed cold and the clone is being
+/// measured after all. It is not. [`joints_only`] is the control, because it is the one
+/// fixture that does *not* drift -- no contacts, so nothing about it changes under
+/// stepping -- which makes in situ and cloned the same scene and the only difference the
+/// clone. Same binary, ten thousand two hundred bodies:
+///
+/// ```text
+///   joints_only/8   in situ   2.657 ms      cloned   2.652 .. 2.753 ms
+/// ```
+///
+/// So the clone is free of the measurement, and every level shift this change produced
+/// elsewhere is the **scene** rather than the harness. That matters for reading the
+/// numbers: cloned figures are not comparable with anything quoted before this existed,
+/// not because the harness got slower but because the old ones were averages over a
+/// trajectory and these are a named state.
+///
+/// What it buys is the spread. Same binary, run to run:
+///
+/// ```text
+///                   in situ                      cloned
+///   one/8           38.5 .. 60.5 us   (57%)      108.5 .. 110.9 us   (2%)
+///   pile/8          3.90 .. 7.86 ms  (100%)      7.39 .. 8.19 ms    (11%)
+/// ```
+///
+/// The levels moved because the named state is a denser moment than the drifted ones the
+/// old samples wandered into -- `pile` at step 30 carries 8,400 contacts, more than any
+/// moment the drift was caught at -- and the contacts are most of what those two fixtures
+/// cost.
+///
+/// A settled scene does not need this -- it stays settled, so its samples are already the
+/// same scene -- and paying a ten-thousand-body clone to time a step that costs nothing
+/// would be measuring the clone. [`a_heap_that_has_settled`] is left in place.
+fn steady(b: &mut criterion::Bencher<'_>, scene: &Skeleton, mut one_step: impl FnMut(&mut Skeleton)) {
+    b.iter_batched_ref(
+        || scene.clone(),
+        |s| one_step(s),
+        BatchSize::NumIterations(batch_of(scene.len()) as u64),
+    );
+}
+
+/// How many clones of a scene of this many bodies may be alive while one batch is timed.
+///
+/// Criterion times a *batch* of iterations together, so a batch larger than one amortises
+/// the per-sample timer and loop overhead over it. That matters: at one clone per
+/// iteration a seventeen-body rig's step measured 108 us against the 60 it costs, because
+/// the overhead of starting and stopping a measurement is a real fraction of forty
+/// microseconds. It is nothing against three milliseconds.
+///
+/// What bounds the batch is memory, so that is what sets it. A clone is about
+/// [`BYTES_A_BODY`] per body and a batch has to fit somewhere without paging or
+/// evicting more than the step itself streams; sixteen megabytes is the budget. A
+/// seventeen-body rig therefore gets the cap and a ten-thousand-body heap gets one clone
+/// at a time, which is the right answer at both ends for the same reason.
+fn batch_of(bodies: usize) -> usize {
+    const BUDGET: usize = 16 << 20;
+    /// A body's share of a cloned skeleton, near enough: ten parallel arrays of a vector,
+    /// a quaternion or a scalar each, plus its share of the contact and colour buffers.
+    /// An estimate, and it only has to be the right order -- it chooses a batch size, not
+    /// a result.
+    const BYTES_A_BODY: usize = 320;
+    (BUDGET / (bodies.max(1) * BYTES_A_BODY)).clamp(1, 64)
+}
+
 fn one_skeleton(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/one");
     let mut s = Skeleton::new();
     let bones = ragdoll(&mut s, 0.0, 0.0);
     assert_eq!(bones, BONES, "the bench's rig is not the rig it documents");
+    // Far enough in that the rig hangs off its pinned pelvis rather than sitting in the
+    // pose it was authored in, and the contacts below are the ones it actually carries.
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    // **This rig is not joint-only either.** Its limb segments are authored overlapping,
+    // self-collision is on by default, and the contacts that makes are solved on every
+    // pass like any others. See the module header.
+    println!(
+        "  one: {} bodies, {} joints, {} contacts",
+        s.len(),
+        s.joints().len(),
+        s.contact_count(),
+    );
 
     for iterations in [1usize, 4, 8] {
         group.bench_with_input(
             BenchmarkId::new("iterations", iterations),
             &iterations,
             |b, &iterations| {
-                b.iter(|| {
+                steady(b, &s, |s| {
+                    s.step(black_box(DT), black_box(G), black_box(iterations));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// **The one fixture here that really is only joints**, which is what `pile` was believed
+/// to be for most of this module's life.
+///
+/// Six hundred rigs with self-collision off and no ground: nine thousand six hundred joints,
+/// no contacts of any kind, and no contact list to build or colour. It is a real workload --
+/// a crowd of corpses driven by an animation that owns where they are, a solver asked for
+/// the articulation and nothing else -- and it is the measurement that says which half of a
+/// step a change lands in, because anything that costs per contact costs exactly nothing
+/// here.
+fn joints_only(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/joints_only");
+    group.sample_size(20);
+
+    let mut s = Skeleton::new();
+    s.set_self_collision(false);
+    for i in 0..PILE {
+        ragdoll(&mut s, i as f64 * 0.8, 0.0);
+    }
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    assert_eq!(
+        s.contact_count(),
+        0,
+        "the joint-only fixture found contacts, so it is not measuring what it says",
+    );
+    println!(
+        "  joints only: {} bodies, {} joints, {} contacts, {} colours",
+        s.len(),
+        s.joints().len(),
+        s.contact_count(),
+        s.colours().len(),
+    );
+
+    for iterations in [1usize, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("iterations", iterations),
+            &iterations,
+            |b, &iterations| {
+                steady(b, &s, |s| {
                     s.step(black_box(DT), black_box(G), black_box(iterations));
                 });
             },
@@ -193,6 +358,18 @@ fn one_skeleton(c: &mut Criterion) {
 /// is what lets the colouring find parallelism *across* skeletons as well as within one.
 /// Six hundred separate `Skeleton`s would be six hundred serial solves of sixteen joints
 /// each, which leaves a thread pool idle.
+///
+/// **It is not a joints-only fixture and it never was, whatever its name suggests.** The
+/// rigs are far enough apart not to touch each other, but each one's limb segments are
+/// authored overlapping and self-collision is on, so it carries between four and seven
+/// thousand contacts and they are solved on every pass. The count printed below is there
+/// because its absence was read as a zero for most of this module's life, and a change
+/// that costs anything per contact was then judged against a workload nobody realised had
+/// any. [`joints_only`] is the fixture this was mistaken for.
+///
+/// The name is kept because the solver's module header quotes `pile/8` throughout and a
+/// rename would silently break every one of those references. What it holds is stated
+/// instead.
 fn the_pile(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/pile");
     group.sample_size(20);
@@ -201,11 +378,18 @@ fn the_pile(c: &mut Criterion) {
     for i in 0..PILE {
         ragdoll(&mut s, i as f64 * 0.8, 0.0);
     }
-    let colours = s.colours().len();
+    // A defined moment rather than step zero, so the contact count printed below is the
+    // one every sample is timed on. Before [`steady`], samples were drawn from wherever
+    // the scene had drifted to and the count ranged from 4,200 to 6,600 within one run.
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
     println!(
-        "  pile: {} bodies, {} joints, {colours} colours",
+        "  pile: {} bodies, {} joints, {} contacts, {} colours",
         s.len(),
         s.joints().len(),
+        s.contact_count(),
+        s.colours().len(),
     );
 
     for iterations in [1usize, 8] {
@@ -213,7 +397,7 @@ fn the_pile(c: &mut Criterion) {
             BenchmarkId::new("iterations", iterations),
             &iterations,
             |b, &iterations| {
-                b.iter(|| {
+                steady(b, &s, |s| {
                     s.step(black_box(DT), black_box(G), black_box(iterations));
                 });
             },
@@ -258,7 +442,7 @@ fn the_pendulums(c: &mut Criterion) {
             BenchmarkId::new("iterations", iterations),
             &iterations,
             |b, &iterations| {
-                b.iter(|| {
+                steady(b, &s, |s| {
                     s.step(black_box(DT), black_box(G), black_box(iterations));
                 });
             },
@@ -295,7 +479,7 @@ fn a_heap_arriving(c: &mut Criterion) {
             BenchmarkId::new("iterations", iterations),
             &iterations,
             |b, &iterations| {
-                b.iter(|| {
+                steady(b, &s, |s| {
                     s.step(black_box(DT), black_box(G), black_box(iterations));
                 });
             },
@@ -331,7 +515,7 @@ fn a_heap_at_thirty_seconds(c: &mut Criterion) {
             s.contact_count(),
         );
         group.bench_with_input(BenchmarkId::new("sleeping", sleeping), &sleeping, |b, _| {
-            b.iter(|| {
+            steady(b, &s, |s| {
                 s.step(black_box(DT), black_box(G), black_box(8));
             });
         });
@@ -346,6 +530,14 @@ fn a_heap_at_thirty_seconds(c: &mut Criterion) {
 /// the point where nothing is awake at about step 700, and from there a step is a word
 /// test per sixty-four bodies and nothing else. The sleeping-off column is the same heap
 /// solved in full, for ever, which is what every settled workload cost before.
+///
+/// **This is the one fixture that steps in place**, and it is the one that may: a settled
+/// scene stays settled, so every sample is already the same scene and [`steady`] would buy
+/// nothing. It would cost a great deal -- a ten-thousand-body clone before each sample, to
+/// time a step whose whole claim is that it costs nothing measurable -- and the
+/// measurement would be of the clone. The sleeping-off column does keep moving, slowly,
+/// and is read as the control on the feature's overhead rather than as a number in its own
+/// right.
 fn a_heap_that_has_settled(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/has_settled");
     group.sample_size(10);
@@ -398,12 +590,22 @@ fn joining(c: &mut Criterion) {
     for _ in 0..30 {
         s.step(DT, G, 8);
     }
+    println!(
+        "  joining: {} bodies, {} joints, {} contacts before the rig arrives",
+        s.len(),
+        s.joints().len(),
+        s.contact_count(),
+    );
 
-    let mut at = 0.0;
+    // **This one needed the clone most of all.** Stepping in place, it added a rig per
+    // sample and never took one away, so the skeleton grew without bound *during* the
+    // measurement: the last sample was timed on a scene tens of thousands of bodies larger
+    // than the first, and the answer depended on how many samples criterion chose to take.
+    // What it is meant to measure is one arrival into a six-hundred-rig scene, which is
+    // what it measures now.
     group.bench_function("rig_then_step", |b| {
-        b.iter(|| {
-            at += 0.8;
-            corpse(&mut s, black_box(at), 60.0, 1.0);
+        steady(b, &s, |s| {
+            corpse(s, black_box(480.0), 60.0, 1.0);
             s.step(black_box(DT), black_box(G), black_box(8));
         });
     });
@@ -413,6 +615,7 @@ fn joining(c: &mut Criterion) {
 criterion_group!(
     benches,
     one_skeleton,
+    joints_only,
     the_pile,
     the_pendulums,
     a_heap_arriving,
