@@ -1768,6 +1768,47 @@
 //! moving. Everything above about shapes, patches, cones and manifolds was aimed at that
 //! and none of it has landed it. The sections that follow are what is known about why.
 //!
+//! # The smallest heap that fails is two rigs, and it is the spine
+//!
+//! A lone rig settles. Bisecting on the rig count, eight draws each, the plain
+//! configuration -- capsules, free balls, self-collision on:
+//!
+//! ```text
+//!   1 rig    settled 8 of 8, soonest 164 steps
+//!   2 rigs   settled 0 of 8, 12.5 restless bones of 34
+//!   3 rigs   settled 0 of 8, 29.0 of 51
+//!   4 rigs   settled 0 of 8, 36.0 of 68
+//! ```
+//!
+//! **It breaks at exactly two**, which makes the failing case thirty-four bodies rather
+//! than three hundred and forty, and small enough to look at directly. What will not stop
+//! is mostly the **spine**, and the spine is barely touching anything:
+//!
+//! ```text
+//!   body 1  spine1   spin 0.151 rad/s   1 own-rig contact, 0 other, 0 ground
+//!   body 2  spine2   spin 0.138         1 own-rig,          0 other, 0 ground
+//!   body 3  spine3   spin 0.137         no contacts at all
+//!   body 4  spine4   spin 0.406         0 own-rig,          2 other, 0 ground
+//! ```
+//!
+//! Spine2 is restless in five hundred and ninety-six steps of six hundred. Speeds are
+//! millimetres a second while spins are tenths of a radian, so this is the same rotational
+//! residual the sections below are about -- but **body 3 has no contacts at all and still
+//! will not stop**, so for that bone it cannot be a contact problem. A four-link chain of
+//! frictionless ball joints hanging off a pelvis is being excited through the head by the
+//! neighbouring rig, and the chain has nothing in it that dissipates.
+//!
+//! **Damping the relative spin across every joint was tried on this case and made it
+//! worse**: a lone rig went from eight draws of eight at 164 steps to four of eight at
+//! 2568, and two rigs stayed at zero. The implementation moved both ends toward their mean
+//! angular velocity, which is not damping but *mixing* -- a still bone next to a moving one
+//! is handed some of its neighbour's spin, and a heavy pelvis and a light bone are weighted
+//! the same. A damper has to be equal and opposite *torques* weighted by inverse inertia,
+//! which is what the unmerged `joint-resistance` work does; that branch predates fifteen
+//! commits of drift here and the region it touches has diverged, so it wants reimplementing
+//! rather than merging. The negative above is a measurement of the crude version and says
+//! nothing about the real one.
+//!
 //! # And the rocking is the shape, which this module already says somewhere else
 //!
 //! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
