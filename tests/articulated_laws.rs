@@ -609,10 +609,15 @@ fn a_heap_settles_and_stays_where_it_settled() {
 /// which is the difference between sixty nanoseconds a step and milliseconds.
 ///
 /// It does **not** claim the same of a rig that may touch itself. That one does not
-/// settle, and nothing short of solving the loop's constraints together will make it:
-/// the residual is the same at eight, thirty-two and sixty-four iterations, with and
-/// without friction, with and without rolling resistance, and with every relative
-/// velocity and every spin zeroed at the end of each step.
+/// settle: the residual is the same at eight, thirty-two and sixty-four iterations, and it
+/// survives every relative velocity and every spin being zeroed at the end of each step.
+/// What it does not survive is friction being taken away altogether -- at a coefficient of
+/// zero the same rig's drift falls from 0.276 of a reach to 0.0001 and its straightness
+/// from 0.96 to 0.01 -- which says the loop manufactures the motion inside the rig and the
+/// contact with the ground turns it into travel. Reversing the sweep every other step,
+/// which looks like the fix and is not, would cost this very law: the rig here never
+/// sleeps under it. See the module header for that and for what a block solve is now
+/// expected to buy.
 #[test]
 fn a_rig_that_does_not_touch_itself_comes_to_rest() {
     let mut s = Skeleton::new();
@@ -653,6 +658,90 @@ fn a_rig_that_does_not_touch_itself_comes_to_rest() {
             s.position(i).1,
         );
     }
+}
+
+/// **A skeleton left to itself does not move its own centre of mass.** Joints and the
+/// contacts between a skeleton's own bones are internal: they are equal and opposite pairs
+/// and they cannot carry the whole of it anywhere. With no gravity and no ground there is
+/// nothing else acting, so whatever the solver does inside the rig -- pulling violated
+/// joints back together, pushing overlapping bones apart, doing both in a loop for ever --
+/// the mass-weighted mean of the positions must be exactly where it started.
+///
+/// # Why this is worth a law of its own
+///
+/// It is the statement that separates two very different failures, and the diagnosis of
+/// the drift in [`Skeleton::step`]'s header rests on it. A rig resting on the plane walks,
+/// and there are only two ways it could: the internal corrections could be pushing it, in
+/// which case this law fails and momentum is being manufactured; or they could be shaking
+/// it while the ground's friction converts the shake into travel, in which case this law
+/// holds and the fault is at the contact. Measured, this holds to under a nanometre over
+/// two thousand steps, which is what says the travel leaves through the ground rather than
+/// out of the joints.
+///
+/// The rig is started **wrong** on purpose -- every other bone displaced by fifty
+/// millimetres, which is most of a bone -- so that the solver has real work to do rather
+/// than confirming that a rig already at rest stays there. The test asserts that the work
+/// happened as well as that the centre did not move, because a law that both sides pass by
+/// doing nothing is not a law.
+#[test]
+fn a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass() {
+    let mut s = Skeleton::new();
+    // No ground and no gravity: nothing outside the rig is acting on it at all.
+    s.set_sleeping(false);
+    let bones = rig(&mut s, 0.0);
+    for i in (0..s.len()).step_by(2) {
+        let mut body = s.body(i);
+        body.position.0 += 0.05;
+        s.set_body(i, body);
+    }
+
+    let mass: Vec<f64> = (0..s.len()).map(|i| 1.0 / s.body(i).inv_mass).collect();
+    let total: f64 = mass.iter().sum();
+    let centre = |s: &Skeleton| {
+        let mut c = (0.0, 0.0, 0.0);
+        for i in 0..s.len() {
+            let p = s.position(i);
+            c = (
+                c.0 + p.0 * mass[i] / total,
+                c.1 + p.1 * mass[i] / total,
+                c.2 + p.2 * mass[i] / total,
+            );
+        }
+        c
+    };
+    let started = centre(&s);
+    let placed: Vec<(f64, f64, f64)> = (0..s.len()).map(|i| s.position(i)).collect();
+
+    for _ in 0..2000 {
+        s.step(DT, (0.0, 0.0, 0.0), 8);
+    }
+
+    let mut worked = 0.0f64;
+    for i in 0..s.len() {
+        let now = s.position(i);
+        worked = worked.max(speed((
+            now.0 - placed[i].0,
+            now.1 - placed[i].1,
+            now.2 - placed[i].2,
+        )));
+    }
+    assert!(
+        worked > 0.01,
+        "no bone of the {bones} moved as much as ten millimetres, so the rig was never \
+         put wrong enough for this to be a test of anything",
+    );
+
+    let ended = centre(&s);
+    let went = speed((ended.0 - started.0, ended.1 - started.1, ended.2 - started.2));
+    // The bound is arithmetic rather than physics: the corrections are equal and opposite
+    // before they are divided by mass, so the only thing left is the last bits of the
+    // division, and over two thousand steps of a seventeen-bone rig that is nanometres.
+    assert!(
+        went < 1e-9,
+        "the rig's centre of mass moved {went:.3e} m with nothing acting on it, while its \
+         bones moved {worked:.3} m: the joints and the contacts between its own bones are \
+         carrying it somewhere, which no internal force can do",
+    );
 }
 
 // -- fixtures ---------------------------------------------------------------------

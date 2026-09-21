@@ -241,10 +241,11 @@
 //!
 //! What says it is a ratchet and not a leak is that it is **straight**: measured over
 //! thirty-two windows of fifteen steps, a settled rig's net travel is 0.99 of the path it
-//! walked getting there, against 0.18 for a body wandering in place. And solving the
-//! stages in the opposite order every other step takes that from 0.996 to 0.008 on an
-//! eleven-bone rig -- the ratchet reverses when the order of composition does, which is
-//! what nothing else about the step would do.
+//! walked getting there, against 0.18 for a body wandering in place. And it is the order
+//! of composition that sets it: solving the stages in the opposite order every other step
+//! takes an eleven-bone rig's straightness from 0.99 to 0.59 and its drift from 1.08 of a
+//! reach over four hundred and eighty steps to 0.14. That is a diagnosis and not a fix,
+//! for a reason worth its own section; see below.
 //!
 //! Everything else was measured and is not it. The residual is the same at eight, at
 //! thirty-two and at sixty-four iterations; with pair friction off, with pair rolling
@@ -282,13 +283,82 @@
 //! that used to sleep. How far apart two bodies are in the joint graph does not say
 //! whether the joints will let them separate.
 //!
-//! **The real fix is the one the ground patch already demonstrated, one level up again.**
-//! A body's two ground samples used to skate for exactly this reason and stopped when they
-//! became one block solve, because a single correction has nothing to fail to commute
-//! with. A joint and a contact cannot be merged that way -- they are different constraints
-//! on different pairs -- so the loop has to be solved as a loop: a block or direct solve
-//! over the island's whole constraint set, in place of coloured Gauss-Seidel over it. That
-//! is a different solver, not a rule, and it is what the next attempt is for.
+//! # What has been tried against it, with numbers, and what is left
+//!
+//! **Reversing the stage order every other step is not a fix, and cannot be one.** It is
+//! the obvious thing to try, since the ratchet weakens when the order of composition
+//! reverses, and on the numbers above it does weaken it. It also stops a rig sleeping at
+//! all: a seventeen-bone rig that cannot touch itself, which sleeps at step 1373 as things
+//! are, never sleeps in six thousand steps under an alternating sweep, and its pelvis
+//! moves 0.21 mm one step and 0.65 mm the next for as long as it is watched. The reason is
+//! structural rather than bad luck. A body may sleep only where the step has a fixed
+//! point; the forward sweep and the reversed one settle on different answers -- 0.27 mm
+//! apart, measured below -- so a rig alternating between them is oscillating between two
+//! equilibria and is never still. **Anything that alternates across steps buys the
+//! cancellation and pays for it in exactly that coin.**
+//!
+//! **A symmetric sweep inside the step converges better and does nothing to the ratchet.**
+//! Walking the stages forwards and then backwards within each step is the textbook
+//! symmetric sweep, and being a palindrome it leaves one map per step, so sleeping stays
+//! possible. It takes the rig that cannot touch itself to sleep at step 234 instead of
+//! 1373, and a settled pile of twenty to sleep outright -- drift 0.0000 of a reach on all
+//! eight draws, against a median of 0.075. The ratchet is untouched: the self-colliding
+//! rig moves at 0.15 m/s against 0.036, and piles of forty and sixty drift 0.254 and 0.324
+//! of a reach against 0.141 and 0.217, with the eight-draw spreads disjoint. Neither
+//! variant is free, either, though its arithmetic is: `pile/8` 3.25 ms becomes 4.16 and
+//! 4.13, `one/8` 36.8 us becomes 44.0 and 62.0, `arriving/8` 6.44 ms becomes 7.59 and
+//! 6.79. None of that is the reversed index; it is what a step costs when less of the
+//! skeleton is asleep.
+//!
+//! **The iteration count is not where this lives, and more of it is worse.** A single step
+//! does converge: at four thousand and ninety-six iterations against four thousand and
+//! ninety-seven, a bone moves 1e-6 mm, so the loop's constraints do have a common solution
+//! and the sweep reaches it. But the forward sweep and the reversed one converge to
+//! answers **0.27 mm apart** on a settled self-colliding rig, and 0.15 mm apart on one
+//! that cannot touch itself. That gap is the bias, and it is the right size: a quarter of a
+//! millimetre a step at sixty hertz is 16 mm/s, which is the walk. Converging harder walks
+//! faster rather than slower -- 0.09 m/s at two thousand and forty-eight iterations against
+//! 0.036 at eight -- because the answer the sweep is converging *to* is the one that
+//! depends on the order.
+//!
+//! **The walk leaves through the ground rather than out of the joints.** Set the friction
+//! coefficient to zero and the same rig's drift falls from 0.276 of a reach to 0.0001 and
+//! its straightness from 0.96 to 0.01, while quadrupling the coefficient instead changes
+//! neither much. With no gravity and no ground, the internal corrections move the rig's
+//! centre of mass by nothing measurable over two thousand steps, which is a law of its own
+//! -- `a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass`. So the loop
+//! manufactures a cycle inside the rig and the contact with the ground rectifies it into
+//! travel, which is how a crawling thing gets along.
+//!
+//! **What solving the loop as a loop would buy, measured before building it.** The
+//! precedent is the ground patch one level down: two samples that skated became one block
+//! solve and stopped, because a single correction has nothing to fail to commute with. A
+//! joint and a contact cannot be merged that way, so the general version is a block or
+//! direct solve over an island's whole constraint set in place of coloured Gauss-Seidel
+//! over it -- a different solver, not a rule. What such a solve has that the sweep does not
+//! is an answer independent of the order its constraints were visited in, and that property
+//! can be had without writing it, slowly, by solving a pass **simultaneously**: every
+//! constraint reading one state, each body taking the mean of the corrections that named
+//! it. Standing in for the block solve that way, a self-colliding rig sleeps in 4 of 16
+//! runs -- iteration counts of 128 to 1024, four draws each -- where the ordered sweep
+//! sleeps in 0 of 16. So an island solved together is worth something and is not on its own
+//! a cure, and that is the number a block solve has to beat rather than a hope it has to
+//! carry.
+//!
+//! **The lead that took the walk to nothing is at the contact.** Friction here compares the
+//! surface with where it was at the start of *this* step, so whatever slip a step fails to
+//! remove is forgiven by the next one, which re-anchors at the new position. Give the
+//! ground patch an anchor instead -- kept while the contact stays strictly inside its
+//! friction cone, moved to where the body is the moment it slips, which is derived rather
+//! than tuned -- and the self-colliding rig's drift falls from 0.334 of a reach to 0.0000
+//! with its straightness at 0.00, a rig that cannot touch itself sleeps at step 110 instead
+//! of 1373, and a settled pile of twenty drifts 0.0000 against 0.075. It is not merged
+//! because of what it does to an impact: a stored offset is restored at whatever the
+//! current normal load allows, so a body landing on a settled stack recovers a resting
+//! step's slip at impact strength and knocks the stack over, and
+//! `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` fails. Holding the stored offset
+//! to what the resting load could carry is what that wants next, and it is where the next
+//! attempt should start.
 //!
 //! # Allocation
 //!
