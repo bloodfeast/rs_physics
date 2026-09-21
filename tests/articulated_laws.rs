@@ -347,6 +347,111 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
     }
 }
 
+/// **A settled pile wanders; it does not drift.**
+///
+/// The sharpest statement of the difference, and the reason it is stated as a *ratio*
+/// rather than as a distance: watch a settled pile for thirty-two times as long and a body
+/// that is drifting has gone thirty-two times as far, while a body that is only jostling
+/// against its neighbours has not. No absolute bound can tell those apart -- pick one
+/// loose enough for the jostling and it admits a slow drift, pick one tight enough to
+/// exclude the drift and the jostling fails it.
+///
+/// Measured as the median over the pile of how far a body's **surface** moved as a
+/// fraction of its own reach, over a fifteen-step window and a four-hundred-and-eighty-step
+/// one. A body travelling at a steady speed gives exactly 32.
+///
+/// The surface and not the centre, because a capsule turning on the spot has moved against
+/// whatever it is resting on exactly as much as one that slid, and measuring the centre
+/// alone misses it -- in this pile the turning is the larger half. So the centre's travel,
+/// plus the angle turned times the reach, except about the capsule's own long axis where it
+/// is times the radius: a surface of revolution spinning about its own axis has not gone
+/// anywhere, and charging that at the reach makes a resting pile look far worse than it is.
+///
+/// What this catches is friction that forgives, in any of its forms: a version measuring
+/// each step's slip from the start of that step rather than from where the contact stuck
+/// scored 17.5, 17.7 and 19.3 at pile sizes twenty, forty and sixty -- which is to say,
+/// linear, which is to say every body in the pile was still going. With the slip carried
+/// across steps the same three are 7.3, 4.7 and 8.0.
+///
+/// Three sizes averaged rather than one measured, because which body ends up where in a
+/// forty-capsule pile is chaotic and a single draw of it measures the draw. The bound sits
+/// between the two means -- 18.1 forgiving, 6.7 holding -- with a little over half again
+/// either way.
+#[test]
+fn a_settled_pile_wanders_but_does_not_drift() {
+    let mut total = 0.0;
+    let sizes = [20usize, 40, 60];
+    for count in sizes {
+        let mut s = heap(count);
+        for _ in 0..1500 {
+            s.step(DT, G, 8);
+        }
+        let short = median_drift(&mut s, 15);
+        let long = median_drift(&mut s, 480);
+        assert!(
+            short > 0.0,
+            "a pile of {count} stopped dead, so this test has measured nothing",
+        );
+        let ratio = long / short;
+        assert!(
+            ratio < 14.0,
+            "a pile of {count} moved {ratio:.1} times as far in thirty-two times the \
+             window ({short:.5} then {long:.5}); at 32 every body is simply still going, \
+             and a pile that has settled scores about 7",
+        );
+        total += ratio;
+    }
+    let mean = total / sizes.len() as f64;
+    assert!(
+        mean < 12.0,
+        "averaged over pile sizes {sizes:?} the drift grew {mean:.1} times for a \
+         thirty-two times longer window; a settled pile scores about 7 and one whose \
+         friction forgives its own residual every step scores about 18",
+    );
+}
+
+/// How far the middle body of a pile's surface moves over `steps`, as a fraction of its own
+/// reach. The median rather than the mean, because one body rolling off the top of a pile
+/// is not what this is asking about.
+fn median_drift(s: &mut Skeleton, steps: usize) -> f64 {
+    let before: Vec<_> = (0..s.len())
+        .map(|i| (s.position(i), s.orientation(i)))
+        .collect();
+    for _ in 0..steps {
+        s.step(DT, G, 8);
+    }
+    let mut ratios: Vec<f64> = (0..s.len())
+        .map(|i| {
+            let (was, now) = (before[i], (s.position(i), s.orientation(i)));
+            let body = s.body(i);
+            let travel = speed((now.0 .0 - was.0 .0, now.0 .1 - was.0 .1, now.0 .2 - was.0 .2));
+
+            // The turn since, as an axis-angle vector, split into the part about the
+            // capsule's own long axis and the rest. See the law above for why the two are
+            // charged at different radii.
+            let delta = now.1.multiply(&was.1.conjugate());
+            let sign = if delta.w < 0.0 { -1.0 } else { 1.0 };
+            let turn = (
+                2.0 * sign * delta.x,
+                2.0 * sign * delta.y,
+                2.0 * sign * delta.z,
+            );
+            let axis = was.1.rotate_point((0.0, 1.0, 0.0));
+            let along = turn.0 * axis.0 + turn.1 * axis.1 + turn.2 * axis.2;
+            let across = speed((
+                turn.0 - along * axis.0,
+                turn.1 - along * axis.1,
+                turn.2 - along * axis.2,
+            ));
+
+            let reach = body.radius + body.half_length;
+            (travel + across * reach + along.abs() * body.radius) / reach
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.partial_cmp(b).expect("no body is at a NaN"));
+    ratios[ratios.len() / 2]
+}
+
 /// **A heap settles, stays where it settled, and stays out of the ground.**
 ///
 /// The three failures this catches are different: bodies still moving means the solver is

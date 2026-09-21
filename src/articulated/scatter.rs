@@ -261,6 +261,15 @@ impl Bodies {
             // The free part moves where the body came from as well, so the velocity read
             // back at the end of the step does not see it at all. See
             // [`Correction::free_translation`].
+            //
+            // It follows that the solve cannot see it either, because `prev_position` and
+            // `prev_orientation` are also the mark the solve measures this step's motion
+            // against. That is right for everything inside the step -- a body being
+            // lifted out of an overlap it was already in has not slid anywhere, and
+            // resisting that with friction would read straight back as speed. It is wrong
+            // for what is carried *between* steps, which is why
+            // [`Skeleton::began_position`] exists and why the anchor sweep reads that
+            // instead.
             if correction.free_translation != (0.0, 0.0, 0.0) {
                 let was = self.prev_position.get(i);
                 self.prev_position

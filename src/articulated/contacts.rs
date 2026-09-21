@@ -35,11 +35,12 @@
 //! drift is removed up to the Coulomb limit of the normal correction. A body resting on
 //! another then stays where it was put instead of sliding out from under the load.
 //!
-//! Two things about that are easy to get wrong and were: what the Coulomb limit bounds
-//! (the resultant over the step, not the distance it walked -- see [`Spent`]), and where
-//! the impulse's couple goes when the contact is a patch rather than a point (see
-//! [`patch_arm`]). Each of them on its own is enough to make a body resting below the
-//! Coulomb angle creep downhill for ever.
+//! Three things about that are easy to get wrong and were: what the Coulomb limit bounds
+//! (the resultant over the step, not the distance it walked -- see [`Spent`]), where the
+//! impulse's couple goes when the contact is a patch rather than a point (see
+//! [`patch_arm`]), and **which moment in the past the drift is measured from** (see
+//! [`Skeleton::anchor_slip`], and `slipped` below for where it enters). Each of them on
+//! its own is enough to make a resting body creep for ever.
 
 use super::*;
 
@@ -68,6 +69,11 @@ use super::*;
 pub(super) struct Spent {
     /// Normal impulse applied so far this step, always positive.
     pub normal: f64,
+    /// The part of it that went on overlap **this step drove in**, rather than on overlap
+    /// that was already there. The whole of it is what Coulomb's cone is a fraction of,
+    /// because that is the load the contact carried; this smaller part is the load it
+    /// *works* against, and it is what bounds the friction anchor. See [`held_within`].
+    pub driven: f64,
     /// Friction impulse applied so far this step, as a world-space vector: the impulse
     /// the *first* body received. For a pair the second received its negative; against
     /// the ground there is no second, because the ground does not move.
@@ -76,6 +82,56 @@ pub(super) struct Spent {
     /// vector, and on the first body for the same reason `tangential` is. A cone for the
     /// same reason too: a roll reverses between passes exactly as a slide does.
     pub rolling: (f64, f64, f64),
+}
+
+/// **The largest slip an anchor may remember: the one Coulomb could still pull back.**
+///
+/// This is the re-anchoring rule, and it is the whole design. An anchor that grows without
+/// bound would drag a sliding body back to where it last stuck, and a slope would hold
+/// past `atan(mu)`; an anchor dropped too eagerly forgives the solver's residual and the
+/// creep comes back. The bound between the two is not a threshold to pick. Friction may
+/// apply at most `friction` times the normal impulse, and an impulse `P` at a contact
+/// whose generalised inverse mass along the slip is `w` moves the surfaces back by
+/// `P * w`. So the largest slip friction could undo is
+///
+/// ```text
+///   hold = friction * driven_impulse * w
+/// ```
+///
+/// and a slip past that is one the contact is not holding and never could: it is sliding,
+/// and what is beyond `hold` is forgotten. Everything within it is remembered, which is
+/// what stops the creep.
+///
+/// Units check: an impulse here is a mass times a distance -- it is what [`accumulate`]
+/// multiplies by an inverse mass to get a correction -- so `hold` is a distance, as a
+/// slip must be.
+///
+/// **The `driven` impulse and not the whole one**, which is the difference between this
+/// bounding an anchor and this launching a body across the room. `Spent::normal` includes
+/// whatever it cost to undo an overlap that was already there, and for a body spawned a
+/// metre inside the ground that is a hundred times its weight -- so an anchor bounded by
+/// it would remember half a metre of slip, and the next step would spend a real impulse
+/// hauling the body back through it. `Spent::driven` is only the overlap this step made,
+/// which for a resting contact is its whole working load and for that spawn is one step of
+/// gravity. Measured, using the whole impulse let a capsule spawned a metre down leave at
+/// 6.3 m/s; using this one it leaves at walking pace, as it did before any of this.
+///
+/// **And it cannot be a test of whether the cone clipped**, which was the first thing
+/// tried and is wrong: the two ends of a resting capsule swing their friction impulses
+/// against each other pass by pass, so the resultant touches the cone on a body that is
+/// plainly not going anywhere, and at `mu` of 0.25 the whole creep came back. Clipping
+/// says something about one pass. This says something about the contact.
+#[inline]
+pub(super) fn held_within(slipped: (f64, f64, f64), hold: f64) -> (f64, f64, f64) {
+    if hold <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let size = length(slipped);
+    if size > hold {
+        scale(slipped, hold / size)
+    } else {
+        slipped
+    }
 }
 
 /// The impulse to add this pass, given what the contact wants and what the cone allows,
@@ -153,6 +209,30 @@ fn patch_arm(
     )
 }
 
+/// The part of `v` that lies in the contact plane.
+#[inline]
+pub(super) fn tangent(v: (f64, f64, f64), normal: (f64, f64, f64)) -> (f64, f64, f64) {
+    sub(v, scale(normal, dot(v, normal)))
+}
+
+// **The anchor's pull reads back as velocity, and the alternative was measured and is
+// worse.** A friction anchor looks like the twin of an `inherited` overlap -- slip left
+// behind by earlier steps, so arguably a correction rather than a deceleration, and
+// arguably it should be applied `free` the way an inherited overlap is. That was tried:
+// split the friction impulse between the slide this step made and the slip carried into
+// it, the second free, exactly as the normal half splits itself.
+//
+// It does what it promises on the translational half -- a settled pile of forty went from
+// a median body speed of 27 mm/s to 3 -- and it is much worse taken as a whole, because a
+// free correction is one the body is *not* decelerated by, so the same bodies kept
+// turning. Median spin stayed at 0.12 rad/s and the pile's combined surface drift over
+// 480 steps went from 0.042 to 0.305, against 0.209 for no anchors at all.
+//
+// The two are not the same thing after all. An overlap resolved is a fiction the solver is
+// undoing; a body that slid really slid, and friction pulling it back is a real force with
+// a real deceleration. Left as it is, and the residual jitter it costs is recorded in the
+// law `a_settled_pile_wanders_but_does_not_drift`.
+
 /// One touching pair, resolved to a point on each surface.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Contact {
@@ -168,6 +248,22 @@ pub(super) struct Contact {
     /// they touch at a point. Both contacts of a line contact carry the same one. See
     /// [`patch_arm`] for what a patch does that a point cannot.
     pub span: (f64, f64, f64),
+    /// Which of the pair's manifold points this is: `0` for a point contact and for the
+    /// low end of a line contact, `1` for the high end. With `a` and `b` this is the
+    /// contact's **name**, and it has to be one that survives the step, because the
+    /// contact set is rebuilt from scratch every step and the friction anchor is not.
+    /// See [`Skeleton::anchor_slip`].
+    pub slot: u8,
+}
+
+impl Contact {
+    /// What this contact is called, for matching it to the one the last step anchored.
+    /// Pairs always arrive with `a < b` -- [`broadphase`] orders them -- so the name does
+    /// not depend on which body the grid happened to visit first.
+    #[inline]
+    pub(super) fn name(&self) -> (u32, u32, u8) {
+        (self.a as u32, self.b as u32, self.slot)
+    }
 }
 
 /// The closest pair of points between segment `p1..q1` and segment `p2..q2`.
@@ -305,6 +401,7 @@ pub(super) fn capsule_contact(
                     point_b,
                     normal,
                     span,
+                    slot as u8,
                     position,
                     orientation,
                     radius,
@@ -325,6 +422,7 @@ pub(super) fn capsule_contact(
             cb,
             normal,
             (0.0, 0.0, 0.0),
+            0,
             position,
             orientation,
             radius,
@@ -344,6 +442,7 @@ fn touching(
     axis_point_b: (f64, f64, f64),
     normal: (f64, f64, f64),
     span: (f64, f64, f64),
+    slot: u8,
     position: &[(f64, f64, f64)],
     orientation: &[Quaternion],
     radius: &[f64],
@@ -360,6 +459,7 @@ fn touching(
         local_b: rotate_inv(orientation[b], sub(surface_b, position[b])),
         normal,
         span,
+        slot,
     })
 }
 
@@ -373,6 +473,9 @@ pub(super) fn solve_contact(
     second: &Gathered,
     friction: f64,
     rolling_resistance: f64,
+    // What this contact had already slipped when the step began, and had not managed to
+    // put back. See [`Skeleton::anchor_slip`].
+    anchored: (f64, f64, f64),
     spent: Spent,
 ) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
@@ -384,6 +487,7 @@ pub(super) fn solve_contact(
         local_b,
         normal,
         span,
+        slot: _,
     } = contact;
     out[0].body = a;
     out[1].body = b;
@@ -419,6 +523,7 @@ pub(super) fn solve_contact(
         return (out, spent);
     }
     spent.normal += depth / total;
+    spent.driven += driven / total;
 
     for (share, free) in [(driven, false), (inherited, true)] {
         if share <= 0.0 {
@@ -445,7 +550,11 @@ pub(super) fn solve_contact(
         return (out, spent);
     }
 
-    let tangential = sub(slid, scale(normal, dot(slid, normal)));
+    // **Measured from the anchor, not just from the start of the step.** `slid` is this
+    // step's relative motion of the two surfaces and `anchored` is what the contact had
+    // already slipped and not put back; friction is asked to remove both. See
+    // [`Skeleton::anchor_slip`].
+    let tangential = tangent(add(anchored, slid), normal);
     let Some(direction) = normalized(tangential) else {
         return (out, spent);
     };
@@ -488,6 +597,13 @@ pub(super) struct GroundContact {
     /// The point on the body's surface, in the body's own frame. Body-frame for the same
     /// reason [`Contact`]'s are.
     pub local: (f64, f64, f64),
+    /// Which end of the capsule this is, `0` or `1`, in the body's own frame and so
+    /// stable however the body turns. **Not** the index of this contact in the list: an
+    /// end that is clear of the plane emits nothing, so a body touching only at its high
+    /// end produces one contact whose end is `1`. With the body index this is the
+    /// contact's name, and the friction anchor is looked up by it. See
+    /// [`Skeleton::anchor_slip`].
+    pub end: u8,
 }
 
 /// Where a capsule meets the plane `dot(normal, p) = distance`, appended to `out`.
@@ -528,6 +644,7 @@ pub(super) fn ground_contacts(
         out.push(GroundContact {
             body,
             local: rotate_inv(orientation, sub(surface, position)),
+            end: index as u8,
         });
     }
 }
@@ -544,11 +661,18 @@ pub(super) fn solve_ground(
     // The vector between the two ends of this body's contact patch with the plane, or
     // zero where it touches at one point. See [`patch_arm`] for what it is for.
     span: (f64, f64, f64),
+    // What this end had already slipped when the step began. See
+    // [`Skeleton::anchor_slip`].
+    anchored: (f64, f64, f64),
     spent: Spent,
 ) -> (Correction, Spent) {
     let mut out = Correction::none();
     let mut spent = spent;
-    let GroundContact { body: index, local } = contact;
+    let GroundContact {
+        body: index,
+        local,
+        end: _,
+    } = contact;
     out.body = index;
 
     let r = rotate(body.now.orientation, local);
@@ -571,6 +695,7 @@ pub(super) fn solve_ground(
         return (out, spent);
     }
     spent.normal += depth / w;
+    spent.driven += driven / w;
 
     for (share, free) in [(driven, false), (inherited, true)] {
         if share <= 0.0 {
@@ -595,7 +720,9 @@ pub(super) fn solve_ground(
     if friction <= 0.0 {
         return (out, spent);
     }
-    let tangential = sub(slid, scale(normal, dot(slid, normal)));
+    // From the anchor as well as from the start of the step; see the pair version and
+    // [`Skeleton::anchor_slip`].
+    let tangential = tangent(add(anchored, slid), normal);
     let Some(direction) = normalized(tangential) else {
         return (out, spent);
     };
@@ -615,4 +742,83 @@ pub(super) fn solve_ground(
     spent.tangential = total_grip;
     accumulate(&mut out, &body.now, arm, grip, false);
     (out, spent)
+}
+
+/// Where this contact stands once the passes are done: how far the two surfaces have
+/// slipped tangentially, counting from the anchor rather than from the start of the step.
+///
+/// The solve reads the state it was given and writes a correction; this reads the state
+/// the corrections left behind, which is why it is a separate sweep and not something the
+/// solve could have returned. See [`Skeleton::anchor_slip`] for what is done with it.
+///
+/// **Whether the contact is still a contact is not asked here**, and deliberately not by
+/// measuring the gap: a resting body ends its step a little way *clear* of what it is
+/// resting on, because the solver has just pushed it out and it does not sink again until
+/// the next step predicts. Testing the gap would throw away the anchor of every contact
+/// that is doing its job. [`Spent::keeps_its_anchor`] asks the question that has an
+/// answer -- whether the contact carried any normal impulse while the passes ran.
+pub(super) fn contact_left_slipped(
+    contact: Contact,
+    first: &Gathered,
+    second: &Gathered,
+    anchored: (f64, f64, f64),
+    friction: f64,
+    spent: Spent,
+) -> (f64, f64, f64) {
+    let ra = rotate(first.now.orientation, contact.local_a);
+    let rb = rotate(second.now.orientation, contact.local_b);
+    let surface_a = add(first.now.position, ra);
+    let surface_b = add(second.now.position, rb);
+    let was_a = add(
+        first.prev_position,
+        rotate(first.prev_orientation, contact.local_a),
+    );
+    let was_b = add(
+        second.prev_position,
+        rotate(second.prev_orientation, contact.local_b),
+    );
+    let slid = sub(sub(surface_a, was_a), sub(surface_b, was_b));
+    let slipped = tangent(add(anchored, slid), contact.normal);
+    let Some(direction) = normalized(slipped) else {
+        return (0.0, 0.0, 0.0);
+    };
+    // The same arms the friction solve used, so `hold` is the slip *this* constraint
+    // could have undone rather than one some other version of it could.
+    let reach = 0.5 * dot(contact.span, direction).abs();
+    let ta = generalised_inverse_mass(
+        &first.now,
+        patch_arm(ra, contact.normal, reach, friction),
+        direction,
+    );
+    let tb = generalised_inverse_mass(
+        &second.now,
+        patch_arm(rb, contact.normal, reach, friction),
+        direction,
+    );
+    held_within(slipped, friction * spent.driven * (ta + tb))
+}
+
+/// The same for a ground contact.
+pub(super) fn ground_left_slipped(
+    contact: GroundContact,
+    body: &Gathered,
+    normal: (f64, f64, f64),
+    span: (f64, f64, f64),
+    anchored: (f64, f64, f64),
+    friction: f64,
+    spent: Spent,
+) -> (f64, f64, f64) {
+    let r = rotate(body.now.orientation, contact.local);
+    let surface = add(body.now.position, r);
+    let was = add(
+        body.prev_position,
+        rotate(body.prev_orientation, contact.local),
+    );
+    let slipped = tangent(add(anchored, sub(surface, was)), normal);
+    let Some(direction) = normalized(slipped) else {
+        return (0.0, 0.0, 0.0);
+    };
+    let arm = patch_arm(r, normal, 0.5 * dot(span, direction).abs(), friction);
+    let tw = generalised_inverse_mass(&body.now, arm, direction);
+    held_within(slipped, friction * spent.driven * tw)
 }
