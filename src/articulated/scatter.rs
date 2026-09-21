@@ -105,6 +105,7 @@
 //! contribute to one sum.
 
 use super::*;
+use std::marker::PhantomData;
 
 /// Panics unless `touched` names each body at most once -- which is what every unsafe
 /// block in this file rests on. Compiled out of release builds; see the module header for
@@ -136,30 +137,43 @@ pub(super) fn disjoint(bodies: usize, what: &str, touched: impl Iterator<Item = 
 /// Deliberately not `&[UnsafeCell<T>]`: that would make every ordinary sweep over the
 /// same arrays go through `UnsafeCell` as well, for the benefit of the one place that
 /// needs it.
-pub(super) struct Cells<T> {
+pub(super) struct Cells<'a, T> {
     at: *mut T,
     len: usize,
+    /// **Ties this view to the borrow it was built from.** Nothing else does: `of` is a
+    /// safe function and the view is `Copy + Send + Sync`, so without a lifetime the type
+    /// system would happily let one outlive its buffer, or be moved into a thread that
+    /// does. Neither is possible at any call site today -- the type is `pub(super)` and
+    /// `solve_pass` scopes them correctly -- but the whole premise of this module is that
+    /// the compiler cannot check the disjointness, and the parts it *can* check should be
+    /// handed to it rather than argued in a comment.
+    ///
+    /// `&'a mut [T]` rather than `&'a [T]`, because that is what it is: the view writes,
+    /// and an invariant lifetime is what stops a shorter borrow being passed off as a
+    /// longer one.
+    owns: PhantomData<&'a mut [T]>,
 }
 
-impl<T> Clone for Cells<T> {
+impl<T> Clone for Cells<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for Cells<T> {}
+impl<T> Copy for Cells<'_, T> {}
 
 // SAFETY: the pointer is a plain `*mut T` into a buffer the caller owns for the lifetime
 // of the parallel region, and the disjointness argument in the module header is what
 // makes sharing it across threads sound.
-unsafe impl<T: Send> Send for Cells<T> {}
-unsafe impl<T: Send> Sync for Cells<T> {}
+unsafe impl<T: Send> Send for Cells<'_, T> {}
+unsafe impl<T: Send> Sync for Cells<'_, T> {}
 
-impl<T: Copy> Cells<T> {
-    pub(super) fn of(slice: &mut [T]) -> Self {
+impl<'a, T: Copy> Cells<'a, T> {
+    pub(super) fn of(slice: &'a mut [T]) -> Self {
         Cells {
             at: slice.as_mut_ptr(),
             len: slice.len(),
+            owns: PhantomData,
         }
     }
 
@@ -182,19 +196,19 @@ impl<T: Copy> Cells<T> {
 
 /// The four arrays a correction writes, bundled so a colour's closure carries one value.
 #[derive(Clone, Copy)]
-pub(super) struct Bodies {
-    position: Cells<(f64, f64, f64)>,
-    orientation: Cells<Quaternion>,
-    prev_position: Cells<(f64, f64, f64)>,
-    prev_orientation: Cells<Quaternion>,
+pub(super) struct Bodies<'a> {
+    position: Cells<'a, (f64, f64, f64)>,
+    orientation: Cells<'a, Quaternion>,
+    prev_position: Cells<'a, (f64, f64, f64)>,
+    prev_orientation: Cells<'a, Quaternion>,
 }
 
-impl Bodies {
+impl<'a> Bodies<'a> {
     pub(super) fn of(
-        position: &mut [(f64, f64, f64)],
-        orientation: &mut [Quaternion],
-        prev_position: &mut [(f64, f64, f64)],
-        prev_orientation: &mut [Quaternion],
+        position: &'a mut [(f64, f64, f64)],
+        orientation: &'a mut [Quaternion],
+        prev_position: &'a mut [(f64, f64, f64)],
+        prev_orientation: &'a mut [Quaternion],
     ) -> Self {
         Bodies {
             position: Cells::of(position),

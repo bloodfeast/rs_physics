@@ -4014,15 +4014,6 @@ impl Skeleton {
     /// The four body arrays every correction writes, as the disjoint-scatter view a
     /// colour is applied through. See [`scatter`] for why, and for the safety argument.
     #[inline]
-    fn writable(&mut self) -> Bodies {
-        Bodies::of(
-            &mut self.position,
-            &mut self.orientation,
-            &mut self.prev_position,
-            &mut self.prev_orientation,
-        )
-    }
-
     /// The stages of one pass, in the order they have to run, with the empty ones left
     /// out so that no lane waits at a barrier for work that does not exist.
     ///
@@ -4204,9 +4195,20 @@ impl Skeleton {
         #[cfg(debug_assertions)]
         self.check_colours_are_disjoint();
 
-        // Taken before the shared borrows: these hold raw pointers rather than
-        // references, so the mutable borrow each one needs ends here.
-        let bodies = self.writable();
+        // Read before the field borrows below, because it asks the whole skeleton and
+        // those hold parts of it.
+        let budget = self.lanes();
+        // **Written as direct field borrows rather than through a method**, because each
+        // of these views now carries the lifetime of the slice it was built from -- see
+        // [`scatter::Cells`]. A method taking `&mut self` would borrow the whole skeleton
+        // and the next line could not take another field mutably; three disjoint fields
+        // taken by name can. The compiler is checking what was previously a comment.
+        let bodies = scatter::Bodies::of(
+            &mut self.position,
+            &mut self.orientation,
+            &mut self.prev_position,
+            &mut self.prev_orientation,
+        );
         let contact_impulse = scatter::Cells::of(&mut self.contact_impulse);
         let ground_impulse = scatter::Cells::of(&mut self.ground_impulse);
 
@@ -4412,7 +4414,7 @@ impl Skeleton {
             }
         };
 
-        let lanes = crew::each_stage(plan.len(), work, self.lanes(), run);
+        let lanes = crew::each_stage(plan.len(), work, budget, run);
         self.solved_in_parallel = lanes > 1;
     }
 
