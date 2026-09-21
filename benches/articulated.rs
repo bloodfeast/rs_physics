@@ -46,9 +46,9 @@ const PILE: usize = 600;
 /// Pinned at the pelvis, which is the usual way to drive one of these: something outside
 /// the solver owns where the body *is* -- a ballistic integrator that knows about the
 /// ground, an animation, a vehicle seat -- and the skeleton hangs off it.
-fn ragdoll(into: &mut Skeleton, x: f64) -> usize {
+fn ragdoll(into: &mut Skeleton, x: f64, z: f64) -> usize {
     let base = into.len();
-    let pelvis = into.add_body(Body::pinned((x, 1.0, 0.0)));
+    let pelvis = into.add_body(Body::pinned((x, 1.0, z)));
 
     // Spine, neck, head.
     let mut up = pelvis;
@@ -57,7 +57,7 @@ fn ragdoll(into: &mut Skeleton, x: f64) -> usize {
             6.0,
             0.08,
             0.2,
-            (x, 1.2 + 0.2 * i as f64, 0.0),
+            (x, 1.2 + 0.2 * i as f64, z),
         ));
         into.add_joint(Joint::Ball {
             a: up,
@@ -71,21 +71,21 @@ fn ragdoll(into: &mut Skeleton, x: f64) -> usize {
     // Four limbs of three, hung off the chest and the pelvis.
     for limb in 0..4 {
         let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
-        let z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let side_z = z + if limb % 2 == 0 { 0.15 } else { -0.15 };
         let mut previous = root;
         for segment in 0..3 {
             let body = into.add_body(Body::capsule(
                 4.0,
                 0.06,
                 0.25,
-                (x, 1.0 + side * 0.25 * segment as f64, z),
+                (x, 1.0 + side * 0.25 * segment as f64, side_z),
             ));
             // Shoulders and hips turn every way; elbows and knees do not.
             let joint = if segment == 0 {
                 Joint::Ball {
                     a: previous,
                     b: body,
-                    anchor_a: (0.0, 0.0, z),
+                    anchor_a: (0.0, 0.0, side_z - z),
                     anchor_b: (0.0, 0.125, 0.0),
                 }
             } else {
@@ -110,7 +110,7 @@ fn ragdoll(into: &mut Skeleton, x: f64) -> usize {
 fn one_skeleton(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/one");
     let mut s = Skeleton::new();
-    let bones = ragdoll(&mut s, 0.0);
+    let bones = ragdoll(&mut s, 0.0, 0.0);
     assert_eq!(bones, BONES, "the bench's rig is not the rig it documents");
 
     for iterations in [1usize, 4, 8] {
@@ -139,7 +139,7 @@ fn the_pile(c: &mut Criterion) {
 
     let mut s = Skeleton::new();
     for i in 0..PILE {
-        ragdoll(&mut s, i as f64 * 0.8);
+        ragdoll(&mut s, i as f64 * 0.8, 0.0);
     }
     let colours = s.colours().len();
     println!(
@@ -162,5 +162,51 @@ fn the_pile(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, one_skeleton, the_pile);
+/// **The same six hundred, packed close enough to touch.**
+///
+/// The pile above is spread out, so it measures joints alone. This one puts the bodies
+/// a third of a metre apart on a ground plane, which is about the spacing a crowd has
+/// and close enough that limbs from neighbouring bodies overlap -- so what it adds over
+/// the pile is the broad phase, the narrow phase and the contact solve, which is the
+/// half of the step that was not there before.
+fn the_heap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/heap");
+    group.sample_size(10);
+
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    let side = (PILE as f64).sqrt().ceil() as usize;
+    for i in 0..PILE {
+        ragdoll(
+            &mut s,
+            (i % side) as f64 * 0.35,
+            (i / side) as f64 * 0.35,
+        );
+    }
+    // Settle first, so what is timed is a heap at rest rather than one still arriving.
+    for _ in 0..30 {
+        s.step(DT, G, 8);
+    }
+    println!(
+        "  heap: {} bodies, {} joints, {} contacts",
+        s.len(),
+        s.joints().len(),
+        s.contact_count(),
+    );
+
+    for iterations in [1usize, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("iterations", iterations),
+            &iterations,
+            |b, &iterations| {
+                b.iter(|| {
+                    s.step(black_box(DT), black_box(G), black_box(iterations));
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, one_skeleton, the_pile, the_heap);
 criterion_main!(benches);
