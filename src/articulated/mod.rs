@@ -192,64 +192,31 @@
 //! iteration count -- and it does not fall off with more passes, which is what says the
 //! forgiveness is across steps rather than within one.
 //!
-//! # Why a body resting on level ground travels, which is what stops anything settling
+//! # The ground patch, and the four corrections that could not stand in for it
 //!
-//! **Every capsule lying on the plane slides, at between 10 and 40 mm a second depending
-//! only on how long it is, while turning by nothing at all.** A sphere does not move.
-//! That is the whole reason a rig does not come to rest, and through the rig it is most
-//! of the reason sleeping does not yet pay on a heap.
+//! Every capsule lying on level ground used to slide, at between ten and forty
+//! millimetres a second depending only on how long it was, while turning by nothing at
+//! all; a sphere did not move. That was a contact patch sampled at each end and solved
+//! one stage after the other, and it is fixed where it was caused rather than downstream
+//! -- see [`contacts::solve_ground`], and the four corrections that each fixed one case
+//! and broke another are recorded there too.
 //!
-//! The rig's residual is not internal. Measured over windows from 15 to 1920 steps, a
-//! seventeen-bone rig's centre travels 3.3 mm to 434 mm while the median body moves the
-//! same amount *relative to that centre* -- 0.4 mm, and not growing. The rig is rigid and
-//! skating. So an island-relative settling criterion would be the wrong answer: there is
-//! nothing internal to forgive, the assembly really is going somewhere.
+//! ```text
+//!   half-length   0.02   0.04   0.05   0.06   0.08   0.10   0.15   0.20   0.25   0.40
+//!   two samples   17.4    9.0    8.5   41.8   36.0   26.1   15.9   20.3    9.7    0.4  mm/s
+//!   one patch      0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0    0.0
+//! ```
 //!
-//! The cause is a contact patch being sampled twice and solved in sequence:
+//! The resting height is exactly one radius at every one of them. A seventeen-bone rig
+//! went from skating at 14 mm a second to 0.62, a stack of ten capsules from never
+//! settling to asleep at step 1319, and a settled pile of twenty from covering 0.275 of a
+//! body's reach in eight seconds to 0.094.
 //!
-//! * A sphere has one ground contact and never moves; every capsule has one at each end
-//!   of its patch and every capsule slides.
-//! * With rolling resistance off it stops dead (0.001 mm/s). With friction off it stops
-//!   dead. **It takes both**, which is the signature of one law being charged for the
-//!   other's transient.
-//!
-//! The two ends are separate constraints in separate stages with a barrier between, so
-//! each one's normal correction tips the body about the across-patch axis before the
-//! other tips it back. Rolling resistance bills that transient as if it were a roll and
-//! turns the body; turning about the centre carries the contact point sideways; friction,
-//! the next pass, hauls the centre after it. The turn nets to nothing and the travel does
-//! not.
-//!
-//! It is **not** what the iteration count suggests: 4 passes is worse, and 8, 16, 32 and
-//! 64 are the same. It is not the joints -- a line of jointed capsules on the plane goes
-//! to sleep at step 22, and so does the same line unjointed.
-//!
-//! Four fixes were built and measured, and none is landable:
-//!
-//! * **Turn about the contact rather than the centre**, carrying the centre back by
-//!   `w x r`. Takes a lone capsule to 0.000 mm/s and its resting height to exact, and
-//!   levitates it: `w x r` has a normal component wherever the contact is not directly
-//!   below the centre, and the non-penetration constraint has no downward half to pull it
-//!   back. At a coefficient of 0.5 the body leaves at 1.5 m/s.
-//! * **The same, tangential part only.** Strictly better than the solver at every aspect
-//!   ratio -- 17.4/9.0/8.5/41.8/36.0/26.1/15.9/20.3/9.7/0.4 mm/s becomes
-//!   10.7/2.9/0.06/0.09/0.05/0.06/0.09/0.04/0.03/0.005 -- and with friction under about
-//!   0.05 it pivots about a point nothing is holding and crosses the ground at 4.8 m/s.
-//! * **The same, bounded by `friction * normal_impulse`.** Every test and every law
-//!   passes, at every friction from 0 to 1 and every aspect ratio. And the workloads that
-//!   matter get *worse*: the rig goes from 14 to 43 mm a second and a five-stack from 359
-//!   steps to sleep to 892, because the point a body pivots about has to be one that is
-//!   not moving, and the body under it is.
-//! * **The same, against the ground only**, where the point really is fixed. Rig 14 to 6
-//!   mm/s and the five-stack to 288 steps, and it fails
-//!   `a_body_dropped_on_a_sleeping_stack_lands_on_top_of_it` and the pile drift law, and
-//!   at a coefficient of 0.5 the rig leaves at 410 mm/s.
-//!
-//! The pattern in all four is the same one the contact anchors ran into: a correction
-//! that gives one contact its own reference frame is consistent only where the contacts
-//! are. **The fix is upstream of all of them -- a body's ground patch should be one
-//! constraint, not two point constraints solved one after the other.** Every failure
-//! above is a symptom of the second sample seeing what the first did.
+//! What is left is the same fault one level up: [`contacts::capsule_contact`] emits the
+//! two ends of a *pair* patch as two independent contacts, and two capsules stacked drift
+//! at 2.3 mm a second where a lone one now drifts at nothing measurable. The ground was
+//! the place to prove this because the plane does not move; the pair case is the same
+//! change against a reference that does.
 //!
 //! # Allocation
 //!
@@ -721,7 +688,7 @@ enum Stage {
     /// The joints colouring could not place. Empty unless a body carries more than
     /// sixty-four joints; see [`Skeleton::add_joint`].
     JointOverflow,
-    Ground(u32),
+    Ground,
 }
 
 /// A set of bodies and the joints between them, solved together.
@@ -791,14 +758,12 @@ pub struct Skeleton {
     /// `None` for a skeleton that hangs in space. See [`Skeleton::set_ground`].
     ground: Option<((f64, f64, f64), f64)>,
     ground_contacts: Vec<GroundContact>,
-    /// Ground contacts split so a colour can be solved in parallel. A body has at most
-    /// one contact per end, so two sets are always enough and no colouring pass is
-    /// needed: the first contact found for a body goes in one, the second in the other.
-    ground_colours: [Vec<usize>; 2],
-    /// One per body: the vector from one end of its contact with the plane to the other,
-    /// or zero where it touches at a point. Rebuilt with the ground contacts. See
-    /// [`contacts::patch_arm`].
-    ground_span: Vec<(f64, f64, f64)>,
+    /// Which ground contacts to solve. **One set, not two**: a body's whole contact with
+    /// the plane is one constraint now (see [`contacts::solve_ground`]), so there is one
+    /// per body and no two of them name the same body -- which is the colouring's whole
+    /// requirement, met by construction. The pair of sets that used to be here existed
+    /// only so that the second end of a capsule could read what the first had spent.
+    ground_colours: Vec<usize>,
     friction: f64,
     rolling_resistance: f64,
     /// What each contact has already spent this step. See [`Spent`], which is also where
@@ -913,8 +878,7 @@ impl Default for Skeleton {
             colour_bits: Vec::new(),
             ground: None,
             ground_contacts: Vec::new(),
-            ground_colours: [Vec::new(), Vec::new()],
-            ground_span: Vec::new(),
+            ground_colours: Vec::new(),
             friction: DEFAULT_FRICTION,
             rolling_resistance: DEFAULT_ROLLING_RESISTANCE,
             contact_impulse: Vec::new(),
@@ -1351,10 +1315,7 @@ impl Skeleton {
             .resize(self.contacts.len(), Spent::default());
 
         self.ground_contacts.clear();
-        self.ground_colours[0].clear();
-        self.ground_colours[1].clear();
-        self.ground_span.clear();
-        self.ground_span.resize(self.position.len(), (0.0, 0.0, 0.0));
+        self.ground_colours.clear();
         let Some((normal, distance)) = self.ground else {
             return;
         };
@@ -1374,50 +1335,21 @@ impl Skeleton {
                 distance,
                 &mut self.ground_contacts,
             );
-            for (nth, index) in (before..self.ground_contacts.len()).enumerate() {
-                self.ground_colours[nth.min(1)].push(index);
+            for index in before..self.ground_contacts.len() {
+                self.ground_colours.push(index);
             }
-            // How far this body's contact with the plane reaches, as the vector from one
-            // end of it to the other, or zero where it touches at a point. See
-            // [`contacts::patch_arm`] for what a patch does that a point cannot.
-            self.ground_span[i] = match self.ground_contacts[before..] {
-                [first, second] => {
-                    let a = add(self.position[i], rotate(self.orientation[i], first.local));
-                    let b = add(self.position[i], rotate(self.orientation[i], second.local));
-                    sub(b, a)
-                }
-                _ => (0.0, 0.0, 0.0),
-            };
         });
         self.awake = awake;
 
-        // **One budget per body, not one per end.** A capsule lying on the plane touches
-        // it along a line and gets a contact at each end of that line, but the two are
-        // samples of a single contact *patch*: they express the same tangential
-        // constraint -- a rigid body's contact line cannot slide at one end and stay put
-        // at the other -- and Coulomb's limit belongs to the patch, `friction` times the
-        // whole normal load it carries.
-        //
-        // Giving each end its own limit out of its own share of the load is what a point
-        // contact would want, and it is wrong here in a way that shows: as the body tips
-        // the load moves between the ends, so one end's cone shrinks while it is still
-        // being asked to hold, and the pair settles into equal and opposite impulses that
-        // cancel and leave the resultant short. Pooling the budget lets whichever end is
-        // loaded supply the grip, which is what the patch does.
-        //
-        // **This is why the two ends must stay in different colours, and that is now a
-        // memory-safety requirement as well as a physical one.** The loop above puts a
-        // body's first ground contact in set zero and its second in set one, and the two
-        // sets are solved one after the other, so the pooled entry is read and written by
-        // one thread at a time: within a set, each body appears at most once. That is the
-        // same disjointness the body arrays need under [`scatter`], checked by the same
-        // `scatter::disjoint` call, which walks the set's bodies rather than its contacts
-        // -- so it covers this without extension. Coupling the ends is deliberate: set
-        // one must see what set zero spent. Putting them in one parallel set would both
-        // race the budget and defeat the pooling.
+        // One running impulse per contact, like every other constraint here. It used to
+        // have to be one per *body*, pooled across the two ends of a capsule's patch,
+        // because Coulomb's limit belongs to the patch and not to a sample of it -- and
+        // that made it the one exception the [`scatter`] safety argument had to make a
+        // case for. The patch is one constraint now, so the exception is gone: the
+        // budget is the constraint's, indexed by the constraint.
         self.ground_impulse.clear();
         self.ground_impulse
-            .resize(self.position.len(), Spent::default());
+            .resize(self.ground_contacts.len(), Spent::default());
     }
 
     /// **Greedy colouring again, but every step**, because the contact set is new every
@@ -1834,18 +1766,16 @@ impl Skeleton {
             self.plan.push(Stage::Overflow);
             self.plan_near.push(Stage::Overflow);
         }
-        // The ground is never reduced and never dropped: there are at most two contacts
-        // per body, they are the cheapest constraint in the step, and the artefact of
-        // under-solving one is a body sinking through the floor, which is the one no
-        // distance excuses. The two sets must also stay separate stages in both plans --
-        // set one reads the budget set zero spent, and the barrier is what orders them.
-        for colour in 0..2 {
-            if !self.ground_colours[colour].is_empty() {
-                self.plan.push(Stage::Ground(colour as u32));
-                self.plan_near.push(Stage::Ground(colour as u32));
-                self.plan_work += self.ground_colours[colour].len();
-                self.plan_near_work += self.ground_colours[colour].len();
-            }
+        // The ground is never reduced and never dropped: there is one contact per body,
+        // it is the cheapest constraint in the step, and the artefact of under-solving one
+        // is a body sinking through the floor, which is the one no distance excuses. It is
+        // also one stage where it was two, because the second used to have to read what
+        // the first had spent and there is no longer a first.
+        if !self.ground_colours.is_empty() {
+            self.plan.push(Stage::Ground);
+            self.plan_near.push(Stage::Ground);
+            self.plan_work += self.ground_colours.len();
+            self.plan_near_work += self.ground_colours.len();
         }
     }
 
@@ -1886,7 +1816,6 @@ impl Skeleton {
         let friction = self.friction;
         let rolling = self.rolling_resistance;
         let ground = self.ground;
-        let span = &self.ground_span;
 
         // SAFETY: the argument is the one [`scatter`] makes, and every part of it still
         // holds here.
@@ -1904,14 +1833,11 @@ impl Skeleton {
         // * The running impulses for joints and pair contacts are indexed by the
         //   constraint, not by the body, so each is touched by the one lane that owns
         //   that constraint.
-        // * `ground_impulse` is the exception and is indexed by the **body**, because the
-        //   two ends of one capsule pool a single Coulomb budget between them. That is
-        //   sound for exactly the reason the body arrays are, and under exactly the same
-        //   check: `check_colours_are_disjoint` walks a ground set's *bodies*, so it is
-        //   already asserting that no two entries of this map address one slot. It is
-        //   also why the two ground sets must stay separate stages -- set one has to read
-        //   what set zero spent, and that ordering is the barrier's to provide.
-        //   `ground_span` is read only, and indexed by the same body.
+        // * `ground_impulse` is indexed by the constraint like the others, and used to be
+        //   the one exception this argument had to make a case for -- indexed by body,
+        //   because the two ends of a capsule pooled one Coulomb budget. A body's contact
+        //   with the plane is one constraint now, so there is one entry per body either
+        //   way and the exception has gone: see [`contacts::solve_ground`].
         // * Across stages, `crew::each_stage` puts a barrier between them, and its
         //   release-acquire pair is what makes one colour's writes visible to the next.
         //   That ordering used to come from the join; losing it without replacing it
@@ -1973,11 +1899,11 @@ impl Skeleton {
                         );
                     }
                 }
-                Stage::Ground(colour) => {
+                Stage::Ground => {
                     let Some((normal, distance)) = ground else {
                         return;
                     };
-                    let set = &ground_colours[colour as usize];
+                    let set = ground_colours;
                     for &k in &set[lane.span(set.len())] {
                         let contact = ground_contacts[k];
                         let body = bodies.gather(contact.body, inv_mass, inv_inertia, radius);
@@ -1988,10 +1914,9 @@ impl Skeleton {
                             rolling,
                             normal,
                             distance,
-                            span[contact.body],
-                            ground_impulse.get(contact.body),
+                            ground_impulse.get(k),
                         );
-                        ground_impulse.set(contact.body, totals);
+                        ground_impulse.set(k, totals);
                         bodies.apply([correction, Correction::none()]);
                     }
                 }
@@ -2030,13 +1955,13 @@ impl Skeleton {
                     .flat_map(|&k| [self.contacts[k].a, self.contacts[k].b]),
             );
         }
-        for set in self.ground_colours.iter() {
-            scatter::disjoint(
-                bodies,
-                "ground",
-                set.iter().map(|&k| self.ground_contacts[k].body),
-            );
-        }
+        scatter::disjoint(
+            bodies,
+            "ground",
+            self.ground_colours
+                .iter()
+                .map(|&k| self.ground_contacts[k].body),
+        );
     }
 
     // -- sleeping. See [`sleep`] for the reasoning behind all of it. ------------------
@@ -2234,7 +2159,7 @@ impl Skeleton {
             let Skeleton {
                 components,
                 joints,
-                contacts,
+                pairs,
                 ready,
                 held,
                 ..
@@ -2262,8 +2187,15 @@ impl Skeleton {
                 let (a, b) = joint.bodies();
                 edge(a, b);
             }
-            for contact in contacts.iter() {
-                edge(contact.a, contact.b);
+            // **The broad phase's pairs, not the narrow phase's contacts.** Two bodies
+            // resting exactly against each other overlap by nothing, so there is no
+            // contact between them -- and the better the solve gets the more often that
+            // is true. Islands built on contacts then come apart under a stack that has
+            // settled perfectly, every body sleeps in its own island, and dropping
+            // something on the top wakes only the top. What an island needs is who
+            // *could* touch, which is the list the broad phase already produced.
+            for &(a, b) in pairs.iter() {
+                edge(a, b);
             }
         }
         {

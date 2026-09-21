@@ -485,9 +485,16 @@ pub(super) fn solve_contact(
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GroundContact {
     pub body: usize,
-    /// The point on the body's surface, in the body's own frame. Body-frame for the same
-    /// reason [`Contact`]'s are.
-    pub local: (f64, f64, f64),
+    /// **The whole of the body's contact with the plane, as the two ends of it**, in the
+    /// body's own frame. Body-frame for the same reason [`Contact`]'s are.
+    ///
+    /// Always two, and neither degenerate case needs asking about. A sphere's two ends
+    /// are the same point; a capsule stood upright has one end clear of the plane. In
+    /// both, [`solve_ground`] finds that one end carries the whole load and the other
+    /// carries none, which is the answer -- and it finds it the same way it finds the
+    /// split for a capsule lying flat, so there is nothing here that tests how many
+    /// contacts there are.
+    pub local: [(f64, f64, f64); 2],
 }
 
 /// Where a capsule meets the plane `dot(normal, p) = distance`, appended to `out`.
@@ -513,26 +520,67 @@ pub(super) fn ground_contacts(
         return;
     }
     let (low, high) = segment(position, orientation, half_length);
-    let ends: [(f64, f64, f64); 2] = [low, high];
-    
-    for (index, end) in ends.into_iter().enumerate() {
-        // A sphere's two ends are the same point, so it gets one contact rather than two
-        // of the same one.
-        if index == 1 && half_length <= 1e-9 {
-            break;
-        }
-        let surface = sub(end, scale(normal, radius));
-        if dot(normal, surface) >= distance {
-            continue;
-        }
-        out.push(GroundContact {
-            body,
-            local: rotate_inv(orientation, sub(surface, position)),
-        });
+    let surface = |end: (f64, f64, f64)| sub(end, scale(normal, radius));
+    let (first, second) = (surface(low), surface(high));
+    // One contact for the body, carrying both ends, as soon as either of them is under
+    // the plane. The end that is not under it needs no case of its own: it comes out of
+    // the solve carrying no load.
+    if dot(normal, first) >= distance && dot(normal, second) >= distance {
+        return;
     }
+    let inverse = |p: (f64, f64, f64)| rotate_inv(orientation, sub(p, position));
+    out.push(GroundContact {
+        body,
+        local: [inverse(first), inverse(second)],
+    });
 }
 
 /// What one ground contact wants done. Reads only; the caller applies.
+#[allow(clippy::too_many_arguments)]
+/// **The whole of one body's contact with the plane, solved as one thing.**
+///
+/// # Why this is one constraint and was two
+///
+/// A capsule lying on the plane touches it along a line, and the two ends of that line
+/// used to be two constraints, solved one stage after the other with a barrier between
+/// them. They were never independent: the Coulomb budget had to be pooled across them by
+/// hand and was the one running impulse indexed by body rather than by constraint;
+/// [`patch_arm`] needed the span between them to work out where the load could move to;
+/// and `ground_span` existed for no other reason than to let one end know about the
+/// other. Three arguments from three directions that the patch was one thing pretending
+/// to be two.
+///
+/// It also **skated**. Solving one end and then the other tips the body about the
+/// across-patch axis and then tips it back, and rolling resistance billed that transient
+/// as a roll while friction hauled the centre after the contact point it displaced.
+/// Measured, a lone capsule on level ground travelled 10 to 40 mm a second for as long as
+/// it was watched, turning by nothing at all, and a sphere -- which has no second sample
+/// -- did not move at all. Nothing downstream fixes that: four corrections were tried and
+/// every one of them was consistent only where the contacts already agreed.
+///
+/// # The two rows, and why it is not two solves
+///
+/// Both ends must end up out of the plane, and one rigid displacement has to do it. The
+/// normal displacement an impulse `l_i` along the normal at `r_i` produces at `r_j` is
+/// `l_i * K_ji`, where
+///
+/// ```text
+///   K_ji = 1/m + (r_j x n) . I^-1 (r_i x n)
+/// ```
+///
+/// -- the same generalised inverse mass the rest of this module uses, with two different
+/// arms. So the pair of depths is `K l = d`, a two-by-two solve rather than two
+/// one-by-one ones, and it is the off-diagonal `K_01` that carries what each end does to
+/// the other.
+///
+/// **The normal may push and not pull**, so `l` is also required to be non-negative,
+/// which makes this a two-variable complementarity problem rather than a linear solve.
+/// Two variables is small enough to enumerate: try both ends loaded, and if that wants a
+/// negative impulse anywhere, try each end alone and keep the one whose impulse lifts the
+/// other end clear. That is the whole of it, and the degenerate cases fall out of it --
+/// a sphere's two ends coincide, which makes `K` singular and sends it to the one-end
+/// branch; an upright capsule's second end is above the plane, which gives it a
+/// non-positive depth and no load.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve_ground(
     contact: GroundContact,
@@ -541,9 +589,6 @@ pub(super) fn solve_ground(
     rolling_resistance: f64,
     normal: (f64, f64, f64),
     distance: f64,
-    // The vector between the two ends of this body's contact patch with the plane, or
-    // zero where it touches at one point. See [`patch_arm`] for what it is for.
-    span: (f64, f64, f64),
     spent: Spent,
 ) -> (Correction, Spent) {
     let mut out = Correction::none();
@@ -551,32 +596,70 @@ pub(super) fn solve_ground(
     let GroundContact { body: index, local } = contact;
     out.body = index;
 
-    let r = rotate(body.now.orientation, local);
-    let surface = add(body.now.position, r);
-    let depth = distance - dot(normal, surface);
-    if depth <= 0.0 {
+    let arm = [
+        rotate(body.now.orientation, local[0]),
+        rotate(body.now.orientation, local[1]),
+    ];
+    let at = [add(body.now.position, arm[0]), add(body.now.position, arm[1])];
+    let depth = [
+        distance - dot(normal, at[0]),
+        distance - dot(normal, at[1]),
+    ];
+    if depth[0] <= 0.0 && depth[1] <= 0.0 {
         return (out, spent);
     }
 
-    let was = add(body.prev_position, rotate(body.prev_orientation, local));
-    let slid = sub(surface, was);
-
-    // How much of the overlap this step drove into the plane, which is the only part
-    // allowed to read back as velocity. See `Correction::free_translation`.
-    let driven = (-dot(slid, normal)).clamp(0.0, depth);
-    let inherited = depth - driven;
-
-    let w = generalised_inverse_mass(&body.now, r, normal);
-    if w <= 1e-12 {
+    let cross_n = [cross(arm[0], normal), cross(arm[1], normal)];
+    let turned = [
+        body.now.world_inv_inertia.apply(cross_n[0]),
+        body.now.world_inv_inertia.apply(cross_n[1]),
+    ];
+    let k00 = body.now.inv_mass + dot(cross_n[0], turned[0]);
+    let k11 = body.now.inv_mass + dot(cross_n[1], turned[1]);
+    let k01 = body.now.inv_mass + dot(cross_n[0], turned[1]);
+    if k00 <= 1e-12 && k11 <= 1e-12 {
         return (out, spent);
     }
-    spent.normal += depth / w;
 
-    for (share, free) in [(driven, false), (inherited, true)] {
-        if share <= 0.0 {
+    let share = solve_patch(depth, k00, k11, k01);
+    let total = share[0] + share[1];
+    if total <= 0.0 {
+        return (out, spent);
+    }
+
+    // Where the load ends up standing, which is where the tangential impulse and the
+    // rolling couple act. For one loaded end that is the end; for two it is between
+    // them, weighted as they carry -- and moving it is what a real patch does instead of
+    // tipping, which is why [`patch_arm`] no longer has to stand in for it.
+    let load = scale(
+        add(scale(arm[0], share[0]), scale(arm[1], share[1])),
+        1.0 / total,
+    );
+
+    let was = |local: (f64, f64, f64)| add(body.prev_position, rotate(body.prev_orientation, local));
+    for end in 0..2 {
+        if share[end] <= 0.0 {
             continue;
         }
-        accumulate(&mut out, &body.now, r, scale(normal, share / w), free);
+        // How much of this end's overlap the step itself drove into the plane, which is
+        // the only part allowed to read back as velocity. See
+        // `Correction::free_translation`.
+        let slid = sub(at[end], was(local[end]));
+        let driven = (-dot(slid, normal)).clamp(0.0, depth[end]);
+        let part = if depth[end] > 0.0 { driven / depth[end] } else { 0.0 };
+        spent.normal += share[end];
+        for (fraction, free) in [(part, false), (1.0 - part, true)] {
+            if fraction <= 0.0 {
+                continue;
+            }
+            accumulate(
+                &mut out,
+                &body.now,
+                arm[end],
+                scale(normal, share[end] * fraction),
+                free,
+            );
+        }
     }
 
     // The ground does not turn, so the whole of the resistance lands on the body.
@@ -595,14 +678,26 @@ pub(super) fn solve_ground(
     if friction <= 0.0 {
         return (out, spent);
     }
+    // The patch slides as one, so the drift that friction answers is the drift of the
+    // point the load stands at, not of either end on its own.
+    let here = add(body.now.position, load);
+    let before = add(
+        body.prev_position,
+        rotate(body.prev_orientation, rotate_inv(body.now.orientation, load)),
+    );
+    let slid = sub(here, before);
     let tangential = sub(slid, scale(normal, dot(slid, normal)));
     let Some(direction) = normalized(tangential) else {
         return (out, spent);
     };
-    // The couple this impulse leaves on the body once the patch has carried what it can:
-    // see [`patch_arm`], which is where the argument is.
-    let arm = patch_arm(r, normal, 0.5 * dot(span, direction).abs(), friction);
-    let tw = generalised_inverse_mass(&body.now, arm, direction);
+    // The load stands where it stands, but the couple the impulse leaves still has to be
+    // carried, and how much of it the patch can absorb is what [`patch_arm`] answers. The
+    // reach is the patch's own, half of it, along the direction being resisted -- which is
+    // the one thing the two ends are still needed for once the normal solve has decided
+    // how they share the load.
+    let reach = 0.5 * dot(sub(arm[1], arm[0]), direction).abs();
+    let couple = patch_arm(load, normal, reach, friction);
+    let tw = generalised_inverse_mass(&body.now, couple, direction);
     if tw <= 1e-12 {
         return (out, spent);
     }
@@ -613,6 +708,49 @@ pub(super) fn solve_ground(
         return (out, spent);
     }
     spent.tangential = total_grip;
-    accumulate(&mut out, &body.now, arm, grip, false);
+    accumulate(&mut out, &body.now, couple, grip, false);
     (out, spent)
+}
+
+/// How much of the normal load each end of a patch carries: `K l = d` subject to `l >= 0`.
+///
+/// Enumerated rather than iterated, because with two variables there are only three
+/// candidate active sets and the right one is the first that is feasible. See
+/// [`solve_ground`] for what `K` is and why the non-negativity is not optional.
+fn solve_patch(depth: [f64; 2], k00: f64, k11: f64, k01: f64) -> [f64; 2] {
+    // Both ends loaded. Singular where the two ends are the same point -- a sphere --
+    // which is exactly when there is only one end to load.
+    let det = k00 * k11 - k01 * k01;
+    if det > 1e-18 && depth[0] > 0.0 && depth[1] > 0.0 {
+        let first = (k11 * depth[0] - k01 * depth[1]) / det;
+        let second = (k00 * depth[1] - k01 * depth[0]) / det;
+        if first >= 0.0 && second >= 0.0 {
+            return [first, second];
+        }
+    }
+    // One end loaded, and it has to lift the other clear rather than leave it under the
+    // plane -- which is the complementarity condition, and the reason this cannot just
+    // take whichever end is deeper.
+    if depth[0] > 0.0 && k00 > 1e-12 {
+        let first = depth[0] / k00;
+        if first * k01 >= depth[1] {
+            return [first, 0.0];
+        }
+    }
+    if depth[1] > 0.0 && k11 > 1e-12 {
+        let second = depth[1] / k11;
+        if second * k01 >= depth[0] {
+            return [0.0, second];
+        }
+    }
+    // Neither end alone answers for the other and both together want a pull. Take the
+    // deeper end on its own: it is the row that must be satisfied, and the pass after
+    // this one sees what it left.
+    if depth[0] >= depth[1] && depth[0] > 0.0 && k00 > 1e-12 {
+        return [depth[0] / k00, 0.0];
+    }
+    if depth[1] > 0.0 && k11 > 1e-12 {
+        return [0.0, depth[1] / k11];
+    }
+    [0.0, 0.0]
 }

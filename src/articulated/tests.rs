@@ -797,13 +797,23 @@ fn a_sleeping_stack_wakes_all_the_way_down_when_something_lands_on_it() {
         "only the falling body should be awake while it is still in the air",
     );
 
+    // Whether each body was ever woken, rather than whether it is awake at some chosen
+    // later moment. The moment is the wrong thing to ask about: a stack that is solved
+    // well enough wakes, rearranges and goes back to sleep inside two seconds, and an
+    // assertion about a fixed step count then fails for the solver getting better. What
+    // is being claimed is that the disturbance reached the bottom, and that is a claim
+    // about the whole interval.
+    let mut woke = [false; 5];
     for _ in 0..120 {
         s.step(DT, G, 8);
+        for (i, ever) in woke.iter_mut().enumerate() {
+            *ever |= s.is_awake(i);
+        }
     }
-    for i in 0..5 {
+    for (i, ever) in woke.iter().enumerate() {
         assert!(
-            s.is_awake(i),
-            "body {i} of the stack is still asleep after something landed on top of it; \
+            ever,
+            "body {i} of the stack was never woken after something landed on top of it; \
              the bottom of a stack is as disturbed as the top",
         );
     }

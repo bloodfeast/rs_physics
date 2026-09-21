@@ -366,40 +366,48 @@ fn a_body_spawned_inside_the_ground_is_not_launched_out_of_it() {
 /// surface of revolution spinning about its own axis has not gone anywhere, and charging
 /// that at the reach makes a resting pile look far worse than it is.
 ///
-/// # Where the solver is, and why it matters
+/// # A ratio alone cannot say it, and asking for one was a mistake
 ///
-/// Measured at pile sizes twenty, forty and sixty: **23.6, 18.7 and 18.4**, mean 20.3.
-/// Against 32 for a body simply sliding the whole time, that is close to linear -- the
-/// pile is still going, and it is why a pile of forty never sleeps while a stack of five
-/// does. Sleeping is worth a hundredfold on a settled workload, so this is the one number
-/// standing between the solver and its largest win.
+/// The first version of this asked only that the ratio be sub-linear, and that punishes
+/// an improvement: a change that took the fifteen-step drift down by three and a half and
+/// the four-hundred-and-eighty-step drift down by a factor of one and a half made the
+/// *ratio* worse and failed, for reducing the jostle faster than the drift. Taken to the
+/// end, a pile that has stopped almost dead has a short window of nearly nothing and a
+/// ratio of nearly anything.
 ///
-/// The cause is understood: friction here measures each step's drift from the start of
-/// *that* step, so whatever slip a step fails to remove is forgiven by the next one,
-/// whose mark is the new position. The error per step is a fraction of a millimetre and
-/// the forgiveness is total, so it accumulates linearly for ever.
+/// So there are two ways to pass and a pile needs either: **sub-linear growth, or a long
+/// window it has barely moved in.** The second bound is not a tolerance either. A body
+/// that is entitled to go to sleep is one whose surface moves less than
+/// `STILL_FRACTION` of its own reach over a settling window; a pile of such bodies
+/// jostling in place, each window independent of the last, covers `STILL_FRACTION *
+/// sqrt(windows)` over many of them, where one that is really travelling covers
+/// `STILL_FRACTION * windows`. The long window here is forty settling windows, so the
+/// random walk allows about 0.126 of a reach and the drift allows 0.8. Below the first,
+/// the pile is doing no worse than a heap of bodies sitting exactly on the threshold and
+/// going nowhere, and that is what "wanders but does not drift" means.
 ///
-/// # The fix that was tried, and what it cost
+/// # Where the solver is
 ///
-/// Carrying each contact's unremoved slip across steps -- a friction anchor, re-anchored
-/// when the slip passes what Coulomb could pull back -- **does** fix this: the same three
-/// sizes become 7.3, 4.7 and 8.0, mean 6.7, and a lone capsule on level ground goes from
-/// sliding at a constant 15 mm a second to still to the last bit.
+/// Measured at pile sizes twenty, forty and sixty, before the ground patch became one
+/// constraint: ratios **23.6, 18.7 and 18.4**, mean 20.3, with the long window at 0.275
+/// of a reach -- above the random walk, and the pile really was still going. Since the
+/// patch, ratio 39.9 and long window 0.094: the growth is *more* linear and the pile has
+/// moved a third as far, which is the case the first predicate got wrong.
 ///
-/// It was not taken, because it costs the thing it was for. An anchor gives each contact
-/// its own historical reference point, and those points are only mutually consistent when
-/// the contacts are: one body on a plane is fine, a stack is not. Measured, steps to fall
-/// asleep went 18, 22, 409, 358 at stack heights one, two, three and five, and with
-/// anchors 18, 22, 686, **never** -- the five-stack topples instead. A pile of forty
-/// drifts half as far and jitters twice as much. Per-step forgiveness is what makes every
-/// friction target agree with every other one each step; removing it buys the creep back
-/// and sells the settling.
-///
-/// So the bound below is where the solver is. Tightening it wants friction that remembers
-/// *and* stays consistent across a constraint graph, which is a harder thing than either
-/// half alone.
+/// The cause of what is left is understood and is the same one, one level up. Two
+/// capsules lying against each other are a patch sampled twice exactly as a capsule on
+/// the plane was, and `capsule_contact` still emits the two ends as two independent
+/// contacts. Measured, two capsules stacked drift at 2.3 mm a second where a lone capsule
+/// on the ground now drifts at nothing measurable.
 #[test]
 fn a_settled_pile_wanders_but_does_not_drift() {
+    // The fraction of its own reach a body may move over a settling window and still be
+    // called still. Written out here rather than reached for, because this is the
+    // solver's own threshold seen from outside it: it is what `Skeleton::step` uses to
+    // decide that a body may sleep, and if the two ever disagree this law is measuring
+    // something the solver is not.
+    const STILL_FRACTION: f64 = 0.02;
+
     for count in [20usize, 40, 60] {
         let mut s = heap(count);
         for _ in 0..1500 {
@@ -407,18 +415,29 @@ fn a_settled_pile_wanders_but_does_not_drift() {
         }
         let short = median_drift(&mut s, 15);
         let long = median_drift(&mut s, 480);
+
+        // What a pile of bodies sitting exactly on the sleeping threshold and going
+        // nowhere would cover over the long window: each settling window independent of
+        // the last, so the square root and not the count. See the header.
+        let windows: f64 = 480.0 / 15.0;
+        let wandering = STILL_FRACTION * windows.sqrt();
+        if long <= wandering {
+            continue;
+        }
         assert!(
             short > 0.0,
-            "a pile of {count} stopped dead, so this test has measured nothing -- which \
-             would be very good news and means this law wants rewriting as an equality",
+            "a pile of {count} stopped dead over fifteen steps and still moved {long:.5} \
+             over four hundred and eighty, which is a drift with no jostle on top of it \
+             and not something this measurement can weigh",
         );
         let ratio = long / short;
         assert!(
             ratio < 28.0,
             "a pile of {count} moved {ratio:.1} times as far in thirty-two times the \
-             window ({short:.5} then {long:.5}); at 32 every body is sliding the whole \
-             time, the solver measures about 20, and anything worse is a new fault on top \
-             of the known one",
+             window ({short:.5} then {long:.5}), and {long:.5} is past the {wandering:.5} \
+             a pile jostling on the sleeping threshold would cover; at 32 every body is \
+             sliding the whole time, and to pass this a pile has to do one or the other \
+             -- grow sub-linearly, or barely move at all",
         );
     }
 }
