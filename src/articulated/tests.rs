@@ -908,6 +908,63 @@ fn a_sleeping_stack_wakes_all_the_way_down_when_something_lands_on_it() {
     );
 }
 
+/// **A limb hanging at rest from a pinned anchor goes to sleep.**
+///
+/// A pinned body is never awake, so it is never *ready* either -- and the edge scan in
+/// [`Skeleton::settle`] used to read "not ready" as "still moving" and disqualify whatever
+/// was jointed to it. Every skeleton hung off an anchor was then held awake for ever by the
+/// stillest thing in the simulation. This limb is built exactly at its own equilibrium, so
+/// the assertion below that nothing is moving is not a tolerance: every velocity is bitwise
+/// zero and it stayed awake for twelve thousand steps anyway.
+///
+/// It sleeps on the first step it is allowed to: the settling window for a body of this
+/// reach is twelve steps, which is the time it would take to fall its own radius.
+#[test]
+fn a_limb_hanging_from_an_anchor_goes_to_sleep() {
+    let mut s = Skeleton::new();
+    let root = s.add_body(Body::pinned((0.0, 2.0, 0.0)));
+    let mut previous = root;
+    let mut anchor_a = (0.0, 0.0, 0.0);
+    for i in 0..3 {
+        // Each capsule hangs with its top anchor exactly on the one above it, so the whole
+        // limb starts in the pose the joints already agree on.
+        let body = s.add_body(Body::capsule(
+            4.0,
+            0.06,
+            0.25,
+            (0.0, 2.0 - 0.125 - 0.25 * i as f64, 0.0),
+        ));
+        s.add_joint(Joint::Ball {
+            a: previous,
+            b: body,
+            anchor_a,
+            anchor_b: (0.0, 0.125, 0.0),
+        });
+        anchor_a = (0.0, -0.125, 0.0);
+        previous = body;
+    }
+
+    let mut slept = None;
+    for step in 1..=600 {
+        s.step(DT, G, 8);
+        if s.awake_count() == 0 {
+            slept = Some(step);
+            break;
+        }
+    }
+    let awake = s.awake_count();
+    let fastest = (0..s.len())
+        .map(|i| length(s.velocity(i)) + length(s.angular_velocity(i)))
+        .fold(0.0f64, f64::max);
+    assert!(
+        slept.is_some(),
+        "{awake} of {} bodies were still being solved after ten seconds, with the fastest \
+         of them moving at {fastest:.3e}: a limb at rest on a pinned anchor is as settled \
+         as anything in this module gets",
+        s.len(),
+    );
+}
+
 /// A sleeping body is not merely slow, it is **exactly** where it was left. Anything less
 /// and a settled heap creeps for free, which is the artefact sleeping exists to remove.
 #[test]

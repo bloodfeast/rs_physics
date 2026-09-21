@@ -31,6 +31,18 @@
 //! the same anchor into one island that can only sleep or wake as a unit. This is the
 //! same reason a static body does not merge islands in any other solver.
 //!
+//! **And not joining an island is not the same as holding one awake.** A body that is not
+//! ready to sleep disqualifies its ready neighbours -- a body holding up something that is
+//! still moving has no business stopping -- and there are three ways to be unready: to be
+//! moving, to be pinned, or to be asleep already. The last two are the *stillest* things in
+//! the simulation. Reading all three as "still moving" left every skeleton hung off an
+//! anchor permanently awake: measured, a limb of three capsules hanging from a pinned root
+//! at exactly its own equilibrium, with every velocity bitwise zero, was solved for twelve
+//! thousand steps and never slept. What disqualifies a neighbour is that it is *awake*,
+//! which is the one bit that means "being solved and not settled", and
+//! `a_limb_hanging_from_an_anchor_goes_to_sleep` is the guard on it. See
+//! [`super::Skeleton::settle`].
+//!
 //! # What counts as still
 //!
 //! Two decisions, and both are quantities rather than epsilons.

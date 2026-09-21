@@ -860,6 +860,88 @@
 //! whether it has anything velocity-level to say or not. That is why the third correction
 //! kind shares the first's fields rather than adding its own. See [`Charge`].
 //!
+//! # What is left is one bone, and it is a contact that exists on alternate steps
+//!
+//! The section above ends on the measurement that localised this: at four velocity sweeps
+//! the rig is the stillest it has ever been and sleeps in none of sixteen draws, so what is
+//! still moving is one or two bones rather than the rig. It is **one bone**, and it is the
+//! same one in all sixteen draws.
+//!
+//! At four sweeps every other bone of the seventeen is frozen -- median drift 0.0000 of a
+//! reach over four hundred and eighty steps -- and body 10, the free end of a limb resting
+//! on another bone, sits in an exact **period-two** cycle:
+//!
+//! ```text
+//!   step  gap 7-10 at the start   after the predict   contact?   after the solve
+//!   even        +0.0319 mm            +0.0446 mm         no          -4.1551 mm
+//!   odd         -4.1551 mm            -8.3159 mm        yes          +0.0319 mm
+//! ```
+//!
+//! On the odd step the contact exists and puts the bone back exactly where it was. On the
+//! even step the narrow phase finds the pair clear -- by **thirty-two microns** -- emits
+//! nothing, and the bone is unconstrained for the whole step: it falls 1.36 mm and turns
+//! 0.0231 rad about its joint, which is 5.7 mm of surface against the 3.7 mm
+//! [`sleep::STILL_FRACTION`] allows it. It misses by half as much again, every other step,
+//! for ever, while nothing else in the rig moves at all.
+//!
+//! **Three facts compose into that, and none of them is wrong on its own.** The positional
+//! solve removes the whole overlap, so a resting pair ends the step touching to within
+//! microns. The narrow phase's test is `distance >= r_a + r_b`, so a pair resting exactly
+//! against another has no contact -- a fact this module has already met once and recorded,
+//! which is why islands are built on the broad phase's pairs rather than on contacts. And
+//! with no contact in the step, the **joints** drive the pair 4.16 mm together, because last
+//! step's contact pushed them 8.35 mm apart and left the joint that much to repair; the
+//! repair is charged as velocity, and the next predict doubles it into the 8.35 mm the
+//! contact then removes. The cycle is closed and it is stable.
+//!
+//! At one sweep the same mechanism runs with more company. The rig settles into an arch --
+//! pelvis and one whole leg flat on the plane, reading 0.0005 m/s and never woken; the other
+//! leg part down; both arms propped on the leg and on each other -- and the bones that never
+//! satisfy the settling test are the propped ones, bones 4 to 10, never a bone lying on the
+//! plane. The heaviest of them, a hand on a foot, carries 10 to 12 mm of overlap at the end
+//! of **every** step and never sheds it: the pair contact resolves it to zero in every pass
+//! and the ground stage, which runs last in a pass and is effectively rigid, turns the foot
+//! 0.096 rad back and puts all of it back. That ordering is not the defect either -- running
+//! the ground first instead takes the rig from nine draws of sixteen asleep to none.
+//!
+//! # Two fixes for it that were built, measured, and are not here
+//!
+//! **Speculative contacts.** Give the pair a constraint while it is still clear, by as much
+//! as one step of gravity's sag -- `|g| dt^2`, which the module already derives as
+//! [`contacts::Anchor`]'s `anchor_reach` and which is exactly the distance a resting pair
+//! can close in a step. It costs nothing while the gap is open, because
+//! [`contacts::solve_contact_normal`] returns on `depth <= 0`, and it catches the joints'
+//! push in the same step they make it. Confined to the crossed branch of the narrow phase --
+//! a near-parallel pair touching at one end already has its patch, and speculation is about
+//! a pair with no contact at all -- it leaves a settled stack of three **bit-identical** and
+//! takes the rig from 14 draws of 32 asleep to 26, the best this defect has ever measured.
+//!
+//! **It brings the walk back, and that is disqualifying.** Over twenty-four draws the median
+//! drift improves (0.0024 of a reach to 0.0016) and the tail explodes: six draws travel past
+//! the jostling allowance where none did, the worst at 2.20 reaches with a straightness of
+//! 0.67, and `a_settled_rig_stays_where_it_settled` allows **no** draw to look carried. The
+//! variants are all worse. Without the velocity share below: eight of twenty-four, worst
+//! straightness 0.9996, which is a rig being carried outright. With the margin at a tenth of
+//! a millimetre instead: the median settled residual goes to 0.301 of `g dt`, past the
+//! quarter `a_settled_rig_does_not_sit_on_a_limit_cycle` allows. Applied to both branches
+//! rather than one: a settled stack of three drifts 0.354 m against 0.048 and leans 1.6
+//! degrees, so a body dropped on it misses and lands beside it. And letting a speculative
+//! contact skip its tangential half -- a pair that was not touching has no patch to stick to
+//! -- is the worst of the lot, nine draws of twenty-four and a worst drift of 13.5 reaches at
+//! a straightness of 0.997.
+//!
+//! The reason is the one this page gives twice already. A speculative contact's normal is
+//! frozen while the pair is still apart and spends itself a pass or a step later, so it is a
+//! push whose direction is a little wrong every time **in the same way**; and its tangential
+//! half acting only on the passes its normal half reached is the third time this page has
+//! found that intermittent friction is what the rig walks on. Whatever closes this has to
+//! give the pair a constraint without giving it a stale frame -- which is a narrow phase that
+//! can run inside the solve, not a margin on the one that runs before it.
+//!
+//! **The velocity share taken over the loaded constraints only.** The arithmetically exact
+//! reading of a simultaneous pass, and measured worse on its own. See
+//! [`Skeleton::share_velocity`], which carries the numbers.
+//!
 //! # Allocation
 //!
 //! [`Skeleton::step`] allocates nothing once it is warm. The predicted state, the colour
@@ -2823,6 +2905,20 @@ impl Skeleton {
 
     /// How many constraints name each body this step, as the reciprocal. See
     /// [`Skeleton::velocity_share`].
+    ///
+    /// **Every constraint that names the body, not only the ones that carried load.** The
+    /// narrower rule is the arithmetically exact one -- a contact that spent no normal
+    /// impulse makes no velocity correction either, because both velocity halves return on
+    /// `spent.normal <= 0` before they read anything, so counting it divides the others by a
+    /// constraint that will not answer. It was built and measured and it is worse, which is
+    /// worth recording: over twenty-four draws of the seventeen-bone rig the median settled
+    /// residual goes from 0.170 of `g dt` to 0.337 -- past the quarter
+    /// `a_settled_rig_does_not_sit_on_a_limit_cycle` allows -- two draws travel past the
+    /// jostling allowance where none did, and the rig sleeps in 1 draw of 32 against 14.
+    /// The reason is the one the plan already gives for keeping joints out of this pass: a
+    /// larger velocity correction at a contact leaves the joints of the body it acts on
+    /// more violated, and only the next step's positional solve repairs that, charged as
+    /// velocity. The mean is deliberately the conservative one.
     fn share_velocity(&mut self) {
         self.velocity_share.clear();
         self.velocity_share.resize(self.position.len(), 0.0);
@@ -3365,14 +3461,13 @@ impl Skeleton {
                 pairs,
                 ready,
                 held,
+                awake,
                 ..
             } = self;
             held.clear();
-            // **One scan, and two bit tests an edge.** Every other lookup here was a
-            // random access into an array the size of the body count, and there are
-            // eighteen thousand edges on the heap workload: the inverse masses this used
-            // to test are already implied, because a pinned body is never awake and only
-            // an awake body is ever ready.
+            // **One scan, and two bit tests an edge**, for the pairs that matter: the
+            // union-find is the expensive half of this and the tests reject an edge with
+            // no random access into anything.
             //
             // An edge with a ready body at one end and a moving one at the other cannot
             // be inside a sleeping island, but it does disqualify the ready side -- a
@@ -3380,11 +3475,25 @@ impl Skeleton {
             // component is not known until every union is in, so the ready end is set
             // aside here and looked up afterwards, which costs a walk over the boundary
             // rather than a second walk over every edge.
+            //
+            // **"Not ready" is not the same as "still moving", and conflating them left a
+            // whole shape of scene permanently awake.** There are three ways to be
+            // unready: to be moving, to be *pinned*, or to be *asleep* already. The last
+            // two are the stillest things in the simulation -- a pinned body can never
+            // move at all, and a sleeping one is not being solved -- so neither can be
+            // what is holding a neighbour up. Without the test below, every body jointed
+            // to a pinned anchor is disqualified on every step for ever: measured, a limb
+            // of three capsules hanging from a pinned root, at rest to the last bit with
+            // every velocity reading exactly zero, stayed awake for twelve thousand steps.
+            // A sleeping neighbour cannot arise through the broad phase, which wakes
+            // whatever it reaches, but it can through a joint the caller has just added,
+            // and the same argument covers it.
+            let holding = |i: usize| awake.get(i);
             let mut edge = |a: usize, b: usize| match (ready.get(a), ready.get(b)) {
                 (true, true) => components.union(a, b),
-                (true, false) => held.push(a as u32),
-                (false, true) => held.push(b as u32),
-                (false, false) => {}
+                (true, false) if holding(b) => held.push(a as u32),
+                (false, true) if holding(a) => held.push(b as u32),
+                _ => {}
             };
             for joint in joints.iter() {
                 let (a, b) = joint.bodies();

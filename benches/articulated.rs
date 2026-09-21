@@ -126,8 +126,14 @@ fn ragdoll(into: &mut Skeleton, x: f64, z: f64) -> usize {
 /// in a position solver, and limbs that never reach the ground never meet Coulomb either,
 /// so nothing can take their energy away. Measured on the pinned fixture over thirty
 /// seconds, the median body was moving at 3.4 m/s at the start and 3.6 m/s at the end --
-/// it is a heap permanently arriving, and no amount of skipping settled work can show up
-/// in it. Dropped rigs land on the plane, which is what dissipates.
+/// it is a heap permanently arriving. Dropped rigs land on the plane, which is what
+/// dissipates.
+///
+/// **The part of a pinned rig that does stop is its legs**, which hang straight down off
+/// the anchor with nothing swinging them, and they are their own island because the anchor
+/// does not join one. Six of a rig's sixteen movable bodies leave the step inside half a
+/// second; the spine and arms go on for ever. So skipping settled work does show up here
+/// after all -- see [`joints_only`] -- just not in the median body.
 fn corpse(into: &mut Skeleton, x: f64, z: f64, y: f64) -> usize {
     rig(into, x, z, y, false)
 }
@@ -313,6 +319,17 @@ fn one_skeleton(c: &mut Criterion) {
 /// the articulation and nothing else -- and it is the measurement that says which half of a
 /// step a change lands in, because anything that costs per contact costs exactly nothing
 /// here.
+///
+/// **Six thousand of the ten thousand two hundred are awake by the time it is timed**, and
+/// that is not a flaw in the fixture, it is the pinned pelvis doing what a pinned body does
+/// to islands. An anchor does not join a component, so each rig is not one island but three
+/// -- the spine with the arms hanging off it, and a leg each -- and the two legs hang
+/// straight down from the anchor and come to rest inside the warm-up while the spine and
+/// arms are still swinging. Six of a rig's sixteen movable bodies then leave the step.
+/// Before `Skeleton::settle` stopped reading "jointed to something that is not ready" as
+/// "jointed to something that is still moving", none of them could: everything hung off an
+/// anchor was disqualified for ever, and this fixture measured 2.67 to 2.88 ms where it now
+/// measures 2.05 to 2.19.
 fn joints_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/joints_only");
     group.sample_size(20);
@@ -331,11 +348,13 @@ fn joints_only(c: &mut Criterion) {
         "the joint-only fixture found contacts, so it is not measuring what it says",
     );
     println!(
-        "  joints only: {} bodies, {} joints, {} contacts, {} colours",
+        "  joints only: {} bodies, {} joints, {} contacts, {} colours, {} of {} awake",
         s.len(),
         s.joints().len(),
         s.contact_count(),
         s.colours().len(),
+        s.awake_count(),
+        s.len(),
     );
 
     for iterations in [1usize, 8] {
