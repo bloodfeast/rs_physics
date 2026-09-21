@@ -1768,6 +1768,40 @@
 //! moving. Everything above about shapes, patches, cones and manifolds was aimed at that
 //! and none of it has landed it. The sections that follow are what is known about why.
 //!
+//! # A joint that resists the motion through it
+//!
+//! Every joint here was a frictionless bearing: two anchors, an axis, and a hard stop at
+//! each end of a hinge's range, with nothing resisting motion *through* the range. No joint
+//! of any body is like that -- a synovial capsule holds a viscous fluid and the ligaments
+//! crossing it are viscoelastic, and both dissipate whether the body is alive or a
+//! fortnight dead. [`Skeleton::set_joint_damping`] is the dial, as a fraction of critical,
+//! and it is off by default.
+//!
+//! On the two-rig case above, which is the smallest thing that fails, sixteen draws each:
+//!
+//! ```text
+//!   ratio    0     0.2    0.25   0.3    0.35   0.4    0.5
+//!   settled  0/16  1/16   1/16   13/16  4/16   5/16   5/16
+//! ```
+//!
+//! **Something large is happening and it is not a trend.** Thirteen of sixteen at three
+//! tenths against one of sixteen at a quarter is a spike at one value, not a curve, and a
+//! spike is the signature of a resonance or of luck rather than of more damping working
+//! better. So the default stays at zero and [`RELAXED_JOINT_DAMPING`] stays at the
+//! anatomical tenth: **taking three tenths because it measured best is exactly the tuned
+//! number this module refuses elsewhere**, and the sweep is recorded here so the next
+//! person starts from the shape of it rather than from one point of it.
+//!
+//! What the term does is not in doubt, because it is asserted of the term rather than of a
+//! simulation: `a_damped_joint_only_ever_takes_energy_out` checks that the relative spin
+//! across a joint never grows, at seven ratios from a hundredth to ten, on two bodies with
+//! different inertia tensors and off every principal axis. Two earlier versions of that
+//! test measured a whole rig and were both wrong -- the first compared kinetic energy,
+//! which compares *phase* on a chaotic swing and reported a damped chain holding more
+//! because it was lower in its arc; the second compared total mechanical energy and came
+//! down to a two-hundredths-of-a-per-cent difference that is the solver's own drift between
+//! two trajectories. A claim about a term is asked of the term.
+//!
 //! # The smallest heap that fails is two rigs, and it is the spine
 //!
 //! A lone rig settles. Bisecting on the rig count, eight draws each, the plain
@@ -2821,6 +2855,9 @@ pub struct Skeleton {
     // -- sleeping. See [`sleep`] for the whole of the reasoning. ------------------
     /// Whether settled bodies may be left out of a step at all.
     sleeping: bool,
+    /// How hard a joint resists the motion through it, as a fraction of critical. Zero is
+    /// the frictionless bearing this module had. See [`Skeleton::set_joint_damping`].
+    joint_damping: f64,
     /// How many lanes a parallel pass may use, or `None` for the default. See
     /// [`Skeleton::set_lanes`].
     lanes: Option<usize>,
@@ -2945,6 +2982,11 @@ impl Default for Skeleton {
             velocity_share: Vec::new(),
             grid: Grid::default(),
             sleeping: true,
+            // **Zero, unlike friction and rolling resistance.** Those two describe a
+            // surface and every surface has them; this describes what is *inside* a joint,
+            // and a caller modelling a machine wants a bearing rather than a knee. See
+            // [`RELAXED_JOINT_DAMPING`] for the figure a body's own joints take.
+            joint_damping: 0.0,
             lanes: None,
             solved_in_parallel: false,
             awake: BitSet::default(),
@@ -3488,6 +3530,29 @@ impl Skeleton {
     /// -- so this is a performance dial and nothing else.
     pub fn set_lanes(&mut self, lanes: usize) {
         self.lanes = Some(lanes.max(1));
+    }
+
+    /// **How hard every joint resists the motion through it**, as a fraction of critical
+    /// damping. Zero, the default, is the frictionless bearing this module used to have.
+    ///
+    /// Critical is the amount that brings a disturbance back without overshooting, so the
+    /// number is dimensionless and means the same thing on a finger bone and a thigh -- it
+    /// is not a torque, a time or a rate, and it does not have to be rescaled when the
+    /// bodies are. [`RELAXED_JOINT_DAMPING`] is what a body's own joints are worth with the
+    /// muscle gone.
+    ///
+    /// It resists only the *relative* spin across a joint, so a rig tumbling rigidly is not
+    /// slowed however fast it turns: this is a joint, not air.
+    ///
+    /// Negative is read as zero, because a joint that adds energy is not a joint.
+    pub fn set_joint_damping(&mut self, ratio: f64) {
+        self.joint_damping = ratio.max(0.0);
+        self.wake_all();
+    }
+
+    /// The damping ratio in force. See [`Skeleton::set_joint_damping`].
+    pub fn joint_damping(&self) -> f64 {
+        self.joint_damping
     }
 
     /// The lane budget in force. See [`Skeleton::set_lanes`].
@@ -4226,6 +4291,53 @@ impl Skeleton {
         }
     }
 
+    /// Every joint resists the motion through it, once a step. See [`damp_joint`].
+    ///
+    /// Serial and in joint order, which is what makes it the same on every machine. It is
+    /// one pass over the joints against `iterations` passes of the solve, so it is a few
+    /// per cent of a step and has not been worth colouring; if it ever is, the colours are
+    /// already built and no two joints in one name the same body.
+    fn damp_joints(&mut self, gravity: f64, dt: f64) {
+        if self.joint_damping <= 0.0 {
+            return;
+        }
+        let pose = |s: &Skeleton, i: usize| Pose {
+            position: s.position[i],
+            orientation: s.orientation[i],
+            inv_mass: s.inv_mass[i],
+            inv_inertia: s.inv_inertia[i],
+            world_inv_inertia: SymMat3::of(s.orientation[i], s.inv_inertia[i]),
+        };
+        for k in 0..self.joints.len() {
+            let joint = self.joints[k];
+            let (a, b) = joint.bodies();
+            // A joint with both ends asleep is not being solved and has nothing to damp.
+            if !self.awake.get(a) && !self.awake.get(b) {
+                continue;
+            }
+            let first = pose(self, a);
+            let second = pose(self, b);
+            let out = damp_joint(
+                joint,
+                &first,
+                &second,
+                self.angular_velocity[a],
+                self.angular_velocity[b],
+                self.joint_damping,
+                gravity,
+                dt,
+            );
+            for correction in out {
+                let i = correction.body;
+                if i == usize::MAX || correction.rotation.is_near_identity(1e-12) {
+                    continue;
+                }
+                let spun = correction.rotation.multiply(&self.orientation[i]);
+                self.orientation[i] = renormalized(spun);
+            }
+        }
+    }
+
     /// **One step.** Predict under `gravity`, run `iterations` passes over the coloured
     /// joint sets, then read the velocities back out of what moved.
     ///
@@ -4266,6 +4378,7 @@ impl Skeleton {
         // on, which is the scale of the slip a step can leave behind. See
         // [`contacts::Anchor`].
         self.anchor_reach = length(gravity) * dt * dt;
+        let gravity_strength = length(gravity);
 
         self.prev_position.copy_from_slice(&self.position);
         self.prev_orientation.copy_from_slice(&self.orientation);
@@ -4413,6 +4526,11 @@ impl Skeleton {
         }
 
         self.read_velocities(dt);
+        // **After the positional solve and after the velocities are known**, because what a
+        // damper resists is the relative spin the step has actually produced. Once a step
+        // rather than once a pass: the coefficient is derived against `dt`, and charging it
+        // per pass would make the dissipation a function of the quality dial.
+        self.damp_joints(gravity_strength, dt);
 
         // **The velocity pass**, which is the one thing an XPBD solver has that this did
         // not: a traversal that corrects velocities rather than positions, where zero
@@ -6096,6 +6214,169 @@ fn accumulate(
 
 /// Turn two bodies apart about a world axis, split by their inertias, into their
 /// corrections.
+/// **A damping ratio for a joint that is not being held open by anything**, which is what
+/// a corpse's are.
+///
+/// Dimensionless, so it means the same thing on a finger bone and a thigh: the fraction of
+/// *critical* damping, where critical is the amount that brings a disturbance back without
+/// overshooting it. A synovial joint with the muscle gone is well under critical -- it
+/// still swings -- but not by much, and a tenth is the middle of the range a limb released
+/// from the horizontal takes about a second and a half to stop swinging at.
+///
+/// Zero by default, which is what this module has always done, and the caller asks for it
+/// with [`Skeleton::set_joint_damping`].
+pub const RELAXED_JOINT_DAMPING: f64 = 0.1;
+
+/// The square of a body's natural frequency when it hangs off `arm` under `gravity`.
+///
+/// `g l / k^2` with `k` the radius of gyration about the anchor, which is the centre's
+/// plus the parallel-axis term. A body with no inertia of its own is a point mass and its
+/// whole radius of gyration is the arm.
+fn pendulum(body: &Pose, arm: (f64, f64, f64), gravity: f64) -> f64 {
+    if body.inv_mass <= 0.0 || gravity <= 0.0 {
+        return 0.0;
+    }
+    let squared = dot(arm, arm);
+    if squared <= 0.0 {
+        return 0.0;
+    }
+    let l = squared.sqrt();
+    // The largest principal moment is the reciprocal of the smallest stored one, and a
+    // zero means a body with no inertia about that axis at all.
+    let (x, y, z) = body.inv_inertia;
+    let smallest = if x > 0.0 { x } else { f64::INFINITY }
+        .min(if y > 0.0 { y } else { f64::INFINITY })
+        .min(if z > 0.0 { z } else { f64::INFINITY });
+    // `I/m`, formed as `I * inv_mass` because the mass is only stored as its reciprocal.
+    let gyration = if smallest.is_finite() {
+        body.inv_mass / smallest + squared
+    } else {
+        squared
+    };
+    gravity * l / gyration
+}
+
+/// A body's inverse moment of inertia about `axis` **through the anchor** at `r`, rather
+/// than through its own centre.
+///
+/// The difference is a factor of three and a half on a limb, and it is the right one: a
+/// couple changes angular momentum about any point equally, and the joint's own constraint
+/// force acts *at* the anchor and so has no moment about it -- so what the pair's relative
+/// rotation ends the step with is set by its inertia about the joint.
+fn about_anchor(body: &Pose, r: (f64, f64, f64), axis: (f64, f64, f64)) -> f64 {
+    if !body.movable() {
+        return 0.0;
+    }
+    let local = rotate(body.orientation.conjugate(), axis);
+    let moment = |component: f64, inv: f64| {
+        if inv > 0.0 {
+            component * component / inv
+        } else {
+            0.0
+        }
+    };
+    let (x, y, z) = body.inv_inertia;
+    let mut inertia = moment(local.0, x) + moment(local.1, y) + moment(local.2, z);
+    if body.inv_mass > 0.0 {
+        let along = dot(r, axis);
+        inertia += (dot(r, r) - along * along) / body.inv_mass;
+    }
+    if inertia > 0.0 {
+        1.0 / inertia
+    } else {
+        0.0
+    }
+}
+
+/// Turns a body by an angular impulse, into the correction's driven channel.
+fn turn_by(into: &mut Correction, body: &Pose, impulse: (f64, f64, f64)) {
+    if !body.movable() {
+        return;
+    }
+    let dw = body.world_inv_inertia.apply(impulse);
+    let delta = renormalized(Quaternion {
+        w: 1.0,
+        x: 0.5 * dw.0,
+        y: 0.5 * dw.1,
+        z: 0.5 * dw.2,
+    });
+    into.rotation = renormalized(delta.multiply(&into.rotation));
+}
+
+/// **What a joint takes out of the motion through it.**
+///
+/// Every joint here was a frictionless bearing: two anchors, an axis, and a hard stop at
+/// each end of a hinge's range, with nothing resisting motion *through* the range. No joint
+/// of any body is like that -- a synovial capsule holds a viscous fluid and the ligaments
+/// crossing it are viscoelastic, and both dissipate whether the body is alive or a
+/// fortnight dead.
+///
+/// **Only the relative spin**, which is what keeps this from being a drag on the world: a
+/// rig tumbling rigidly has none of it however fast it turns, so a corpse in free fall is
+/// not slowed.
+///
+/// **One equal and opposite angular impulse, and not [`share_turn`].** That function splits
+/// an *angle* by the two bodies' inverse inertias, which is the same as an equal and
+/// opposite impulse only where the axis is a principal one. Off a principal axis it is
+/// neither momentum-conserving nor dissipative, and a term whose whole job is to remove
+/// energy cannot be approximately either. With the impulse written `-(f / total) *
+/// relative`, the energy the pair loses is `mu |relative|^2 f (f/2 - 1)` with
+/// `mu = 1/total`, which is negative for every `f` below two whatever the two tensors are.
+/// That is why this shape and not the other one.
+#[allow(clippy::too_many_arguments)]
+fn damp_joint(
+    joint: Joint,
+    first: &Pose,
+    second: &Pose,
+    spin_a: (f64, f64, f64),
+    spin_b: (f64, f64, f64),
+    damping: f64,
+    gravity: f64,
+    dt: f64,
+) -> [Correction; 2] {
+    let mut out = [Correction::none(); 2];
+    let (a, b) = joint.bodies();
+    out[0].body = a;
+    out[1].body = b;
+
+    let relative = sub(spin_b, spin_a);
+    let Some(axis) = normalized(relative) else {
+        return out;
+    };
+
+    let (anchor_a, anchor_b) = match joint {
+        Joint::Ball {
+            anchor_a, anchor_b, ..
+        } => (anchor_a, anchor_b),
+        Joint::Hinge {
+            anchor_a, anchor_b, ..
+        } => (anchor_a, anchor_b),
+    };
+    let (ra, rb) = (
+        rotate(first.orientation, anchor_a),
+        rotate(second.orientation, anchor_b),
+    );
+    // One root rather than two: a square root is monotone, so the larger of the two
+    // frequencies is the root of the larger of the two squares.
+    let squared = pendulum(first, anchor_a, gravity).max(pendulum(second, anchor_b, gravity));
+    if squared <= 0.0 {
+        return out;
+    }
+    let frequency = squared.sqrt();
+
+    let total = about_anchor(first, ra, axis) + about_anchor(second, rb, axis);
+    if total <= 1e-12 {
+        return out;
+    }
+
+    // `c dt / I_rel`, with the inertia cancelled.
+    let beta = 2.0 * damping * frequency * dt;
+    let impulse = scale(relative, -(beta / (1.0 + beta)) / total * dt);
+    turn_by(&mut out[0], first, scale(impulse, -1.0));
+    turn_by(&mut out[1], second, impulse);
+    out
+}
+
 fn share_turn(
     out: &mut [Correction; 2],
     a: &Pose,

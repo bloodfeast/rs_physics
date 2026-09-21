@@ -1829,7 +1829,7 @@ fn a_body_resting_on_the_ground_reads_its_own_weight() {
 
     // Eight draws a relative 1e-12 apart, because one draw of anything that has been
     // through the solve says nothing about the next.
-    for draw in 0..8 {
+    for draw in 0..16 {
         let mut s = Skeleton::new();
         floor(&mut s, 0.0);
         s.set_sleeping(false);
@@ -1892,7 +1892,7 @@ fn a_body_under_a_pile_reads_what_the_pile_weighs() {
     const WINDOW: usize = 600;
     let weight = MASS * length(G);
 
-    for draw in 0..8 {
+    for draw in 0..16 {
         let nudge = 1.0 + draw as f64 * 1e-12;
         let mut s = Skeleton::new();
         floor(&mut s, 0.0);
@@ -2918,4 +2918,122 @@ fn shaped_rig(into: &mut Skeleton, x: f64, y: f64, z: f64, facets: u32) {
 }
 
 
+// -- what a joint takes out of the motion through it -------------------------------
 
+/// **Damping only ever reduces the relative spin across a joint**, at every ratio and
+/// whatever the two bodies are.
+///
+/// Tested on [`damp_joint`] directly rather than through a simulation, and the reason is a
+/// lesson rather than a convenience: a swinging chain is chaotic, so two runs differing
+/// only by a damping ratio sit at different points in their swing by the time anyone looks.
+/// Two earlier versions of this test compared a whole rig -- first by kinetic energy, which
+/// compares *phase* and reported a damped chain holding more because it was lower in its
+/// arc, and then by total mechanical energy, which came down to a two-hundredths-of-a-per-
+/// cent difference that is the solver's own drift between two trajectories rather than
+/// anything the damper did. The claim is about the term, so the term is what is asked.
+///
+/// The claim itself: written as an equal and opposite impulse `-(f / total) * relative`,
+/// the pair loses `mu |relative|^2 f (f/2 - 1)` with `mu = 1/total`, which is negative for
+/// every `f` below two whatever the two inertia tensors are. That is why it is an impulse
+/// and not [`share_turn`], which splits an *angle* by inverse inertia -- the same thing
+/// only where the axis is a principal one, and neither momentum-conserving nor dissipative
+/// off it.
+#[test]
+fn a_damped_joint_only_ever_takes_energy_out() {
+    let pose = |orientation: Quaternion, inv_inertia: (f64, f64, f64)| Pose {
+        position: (0.0, 0.0, 0.0),
+        orientation,
+        inv_mass: 0.25,
+        inv_inertia,
+        world_inv_inertia: SymMat3::of(orientation, inv_inertia),
+    };
+    // Deliberately off every principal axis, and deliberately not the same tensor twice:
+    // the equal-and-opposite form is what makes this hold there, and an earlier shape of
+    // the term did not.
+    let turned = Quaternion::from_axis_angle((0.3, 0.7, -0.5), 0.9).normalized();
+    let first = pose(turned, (4.0, 9.0, 2.5));
+    let second = pose(
+        Quaternion::from_axis_angle((-0.2, 0.4, 0.8), 2.1).normalized(),
+        (7.0, 1.5, 5.0),
+    );
+    let joint = Joint::free_ball(0, 1, (0.0, -0.2, 0.0), (0.0, 0.2, 0.0));
+
+    for zeta in [0.01f64, 0.05, 0.1, 0.3, 1.0, 3.0, 10.0] {
+        for spins in [
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+            ((0.4, -1.2, 0.7), (-0.9, 0.3, 2.0)),
+            ((3.0, 3.0, 3.0), (3.0, 3.0, 3.0)),
+            ((-2.5, 0.1, 0.0), (0.0, -0.1, 2.5)),
+        ] {
+            let (wa, wb) = spins;
+            let out = damp_joint(joint, &first, &second, wa, wb, zeta, length(G), DT);
+            // `turn_by` writes the delta as `1 + dw/2`, so the change in spin is twice the
+            // vector part.
+            let change = |c: &Correction| {
+                scale((c.rotation.x, c.rotation.y, c.rotation.z), 2.0)
+            };
+            let after_a = add(wa, change(&out[0]));
+            let after_b = add(wb, change(&out[1]));
+            let before = length(sub(wb, wa));
+            let after = length(sub(after_b, after_a));
+            assert!(
+                after <= before + 1e-12,
+                "at a ratio of {zeta} the relative spin went from {before:.9} to \
+                 {after:.9} rad/s; a joint that adds motion is not a damper",
+            );
+            // And it is doing something, or the bound above is vacuous.
+            if before > 1e-9 && zeta >= 0.1 {
+                assert!(
+                    after < before,
+                    "at a ratio of {zeta} the relative spin did not move from \
+                     {before:.9} rad/s; the term is inert and the bound means nothing",
+                );
+            }
+        }
+    }
+}
+
+/// **And it does not slow a rig that is only tumbling.**
+///
+/// A damper inside a joint sees the *relative* spin across it, and a body turning rigidly
+/// has none however fast it turns. Getting that wrong would make this air resistance rather
+/// than a joint, and a corpse thrown across a room would arrive slower for having knees.
+#[test]
+fn damping_does_not_slow_a_rig_that_is_only_tumbling() {
+    let spun = |damping: f64| {
+        let mut s = Skeleton::new();
+        s.set_joint_damping(damping);
+        let first = s.add_body(Body::capsule(4.0, 0.06, 0.25, (0.0, 0.0, 0.0)));
+        let mut previous = first;
+        for k in 1..5 {
+            let body = s.add_body(Body::capsule(4.0, 0.06, 0.25, (0.0, -0.5 * k as f64, 0.0)));
+            assert!(s.add_joint(Joint::free_ball(
+                previous,
+                body,
+                (0.0, -0.25, 0.0),
+                (0.0, 0.25, 0.0)
+            )));
+            previous = body;
+        }
+        // Every body given the SAME angular velocity about the same axis through the
+        // group's centre: a rigid tumble, with no relative spin anywhere in it.
+        for i in 0..s.len() {
+            s.set_angular_velocity(i, (0.0, 0.0, 1.5));
+        }
+        // No gravity, so nothing but the joints can act.
+        for _ in 0..240 {
+            s.step(DT, (0.0, 0.0, 0.0), 8);
+        }
+        (0..s.len())
+            .map(|i| length(s.angular_velocity(i)))
+            .sum::<f64>()
+            / s.len() as f64
+    };
+    let free = spun(0.0);
+    let damped = spun(1.0);
+    assert!(
+        (damped - free).abs() < 1e-6 * free.max(1.0),
+        "a rig tumbling rigidly held a mean spin of {damped:.6} rad/s with damping and \
+         {free:.6} without; a joint damper may only see the motion *through* the joint",
+    );
+}
