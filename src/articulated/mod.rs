@@ -2177,8 +2177,27 @@ impl Body {
         // A capsule's inertia, taken as the cylinder it mostly is: `m r^2 / 2` about the
         // long axis and `m (3 r^2 + L^2) / 12` across it. The hemispherical caps move
         // both terms by a few percent and are not worth the algebra for a corpse.
-        let along = 0.5 * mass * radius * radius;
-        let across = mass * (3.0 * radius * radius + length * length) / 12.0;
+        //
+        // **Except when there is no cylinder at all.** At `length = 0` a capsule is a
+        // sphere, and then the caps are not a few per cent of it, they are the whole of it:
+        // the cylinder formula gives `0.5 m r^2` about `+Y` and `0.25 m r^2` across, where a
+        // sphere is `0.4 m r^2` in every direction. So a ball built this way has a preferred
+        // axis that does not exist, is twice as hard to spin one way as the other, and
+        // precesses instead of coming to rest -- with rolling resistance applied about axes
+        // whose inertia is wrong.
+        //
+        // Found through a caller whose chunks of gore are spheres and would not settle. A
+        // solver has no way to notice this: every number stays finite and plausible, and
+        // what comes out is a lump of meat that spins for ever.
+        let (along, across) = if length <= 0.0 {
+            let ball = 0.4 * mass * radius * radius;
+            (ball, ball)
+        } else {
+            (
+                0.5 * mass * radius * radius,
+                mass * (3.0 * radius * radius + length * length) / 12.0,
+            )
+        };
         let inv = |i: f64| if i > 0.0 { 1.0 / i } else { 0.0 };
         Body {
             position,

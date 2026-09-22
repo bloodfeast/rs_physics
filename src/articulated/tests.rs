@@ -3095,6 +3095,38 @@ fn a_body_given_a_mass_falls() {
     s.check_no_joint_straddles_the_awake_set();
 }
 
+/// **A sphere has no preferred axis**, and a capsule of no length is a sphere.
+///
+/// The cylinder approximation the capsule constructor uses is fine for a limb and wrong for
+/// a ball: at zero length it hands back `0.5 m r^2` about `+Y` and `0.25 m r^2` across,
+/// which is a body twice as hard to spin one way as the other. Nothing downstream can see
+/// that -- every number stays finite and plausible -- and what a caller gets is a sphere
+/// that precesses instead of settling, which is how it was found.
+#[test]
+fn a_capsule_of_no_length_is_a_sphere() {
+    let ball = Body::capsule(4.0, 0.2, 0.0, (0.0, 0.0, 0.0));
+    let (x, y, z) = ball.inv_inertia;
+    assert!(
+        (x - y).abs() < 1e-12 && (y - z).abs() < 1e-12,
+        "a sphere came out with a preferred axis: {:?}",
+        ball.inv_inertia,
+    );
+    // `2/5 m r^2`, which is the sphere every textbook has.
+    let want = 1.0 / (0.4 * 4.0 * 0.2 * 0.2);
+    assert!(
+        (x - want).abs() < 1e-9,
+        "a sphere of 4 kg and 0.2 m reads {x:.6} where 2/5 m r^2 is {want:.6}",
+    );
+
+    // And a capsule with length is untouched -- it is still the cylinder it mostly is.
+    let rod = Body::capsule(4.0, 0.2, 1.0, (0.0, 0.0, 0.0));
+    let (rx, ry, _) = rod.inv_inertia;
+    assert!(
+        (rx - ry).abs() > 1e-6,
+        "a capsule with length should be easier to spin about its own axis than across it",
+    );
+}
+
 /// A square grid of heights over `y = f(x)`, invariant in z, spanning x in `[-10, 10]` at
 /// one metre a cell.
 fn terrace(f: impl Fn(f64) -> f64) -> (Vec<f64>, usize, usize, f64, (f64, f64)) {
