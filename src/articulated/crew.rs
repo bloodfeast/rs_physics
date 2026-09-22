@@ -69,6 +69,38 @@
 //!   18 lanes   5.26  5.21  5.25 ms   medians spread 1.0 per cent
 //! ```
 //!
+//! **Read that as a fact about `pile`, not about the crate.** Two independent
+//! re-measurements have since disagreed with each other and with it, on three different
+//! fixtures, and the disagreement is larger than any of the effects:
+//!
+//! ```text
+//!   this table, pile, one binary per count, 3 rounds     18 beats 36 by 16%
+//!   a heap of rigs, counts alternated in one process     36 beats 18 by 25-33%
+//!   a dense overlapping heap, ABBA in one process        18 and 27 beat 36 by 5-25%
+//! ```
+//!
+//! So **the lane count that wins is a property of the scene**, and nothing here is
+//! entitled to state one answer. What the three agree on is narrower and is what the
+//! design actually rests on: oversubscribing a spin barrier is not free, the cost is real
+//! enough to measure, and a caller who knows its workload should be able to say so --
+//! which is what [`super::Skeleton::set_lanes`] is for.
+//!
+//! Two methodological notes, because both re-measurements were provoked by this table and
+//! neither settles it:
+//!
+//! * **The numbers above were taken across separate runs**, and this machine ramps
+//!   thermally -- an unchanged binary on an unchanged scene has read 10.01 ms early in a
+//!   session and 24.87 ms an hour later. A 16 per cent difference between two runs is
+//!   inside that. Alternating the variants *within one process* is the only form of this
+//!   comparison worth making, and the two rows below the table are.
+//! * **The third row's fixture packs six hundred rigs into about ten metres square**, so
+//!   the bodies interpenetrate and the contact count is nothing like `pile`'s -- its step
+//!   is 127 ms where `pile`'s is six. It is evidence that the answer moves with the scene
+//!   and is not evidence about `pile`.
+//!
+//! What would settle it is one fixture, phase-timed rather than wall-timed, with the lane
+//! count alternated inside the process -- which is a measurement nobody has made yet.
+//!
 //! Sixteen per cent, and the spread is the more expensive half: several sections of
 //! [`super`]'s header apologise for a variance they put down to the machine -- one fixture
 //! "moved by a factor of two on the unchanged binary between rounds" -- and then read

@@ -75,9 +75,30 @@ use super::*;
 pub(super) struct Spent {
     /// Normal impulse applied so far this step, always positive.
     pub normal: f64,
-    /// The share of `normal` that was charged as velocity rather than as a free
-    /// correction: the overlap the step itself drove, and so the only part of the normal
-    /// impulse the bodies were actually handed as momentum.
+    /// **Normal impulse the bodies were actually handed as momentum**, as opposed to moved
+    /// apart for free.
+    ///
+    /// # It is not a share of `normal`, and it used to say it was
+    ///
+    /// The positional solve contributes the part of `normal` that the step itself drove, so
+    /// over that pass alone it is a share. The **velocity pass then adds to it** -- a
+    /// positive `lambda` in [`solve_contact_velocity_normal`] and
+    /// [`solve_ground_velocity_normal`] is genuine extra normal impulse -- and does not add
+    /// that to `normal`, deliberately: `normal` and `tangential` are the positional solve's
+    /// record, which is what [`super::Skeleton::anchor_ground`] reads to decide whether a
+    /// patch stuck. So `driven` can and does exceed `normal`, measured at 1.14 times it on a
+    /// settled stack.
+    ///
+    /// That makes it the right quantity for the one thing that reads it from outside --
+    /// [`super::Skeleton::normal_load`], which wants the momentum actually delivered and
+    /// would under-report a load without the velocity pass's share -- and the **wrong**
+    /// quantity for anything that wants a fraction. Nothing may divide by it or by `normal`
+    /// expecting a ratio in `[0, 1]`.
+    ///
+    /// This matters beyond bookkeeping because `driven` is the leading candidate for what a
+    /// friction cone should be charged against (see the note above [`Anchor`] on the burial
+    /// defect). A cone built on it is building on an impulse, not on a proportion, and its
+    /// own doc said otherwise until this was measured.
     pub driven: f64,
     /// Friction impulse applied so far this step, as a world-space vector: the impulse
     /// the *first* body received. For a pair the second received its negative; against
@@ -1231,8 +1252,15 @@ pub(super) fn solve_contact_velocity_normal(
     // **What is taken back comes off the total, so a second sweep cannot take it again.**
     // The pass runs [`super::VELOCITY_SWEEPS`] times, and a bound re-read from the
     // positional figure each sweep would let N of them hand back N times what the contact
-    // ever gave. A positive `lambda` is normal impulse this sweep *added* as velocity, so
-    // it raises the total by the same accounting.
+    // ever gave. A positive `lambda` is normal impulse this sweep *added* as velocity, so it
+    // raises `driven` by the same accounting.
+    //
+    // **`normal` is not raised with it**, which is why `driven` is not a share of `normal`
+    // and its own doc no longer claims to be. It is not an oversight: `normal` is the
+    // positional solve's record and `anchor_ground` reads it to decide whether a patch
+    // stuck, so a velocity-pass addition does not belong in it. The consequence to keep in
+    // mind is that the Coulomb budget here is charged against a `spent.normal` that is
+    // missing whatever this sibling half just applied.
     spent.driven = (spent.driven + lambda).max(0.0);
     let push = scale(normal, lambda);
     accumulate(&mut out[0], &first.now, ra, scale(push, -1.0), Charge::Still);

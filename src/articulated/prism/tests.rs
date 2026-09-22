@@ -224,3 +224,29 @@ fn crossed_prisms_get_an_arm_at_every_angle() {
         single.len(),
     );
 }
+
+/// **The cross-section table is the expression it replaced, to the bit.**
+///
+/// [`cross_section`] exists to keep a `sin` and a `cos` per corner out of a function that
+/// runs per candidate pair, and the whole reason it is safe to do that without re-measuring
+/// every prism guard is that it changes no answer at all -- not "by less than an epsilon",
+/// but not at all. That claim is worth a test of its own, because the cheap mistakes here
+/// (folding the angle into `[0, TAU)`, using `k / n` as a fraction of a turn computed a
+/// different way, reaching for `sin_cos`) all produce something that is *nearly* this and
+/// would pass any tolerance-based comparison while quietly moving every contact normal.
+#[test]
+fn the_cross_section_table_is_the_expression_it_replaced() {
+    for n in 3..=MOST_FACETS as usize {
+        let table = cross_section(n);
+        assert_eq!(table.len(), n, "the table's row for {n} facets is the wrong length");
+        for (k, &(across, along)) in table.iter().enumerate() {
+            let turn = std::f64::consts::TAU * k as f64 / n as f64;
+            assert_eq!(
+                (across, along),
+                (turn.cos(), turn.sin()),
+                "corner {k} of {n} came out of the table as {across:?}, {along:?} rather \
+                 than as the expression it stands in for",
+            );
+        }
+    }
+}
