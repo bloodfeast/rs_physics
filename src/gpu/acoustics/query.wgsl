@@ -585,16 +585,27 @@ fn source_query(i: u32, lane: u32) {
     red_band[lane] = best;
     red_probe[lane] = vec2<f32>(probe, fol);
     workgroupBarrier();
-    for (var stride = 32u; stride > 0u; stride = stride >> 1u) {
-        if (lane < stride) {
-            red_band[lane] = max(red_band[lane], red_band[lane + stride]);
-            let o = red_probe[lane + stride];
-            red_probe[lane] = vec2<f32>(max(red_probe[lane].x, o.x), red_probe[lane].y + o.y);
+    // Two levels: eight lanes fold eight each, then every lane folds the eight, which is
+    // cheaper than a six-barrier tree and leaves the answer in every lane.
+    if (lane < 8u) {
+        var b8 = red_band[8u * lane];
+        var p8 = red_probe[8u * lane];
+        for (var k = 1u; k < 8u; k = k + 1u) {
+            b8 = max(b8, red_band[8u * lane + k]);
+            let o = red_probe[8u * lane + k];
+            p8 = vec2<f32>(max(p8.x, o.x), p8.y + o.y);
         }
-        workgroupBarrier();
+        red_band[8u * lane] = b8;
+        red_probe[8u * lane] = p8;
     }
-    let band = red_band[0];
-    let probe_fol = red_probe[0];
+    workgroupBarrier();
+    var band = red_band[0];
+    var probe_fol = red_probe[0];
+    for (var k = 1u; k < 8u; k = k + 1u) {
+        band = max(band, red_band[8u * k]);
+        let o = red_probe[8u * k];
+        probe_fol = vec2<f32>(max(probe_fol.x, o.x), probe_fol.y + o.y);
+    }
     laws(lane, s, directivity, vs, word, band, probe_fol.x, probe_fol.y, OUT_SOURCES + 8u * i);
     if (lane == 0u) {
         // The march's own answer, for the oracles: six stores a source.
@@ -972,8 +983,8 @@ var<workgroup> arr_pan: array<f32, 128>;
 var<workgroup> bin_gain: array<atomic<u32>, 64>;
 var<workgroup> bin_arrival: array<atomic<u32>, 64>;
 var<workgroup> red_field: array<vec4<f32>, 64>;
-var<workgroup> bin_plain: array<u32, 64>;
-var<workgroup> bin_chosen: array<u32, 64>;
+var<workgroup> bin_plain: array<vec4<u32>, 16>;
+var<workgroup> bin_chosen: array<vec4<u32>, 16>;
 
 fn ray_word_at(i: u32) -> f32 {
     return bitcast<f32>(outb[i]);
@@ -986,7 +997,6 @@ fn ray_word(ray: u32, k: u32) -> f32 {
 @compute @workgroup_size(64)
 fn field_reduce(@builtin(local_invocation_index) lane: u32) {
     let c = bitcast<vec4<f32>>(inb[HV_LISTENER]).w;
-    let dw = FIELD_DIRS[lane];
     atomicStore(&bin_gain[lane], 0u);
     atomicStore(&bin_arrival[lane], 0xFFFFFFFFu);
     // Unused taps are zero: written first, and ordered before the chosen taps' writes.
@@ -1034,31 +1044,41 @@ fn field_reduce(@builtin(local_invocation_index) lane: u32) {
             atomicMin(&bin_arrival[bin], idx);
         }
     }
-    for (var stride = 32u; stride > 0u; stride = stride >> 1u) {
-        if (lane < stride) {
-            red_field[lane] = red_field[lane] + red_field[lane + stride];
+    // The sums in two levels: eight lanes add eight each, then lane 0 adds the eight. A
+    // barrier costs more than eight shared loads, so this beats a six-step tree.
+    workgroupBarrier();
+    if (lane < 8u) {
+        var acc = red_field[8u * lane];
+        for (var k = 1u; k < 8u; k = k + 1u) {
+            acc = acc + red_field[8u * lane + k];
         }
-        workgroupBarrier();
+        red_field[8u * lane] = acc;
     }
     // The eight strongest bins: each lane counts the bins stronger than its own (ties to
     // the earlier bin), from a plain copy, and a bin with fewer than eight above it is a
     // tap. Taps go out in delay order: a tap's slot is the number of chosen bins before it.
-    bin_plain[lane] = atomicLoad(&bin_gain[lane]);
+    let mine = atomicLoad(&bin_gain[lane]);
+    bin_plain[lane >> 2u][lane & 3u] = mine;
     workgroupBarrier();
-    let mine = bin_plain[lane];
-    var above = 0u;
-    for (var b = 0u; b < TAP_BINS; b = b + 1u) {
-        let gb = bin_plain[b];
-        above = above + select(0u, 1u, gb > mine || (gb == mine && b < lane));
+    // Four bins a load: sixteen dependent shared loads rather than sixty-four.
+    var above = vec4<u32>(0u);
+    let me = vec4<u32>(mine);
+    let lane4 = vec4<u32>(lane);
+    for (var q = 0u; q < TAP_BINS / 4u; q = q + 1u) {
+        let gb = bin_plain[q];
+        let b = vec4<u32>(4u * q) + vec4<u32>(0u, 1u, 2u, 3u);
+        above = above + select(vec4<u32>(0u), vec4<u32>(1u), gb > me | (gb == me & b < lane4));
     }
-    let chosen = mine > 0u && above < 8u;
-    bin_chosen[lane] = select(0u, 1u, chosen);
+    let chosen = mine > 0u && (above.x + above.y + above.z + above.w) < 8u;
+    bin_chosen[lane >> 2u][lane & 3u] = select(0u, 1u, chosen);
     workgroupBarrier();
     if (chosen) {
-        var slot = 0u;
-        for (var b = 0u; b < TAP_BINS; b = b + 1u) {
-            slot = slot + select(0u, bin_chosen[b], b < lane);
+        var before = vec4<u32>(0u);
+        for (var q = 0u; q < TAP_BINS / 4u; q = q + 1u) {
+            let b = vec4<u32>(4u * q) + vec4<u32>(0u, 1u, 2u, 3u);
+            before = before + select(vec4<u32>(0u), bin_chosen[q], b < lane4);
         }
+        let slot = before.x + before.y + before.z + before.w;
         let idx = atomicLoad(&bin_arrival[lane]);
         let at = OUT_FIELD + 4u * slot;
         outb[at] = bitcast<u32>(arr_delay[idx]);
@@ -1066,8 +1086,12 @@ fn field_reduce(@builtin(local_invocation_index) lane: u32) {
         outb[at + 2u] = bitcast<u32>(clamp(arr_pan[idx], -1.0, 1.0));
         outb[at + 3u] = 0u;
     }
+    workgroupBarrier();
     if (lane == 0u) {
-        let s = red_field[0];
+        var s = red_field[0];
+        for (var k = 1u; k < 8u; k = k + 1u) {
+            s = s + red_field[8u * k];
+        }
         var mfp = 0.0;
         var rt60 = 0.0;
         let clear = s.w / FIELD_TOTAL_WEIGHT;

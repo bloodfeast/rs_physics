@@ -155,6 +155,7 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
                 per_ray.push((a, s));
             }
             assert_eq!(out.field.clear_fraction, 0.0, "a closed box let a ray out");
+            check_taps(&out.field, &rays);
             // ---- L5, the GPU's 64 rays: 4V/S within three standard errors of its own
             // sample, the error reported.
             let n = per_ray.len() as f64;
@@ -263,4 +264,49 @@ fn l12_empty_inputs_dispatch_and_answer() {
     }
     assert!(hits > 0);
     assert!(out.field.clear_fraction > 0.0 && out.field.clear_fraction < 1.0);
+}
+
+/// The taps against a CPU selection over the rays' own arrival records: the strongest
+/// arrival in each 5 ms bin, the eight strongest bins (ties to the earlier bin), in delay
+/// order, the earliest-indexed arrival on a tie within a bin.
+fn check_taps(field: &ListenerField, rays: &[FieldRay]) {
+    let mut arrivals = Vec::new();
+    for (i, r) in rays.iter().enumerate() {
+        if r.first_m >= 0.0 {
+            arrivals.push((2 * i, r.first_arrival));
+            if r.second_m >= 0.0 {
+                arrivals.push((2 * i + 1, r.second_arrival));
+            }
+        }
+    }
+    let mut bins: Vec<Option<(usize, [f32; 3])>> = vec![None; TAP_BINS as usize];
+    for &(idx, a) in &arrivals {
+        let bin = (a[0] / TAP_BIN_S) as usize;
+        if a[1] <= 0.0 || bin >= TAP_BINS as usize {
+            continue;
+        }
+        let better = match bins[bin] {
+            None => true,
+            Some((j, b)) => a[1] > b[1] || (a[1] == b[1] && idx < j),
+        };
+        if better {
+            bins[bin] = Some((idx, a));
+        }
+    }
+    let mut order: Vec<usize> = (0..bins.len()).filter(|&b| bins[b].is_some()).collect();
+    order.sort_by(|&x, &y| {
+        let (gx, gy) = (bins[x].unwrap().1[1], bins[y].unwrap().1[1]);
+        gy.partial_cmp(&gx).unwrap().then(x.cmp(&y))
+    });
+    let mut chosen: Vec<usize> = order.into_iter().take(8).collect();
+    chosen.sort();
+    for (slot, tap) in field.taps.iter().enumerate() {
+        match chosen.get(slot) {
+            Some(&b) => {
+                let a = bins[b].unwrap().1;
+                assert_eq!([tap.delay_s, tap.gain, tap.pan], [a[0], a[1], a[2].clamp(-1.0, 1.0)], "tap {slot}");
+            }
+            None => assert_eq!(tap.gain, 0.0, "tap {slot} should be empty"),
+        }
+    }
 }
