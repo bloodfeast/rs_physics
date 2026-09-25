@@ -403,7 +403,6 @@ fn random_point(rng: &mut Rng, scene: &Scene) -> [f32; 3] {
 fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
     let Some(gpu) = gpu() else { return };
     let air = Air::standard();
-    let c = air.speed_of_sound();
     let mut rng = Rng(0xacd5_0003);
     let (mut l3_pairs, mut l3_counted, mut l3_worst) = (0usize, 0usize, 0.0f64);
     let (mut l2_pairs, mut l2_counted, mut l2_blocked) = (0usize, 0usize, 0usize);

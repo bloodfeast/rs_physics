@@ -320,6 +320,16 @@ fn fmt(ns: f64) -> String {
 
 fn main() {
     let Some(mut rig) = Rig::new() else { return };
+    // `cargo bench` passes `--bench` and `quiet.py` appends `--measure`; anything else (the
+    // test harness running every target) gets a smoke run, not a timed one.
+    let timed = std::env::args().any(|a| a == "--bench" || a == "--measure");
+    if !timed {
+        for _ in 0..8 {
+            rig.tick();
+        }
+        println!("acoustics bench: smoke run only; pass --bench or --measure for the gate");
+        return;
+    }
     for _ in 0..WARM {
         rig.tick();
     }
