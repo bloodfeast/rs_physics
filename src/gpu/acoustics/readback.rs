@@ -26,7 +26,8 @@ struct Answer(Arc<AtomicU8>);
 
 impl Answer {
     fn answer(self, ok: bool) {
-        self.0.store(if ok { READY } else { FAILED }, Ordering::Release);
+        self.0
+            .store(if ok { READY } else { FAILED }, Ordering::Release);
     }
 }
 
@@ -56,7 +57,14 @@ impl Ring {
     pub(crate) fn new(device: &wgpu::Device) -> Ring {
         let slot = |i: usize| Slot {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(["acoustics readback 0", "acoustics readback 1", "acoustics readback 2", "acoustics readback 3"][i]),
+                label: Some(
+                    [
+                        "acoustics readback 0",
+                        "acoustics readback 1",
+                        "acoustics readback 2",
+                        "acoustics readback 3",
+                    ][i],
+                ),
                 size: READBACK_BYTES,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -97,7 +105,12 @@ impl Ring {
     }
 
     /// Copy the output into slot `k` and ask for it to be mapped when `enc` is submitted.
-    pub(crate) fn record(&mut self, enc: &mut wgpu::CommandEncoder, output: &wgpu::Buffer, k: usize) {
+    pub(crate) fn record(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        output: &wgpu::Buffer,
+        k: usize,
+    ) {
         let slot = &self.slots[k];
         enc.copy_buffer_to_buffer(output, 0, &slot.buffer, 0, READBACK_BYTES);
         slot.state.store(PENDING, Ordering::Release);

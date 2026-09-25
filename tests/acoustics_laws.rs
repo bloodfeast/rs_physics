@@ -24,16 +24,15 @@ use acoustics_common::*;
 
 use rs_physics::acoustics::band::{cutoff_ceiling, fit_lowpass, FIT_REFERENCE_HZ, NO_LOWPASS_HZ};
 use rs_physics::acoustics::surfaces::{
-    barrier_insertion_db, foliage_absorption_db_per_m, foliage_attenuation_db, lit_zone_limit, BARRIER_CAP_DB,
-    BARRIER_GRAZING_DB, FOLIAGE_MAX_CREDITED_M,
+    barrier_insertion_db, foliage_absorption_db_per_m, foliage_attenuation_db, lit_zone_limit,
+    BARRIER_CAP_DB, BARRIER_GRAZING_DB, FOLIAGE_MAX_CREDITED_M,
 };
 use rs_physics::acoustics::{
-    doppler_ratio, spatial::HEAD_RADIUS_M, spreading_gain, Air, Ears,
-    DOPPLER_MAX_CLOSING, REFERENCE_M,
+    doppler_ratio, spatial::HEAD_RADIUS_M, spreading_gain, Air, Ears, DOPPLER_MAX_CLOSING,
+    REFERENCE_M,
 };
 use rs_physics::gpu::acoustics::oracle::{LawCase, LawProbe};
 use rs_physics::gpu::acoustics::*;
-
 
 /// Unit roundoff of f32.
 const U: f64 = 1.0 / (1u64 << 24) as f64;
@@ -52,12 +51,18 @@ struct E {
 }
 
 fn x(v: f32) -> E {
-    E { v: v as f64, e: 0.0 }
+    E {
+        v: v as f64,
+        e: 0.0,
+    }
 }
 
 /// A constant the generator rounded to f32.
 fn k(v: f64) -> E {
-    E { v, e: ((v as f32) as f64 - v).abs() }
+    E {
+        v,
+        e: ((v as f32) as f64 - v).abs(),
+    }
 }
 
 /// The variation of a monotone `f` over `[v - e, v + e]`, clipped to its domain.
@@ -72,7 +77,10 @@ impl E {
     fn add(self, o: E) -> E {
         let v = self.v + o.v;
         let p = self.e + o.e;
-        E { v, e: p + 0.5 * ulp(v.abs() + p) }
+        E {
+            v,
+            e: p + 0.5 * ulp(v.abs() + p),
+        }
     }
     fn sub(self, o: E) -> E {
         self.add(E { v: -o.v, e: o.e })
@@ -80,18 +88,29 @@ impl E {
     fn mul(self, o: E) -> E {
         let v = self.v * o.v;
         let p = self.v.abs() * o.e + o.v.abs() * self.e + self.e * o.e;
-        E { v, e: p + 0.5 * ulp(v.abs() + p) }
+        E {
+            v,
+            e: p + 0.5 * ulp(v.abs() + p),
+        }
     }
     fn div(self, o: E) -> E {
         assert!(o.v.abs() > o.e, "a divisor within its own error of zero");
         let v = self.v / o.v;
         let p = (self.e + v.abs() * o.e) / (o.v.abs() - o.e);
-        E { v, e: p + 2.5 * ulp(v.abs() + p) }
+        E {
+            v,
+            e: p + 2.5 * ulp(v.abs() + p),
+        }
     }
     fn inverse_sqrt(self) -> E {
         let v = 1.0 / self.v.sqrt();
-        let p = vary(self.v, self.e, f64::MIN_POSITIVE, f64::INFINITY, |a| 1.0 / a.sqrt());
-        E { v, e: p + 2.0 * ulp(v + p) }
+        let p = vary(self.v, self.e, f64::MIN_POSITIVE, f64::INFINITY, |a| {
+            1.0 / a.sqrt()
+        });
+        E {
+            v,
+            e: p + 2.0 * ulp(v + p),
+        }
     }
     /// `1 / inverseSqrt(x)`: the reciprocal of a value 2 ulp out, itself 2.5 ulp out.
     fn sqrt(self) -> E {
@@ -107,7 +126,10 @@ impl E {
     fn exp2(self) -> E {
         let v = self.v.exp2();
         let p = vary(self.v, self.e, f64::NEG_INFINITY, f64::INFINITY, f64::exp2);
-        E { v, e: p + (3.0 + 2.0 * (self.v.abs() + self.e)) * ulp(v + p) }
+        E {
+            v,
+            e: p + (3.0 + 2.0 * (self.v.abs() + self.e)) * ulp(v + p),
+        }
     }
     fn log2(self) -> E {
         let v = self.v.log2();
@@ -126,16 +148,28 @@ impl E {
         E { v, e: p + own }
     }
     fn max_c(self, c: f64) -> E {
-        E { v: self.v.max(c), e: self.e }
+        E {
+            v: self.v.max(c),
+            e: self.e,
+        }
     }
     fn min_c(self, c: f64) -> E {
-        E { v: self.v.min(c), e: self.e }
+        E {
+            v: self.v.min(c),
+            e: self.e,
+        }
     }
     fn abs(self) -> E {
-        E { v: self.v.abs(), e: self.e }
+        E {
+            v: self.v.abs(),
+            e: self.e,
+        }
     }
     fn neg(self) -> E {
-        E { v: -self.v, e: self.e }
+        E {
+            v: -self.v,
+            e: self.e,
+        }
     }
 }
 
@@ -151,7 +185,10 @@ fn dot(a: &[E], b: &[E]) -> E {
         p += x.v.abs() * y.e + y.v.abs() * x.e + x.e * y.e;
     }
     let gamma = n * U / (1.0 - n * U);
-    E { v, e: p + gamma * mag }
+    E {
+        v,
+        e: p + gamma * mag,
+    }
 }
 
 fn sum(terms: &[E]) -> E {
@@ -174,7 +211,11 @@ fn horner(coeffs: &[f64], z: E) -> E {
 /// The shader's `barrier_db`, bounded, with its method error; branches that the interval
 /// straddles are both evaluated and the worse taken. Returns (bound on |gpu - exact law|).
 fn barrier_bound(ex: E, lam: E) -> f64 {
-    let n = E { v: 2.0 * ex.v, e: 2.0 * ex.e }.div(lam);
+    let n = E {
+        v: 2.0 * ex.v,
+        e: 2.0 * ex.e,
+    }
+    .div(lam);
     let exact = |n: f64| barrier_insertion_db(n * lam.v / 2.0, lam.v);
     let series = series_coefficients();
     let x0 = (2.0 * std::f64::consts::PI * lit_zone_limit()).sqrt();
@@ -184,7 +225,15 @@ fn barrier_bound(ex: E, lam: E) -> f64 {
         let (ratio, method) = if positive {
             if xx.v < 1.0 {
                 let c: Vec<f64> = (0..=COTH_TERMS)
-                    .map(|i| if i == 0 { 1.0 } else if i % 2 == 1 { series[i - 1] } else { -series[i - 1] })
+                    .map(|i| {
+                        if i == 0 {
+                            1.0
+                        } else if i % 2 == 1 {
+                            series[i - 1]
+                        } else {
+                            -series[i - 1]
+                        }
+                    })
                     .collect();
                 let z = xx.mul(xx);
                 let p = horner(&c[1..], z).mul(z).add(E { v: 1.0, e: 0.0 });
@@ -206,7 +255,10 @@ fn barrier_bound(ex: E, lam: E) -> f64 {
             // All terms past the first are negative and fall by at least (x / pi)^2.
             let hi = (xx.v + xx.e).min(x0);
             let r2 = (hi / std::f64::consts::PI).powi(2);
-            (p, series[COT_TERMS] * hi.powi(2 * COT_TERMS as i32 + 2) / (1.0 - r2))
+            (
+                p,
+                series[COT_TERMS] * hi.powi(2 * COT_TERMS as i32 + 2) / (1.0 - r2),
+            )
         };
         let db = k(BARRIER_GRAZING_DB).add(k(20.0 * 2f64.log10()).mul(ratio.log2()));
         // d(dB)/d(ratio) = 20 / (ratio ln 10): the method error in the ratio, in dB.
@@ -221,9 +273,15 @@ fn barrier_bound(ex: E, lam: E) -> f64 {
     for (lo_in, positive) in [(n.v + n.e > 0.0, true), (n.v - n.e < 0.0, false)] {
         if lo_in {
             let probe = if positive {
-                E { v: n.v.max(n.e.max(1e-30)), e: n.e }
+                E {
+                    v: n.v.max(n.e.max(1e-30)),
+                    e: n.e,
+                }
             } else {
-                E { v: n.v.min(-n.e.max(1e-30)), e: n.e }
+                E {
+                    v: n.v.min(-n.e.max(1e-30)),
+                    e: n.e,
+                }
             };
             own = own.max(branch(probe, positive).1);
         }
@@ -256,10 +314,19 @@ struct Worst {
 
 impl Worst {
     fn see(&mut self, diff: f64, bound: f64) {
-        assert!(diff <= bound, "{}: |gpu - cpu| = {diff:e} over its bound {bound:e}", self.name);
+        assert!(
+            diff <= bound,
+            "{}: |gpu - cpu| = {diff:e} over its bound {bound:e}",
+            self.name
+        );
         let r = diff / bound;
         if r >= self.ratio {
-            *self = Worst { name: self.name, ratio: r, diff, bound };
+            *self = Worst {
+                name: self.name,
+                ratio: r,
+                diff,
+                bound,
+            };
         }
     }
 }
@@ -280,10 +347,18 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
         .unwrap();
         let yaw = rng.range(0.0, std::f64::consts::TAU);
         let listener = Listener {
-            position: [rng.range(-500.0, 500.0) as f32, rng.range(0.0, 20.0) as f32, rng.range(-500.0, 500.0) as f32],
+            position: [
+                rng.range(-500.0, 500.0) as f32,
+                rng.range(0.0, 20.0) as f32,
+                rng.range(-500.0, 500.0) as f32,
+            ],
             forward: [yaw.sin() as f32, 0.0, -yaw.cos() as f32],
             right: [yaw.cos() as f32, 0.0, yaw.sin() as f32],
-            velocity: [rng.range(-15.0, 15.0) as f32, 0.0, rng.range(-15.0, 15.0) as f32],
+            velocity: [
+                rng.range(-15.0, 15.0) as f32,
+                0.0,
+                rng.range(-15.0, 15.0) as f32,
+            ],
         };
         let curve: Vec<(f32, f32)> = if rng.unit() < 0.5 {
             Vec::new()
@@ -322,11 +397,19 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
                         l[2] + (dist * el.cos() * az.sin()) as f32,
                     ],
                     directivity: rng.range(0.0, 2.0) as f32,
-                    velocity: [rng.range(-30.0, 30.0) as f32, rng.range(-5.0, 5.0) as f32, rng.range(-30.0, 30.0) as f32],
+                    velocity: [
+                        rng.range(-30.0, 30.0) as f32,
+                        rng.range(-5.0, 5.0) as f32,
+                        rng.range(-30.0, 30.0) as f32,
+                    ],
                     tag: i,
                     excess: [ex(&mut rng), ex(&mut rng), ex(&mut rng), ex(&mut rng)],
                     probe_excess: ex(&mut rng),
-                    foliage_m: if rng.unit() < 0.3 { 0.0 } else { rng.range(0.0, 300.0) as f32 },
+                    foliage_m: if rng.unit() < 0.3 {
+                        0.0
+                    } else {
+                        rng.range(0.0, 300.0) as f32
+                    },
                     pad: [0.0; 2],
                 }
             })
@@ -341,21 +424,52 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
             mapped_at_creation: false,
         });
         let mut enc = gpu.encoder();
-        probe.encode(&mut enc, Staged { buffer: &stage, offset: 0, len: bytes.len() as u64 }, batch.len() as u32, &dst);
+        probe.encode(
+            &mut enc,
+            Staged {
+                buffer: &stage,
+                offset: 0,
+                len: bytes.len() as u64,
+            },
+            batch.len() as u32,
+            &dst,
+        );
         gpu.submit_wait(enc);
-        let got: Vec<SourceResult> = bytemuck::cast_slice(&gpu.read(&dst, 32 * batch.len() as u64)).to_vec();
+        let got: Vec<SourceResult> =
+            bytemuck::cast_slice(&gpu.read(&dst, 32 * batch.len() as u64)).to_vec();
         for (case, r) in batch.into_iter().zip(got) {
-            cases.push(Case { gpu: r, header, air, curve: curve.clone(), case });
+            cases.push(Case {
+                gpu: r,
+                header,
+                air,
+                curve: curve.clone(),
+                case,
+            });
         }
     }
     assert_eq!(cases.len(), 10_000);
 
     let mut worst = [
-        Worst { name: "gain_l", ..Default::default() },
-        Worst { name: "gain_r", ..Default::default() },
-        Worst { name: "itd_s", ..Default::default() },
-        Worst { name: "cutoff_hz", ..Default::default() },
-        Worst { name: "pitch", ..Default::default() },
+        Worst {
+            name: "gain_l",
+            ..Default::default()
+        },
+        Worst {
+            name: "gain_r",
+            ..Default::default()
+        },
+        Worst {
+            name: "itd_s",
+            ..Default::default()
+        },
+        Worst {
+            name: "cutoff_hz",
+            ..Default::default()
+        },
+        Worst {
+            name: "pitch",
+            ..Default::default()
+        },
     ];
     for c in &cases {
         let h = &c.header;
@@ -379,14 +493,22 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
                 + foliage_attenuation_db(c.case.foliage_m as f64, f);
         }
         let fit = fit_lowpass(&BANDS_HZ.map(|v| v as f64), &loss);
-        let curve: Vec<(f64, f64)> = c.curve.iter().map(|&(m, hz)| (m as f64, hz as f64)).collect();
+        let curve: Vec<(f64, f64)> = c
+            .curve
+            .iter()
+            .map(|&(m, hz)| (m as f64, hz as f64))
+            .collect();
         let cutoff64 = match cutoff_ceiling(&curve, r64) {
             Some(ceiling) => fit.cutoff_hz.min(ceiling),
             None => fit.cutoff_hz,
         };
         let ears = Ears {
             position: lf,
-            forward: [h.forward[0] as f64, h.forward[1] as f64, h.forward[2] as f64],
+            forward: [
+                h.forward[0] as f64,
+                h.forward[1] as f64,
+                h.forward[2] as f64,
+            ],
             right: right.map(|v| v as f64),
         };
         let heard = ears.hear(sf, air, PROBE_HZ as f64);
@@ -395,7 +517,11 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
             + (sf[1] - lf[1]) * right[1] as f64
             + (sf[2] - lf[2]) * right[2] as f64)
             / r64;
-        let itd64 = if beside64 >= 0.0 { heard.interaural_delay } else { -heard.interaural_delay };
+        let itd64 = if beside64 >= 0.0 {
+            heard.interaural_delay
+        } else {
+            -heard.interaural_delay
+        };
         let u = d64.map(|v| v / r64);
         let toward = vs[0] as f64 * u[0] + vs[1] as f64 * u[1] + vs[2] as f64 * u[2];
         let listener_toward = -(vl[0] as f64 * u[0] + vl[1] as f64 * u[1] + vl[2] as f64 * u[2]);
@@ -414,7 +540,13 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
         let ex = c.case.excess.map(x);
         let at32 = mirror(c, x(h.listener[3]), ex);
         let at64 = mirror(c, E { v: c64, e: 0.0 }, ex);
-        let got = [c.gpu.gain_l, c.gpu.gain_r, c.gpu.itd_s, c.gpu.cutoff_hz, c.gpu.pitch];
+        let got = [
+            c.gpu.gain_l,
+            c.gpu.gain_r,
+            c.gpu.itd_s,
+            c.gpu.cutoff_hz,
+            c.gpu.pitch,
+        ];
         for i in 0..5 {
             let input = (at32.out[i].v - at64.out[i].v).abs();
             let slack = 1e-12 * oracle[i].abs() + 1e-30;
@@ -433,9 +565,15 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
         }
         assert_eq!(c.gpu.tag(), c.case.tag);
     }
-    println!("L1 over {} cases, worst |gpu - cpu| as a share of its derived bound:", cases.len());
+    println!(
+        "L1 over {} cases, worst |gpu - cpu| as a share of its derived bound:",
+        cases.len()
+    );
     for w in &worst {
-        println!("  {:>9}: {:.3} of its bound ({:.3e} against {:.3e})", w.name, w.ratio, w.diff, w.bound);
+        println!(
+            "  {:>9}: {:.3} of its bound ({:.3e} against {:.3e})",
+            w.name, w.ratio, w.diff, w.bound
+        );
     }
 }
 
@@ -455,7 +593,11 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
     let vs = c.case.velocity;
     let vl = [h.velocity[0], h.velocity[1], h.velocity[2]];
 
-    let d = [x(l[0]).sub(x(s[0])), x(l[1]).sub(x(s[1])), x(l[2]).sub(x(s[2]))];
+    let d = [
+        x(l[0]).sub(x(s[0])),
+        x(l[1]).sub(x(s[1])),
+        x(l[2]).sub(x(s[2])),
+    ];
     let r = dot(&d, &d).sqrt();
     let spread = x(c.case.directivity).max_c(0.0).div(r.max_c(REFERENCE_M));
     let fol = x(c.case.foliage_m).max_c(0.0).min_c(FOLIAGE_MAX_CREDITED_M);
@@ -472,7 +614,10 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
         };
         loss[b] = base.add(bar);
     }
-    let y: Vec<E> = loss.iter().map(|l| l.mul(k(10f64.log2() / 10.0)).exp2()).collect();
+    let y: Vec<E> = loss
+        .iter()
+        .map(|l| l.mul(k(10f64.log2() / 10.0)).exp2())
+        .collect();
     let xs = BANDS_HZ.map(|f| (f as f64 / FIT_REFERENCE_HZ).powi(2));
     let mean = xs.iter().sum::<f64>() / 4.0;
     let sxx: f64 = xs.iter().map(|v| (v - mean).powi(2)).sum();
@@ -482,9 +627,14 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
     let a = y_mean.sub(b.mul(k(mean))).max_c(1.0);
     let g = a.inverse_sqrt();
     let mut cutoff = if b.v - b.e > 0.0 {
-        k(FIT_REFERENCE_HZ).mul(a.div(b).sqrt()).min_c(NO_LOWPASS_HZ)
+        k(FIT_REFERENCE_HZ)
+            .mul(a.div(b).sqrt())
+            .min_c(NO_LOWPASS_HZ)
     } else if b.v + b.e <= 0.0 {
-        E { v: NO_LOWPASS_HZ, e: 0.0 }
+        E {
+            v: NO_LOWPASS_HZ,
+            e: 0.0,
+        }
     } else {
         // The slope's sign is in doubt: the shader returns 20 kHz or FREF sqrt(a / b),
         // and with b under 2 e_b the latter is at least FREF sqrt(a / (2 e_b)).
@@ -493,8 +643,12 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
         } else {
             NO_LOWPASS_HZ
         };
-        let lo = (FIT_REFERENCE_HZ * ((a.v - a.e).max(1.0) / (2.0 * b.e)).sqrt()).min(NO_LOWPASS_HZ);
-        E { v, e: (v - lo).abs().max(NO_LOWPASS_HZ - lo) }
+        let lo =
+            (FIT_REFERENCE_HZ * ((a.v - a.e).max(1.0) / (2.0 * b.e)).sqrt()).min(NO_LOWPASS_HZ);
+        E {
+            v,
+            e: (v - lo).abs().max(NO_LOWPASS_HZ - lo),
+        }
     };
     if !c.curve.is_empty() {
         // Piecewise linear in distance: its steepest slope times the distance's error,
@@ -507,19 +661,36 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
                 slope = slope.max(((p[1].1 - p[0].1) as f64 / span).abs());
             }
         }
-        let pts: Vec<(f64, f64)> = c.curve.iter().map(|&(m, hz)| (m as f64, hz as f64)).collect();
+        let pts: Vec<(f64, f64)> = c
+            .curve
+            .iter()
+            .map(|&(m, hz)| (m as f64, hz as f64))
+            .collect();
         let ceil_v = cutoff_ceiling(&pts, r.v).unwrap();
-        let ceiling = E { v: ceil_v, e: slope * r.e + 10.0 * ulp(ceil_v) + slope * 10.0 * ulp(r.v) };
-        cutoff = E { v: cutoff.v.min(ceiling.v), e: cutoff.e.max(ceiling.e) };
+        let ceiling = E {
+            v: ceil_v,
+            e: slope * r.e + 10.0 * ulp(ceil_v) + slope * 10.0 * ulp(r.v),
+        };
+        cutoff = E {
+            v: cutoff.v.min(ceiling.v),
+            e: cutoff.e.max(ceiling.e),
+        };
     }
-    let sl = [x(s[0]).sub(x(l[0])), x(s[1]).sub(x(l[1])), x(s[2]).sub(x(l[2]))];
+    let sl = [
+        x(s[0]).sub(x(l[0])),
+        x(s[1]).sub(x(l[1])),
+        x(s[2]).sub(x(l[2])),
+    ];
     let beside = dot(&sl, &right.map(x)).div(r);
     let ab = beside.abs().min_c(1.0);
     // asin by A&S 4.4.46, as the shader evaluates it, plus the approximation's own 2e-8.
     let p = horner(&ASIN_COEFFICIENTS, ab);
     let one = E { v: 1.0, e: 0.0 };
     let lat = k(std::f64::consts::FRAC_PI_2).sub(one.sub(ab).sqrt().mul(p));
-    let lateral = E { v: ab.v.asin(), e: lat.e + ASIN_ERROR + (lat.v - ab.v.asin()).abs() };
+    let lateral = E {
+        v: ab.v.asin(),
+        e: lat.e + ASIN_ERROR + (lat.v - ab.v.asin()).abs(),
+    };
     let itd_mag = k(HEAD_RADIUS_M).mul(lateral.add(ab)).div(c_e);
     let far = one.sub(k(shadow_k()).mul(beside.abs())).max_c(0.0);
     let right_side = beside.v >= 0.0;
@@ -530,7 +701,10 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
     let toward = dot(&vs.map(x), &d).div(r);
     let lt = dot(&vl.map(x), &d.map(|v| v.neg())).div(r);
     let lim = k(DOPPLER_MAX_CLOSING).mul(c_e);
-    let closing = E { v: toward.v.clamp(-lim.v, lim.v), e: toward.e.max(lim.e) };
+    let closing = E {
+        v: toward.v.clamp(-lim.v, lim.v),
+        e: toward.e.max(lim.e),
+    };
     let pitch = c_e.add(lt).div(c_e.sub(closing));
 
     let doubt = beside.v.abs() <= beside.e;
@@ -540,7 +714,10 @@ fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
     } else {
         [0.0; 5]
     };
-    Mirrored { out: [gl, gr, itd, cutoff, pitch], flip }
+    Mirrored {
+        out: [gl, gr, itd, cutoff, pitch],
+        flip,
+    }
 }
 
 /// The largest signed excess over the terrain columns between `s` and `l`, in f64: every
@@ -563,9 +740,15 @@ fn terrain_edge(scene: &Scene, s: [f64; 3], l: [f64; 3]) -> f64 {
     let signed = |t: f64, h: f64| {
         let p = [s[0] + t * d[0], s[1] + t * d[1], s[2] + t * d[2]];
         let q = [p[0], h, p[2]];
-        let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let dist = |a: [f64; 3], b: [f64; 3]| {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
         let e = dist(q, s) + dist(l, q) - dist(l, s);
-        if h > p[1] { e } else { -e }
+        if h > p[1] {
+            e
+        } else {
+            -e
+        }
     };
     let mut best = f64::MIN;
     for w in cuts.windows(2) {
@@ -574,13 +757,19 @@ fn terrain_edge(scene: &Scene, s: [f64; 3], l: [f64; 3]) -> f64 {
             continue;
         }
         let m = 0.5 * (t0 + t1);
-        let Some(h) = scene.height_at(s[0] + m * d[0], s[2] + m * d[2]) else { continue };
+        let Some(h) = scene.height_at(s[0] + m * d[0], s[2] + m * d[2]) else {
+            continue;
+        };
         best = best.max(signed(t0, h)).max(signed(t1, h));
         let g = (5f64.sqrt() - 1.0) / 2.0;
         let (mut a, mut b) = (t0, t1);
         for _ in 0..100 {
             let (c, dd) = (b - g * (b - a), a + g * (b - a));
-            if signed(c, h) > signed(dd, h) { b = dd } else { a = c }
+            if signed(c, h) > signed(dd, h) {
+                b = dd
+            } else {
+                a = c
+            }
         }
         best = best.max(signed(0.5 * (a + b), h));
     }
@@ -623,13 +812,17 @@ fn l13_a_source_walking_over_a_crest_does_not_click() {
         [x, ridge(x) + 1.0, 110.0]
     };
     let steps = ((130.0 - 80.0) / step) as usize;
-    let positions: Vec<[f32; 3]> = (0..=steps).map(|k| at(k as f64).map(|v| v as f32)).collect();
+    let positions: Vec<[f32; 3]> = (0..=steps)
+        .map(|k| at(k as f64).map(|v| v as f32))
+        .collect();
     let mut gpu_out: Vec<SourceResult> = Vec::new();
     for chunk in positions.chunks(MAX_SOURCES as usize) {
         let sources: Vec<Source> = chunk
             .iter()
             .enumerate()
-            .map(|(i, p)| Source::new(*p, 1.0, [speed as f32, 0.0, 0.0], i as u32, NO_MOVER).unwrap())
+            .map(|(i, p)| {
+                Source::new(*p, 1.0, [speed as f32, 0.0, 0.0], i as u32, NO_MOVER).unwrap()
+            })
             .collect();
         let out = dispatch(&gpu, &mut ac, &header, &sources, &[]);
         gpu_out.extend_from_slice(out.results());
@@ -646,9 +839,16 @@ fn l13_a_source_walking_over_a_crest_does_not_click() {
             loss[b] = air.absorption_db_per_m(f) * r + barrier_insertion_db(e, c64 / f);
         }
         let fit = fit_lowpass(&BANDS_HZ.map(|v| v as f64), &loss);
-        let pts: Vec<(f64, f64)> = ladder.iter().map(|&(m, hz)| (m as f64, hz as f64)).collect();
+        let pts: Vec<(f64, f64)> = ladder
+            .iter()
+            .map(|&(m, hz)| (m as f64, hz as f64))
+            .collect();
         let cutoff = fit.cutoff_hz.min(cutoff_ceiling(&pts, r).unwrap());
-        let ears = Ears { position: l, forward: [0.0, 0.0, -1.0], right: [1.0, 0.0, 0.0] };
+        let ears = Ears {
+            position: l,
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+        };
         let heard = ears.hear(p, &air, PROBE_HZ as f64);
         let g = spreading_gain(r, 1.0) * fit.gain;
         [g * heard.left_gain, g * heard.right_gain, cutoff]
@@ -659,7 +859,11 @@ fn l13_a_source_walking_over_a_crest_does_not_click() {
         let p = p32.map(|v| v as f64);
         let e = terrain_edge(&scene, p, l);
         let len = ((l[0] - p[0]).powi(2) + (l[1] - p[1]).powi(2) + (l[2] - p[2]).powi(2)).sqrt();
-        let mag = p.iter().chain(l.iter()).map(|v| v.abs()).fold(0.0, f64::max);
+        let mag = p
+            .iter()
+            .chain(l.iter())
+            .map(|v| v.abs())
+            .fold(0.0, f64::max);
         let dt = [(p[0], l[0] - p[0], 280.0), (p[2], l[2] - p[2], 200.0)]
             .iter()
             .map(|&(o, dd, hi): &(f64, f64, f64)| 4.0 * U * (hi + o.abs()) / dd.abs().max(1e-300))
@@ -670,7 +874,16 @@ fn l13_a_source_walking_over_a_crest_does_not_click() {
             header,
             air,
             curve: ladder.to_vec(),
-            case: LawCase { source: p32, directivity: 1.0, velocity: [speed as f32, 0.0, 0.0], tag: 0, excess: [e as f32; 4], probe_excess: e as f32, foliage_m: 0.0, pad: [0.0; 2] },
+            case: LawCase {
+                source: p32,
+                directivity: 1.0,
+                velocity: [speed as f32, 0.0, 0.0],
+                tag: 0,
+                excess: [e as f32; 4],
+                probe_excess: e as f32,
+                foliage_m: 0.0,
+                pad: [0.0; 2],
+            },
         };
         let ex = [E { v: e, e: e3 }; 4];
         let m32 = mirror(&case, x(header.listener[3]), ex);
@@ -692,11 +905,18 @@ fn l13_a_source_walking_over_a_crest_does_not_click() {
             prev = next;
         }
         let g0 = [gpu_out[k].gain_l, gpu_out[k].gain_r, gpu_out[k].cutoff_hz];
-        let g1 = [gpu_out[k + 1].gain_l, gpu_out[k + 1].gain_r, gpu_out[k + 1].cutoff_hz];
+        let g1 = [
+            gpu_out[k + 1].gain_l,
+            gpu_out[k + 1].gain_r,
+            gpu_out[k + 1].cutoff_hz,
+        ];
         for o in 0..3 {
             let moved = (g1[o] as f64 - g0[o] as f64).abs();
             let allowed = slope[o] * step + bounds[k][o] + bounds[k + 1][o];
-            assert!(moved <= allowed, "step {k}, output {o}: moved {moved:e}, the law allows {allowed:e}");
+            assert!(
+                moved <= allowed,
+                "step {k}, output {o}: moved {moved:e}, the law allows {allowed:e}"
+            );
             worst[o] = worst[o].max(moved / allowed);
             largest_step[o] = largest_step[o].max(moved);
         }

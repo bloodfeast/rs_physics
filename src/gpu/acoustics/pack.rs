@@ -255,7 +255,10 @@ pub(crate) fn static_range(
     let r = &obb.rows;
     let finite = r.iter().all(|row| row.iter().all(|v| v.is_finite()));
     if !finite || !obb.half_width.is_finite() {
-        return Err(AcousticsError::Static { index, why: "non-finite transform" });
+        return Err(AcousticsError::Static {
+            index,
+            why: "non-finite transform",
+        });
     }
     let (cx, cz) = (r[0][3] as f64, r[2][3] as f64);
     let hx = 0.5 * (r[0][0].abs() + r[0][1].abs() + r[0][2].abs()) as f64 + BIN_MARGIN_M;
@@ -267,13 +270,24 @@ pub(crate) fn static_range(
     let r0 = ((cz - hz - oz) / cell).floor();
     let r1 = ((cz + hz - oz) / cell).floor();
     if c1 < 0.0 || r1 < 0.0 || c0 >= cols as f64 || r0 >= rows as f64 {
-        return Err(AcousticsError::Static { index, why: "outside the terrain grid" });
+        return Err(AcousticsError::Static {
+            index,
+            why: "outside the terrain grid",
+        });
     }
     let clamp = |v: f64, n: u32| v.max(0.0).min((n - 1) as f64) as u32;
-    let range = [clamp(c0, cols), clamp(r0, rows), clamp(c1, cols), clamp(r1, rows)];
+    let range = [
+        clamp(c0, cols),
+        clamp(r0, rows),
+        clamp(c1, cols),
+        clamp(r1, rows),
+    ];
     let area = (range[2] - range[0] + 1) as u64 * (range[3] - range[1] + 1) as u64;
     if area > MAX_CELLS_PER_STATIC as u64 {
-        return Err(AcousticsError::Static { index, why: "covers more than 4,096 cells" });
+        return Err(AcousticsError::Static {
+            index,
+            why: "covers more than 4,096 cells",
+        });
     }
     Ok(range)
 }
@@ -298,7 +312,9 @@ pub(crate) fn layout(
         return Err(AcousticsError::Shape("terrain slices are not cols x rows"));
     }
     if cells > 0 && !(terrain.cell_m > 0.0 && terrain.cell_m.is_finite()) {
-        return Err(AcousticsError::Shape("cell size must be positive and finite"));
+        return Err(AcousticsError::Shape(
+            "cell size must be positive and finite",
+        ));
     }
     if !terrain.origin.iter().all(|v| v.is_finite()) {
         return Err(AcousticsError::Shape("terrain origin must be finite"));
@@ -318,10 +334,16 @@ pub(crate) fn layout(
     let mut list_len: u64 = 0;
     for (i, s) in statics.iter().enumerate() {
         if s.material >= materials {
-            return Err(AcousticsError::Material { index: s.material, len: materials });
+            return Err(AcousticsError::Material {
+                index: s.material,
+                len: materials,
+            });
         }
         if cells == 0 {
-            return Err(AcousticsError::Static { index: i as u32, why: "outside the terrain grid" });
+            return Err(AcousticsError::Static {
+                index: i as u32,
+                why: "outside the terrain grid",
+            });
         }
         let r = static_range(i as u32, s, cols, rows, terrain.cell_m, terrain.origin)?;
         list_len += (r[2] - r[0] + 1) as u64 * (r[3] - r[1] + 1) as u64;
@@ -381,9 +403,17 @@ pub(crate) fn layout(
     h[H_OFF_PYR..H_OFF_PYR + 3].copy_from_slice(&pyr);
     h[H_PYR_DIMS..H_PYR_DIMS + 6].copy_from_slice(&dims);
     h[H_LIST_LEN] = list_len as u32;
-    h[H_INV_CELL] = if cells > 0 { (1.0 / terrain.cell_m).to_bits() } else { 0 };
+    h[H_INV_CELL] = if cells > 0 {
+        (1.0 / terrain.cell_m).to_bits()
+    } else {
+        0
+    };
     h[H_RECT..H_RECT + 4].copy_from_slice(&[0, 0, cols, rows]);
-    Ok(SceneLayout { header: h, staged_words, total_words })
+    Ok(SceneLayout {
+        header: h,
+        staged_words,
+        total_words,
+    })
 }
 
 /// Where packed bytes go: a CPU slice, or mapped staging memory lent as a
@@ -409,16 +439,24 @@ pub(crate) fn pack_scene(
 ) -> Result<(), AcousticsError> {
     let again = self::layout(terrain, statics, materials.len() as u32, foliage)?;
     if again != *layout {
-        return Err(AcousticsError::Shape("the layout was made for a different scene"));
+        return Err(AcousticsError::Shape(
+            "the layout was made for a different scene",
+        ));
     }
     let need = layout.staged_bytes() as usize;
     if out.len() < need {
-        return Err(AcousticsError::OutputTooSmall { need, got: out.len() });
+        return Err(AcousticsError::OutputTooSmall {
+            need,
+            got: out.len(),
+        });
     }
     for (b, &m) in terrain.material.iter().enumerate() {
         if m as usize >= materials.len() {
             let _ = b;
-            return Err(AcousticsError::Material { index: m as u32, len: materials.len() as u32 });
+            return Err(AcousticsError::Material {
+                index: m as u32,
+                len: materials.len() as u32,
+            });
         }
     }
     let out = &mut out;
@@ -432,8 +470,19 @@ pub(crate) fn pack_scene(
     }
     put_bytes_as_words(out, h[H_OFF_STATICS], bytemuck::cast_slice(statics));
     for (i, s) in statics.iter().enumerate() {
-        let r = static_range(i as u32, s, terrain.cols, terrain.rows, terrain.cell_m, terrain.origin)?;
-        put_bytes_as_words(out, h[H_OFF_RANGES] + 4 * i as u32, bytemuck::cast_slice(&r));
+        let r = static_range(
+            i as u32,
+            s,
+            terrain.cols,
+            terrain.rows,
+            terrain.cell_m,
+            terrain.origin,
+        )?;
+        put_bytes_as_words(
+            out,
+            h[H_OFF_RANGES] + 4 * i as u32,
+            bytemuck::cast_slice(&r),
+        );
     }
     put_bytes_as_words(out, h[H_OFF_MATERIALS], bytemuck::cast_slice(materials));
     Ok(())
@@ -468,18 +517,24 @@ pub(crate) fn pack_terrain_rect(
 ) -> Result<usize, AcousticsError> {
     let n = rect.cols as usize * rect.rows as usize;
     if heights.len() != n || n == 0 {
-        return Err(AcousticsError::Shape("rect heights are not cols x rows, or empty"));
+        return Err(AcousticsError::Shape(
+            "rect heights are not cols x rows, or empty",
+        ));
     }
     if !heights.iter().all(|h| h.is_finite()) {
         return Err(AcousticsError::Shape("heights must be finite"));
     }
     let need = terrain_rect_bytes(rect);
     if out.len() < need {
-        return Err(AcousticsError::OutputTooSmall { need, got: out.len() });
+        return Err(AcousticsError::OutputTooSmall {
+            need,
+            got: out.len(),
+        });
     }
     let head = [rect.col, rect.row, rect.cols, rect.rows];
     out.slice(..16).copy_from_slice(bytemuck::cast_slice(&head));
-    out.slice(16..need).copy_from_slice(bytemuck::cast_slice(heights));
+    out.slice(16..need)
+        .copy_from_slice(bytemuck::cast_slice(heights));
     Ok(need)
 }
 
@@ -541,7 +596,10 @@ pub(crate) fn pack_dispatch(
     }
     let need = dispatch_bytes(sources.len(), movers.len());
     if out.len() < need {
-        return Err(AcousticsError::OutputTooSmall { need, got: out.len() });
+        return Err(AcousticsError::OutputTooSmall {
+            need,
+            got: out.len(),
+        });
     }
     let mut h = *header;
     h.counts[0] = sources.len() as u32;
@@ -549,8 +607,10 @@ pub(crate) fn pack_dispatch(
     let head = HEADER_BYTES as usize;
     out.slice(..head).copy_from_slice(bytemuck::bytes_of(&h));
     let src_end = head + 32 * sources.len();
-    out.slice(head..src_end).copy_from_slice(bytemuck::cast_slice(sources));
-    out.slice(src_end..need).copy_from_slice(bytemuck::cast_slice(movers));
+    out.slice(head..src_end)
+        .copy_from_slice(bytemuck::cast_slice(sources));
+    out.slice(src_end..need)
+        .copy_from_slice(bytemuck::cast_slice(movers));
     Ok(DispatchShape {
         bytes: need as u64,
         sources: sources.len() as u32,

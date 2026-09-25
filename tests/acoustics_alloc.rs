@@ -62,27 +62,55 @@ fn l7_the_acoustics_allocate_nothing_of_their_own_per_tick() {
     let mut ac = GpuAcoustics::new(&gpu.device, AcousticLimits::MAX).unwrap();
     let mut scene = Scene::flat(140, 100, 2.0, 0.0);
     scene.statics = (0..200)
-        .map(|i| Obb::upright([5.0 + (i % 20) as f32 * 13.0, 2.0, 5.0 + (i / 20) as f32 * 19.0], [3.0, 4.0, 2.0], i as f32, 0))
+        .map(|i| {
+            Obb::upright(
+                [
+                    5.0 + (i % 20) as f32 * 13.0,
+                    2.0,
+                    5.0 + (i / 20) as f32 * 19.0,
+                ],
+                [3.0, 4.0, 2.0],
+                i as f32,
+                0,
+            )
+        })
         .collect();
     scene.load(&gpu, &mut ac);
     let air = Air::standard();
     let header = DispatchHeader::new(&listener_at([140.0, 1.6, 100.0]), &air, &[]).unwrap();
     let sources: Vec<Source> = (0..40)
-        .map(|i| Source::new([60.0 + 4.0 * i as f32, 1.0, 40.0 + 2.0 * i as f32], 1.0, [3.0, 0.0, 0.0], i, NO_MOVER).unwrap())
+        .map(|i| {
+            Source::new(
+                [60.0 + 4.0 * i as f32, 1.0, 40.0 + 2.0 * i as f32],
+                1.0,
+                [3.0, 0.0, 0.0],
+                i,
+                NO_MOVER,
+            )
+            .unwrap()
+        })
         .collect();
-    let movers: Vec<Obb> = (0..64).map(|i| Obb::upright([20.0 + 3.0 * i as f32, 1.5, 150.0], [2.5, 3.0, 5.0], 0.0, 0)).collect();
+    let movers: Vec<Obb> = (0..64)
+        .map(|i| Obb::upright([20.0 + 3.0 * i as f32, 1.5, 150.0], [2.5, 3.0, 5.0], 0.0, 0))
+        .collect();
     let mut bytes = vec![0u8; dispatch_bytes(sources.len(), movers.len())];
     let mut out = TickResults::default();
 
     // Packing: zero, every time.
     for _ in 0..3 {
-        let (shape, n) = counted(|| GpuAcoustics::pack_dispatch(&header, &sources, &movers, &mut bytes[..]).unwrap());
+        let (shape, n) = counted(|| {
+            GpuAcoustics::pack_dispatch(&header, &sources, &movers, &mut bytes[..]).unwrap()
+        });
         assert_eq!(n, 0, "pack_dispatch allocated");
         assert_eq!(shape.bytes as usize, bytes.len());
     }
     let shape = GpuAcoustics::pack_dispatch(&header, &sources, &movers, &mut bytes[..]).unwrap();
     let stage = gpu.stage(&bytes);
-    let staged = Staged { buffer: &stage, offset: 0, len: shape.bytes };
+    let staged = Staged {
+        buffer: &stage,
+        offset: 0,
+        len: shape.bytes,
+    };
 
     // The control records what encode records, by hand: a copy in, a pass with two
     // dispatches of a trivial pipeline over three storage bindings, a copy out, and one
@@ -94,12 +122,14 @@ fn l7_the_acoustics_allocate_nothing_of_their_own_per_tick() {
     let (mut encode_n, mut take_n) = (0u64, 0u64);
     for f in 0..(frames + 8) {
         let warm = f >= 8; // the first frames grow wgpu's own pools
-        // With the acoustics.
+                           // With the acoustics.
         let (_, n) = counted(|| {
             let mut enc = gpu.encoder();
             let (_, e) = counted_inner(|| ac.encode(&mut enc, staged, shape).unwrap());
             gpu.queue.submit([enc.finish()]);
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
             let (taken, t) = counted_inner(|| ac.take_ready(&mut out));
             assert!(taken);
             (e, t)
@@ -108,14 +138,18 @@ fn l7_the_acoustics_allocate_nothing_of_their_own_per_tick() {
         let (_, b) = counted(|| {
             let enc = gpu.encoder();
             gpu.queue.submit([enc.finish()]);
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
         });
         // Control: the same wgpu commands by hand.
         let (_, c) = counted(|| {
             let mut enc = gpu.encoder();
             control.record(&mut enc, staged);
             gpu.queue.submit([enc.finish()]);
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
             control.unmap();
         });
         if warm {
@@ -132,7 +166,9 @@ fn l7_the_acoustics_allocate_nothing_of_their_own_per_tick() {
         let (_, c) = counted(|| control.record(&mut enc, staged));
         let (_, fin) = counted(|| enc.finish());
         println!("encode {e}, control record {c}, finish {fin}");
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
     }
     // take_ready on its own: a copy out and an unmap.
     let mut enc = gpu.encoder();
@@ -149,7 +185,10 @@ fn l7_the_acoustics_allocate_nothing_of_their_own_per_tick() {
         (with as f64 - bare as f64) / frames as f64,
         (with as f64 - ctrl as f64) / frames as f64,
     );
-    assert!(with <= ctrl, "the acoustics allocated beyond the wgpu commands they record");
+    assert!(
+        with <= ctrl,
+        "the acoustics allocated beyond the wgpu commands they record"
+    );
 }
 
 /// Counting inside `counted` without resetting the outer count.
@@ -173,13 +212,21 @@ struct Control {
 impl Control {
     fn new(device: &wgpu::Device) -> Control {
         let buf = |size: u64, usage| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
         };
         let storage = wgpu::BufferUsages::STORAGE;
         let input = buf(16_384, storage | wgpu::BufferUsages::COPY_DST);
         let output = buf(16_384, storage | wgpu::BufferUsages::COPY_SRC);
         let scene = buf(1024, storage);
-        let slot = buf(READBACK_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let slot = buf(
+            READBACK_BYTES,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(
@@ -234,18 +281,39 @@ impl Control {
             label: None,
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: scene.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: scene.as_entire_binding(),
+                },
             ],
         });
-        Control { input, output, scene, slot, pipeline, second, group, state: Default::default() }
+        Control {
+            input,
+            output,
+            scene,
+            slot,
+            pipeline,
+            second,
+            group,
+            state: Default::default(),
+        }
     }
 
     fn record(&self, enc: &mut wgpu::CommandEncoder, staged: Staged<'_>) {
         enc.copy_buffer_to_buffer(staged.buffer, staged.offset, &self.input, 0, staged.len);
         {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
             pass.set_bind_group(0, &self.group, &[]);
             pass.set_pipeline(&self.pipeline);
             pass.dispatch_workgroups(40, 1, 1);

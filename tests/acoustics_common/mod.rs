@@ -28,12 +28,20 @@ pub fn gpu() -> Option<Gpu> {
     let timing = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("acoustics oracles"),
-        required_features: if timing { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() },
+        required_features: if timing {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        },
         required_limits: wgpu::Limits::default(),
         ..Default::default()
     }))
     .ok()?;
-    Some(Gpu { device, queue, timing })
+    Some(Gpu {
+        device,
+        queue,
+        timing,
+    })
 }
 
 impl Gpu {
@@ -60,7 +68,9 @@ impl Gpu {
 
     pub fn submit_wait(&self, enc: wgpu::CommandEncoder) {
         self.queue.submit([enc.finish()]);
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
     }
 
     pub fn read(&self, src: &wgpu::Buffer, len: u64) -> Vec<u8> {
@@ -74,7 +84,9 @@ impl Gpu {
         enc.copy_buffer_to_buffer(src, 0, &dst, 0, len);
         self.submit_wait(enc);
         dst.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let out = dst.slice(..).get_mapped_range().unwrap().to_vec();
         dst.unmap();
         out
@@ -107,7 +119,9 @@ impl Scene {
             cell,
             origin: [0.0, 0.0],
             statics: Vec::new(),
-            materials: vec![AcousticMaterial { reflection: [0.9, 0.8, 0.7, 0.6] }],
+            materials: vec![AcousticMaterial {
+                reflection: [0.9, 0.8, 0.7, 0.6],
+            }],
         }
     }
 
@@ -154,7 +168,15 @@ impl Scene {
         let stage = gpu.stage(&bytes);
         let mut enc = gpu.encoder();
         acoustics
-            .encode_scene(&mut enc, &layout, Staged { buffer: &stage, offset: 0, len: layout.staged_bytes() })
+            .encode_scene(
+                &mut enc,
+                &layout,
+                Staged {
+                    buffer: &stage,
+                    offset: 0,
+                    len: layout.staged_bytes(),
+                },
+            )
             .unwrap();
         gpu.submit_wait(enc);
         layout
@@ -162,7 +184,12 @@ impl Scene {
 }
 
 pub fn listener_at(p: [f32; 3]) -> Listener {
-    Listener { position: p, forward: [0.0, 0.0, -1.0], right: [1.0, 0.0, 0.0], velocity: [0.0; 3] }
+    Listener {
+        position: p,
+        forward: [0.0, 0.0, -1.0],
+        right: [1.0, 0.0, 0.0],
+        velocity: [0.0; 3],
+    }
 }
 
 /// Pack, record, submit, wait, and take the results of one dispatch.
@@ -177,11 +204,24 @@ pub fn dispatch(
     let shape = GpuAcoustics::pack_dispatch(header, sources, movers, &mut bytes[..]).unwrap();
     let stage = gpu.stage(&bytes);
     let mut enc = gpu.encoder();
-    let e = acoustics.encode(&mut enc, Staged { buffer: &stage, offset: 0, len: shape.bytes }, shape).unwrap();
+    let e = acoustics
+        .encode(
+            &mut enc,
+            Staged {
+                buffer: &stage,
+                offset: 0,
+                len: shape.bytes,
+            },
+            shape,
+        )
+        .unwrap();
     assert!(matches!(e, Encoded::Dispatched { .. }), "{e:?}");
     gpu.submit_wait(enc);
     let mut out = TickResults::default();
-    assert!(acoustics.take_ready(&mut out), "no result was ready after a waited submit");
+    assert!(
+        acoustics.take_ready(&mut out),
+        "no result was ready after a waited submit"
+    );
     out
 }
 

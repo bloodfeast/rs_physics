@@ -27,10 +27,15 @@ fn terrains() -> Vec<(&'static str, Scene)> {
     for r in 0..100usize {
         for c in 0..140usize {
             let (x, z) = (c as f64 * 2.0, r as f64 * 2.0);
-            hills.heights[r * 140 + c] =
-                (4.0 * (x / 37.0).sin() * (z / 23.0).cos() + 2.0 * (x / 11.0 + z / 17.0).sin()) as f32;
+            hills.heights[r * 140 + c] = (4.0 * (x / 37.0).sin() * (z / 23.0).cos()
+                + 2.0 * (x / 11.0 + z / 17.0).sin())
+                as f32;
             let band = ((x + 0.3 * z) / 40.0).floor() as i64;
-            ridges.heights[r * 140 + c] = if band % 2 == 0 { 0.0 } else { 3.0 + (band % 3) as f32 * 2.5 };
+            ridges.heights[r * 140 + c] = if band % 2 == 0 {
+                0.0
+            } else {
+                3.0 + (band % 3) as f32 * 2.5
+            };
             rough.heights[r * 140 + c] = (rng.range(0.0, 1.5) + 2.0 * (x / 60.0).sin()) as f32;
         }
     }
@@ -51,7 +56,11 @@ fn random_box(rng: &mut Rng, scene: &Scene, big: bool) -> Obb {
     let z = rng.range(10.0, 190.0);
     let ground = scene.height_at(x, z).unwrap();
     // One in six floats, like a dropship at cruise.
-    let lift = if rng.unit() < 1.0 / 6.0 { rng.range(3.0, 10.0) } else { 0.0 };
+    let lift = if rng.unit() < 1.0 / 6.0 {
+        rng.range(3.0, 10.0)
+    } else {
+        0.0
+    };
     Obb::upright(
         [x as f32, (ground + lift + h / 2.0) as f32, z as f32],
         [w as f32, h as f32, d as f32],
@@ -70,18 +79,38 @@ struct Col {
 
 fn col(o: &Obb) -> Col {
     let r = o.rows.map(|row| row.map(|v| v as f64));
-    let a = [[r[0][0], r[0][1], r[0][2]], [r[1][0], r[1][1], r[1][2]], [r[2][0], r[2][1], r[2][2]]];
-    let cross = |p: [f64; 3], q: [f64; 3]| [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+    let a = [
+        [r[0][0], r[0][1], r[0][2]],
+        [r[1][0], r[1][1], r[1][2]],
+        [r[2][0], r[2][1], r[2][2]],
+    ];
+    let cross = |p: [f64; 3], q: [f64; 3]| {
+        [
+            p[1] * q[2] - p[2] * q[1],
+            p[2] * q[0] - p[0] * q[2],
+            p[0] * q[1] - p[1] * q[0],
+        ]
+    };
     let (c0, c1, c2) = (cross(a[1], a[2]), cross(a[2], a[0]), cross(a[0], a[1]));
     let det = a[0][0] * c0[0] + a[0][1] * c0[1] + a[0][2] * c0[2];
     let t = [r[0][3], r[1][3], r[2][3]];
     let mut inv = [[0.0; 4]; 3];
     for i in 0..3 {
         let row = [c0[i] / det, c1[i] / det, c2[i] / det];
-        inv[i] = [row[0], row[1], row[2], -(row[0] * t[0] + row[1] * t[1] + row[2] * t[2])];
+        inv[i] = [
+            row[0],
+            row[1],
+            row[2],
+            -(row[0] * t[0] + row[1] * t[1] + row[2] * t[2]),
+        ];
     }
     let half_y = 0.5 * (r[1][0].abs() + r[1][1].abs() + r[1][2].abs());
-    Col { inv, top: r[1][3] + half_y, bottom: r[1][3] - half_y, half_width: o.half_width as f64 }
+    Col {
+        inv,
+        top: r[1][3] + half_y,
+        bottom: r[1][3] - half_y,
+        half_width: o.half_width as f64,
+    }
 }
 
 fn local(inv: &[[f64; 4]; 3], p: [f64; 3], w: f64) -> [f64; 3] {
@@ -108,11 +137,21 @@ fn crossing(c: &Col, s: [f64; 3], d: [f64; 3]) -> Option<(f64, f64)> {
 }
 
 fn excess(s: [f64; 3], l: [f64; 3], t: f64, h: f64) -> f64 {
-    let p = [s[0] + t * (l[0] - s[0]), s[1] + t * (l[1] - s[1]), s[2] + t * (l[2] - s[2])];
-    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let p = [
+        s[0] + t * (l[0] - s[0]),
+        s[1] + t * (l[1] - s[1]),
+        s[2] + t * (l[2] - s[2]),
+    ];
+    let dist = |a: [f64; 3], b: [f64; 3]| {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    };
     let q = [p[0], h, p[2]];
     let e = dist(q, s) + dist(l, q) - dist(l, s);
-    if h > p[1] { e } else { -e }
+    if h > p[1] {
+        e
+    } else {
+        -e
+    }
 }
 
 /// The largest signed excess over [t0, t1] at height h: samples every `step_t`, the ends,
@@ -155,7 +194,14 @@ struct CpuEdges {
     dt: f64,
 }
 
-fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, step_m: f64) -> CpuEdges {
+fn cpu_edges(
+    scene: &Scene,
+    cols: &[Col],
+    s32: [f32; 3],
+    l32: [f32; 3],
+    c: f64,
+    step_m: f64,
+) -> CpuEdges {
     let s = s32.map(|v| v as f64);
     let l = l32.map(|v| v as f64);
     let d = [l[0] - s[0], l[1] - s[1], l[2] - s[2]];
@@ -184,7 +230,10 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
     }
     if c0 < c1 {
         let mut cuts = vec![c0, c1];
-        for (o, dd, origin, n, mag) in [(s[0], d[0], ox, scene.cols, hx.abs().max(ox.abs())), (s[2], d[2], oz, scene.rows, hz.abs().max(oz.abs()))] {
+        for (o, dd, origin, n, mag) in [
+            (s[0], d[0], ox, scene.cols, hx.abs().max(ox.abs())),
+            (s[2], d[2], oz, scene.rows, hz.abs().max(oz.abs())),
+        ] {
             if dd.abs() > 1e-300 {
                 for k in 0..=n {
                     let t = (origin + k as f64 * cell - o) / dd;
@@ -222,7 +271,9 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
     }
     lams[4] = c / PROBE_HZ as f64;
     for cc in cols {
-        let Some((ta, tb)) = crossing(cc, s, d) else { continue };
+        let Some((ta, tb)) = crossing(cc, s, d) else {
+            continue;
+        };
         let (ya, yb) = (s[1] + ta * d[1], s[1] + tb * d[1]);
         if ya < cc.bottom && yb < cc.bottom {
             if (ya - cc.bottom).abs() < 1e-3 || (yb - cc.bottom).abs() < 1e-3 {
@@ -236,7 +287,8 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
         let dl = local(&cc.inv, d, 0.0);
         for k in [0, 2] {
             if dl[k].abs() > 1e-300 {
-                let mag: f64 = cc.inv[k].iter().map(|v| v.abs()).sum::<f64>() * (1.0 + s.iter().map(|v| v.abs()).sum::<f64>());
+                let mag: f64 = cc.inv[k].iter().map(|v| v.abs()).sum::<f64>()
+                    * (1.0 + s.iter().map(|v| v.abs()).sum::<f64>());
                 dt = dt.max(8.0 * U * mag / dl[k].abs());
             }
         }
@@ -254,12 +306,23 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
             }
         }
     }
-    CpuEdges { edges, ambiguous, short, dt }
+    CpuEdges {
+        edges,
+        ambiguous,
+        short,
+        dt,
+    }
 }
 
 /// A march at `step` metres plus every cell boundary: blocked at the probe band, and the
 /// least clearance with the local height step there.
-fn cpu_blocked(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64) -> (bool, f64, f64) {
+fn cpu_blocked(
+    scene: &Scene,
+    cols: &[Col],
+    s32: [f32; 3],
+    l32: [f32; 3],
+    c: f64,
+) -> (bool, f64, f64) {
     let s = s32.map(|v| v as f64);
     let l = l32.map(|v| v as f64);
     let d = [l[0] - s[0], l[1] - s[1], l[2] - s[2]];
@@ -294,7 +357,10 @@ fn cpu_blocked(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64
                 let cj = (p[2] / cell).floor() as i64;
                 let mut step: f64 = 0.0;
                 for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
-                    if let Some(hn) = scene.height_at(((ci + di) as f64 + 0.5) * cell, ((cj + dj) as f64 + 0.5) * cell) {
+                    if let Some(hn) = scene.height_at(
+                        ((ci + di) as f64 + 0.5) * cell,
+                        ((cj + dj) as f64 + 0.5) * cell,
+                    ) {
                         step = step.max((hn - h).abs());
                     }
                 }
@@ -302,7 +368,9 @@ fn cpu_blocked(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64
             }
         }
         for cc in cols {
-            let Some((ta, tb)) = crossing(cc, s, d) else { continue };
+            let Some((ta, tb)) = crossing(cc, s, d) else {
+                continue;
+            };
             if t < ta || t > tb {
                 continue;
             }
@@ -341,13 +409,17 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
     let (mut l2_pairs, mut l2_counted, mut l2_blocked) = (0usize, 0usize, 0usize);
     for (name, mut scene) in terrains() {
         let mut ac = GpuAcoustics::new(&gpu.device, AcousticLimits::MAX).unwrap();
-        scene.statics = (0..40).map(|_| random_box(&mut rng, &scene, true)).collect();
+        scene.statics = (0..40)
+            .map(|_| random_box(&mut rng, &scene, true))
+            .collect();
         scene.load(&gpu, &mut ac);
         let static_cols: Vec<Col> = scene.statics.iter().map(col).collect();
         let (mut t_name_pairs, mut t_asserted) = (0usize, 0usize);
         for _round in 0..6 {
             let listener = random_point(&mut rng, &scene);
-            let movers: Vec<Obb> = (0..MAX_MOVERS).map(|_| random_box(&mut rng, &scene, false)).collect();
+            let movers: Vec<Obb> = (0..MAX_MOVERS)
+                .map(|_| random_box(&mut rng, &scene, false))
+                .collect();
             let sources: Vec<Source> = (0..MAX_SOURCES)
                 .map(|i| {
                     // Some sources sit inside a mover, which they then ignore.
@@ -391,13 +463,29 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
                 } else {
                     let s = src.position.map(|v| v as f64);
                     let l = listener.map(|v| v as f64);
-                    let len = ((l[0] - s[0]).powi(2) + (l[1] - s[1]).powi(2) + (l[2] - s[2]).powi(2)).sqrt();
-                    let mag = s.iter().chain(l.iter()).map(|v| v.abs()).fold(0.0, f64::max);
-                    let gpu_e = [edges[i].excess_m[0], edges[i].excess_m[1], edges[i].excess_m[2], edges[i].excess_m[3], edges[i].probe_excess_m];
+                    let len =
+                        ((l[0] - s[0]).powi(2) + (l[1] - s[1]).powi(2) + (l[2] - s[2]).powi(2))
+                            .sqrt();
+                    let mag = s
+                        .iter()
+                        .chain(l.iter())
+                        .map(|v| v.abs())
+                        .fold(0.0, f64::max);
+                    let gpu_e = [
+                        edges[i].excess_m[0],
+                        edges[i].excess_m[1],
+                        edges[i].excess_m[2],
+                        edges[i].excess_m[3],
+                        edges[i].probe_excess_m,
+                    ];
                     for b in 0..5 {
                         let (g, want) = (gpu_e[b] as f64, cpu.edges[b]);
                         if want == f64::MIN {
-                            assert_eq!(g, f32::MIN as f64, "{name}: pair {i} band {b} saw an edge the CPU did not");
+                            assert_eq!(
+                                g,
+                                f32::MIN as f64,
+                                "{name}: pair {i} band {b} saw an edge the CPU did not"
+                            );
                             continue;
                         }
                         // Two lengths, each a three-term dot and a sqrt (10.5 u), a sum and
@@ -412,19 +500,27 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
                     assert_eq!(out.sources[i].excess_m, edges[i].probe_excess_m);
                 }
                 // L2: the blocked flag.
-                let (blocked, clear, step) = cpu_blocked(&scene, &cols, src.position, listener, c32);
+                let (blocked, clear, step) =
+                    cpu_blocked(&scene, &cols, src.position, listener, c32);
                 l2_pairs += 1;
                 if clear <= step.max(1e-6) || cpu.ambiguous || cpu.short {
                     l2_counted += 1;
                 } else {
-                    assert_eq!(out.sources[i].blocked(), blocked, "{name}: pair {i} clearance {clear} step {step}");
+                    assert_eq!(
+                        out.sources[i].blocked(),
+                        blocked,
+                        "{name}: pair {i} clearance {clear} step {step}"
+                    );
                     t_asserted += 1;
                     l2_blocked += blocked as usize;
                 }
             }
         }
         println!("{name}: {t_name_pairs} pairs, {t_asserted} asserted by L2");
-        assert!(4 * t_asserted >= t_name_pairs, "{name}: under a quarter of the pairs were asserted");
+        assert!(
+            4 * t_asserted >= t_name_pairs,
+            "{name}: under a quarter of the pairs were asserted"
+        );
     }
     println!(
         "L3: {l3_pairs} pairs x 5 bands, {l3_counted} counted (a Fresnel admission within rounding of its threshold), worst {l3_worst:.3} of the bound"
@@ -446,7 +542,11 @@ fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
     scene.statics = (0..1_200)
         .map(|_| {
             Obb::upright(
-                [rng.range(57.0, 63.0) as f32, rng.range(0.5, 3.0) as f32, rng.range(57.0, 63.0) as f32],
+                [
+                    rng.range(57.0, 63.0) as f32,
+                    rng.range(0.5, 3.0) as f32,
+                    rng.range(57.0, 63.0) as f32,
+                ],
                 [3.0, rng.range(1.0, 6.0) as f32, 2.6],
                 rng.range(0.0, 3.14) as f32,
                 0,
@@ -459,7 +559,16 @@ fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
     let listener = [30.0f32, 1.6, 60.0];
     let header = DispatchHeader::new(&listener_at(listener), &air, &[]).unwrap();
     let sources: Vec<Source> = (0..32)
-        .map(|i| Source::new([90.0, 0.5 + 0.2 * i as f32, 50.0 + 0.6 * i as f32], 1.0, [0.0; 3], i, NO_MOVER).unwrap())
+        .map(|i| {
+            Source::new(
+                [90.0, 0.5 + 0.2 * i as f32, 50.0 + 0.6 * i as f32],
+                1.0,
+                [0.0; 3],
+                i,
+                NO_MOVER,
+            )
+            .unwrap()
+        })
         .collect();
     let out = dispatch(&gpu, &mut ac, &header, &sources, &[]);
     let dst = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -483,27 +592,55 @@ fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
         let s = src.position.map(|v| v as f64);
         let l = listener.map(|v| v as f64);
         let len = ((l[0] - s[0]).powi(2) + (l[1] - s[1]).powi(2) + (l[2] - s[2]).powi(2)).sqrt();
-        let mag = s.iter().chain(l.iter()).map(|v| v.abs()).fold(0.0, f64::max);
-        let gpu_e = [edges[i].excess_m[0], edges[i].excess_m[1], edges[i].excess_m[2], edges[i].excess_m[3], edges[i].probe_excess_m];
+        let mag = s
+            .iter()
+            .chain(l.iter())
+            .map(|v| v.abs())
+            .fold(0.0, f64::max);
+        let gpu_e = [
+            edges[i].excess_m[0],
+            edges[i].excess_m[1],
+            edges[i].excess_m[2],
+            edges[i].excess_m[3],
+            edges[i].probe_excess_m,
+        ];
         for b in 0..5 {
             let (g, want) = (gpu_e[b] as f64, cpu.edges[b]);
-            let bound = 16.0 * U * (2.0 * len + want.abs() + 2.0 * mag) + 8.0 * U * mag + 2.0 * len * cpu.dt;
-            assert!((g - want).abs() <= bound, "crowd: pair {i} band {b}: gpu {g} cpu {want}");
+            let bound = 16.0 * U * (2.0 * len + want.abs() + 2.0 * mag)
+                + 8.0 * U * mag
+                + 2.0 * len * cpu.dt;
+            assert!(
+                (g - want).abs() <= bound,
+                "crowd: pair {i} band {b}: gpu {g} cpu {want}"
+            );
             worst = worst.max((g - want).abs() / bound);
         }
         asserted += 1;
     }
-    assert!(out.results().iter().any(|r| r.blocked()), "the crowd blocked nothing");
+    assert!(
+        out.results().iter().any(|r| r.blocked()),
+        "the crowd blocked nothing"
+    );
     // The queue really overflowed: the cells one path crosses list more statics than it holds.
     let per_cell = |ci: i64, cj: i64| {
-        scene.statics.iter().filter(|o| {
-            let r = o.rows;
-            let hx = 0.5 * (r[0][0].abs() + r[0][1].abs() + r[0][2].abs());
-            let hz = 0.5 * (r[2][0].abs() + r[2][1].abs() + r[2][2].abs());
-            let (x0, x1) = (((r[0][3] - hx) / 2.0).floor() as i64, ((r[0][3] + hx) / 2.0).floor() as i64);
-            let (z0, z1) = (((r[2][3] - hz) / 2.0).floor() as i64, ((r[2][3] + hz) / 2.0).floor() as i64);
-            (x0..=x1).contains(&ci) && (z0..=z1).contains(&cj)
-        }).count()
+        scene
+            .statics
+            .iter()
+            .filter(|o| {
+                let r = o.rows;
+                let hx = 0.5 * (r[0][0].abs() + r[0][1].abs() + r[0][2].abs());
+                let hz = 0.5 * (r[2][0].abs() + r[2][1].abs() + r[2][2].abs());
+                let (x0, x1) = (
+                    ((r[0][3] - hx) / 2.0).floor() as i64,
+                    ((r[0][3] + hx) / 2.0).floor() as i64,
+                );
+                let (z0, z1) = (
+                    ((r[2][3] - hz) / 2.0).floor() as i64,
+                    ((r[2][3] + hz) / 2.0).floor() as i64,
+                );
+                (x0..=x1).contains(&ci) && (z0..=z1).contains(&cj)
+            })
+            .count()
     };
     let mut most = 0usize;
     for src in &sources {
@@ -511,11 +648,20 @@ fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
         let mut cells = std::collections::BTreeSet::new();
         for k in 0..=20_000 {
             let t = k as f64 / 20_000.0;
-            cells.insert((((s[0] + t * (l[0] - s[0])) / 2.0).floor() as i64, ((s[2] + t * (l[2] - s[2])) / 2.0).floor() as i64));
+            cells.insert((
+                ((s[0] + t * (l[0] - s[0])) / 2.0).floor() as i64,
+                ((s[2] + t * (l[2] - s[2])) / 2.0).floor() as i64,
+            ));
         }
         most = most.max(cells.iter().map(|&(i, j)| per_cell(i, j)).sum());
     }
-    assert!(most > 512, "the busiest path lists only {most} statics: the queue did not overflow");
-    assert!(asserted >= 8, "only {asserted} pairs were asserted ({counted} counted)");
+    assert!(
+        most > 512,
+        "the busiest path lists only {most} statics: the queue did not overflow"
+    );
+    assert!(
+        asserted >= 8,
+        "only {asserted} pairs were asserted ({counted} counted)"
+    );
     println!("L3 crowd: {asserted} pairs asserted, the busiest path listing {most} statics against a queue of 512, {counted} counted, worst {worst:.3} of the bound");
 }

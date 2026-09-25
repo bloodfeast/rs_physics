@@ -95,18 +95,34 @@ impl Rig {
         for r in 0..rows as usize {
             for c in 0..cols as usize {
                 let (x, z) = (c as f64 * 2.0, r as f64 * 2.0);
-                heights[r * cols as usize + c] =
-                    (4.0 * (x / 37.0).sin() * (z / 23.0).cos() + 2.0 * (x / 11.0 + z / 17.0).sin()) as f32;
+                heights[r * cols as usize + c] = (4.0 * (x / 37.0).sin() * (z / 23.0).cos()
+                    + 2.0 * (x / 11.0 + z / 17.0).sin())
+                    as f32;
             }
         }
         let material: Vec<u8> = (0..heights.len()).map(|i| (i % 4) as u8).collect();
-        let terrain = TerrainGrid { heights: &heights, material: &material, cols, rows, cell_m: 2.0, origin: [0.0, 0.0] };
+        let terrain = TerrainGrid {
+            heights: &heights,
+            material: &material,
+            cols,
+            rows,
+            cell_m: 2.0,
+            origin: [0.0, 0.0],
+        };
         let mut rng = Rng(0xbe4c);
         let statics: Vec<Obb> = (0..200)
             .map(|i| {
                 Obb::upright(
-                    [rng.range(10.0, 270.0) as f32, 3.0, rng.range(10.0, 190.0) as f32],
-                    [rng.range(1.0, 12.0) as f32, rng.range(2.0, 9.0) as f32, rng.range(1.0, 12.0) as f32],
+                    [
+                        rng.range(10.0, 270.0) as f32,
+                        3.0,
+                        rng.range(10.0, 190.0) as f32,
+                    ],
+                    [
+                        rng.range(1.0, 12.0) as f32,
+                        rng.range(2.0, 9.0) as f32,
+                        rng.range(1.0, 12.0) as f32,
+                    ],
                     rng.range(0.0, 6.28) as f32,
                     i % 4,
                 )
@@ -122,15 +138,32 @@ impl Rig {
         });
         {
             let mut view = scene_stage.slice(..).get_mapped_range_mut().unwrap();
-            GpuAcoustics::pack_scene(&layout, &terrain, &statics, &materials, None, view.slice(..)).unwrap();
+            GpuAcoustics::pack_scene(
+                &layout,
+                &terrain,
+                &statics,
+                &materials,
+                None,
+                view.slice(..),
+            )
+            .unwrap();
         }
         scene_stage.unmap();
         let mut enc = device.create_command_encoder(&Default::default());
-        let staged = Staged { buffer: &scene_stage, offset: 0, len: layout.staged_bytes() };
+        let staged = Staged {
+            buffer: &scene_stage,
+            offset: 0,
+            len: layout.staged_bytes(),
+        };
         acoustics.encode_scene(&mut enc, &layout, staged).unwrap();
         queue.submit([enc.finish()]);
 
-        let listener = Listener { position: [140.0, 1.6, 100.0], forward: [0.0, 0.0, -1.0], right: [1.0, 0.0, 0.0], velocity: [0.0; 3] };
+        let listener = Listener {
+            position: [140.0, 1.6, 100.0],
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            velocity: [0.0; 3],
+        };
         let ladder = [(0.0f32, 20_000.0f32), (45.0, 1_400.0), (130.0, 480.0)];
         let header = DispatchHeader::new(&listener, &Air::standard(), &ladder).unwrap();
         let sources = (0..40)
@@ -138,9 +171,17 @@ impl Rig {
                 let a = rng.range(0.0, 6.28);
                 let d = rng.range(5.0, 75.0);
                 Source::new(
-                    [(140.0 + d * a.cos()) as f32, 6.0, (100.0 + d * a.sin()) as f32],
+                    [
+                        (140.0 + d * a.cos()) as f32,
+                        6.0,
+                        (100.0 + d * a.sin()) as f32,
+                    ],
                     1.0,
-                    [rng.range(-10.0, 10.0) as f32, 0.0, rng.range(-10.0, 10.0) as f32],
+                    [
+                        rng.range(-10.0, 10.0) as f32,
+                        0.0,
+                        rng.range(-10.0, 10.0) as f32,
+                    ],
                     i,
                     NO_MOVER,
                 )
@@ -150,7 +191,11 @@ impl Rig {
         let movers = (0..64)
             .map(|_| {
                 Obb::upright(
-                    [rng.range(80.0, 200.0) as f32, 3.0, rng.range(40.0, 160.0) as f32],
+                    [
+                        rng.range(80.0, 200.0) as f32,
+                        3.0,
+                        rng.range(40.0, 160.0) as f32,
+                    ],
                     [2.5, 3.0, 5.0],
                     rng.range(0.0, 6.28) as f32,
                     0,
@@ -168,7 +213,11 @@ impl Rig {
                 ready: Arc::new(AtomicBool::new(true)),
             })
             .collect();
-        let queries = device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: 2 });
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: None,
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
         let resolve = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 16,
@@ -211,16 +260,24 @@ impl Rig {
         let began = Instant::now();
         let shape = {
             let mut view = slot.buffer.slice(..).get_mapped_range_mut().unwrap();
-            GpuAcoustics::pack_dispatch(&self.header, &self.sources, &self.movers, view.slice(..)).unwrap()
+            GpuAcoustics::pack_dispatch(&self.header, &self.sources, &self.movers, view.slice(..))
+                .unwrap()
         };
         slot.buffer.unmap();
-        let staged = Staged { buffer: &slot.buffer, offset: 0, len: shape.bytes };
+        let staged = Staged {
+            buffer: &slot.buffer,
+            offset: 0,
+            len: shape.bytes,
+        };
         let marks = wgpu::ComputePassTimestampWrites {
             query_set: &self.queries,
             beginning_of_pass_write_index: Some(0),
             end_of_pass_write_index: Some(1),
         };
-        let encoded = self.acoustics.encode_timed(&mut enc, staged, shape, Some(marks)).unwrap();
+        let encoded = self
+            .acoustics
+            .encode_timed(&mut enc, staged, shape, Some(marks))
+            .unwrap();
         let cpu = began.elapsed().as_nanos() as f64;
         assert!(matches!(encoded, Encoded::Dispatched { .. }));
         slot.ready.store(false, Ordering::Release);
@@ -232,7 +289,9 @@ impl Rig {
         enc.copy_buffer_to_buffer(&self.resolve, 0, &self.read, 0, 16);
         enc.map_buffer_on_submit(&self.read, wgpu::MapMode::Read, .., |_| {});
         self.queue.submit([enc.finish()]);
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let ticks: [u64; 2] = {
             let view = self.read.slice(..).get_mapped_range().unwrap();
             bytemuck::pod_read_unaligned(&view[..16])
@@ -250,7 +309,13 @@ fn median(v: &mut [f64]) -> f64 {
 }
 
 fn fmt(ns: f64) -> String {
-    if ns < 1_000.0 { format!("{ns:.0} ns") } else if ns < 1_000_000.0 { format!("{:.2} us", ns / 1e3) } else { format!("{:.3} ms", ns / 1e6) }
+    if ns < 1_000.0 {
+        format!("{ns:.0} ns")
+    } else if ns < 1_000_000.0 {
+        format!("{:.2} us", ns / 1e3)
+    } else {
+        format!("{:.3} ms", ns / 1e6)
+    }
 }
 
 fn main() {

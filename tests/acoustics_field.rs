@@ -23,7 +23,9 @@ const WALL: f64 = 0.5;
 impl Shoebox {
     fn scene(&self) -> Scene {
         let mut s = Scene::flat(140, 100, 2.0, -100.0);
-        s.materials = vec![AcousticMaterial { reflection: [0.95, 0.9, 0.85, 0.8] }];
+        s.materials = vec![AcousticMaterial {
+            reflection: [0.95, 0.9, 0.85, 0.8],
+        }];
         let [x0, y0, z0] = self.lo;
         let [lx, ly, lz] = self.size;
         let (cx, cy, cz) = (x0 + lx / 2.0, y0 + ly / 2.0, z0 + lz / 2.0);
@@ -71,7 +73,11 @@ trait MinByT {
 
 impl MinByT for (f64, usize) {
     fn min_by_t(self, o: (f64, usize)) -> (f64, usize) {
-        if o.0 < self.0 { o } else { self }
+        if o.0 < self.0 {
+            o
+        } else {
+            self
+        }
     }
 }
 
@@ -95,9 +101,18 @@ fn hit_bound(o: [f64; 3], d: [f64; 3], k: usize, t: f64, wall: f64, center: f64,
 fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
     let Some(gpu) = gpu() else { return };
     let boxes = [
-        Shoebox { lo: [100.0, 0.0, 80.0], size: [12.0, 5.0, 8.0] },
-        Shoebox { lo: [40.0, -3.0, 30.0], size: [30.0, 9.0, 21.0] },
-        Shoebox { lo: [200.0, 2.0, 150.0], size: [6.0, 3.0, 6.0] },
+        Shoebox {
+            lo: [100.0, 0.0, 80.0],
+            size: [12.0, 5.0, 8.0],
+        },
+        Shoebox {
+            lo: [40.0, -3.0, 30.0],
+            size: [30.0, 9.0, 21.0],
+        },
+        Shoebox {
+            lo: [200.0, 2.0, 150.0],
+            size: [6.0, 3.0, 6.0],
+        },
     ];
     let air = Air::standard();
     let dirs = field_directions();
@@ -119,21 +134,37 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
             let mut sums = (0.0, 0.0, 0.0f64);
             let mut per_ray = Vec::new();
             for (r, dw) in rays.iter().zip(dirs.iter()) {
-                let d = [dw[0] as f32 as f64, dw[1] as f32 as f64, dw[2] as f32 as f64];
+                let d = [
+                    dw[0] as f32 as f64,
+                    dw[1] as f32 as f64,
+                    dw[2] as f32 as f64,
+                ];
                 let (t, k, refl) = b.hit(o, d);
                 if t > range {
                     assert!(r.first_m < 0.0, "a ray past the range hit at {}", r.first_m);
                     continue;
                 }
-                let face = if d[k] > 0.0 { b.lo[k] + b.size[k] + WALL / 2.0 } else { b.lo[k] - WALL / 2.0 };
+                let face = if d[k] > 0.0 {
+                    b.lo[k] + b.size[k] + WALL / 2.0
+                } else {
+                    b.lo[k] - WALL / 2.0
+                };
                 let e1 = hit_bound(o, d, k, t, WALL, face, 0.0);
                 let dt = (r.first_m as f64 - t).abs();
-                assert!(dt <= e1, "box {bi} trial {trial}: first hit {} against {t} (bound {e1:e})", r.first_m);
+                assert!(
+                    dt <= e1,
+                    "box {bi} trial {trial}: first hit {} against {t} (bound {e1:e})",
+                    r.first_m
+                );
                 worst_t = worst_t.max(dt / e1);
                 for j in 0..3 {
                     let bound = 60.0 * U * d[j].abs() + 1e-30;
                     let dd = (r.first_dir[j] as f64 - refl[j]).abs();
-                    assert!(dd <= bound, "box {bi}: reflected {:?} against {refl:?}", r.first_dir);
+                    assert!(
+                        dd <= bound,
+                        "box {bi}: reflected {:?} against {refl:?}",
+                        r.first_dir
+                    );
                     worst_dir = worst_dir.max(dd / bound);
                 }
                 // The second leg, from the first hit less its millimetre offset.
@@ -141,14 +172,26 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
                 p1[k] -= d[k].signum() * 1e-3;
                 let (t2, k2, _) = b.hit(p1, refl);
                 if t2 <= range && r.second_m >= 0.0 {
-                    let face2 = if refl[k2] > 0.0 { b.lo[k2] + b.size[k2] + WALL / 2.0 } else { b.lo[k2] - WALL / 2.0 };
+                    let face2 = if refl[k2] > 0.0 {
+                        b.lo[k2] + b.size[k2] + WALL / 2.0
+                    } else {
+                        b.lo[k2] - WALL / 2.0
+                    };
                     let e2 = hit_bound(p1, refl, k2, t2, WALL, face2, e1 + 4.0 * U * p1[k].abs());
                     let d2 = (r.second_m as f64 - t2).abs();
-                    assert!(d2 <= e2, "box {bi}: second hit {} against {t2} (bound {e2:e})", r.second_m);
+                    assert!(
+                        d2 <= e2,
+                        "box {bi}: second hit {} against {t2} (bound {e2:e})",
+                        r.second_m
+                    );
                 }
                 // L5's GPU quadrature, from the rays' own records.
                 let cos = d[k].abs();
-                assert!((r.first_cos as f64 - cos).abs() <= 64.0 * U, "cos {} against {cos}", r.first_cos);
+                assert!(
+                    (r.first_cos as f64 - cos).abs() <= 64.0 * U,
+                    "cos {} against {cos}",
+                    r.first_cos
+                );
                 let (a, s) = (dw[3] * t * t * t, dw[3] * t * t / cos);
                 sums.0 += a;
                 sums.1 += s;
@@ -160,7 +203,12 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
             // sample, the error reported.
             let n = per_ray.len() as f64;
             let ratio = sums.0 / sums.1;
-            let var: f64 = per_ray.iter().map(|(a, s)| (a - ratio * s).powi(2)).sum::<f64>() * n / (n - 1.0);
+            let var: f64 = per_ray
+                .iter()
+                .map(|(a, s)| (a - ratio * s).powi(2))
+                .sum::<f64>()
+                * n
+                / (n - 1.0);
             let se = (4.0 / 3.0) * var.sqrt() / sums.1;
             let truth = b.mfp();
             let gpu_mfp = out.field.mfp_m as f64;
@@ -169,7 +217,10 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
                 gpu_mfp - truth,
                 (gpu_mfp - truth).abs() / se,
             );
-            assert!((gpu_mfp - truth).abs() <= 3.0 * se, "mfp off by more than three standard errors");
+            assert!(
+                (gpu_mfp - truth).abs() <= 3.0 * se,
+                "mfp off by more than three standard errors"
+            );
             // RT60 against Eyring on the true V/S, within what the mfp error implies.
             let r500 = scene.materials[0].reflection[1] as f64;
             let alpha = 1.0 - r500 * r500;
@@ -189,7 +240,10 @@ fn l4_l5_field_rays_are_specular_and_the_mean_free_path_is_4v_over_s() {
 /// uniformly random directions, in f64, closes on 4V/S as the ray count grows.
 #[test]
 fn l5_the_quadrature_converges_on_4v_over_s() {
-    let b = Shoebox { lo: [0.0, 0.0, 0.0], size: [12.0, 5.0, 8.0] };
+    let b = Shoebox {
+        lo: [0.0, 0.0, 0.0],
+        size: [12.0, 5.0, 8.0],
+    };
     let o = [4.3, 1.7, 3.1];
     let truth = b.mfp();
     let mut rng = Rng(0xc0ffee);
@@ -204,14 +258,27 @@ fn l5_the_quadrature_converges_on_4v_over_s() {
             let (t, k, _) = b.hit(o, d);
             per.push((t * t * t, t * t / d[k].abs()));
         }
-        let (a, s): (f64, f64) = per.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
+        let (a, s): (f64, f64) = per
+            .iter()
+            .fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
         let ratio = a / s;
-        let var: f64 = per.iter().map(|(x, y)| (x - ratio * y).powi(2)).sum::<f64>() * n as f64 / (n as f64 - 1.0);
+        let var: f64 = per
+            .iter()
+            .map(|(x, y)| (x - ratio * y).powi(2))
+            .sum::<f64>()
+            * n as f64
+            / (n as f64 - 1.0);
         let se = (4.0 / 3.0) * var.sqrt() / s;
         let mfp = 4.0 * a / (3.0 * s);
         println!("{n:>5} rays: mfp {mfp:.4} against {truth:.4}: error {:+.4} m, standard error {se:.4} m", mfp - truth);
-        assert!((mfp - truth).abs() <= 3.0 * se, "{n} rays: off by more than three standard errors");
-        assert!(se < last_se, "the standard error did not fall with the ray count");
+        assert!(
+            (mfp - truth).abs() <= 3.0 * se,
+            "{n} rays: off by more than three standard errors"
+        );
+        assert!(
+            se < last_se,
+            "the standard error did not fall with the ray count"
+        );
         last_se = se;
     }
 }
@@ -227,7 +294,10 @@ fn l12_empty_inputs_dispatch_and_answer() {
     let out = dispatch(&gpu, &mut ac, &header, &[], &[]);
     assert_eq!(out.len, 0);
     assert!(out.results().is_empty());
-    assert_eq!((out.field.mfp_m, out.field.rt60_s, out.field.clear_fraction), (0.0, 0.0, 1.0));
+    assert_eq!(
+        (out.field.mfp_m, out.field.rt60_s, out.field.clear_fraction),
+        (0.0, 0.0, 1.0)
+    );
     assert!(field_rays(&gpu, &ac).iter().all(|r| r.first_m < 0.0));
     // A source with no scene: spreading only, and no edge.
     let s = Source::new([20.0, 1.6, 10.0], 1.0, [0.0; 3], 7, NO_MOVER).unwrap();
@@ -255,11 +325,18 @@ fn l12_empty_inputs_dispatch_and_answer() {
             let z = o[2] as f64 + t * d[2];
             let inside = (0.0..80.0).contains(&x) && (0.0..80.0).contains(&z);
             if t <= range && inside {
-                assert!((r.first_m as f64 - t).abs() < 1e-3, "a ground ray hit at {} against {t}", r.first_m);
+                assert!(
+                    (r.first_m as f64 - t).abs() < 1e-3,
+                    "a ground ray hit at {} against {t}",
+                    r.first_m
+                );
                 hits += 1;
             }
         } else {
-            assert!(r.first_m < 0.0, "an upward ray hit something with no statics");
+            assert!(
+                r.first_m < 0.0,
+                "an upward ray hit something with no statics"
+            );
         }
     }
     assert!(hits > 0);
@@ -304,7 +381,11 @@ fn check_taps(field: &ListenerField, rays: &[FieldRay]) {
         match chosen.get(slot) {
             Some(&b) => {
                 let a = bins[b].unwrap().1;
-                assert_eq!([tap.delay_s, tap.gain, tap.pan], [a[0], a[1], a[2].clamp(-1.0, 1.0)], "tap {slot}");
+                assert_eq!(
+                    [tap.delay_s, tap.gain, tap.pan],
+                    [a[0], a[1], a[2].clamp(-1.0, 1.0)],
+                    "tap {slot}"
+                );
             }
             None => assert_eq!(tap.gain, 0.0, "tap {slot} should be empty"),
         }

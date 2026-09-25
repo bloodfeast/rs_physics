@@ -12,8 +12,15 @@
 //!   4,096 static boxes binned into the same grid, a four-band material table and an
 //!   optional foliage density. It is rays against this, on any adapter with compute; the
 //!   engine's acceleration structures are not used.
-//! * **One dispatch per source set**, recorded into the caller's encoder: a 64-lane
-//!   workgroup per source and one for the listener field, in one compute pass.
+//! * **One compute pass per source set**, recorded into the caller's encoder, of two
+//!   dispatches: the query (a 64-lane workgroup per field ray and one per source, so the
+//!   two overlap) and the field's one-workgroup reduce.
+//! * **Latency, not flops, is the cost.** Everything is shaped so no lane walks far alone:
+//!   a path or a ray segment is split into 64 equal lengths, one per lane; a cell's static
+//!   list goes into a shared queue the whole workgroup tests; and reductions fold in two
+//!   levels rather than six-step trees. The reductions use workgroup memory, not subgroup
+//!   operations, because the engine's device does not ask for `SUBGROUP` and the pass must
+//!   run on any adapter with compute.
 //! * **No device calls after [`GpuAcoustics::new`].** Inputs are packed by pure functions
 //!   into memory the caller owns (the engine's staging ring) and copied in while
 //!   recording; results come back through four readback slots mapped by
@@ -29,7 +36,7 @@
 //! the same over the top edge of every static the path crosses there, and the foliage
 //! density times the path length in the cell. Each lane also tests one mover. The
 //! workgroup reduces to the largest excess per band (Deygout's main edge, found in the
-//! march itself) and the foliage path. Then, in lane 0, the laws per band: air
+//! march itself) and the foliage path. Then the laws, a band a lane: air
 //! (ISO 9613-1), the signed barrier law (Kurze-Anderson,
 //! [`crate::acoustics::surfaces::barrier_insertion_db`]) and foliage (ISO 9613-2), fitted
 //! to a broadband gain and a one-pole cutoff ([`crate::acoustics::band::fit_lowpass`]);
@@ -42,10 +49,15 @@
 //! not muffle a shot and a tank does, and a fence takes the treble and leaves the bass.
 //!
 //! **The listener field.** 64 rays weighted toward the horizon ([`field_directions`]),
-//! marched through the pyramid and the static grid for up to two specular bounces, reduce
-//! to eight early-reflection taps, the mean free path `4V/S` by quadrature over the rays'
-//! first hits (`V = sum w l^3 / 3`, `S = sum w l^2 / |cos|`), the share of the sphere that
-//! escapes, and an Eyring RT60 at 500 Hz in which escaped rays absorb everything.
+//! marched through the pyramid and the static grid for up to two specular bounces, out to
+//! the distance whose first-order echo ends the tap window (about 55 m). They reduce to
+//! eight early-reflection taps (the strongest arrival in each of the eight strongest 5 ms
+//! bins, in delay order; an arrival's path returns to the listener untraced), the mean free
+//! path `4V/S` by quadrature over the rays' first hits (`V = sum w l^3 / 3`,
+//! `S = sum w l^2 / |cos|`, which converges on Kosten's `4V/S` from any interior point of
+//! the space the rays see), the share of the sphere that escapes, and an Eyring RT60 at
+//! 500 Hz, `(24 ln 10 / c) (mfp / 4) / -ln(1 - a)`, in which escaped rays absorb
+//! everything.
 //!
 //! ## Examples
 //!
@@ -121,16 +133,15 @@ pub use pack::{
     TerrainGrid, HEADER_WORDS, PYRAMID_LEVELS,
 };
 pub use records::{
-    AcousticCounters, AcousticLimits, AcousticMaterial, AcousticsError, DispatchHeader,
-    FieldRay, Listener, ListenerField, Obb, Source, SourceEdges, SourceResult, Tap, TickResults,
-    BANDS_HZ,
+    AcousticCounters, AcousticLimits, AcousticMaterial, AcousticsError, DispatchHeader, FieldRay,
+    Listener, ListenerField, Obb, Source, SourceEdges, SourceResult, Tap, TickResults, BANDS_HZ,
     HEADER_BYTES, MAX_BOUNCES, MAX_CELLS_PER_STATIC, MAX_FIELD_RAYS, MAX_LEGIBILITY_POINTS,
     MAX_MOVERS, MAX_SOURCES, MAX_STATICS, MAX_TAG, MAX_TERRAIN_SIDE, NO_MOVER, PROBE_HZ,
     READBACK_BYTES,
 };
 pub use shader::{
-    field_directions, series_coefficients, shadow_k, ASIN_COEFFICIENTS, ASIN_ERROR,
-    COTH_TERMS, COT_TERMS, TAP_BINS, TAP_BIN_S,
+    field_directions, series_coefficients, shadow_k, ASIN_COEFFICIENTS, ASIN_ERROR, COTH_TERMS,
+    COT_TERMS, TAP_BINS, TAP_BIN_S,
 };
 
 use pack::*;
@@ -225,10 +236,14 @@ fn check_staged(staged: &Staged<'_>, len: u64) -> Result<(), AcousticsError> {
         return Err(AcousticsError::Misaligned);
     }
     if staged.len != len {
-        return Err(AcousticsError::Shape("the staged length is not the packed length"));
+        return Err(AcousticsError::Shape(
+            "the staged length is not the packed length",
+        ));
     }
     if staged.offset + staged.len > staged.buffer.size() {
-        return Err(AcousticsError::Shape("the staged slice runs past its buffer"));
+        return Err(AcousticsError::Shape(
+            "the staged slice runs past its buffer",
+        ));
     }
     Ok(())
 }
@@ -266,7 +281,10 @@ impl GpuAcoustics {
     /// let acoustics = GpuAcoustics::new(&device, limits).unwrap();
     /// assert_eq!(acoustics.counters().dispatches, 0);
     /// ```
-    pub fn new(device: &wgpu::Device, limits: AcousticLimits) -> Result<GpuAcoustics, AcousticsError> {
+    pub fn new(
+        device: &wgpu::Device,
+        limits: AcousticLimits,
+    ) -> Result<GpuAcoustics, AcousticsError> {
         limits.validate()?;
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -295,7 +313,11 @@ impl GpuAcoustics {
 
         let query_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("acoustics query"),
-            entries: &[storage_entry(0, true), storage_entry(1, false), storage_entry(2, true)],
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                storage_entry(2, true),
+            ],
         });
         let build_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("acoustics build"),
@@ -362,15 +384,27 @@ impl GpuAcoustics {
             label: Some("acoustics query"),
             layout: query_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: scene.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: scene.as_entire_binding(),
+                },
             ],
         });
         let build = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("acoustics build"),
             layout: build_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: scene.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene.as_entire_binding(),
+            }],
         });
         (query, build)
     }
@@ -577,7 +611,11 @@ impl GpuAcoustics {
         let (cols, rows) = layout.grid();
         let over = |what, got: u32, max: u32| {
             if got > max {
-                Err(AcousticsError::Limit { what, got: got as u64, max: max as u64 })
+                Err(AcousticsError::Limit {
+                    what,
+                    got: got as u64,
+                    max: max as u64,
+                })
             } else {
                 Ok(())
             }
@@ -587,7 +625,9 @@ impl GpuAcoustics {
         over("statics", layout.statics(), self.limits.statics)?;
         let need = layout.resident_bytes();
         if need > self.device.limits().max_storage_buffer_binding_size as u64 {
-            return Err(AcousticsError::Device("the scene exceeds one storage binding"));
+            return Err(AcousticsError::Device(
+                "the scene exceeds one storage binding",
+            ));
         }
         if need > self.scene.size() {
             self.scene = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -610,8 +650,16 @@ impl GpuAcoustics {
         enc.copy_buffer_to_buffer(staged.buffer, staged.offset, &self.scene, 0, staged.len);
         let cells = cols as u64 * rows as u64;
         if cells > 0 {
-            enc.clear_buffer(&self.scene, layout.words(H_OFF_COUNT) as u64 * 4, Some(cells * 4));
-            enc.clear_buffer(&self.scene, layout.words(H_OFF_TOP) as u64 * 4, Some(cells * 4));
+            enc.clear_buffer(
+                &self.scene,
+                layout.words(H_OFF_COUNT) as u64 * 4,
+                Some(cells * 4),
+            );
+            enc.clear_buffer(
+                &self.scene,
+                layout.words(H_OFF_TOP) as u64 * 4,
+                Some(cells * 4),
+            );
         }
         let n = layout.statics();
         {
@@ -631,7 +679,15 @@ impl GpuAcoustics {
                 pass.dispatch_workgroups(n.div_ceil(64), 1, 1);
             }
             if cells > 0 {
-                self.record_pyramid(&mut pass, GridRect { col: 0, row: 0, cols, rows });
+                self.record_pyramid(
+                    &mut pass,
+                    GridRect {
+                        col: 0,
+                        row: 0,
+                        cols,
+                        rows,
+                    },
+                );
             }
         }
         self.layout = Some(*layout);
@@ -686,7 +742,9 @@ impl GpuAcoustics {
         rect: GridRect,
         staged: Staged<'_>,
     ) -> Result<(), AcousticsError> {
-        let layout = self.layout.ok_or(AcousticsError::Shape("no scene has been encoded"))?;
+        let layout = self
+            .layout
+            .ok_or(AcousticsError::Shape("no scene has been encoded"))?;
         check_staged(&staged, terrain_rect_bytes(rect) as u64)?;
         let (cols, rows) = layout.grid();
         let inside = rect.cols > 0
@@ -694,9 +752,17 @@ impl GpuAcoustics {
             && rect.col as u64 + rect.cols as u64 <= cols as u64
             && rect.row as u64 + rect.rows as u64 <= rows as u64;
         if !inside {
-            return Err(AcousticsError::Shape("the rect is not inside the terrain grid"));
+            return Err(AcousticsError::Shape(
+                "the rect is not inside the terrain grid",
+            ));
         }
-        enc.copy_buffer_to_buffer(staged.buffer, staged.offset, &self.scene, H_RECT as u64 * 4, 16);
+        enc.copy_buffer_to_buffer(
+            staged.buffer,
+            staged.offset,
+            &self.scene,
+            H_RECT as u64 * 4,
+            16,
+        );
         let heights = layout.words(H_OFF_HEIGHTS) as u64;
         let row_bytes = rect.cols as u64 * 4;
         for r in 0..rect.rows as u64 {
@@ -784,7 +850,9 @@ impl GpuAcoustics {
     ) -> Result<Encoded, AcousticsError> {
         check_staged(&staged, shape.bytes)?;
         if shape.bytes != dispatch_bytes(shape.sources as usize, shape.movers as usize) as u64 {
-            return Err(AcousticsError::Shape("the shape's bytes do not match its counts"));
+            return Err(AcousticsError::Shape(
+                "the shape's bytes do not match its counts",
+            ));
         }
         if shape.sources > self.limits.sources {
             return Err(AcousticsError::Limit {
@@ -913,7 +981,13 @@ impl GpuAcoustics {
     /// ```
     pub fn copy_field_rays(&self, enc: &mut wgpu::CommandEncoder, dst: &wgpu::Buffer, offset: u64) {
         let bytes = 16 * 4 * MAX_FIELD_RAYS as u64;
-        enc.copy_buffer_to_buffer(&self.output, shader::OUT_RAYS as u64 * 4, dst, offset, bytes);
+        enc.copy_buffer_to_buffer(
+            &self.output,
+            shader::OUT_RAYS as u64 * 4,
+            dst,
+            offset,
+            bytes,
+        );
     }
 
     /// Record a copy of the last dispatch's per-source main edges into a caller buffer, for
@@ -940,8 +1014,19 @@ impl GpuAcoustics {
     /// let mut enc = device.create_command_encoder(&Default::default());
     /// acoustics.copy_source_edges(&mut enc, &dst, 0);
     /// ```
-    pub fn copy_source_edges(&self, enc: &mut wgpu::CommandEncoder, dst: &wgpu::Buffer, offset: u64) {
+    pub fn copy_source_edges(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        dst: &wgpu::Buffer,
+        offset: u64,
+    ) {
         let bytes = 32 * MAX_SOURCES as u64;
-        enc.copy_buffer_to_buffer(&self.output, shader::OUT_EDGES as u64 * 4, dst, offset, bytes);
+        enc.copy_buffer_to_buffer(
+            &self.output,
+            shader::OUT_EDGES as u64 * 4,
+            dst,
+            offset,
+            bytes,
+        );
     }
 }

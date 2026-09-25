@@ -158,7 +158,13 @@ fn f(v: f64) -> String {
 }
 
 fn vec4(v: [f64; 4]) -> String {
-    format!("vec4<f32>({}, {}, {}, {})", f(v[0]), f(v[1]), f(v[2]), f(v[3]))
+    format!(
+        "vec4<f32>({}, {}, {}, {})",
+        f(v[0]),
+        f(v[1]),
+        f(v[2]),
+        f(v[3])
+    )
 }
 
 fn prelude(out: &mut String) {
@@ -181,20 +187,44 @@ pub(crate) fn query_source() -> String {
     c("OUT_SUMS", format!("{OUT_SUMS}u"), &mut s);
     c("MAX_STATICS", format!("{MAX_STATICS}u"), &mut s);
     c("FIELD_RAYS", format!("{MAX_FIELD_RAYS}u"), &mut s);
-    c("MAX_LANE_STEPS", format!("{}u", 2 * MAX_TERRAIN_SIDE / 64 + 4), &mut s);
-    c("MAX_BLOCK_STEPS", format!("{}u", 2 * MAX_TERRAIN_SIDE / 8 + 4), &mut s);
+    c(
+        "MAX_LANE_STEPS",
+        format!("{}u", 2 * MAX_TERRAIN_SIDE / 64 + 4),
+        &mut s,
+    );
+    c(
+        "MAX_BLOCK_STEPS",
+        format!("{}u", 2 * MAX_TERRAIN_SIDE / 8 + 4),
+        &mut s,
+    );
     c("MAX_CELL_STEPS", format!("{}u", 2 * 8 + 4), &mut s);
-    c("MAX_LEGIBILITY", format!("{MAX_LEGIBILITY_POINTS}u"), &mut s);
+    c(
+        "MAX_LEGIBILITY",
+        format!("{MAX_LEGIBILITY_POINTS}u"),
+        &mut s,
+    );
     c("PYRAMID_TOP", format!("{PYRAMID_LEVELS}u"), &mut s);
-    c("BAND_INV_HZ", vec4(BANDS_HZ.map(|hz| 1.0 / hz as f64)), &mut s);
+    c(
+        "BAND_INV_HZ",
+        vec4(BANDS_HZ.map(|hz| 1.0 / hz as f64)),
+        &mut s,
+    );
     c("PROBE_INV_HZ", f(1.0 / PROBE_HZ as f64), &mut s);
     c("FOLIAGE_DB_PER_M", vec4(k.foliage_db_per_m), &mut s);
     c("FOLIAGE_MAX_M", f(surfaces::FOLIAGE_MAX_CREDITED_M), &mut s);
-    c("BARRIER_GRAZING_DB", f(surfaces::BARRIER_GRAZING_DB), &mut s);
+    c(
+        "BARRIER_GRAZING_DB",
+        f(surfaces::BARRIER_GRAZING_DB),
+        &mut s,
+    );
     c("BARRIER_CAP_DB", f(surfaces::BARRIER_CAP_DB), &mut s);
     let n0 = surfaces::lit_zone_limit();
     c("LIT_N0", f(n0), &mut s);
-    c("LIT_X0", f((2.0 * std::f64::consts::PI * n0).sqrt()), &mut s);
+    c(
+        "LIT_X0",
+        f((2.0 * std::f64::consts::PI * n0).sqrt()),
+        &mut s,
+    );
     c("TWO_PI", f(2.0 * std::f64::consts::PI), &mut s);
     c("HALF_PI", f(std::f64::consts::FRAC_PI_2), &mut s);
     c("DB_PER_LOG2", f(20.0 * 2f64.log10()), &mut s);
@@ -232,7 +262,11 @@ pub(crate) fn query_source() -> String {
     c("FIELD_TOTAL_WEIGHT", f(total), &mut s);
     c("TAP_BIN_S", f(TAP_BIN_S as f64), &mut s);
     c("TAP_BINS", format!("{TAP_BINS}u"), &mut s);
-    c("TAP_WINDOW_S", f(TAP_BIN_S as f64 * TAP_BINS as f64), &mut s);
+    c(
+        "TAP_WINDOW_S",
+        f(TAP_BIN_S as f64 * TAP_BINS as f64),
+        &mut s,
+    );
     c("T_START", f(T_START_M as f64), &mut s);
     c("COS_FLOOR", f(COS_FLOOR as f64), &mut s);
     c("SABINE_LN", f(24.0 * 10f64.ln()), &mut s);

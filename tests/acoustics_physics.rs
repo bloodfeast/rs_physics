@@ -58,7 +58,10 @@ fn column_loss_db(w: f64, lambda: f64, d1: f64, d2: f64) -> f64 {
 fn l6_a_column_occludes_as_the_diffraction_integral_says() {
     // The quadrature against the one closed-form value there is: the full integral's limit.
     let (c, s) = fresnel(60.0);
-    assert!((c - 0.5).abs() < 0.006 && (s - 0.5).abs() < 0.006, "C, S at 60: {c}, {s}");
+    assert!(
+        (c - 0.5).abs() < 0.006 && (s - 0.5).abs() < 0.006,
+        "C, S at 60: {c}, {s}"
+    );
 
     let c_air = Air::standard().speed_of_sound();
     let lambda = wavelength(4_000.0, c_air);
@@ -70,11 +73,17 @@ fn l6_a_column_occludes_as_the_diffraction_integral_says() {
     let mut w = 0.0;
     while w <= 3.0 {
         let db = column_loss_db(w, lambda, d1, d2);
-        assert!(db >= last - 1e-9, "the loss fell from {last} to {db} at w = {w}");
+        assert!(
+            db >= last - 1e-9,
+            "the loss fell from {last} to {db} at w = {w}"
+        );
         last = db;
         w += 0.005;
     }
-    assert!(column_loss_db(0.0, lambda, d1, d2).abs() < 1e-12, "no column, no loss");
+    assert!(
+        column_loss_db(0.0, lambda, d1, d2).abs() < 1e-12,
+        "no column, no loss"
+    );
 
     // What the drop rule accepts: the loss of the widest column it drops.
     let at_r1 = column_loss_db(r1, lambda, d1, d2);
@@ -84,10 +93,18 @@ fn l6_a_column_occludes_as_the_diffraction_integral_says() {
     // For context: what a semi-infinite screen at the same grazing geometry would charge.
     let grazing = barrier_insertion_db(0.0, lambda);
     println!("L6: 4 kHz, a 17.4 m path, r1 = {r1:.3} m");
-    println!("  column of half-width r1     : {at_r1:.2} dB  (the error the Fresnel drop rule accepts)");
+    println!(
+        "  column of half-width r1     : {at_r1:.2} dB  (the error the Fresnel drop rule accepts)"
+    );
     println!("  column of half-width r1 / 2 : {at_half:.2} dB");
-    println!("  a soldier (0.25 m)          : {at_soldier:.2} dB, dropped: {}", !occludes(0.25, lambda, d1, d2));
-    println!("  a Siege (1.25 m)            : {at_tank:.2} dB, kept: {}", occludes(1.25, lambda, d1, d2));
+    println!(
+        "  a soldier (0.25 m)          : {at_soldier:.2} dB, dropped: {}",
+        !occludes(0.25, lambda, d1, d2)
+    );
+    println!(
+        "  a Siege (1.25 m)            : {at_tank:.2} dB, kept: {}",
+        occludes(1.25, lambda, d1, d2)
+    );
     println!("  a screen's edge at grazing  : {grazing:.2} dB");
     assert!(!occludes(0.25, lambda, d1, d2) && occludes(1.25, lambda, d1, d2));
     // The rule's premise: what it drops costs less than what it keeps.

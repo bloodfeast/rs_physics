@@ -88,7 +88,11 @@ impl LawProbe {
         let scene = buffer("law probe scene", 256, storage);
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("law probe"),
-            entries: &[storage_entry(0, true), storage_entry(1, false), storage_entry(2, true)],
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                storage_entry(2, true),
+            ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("acoustics query"),
@@ -104,12 +108,26 @@ impl LawProbe {
             label: Some("law probe"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: scene.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: scene.as_entire_binding(),
+                },
             ],
         });
-        LawProbe { input, output, pipeline, group }
+        LawProbe {
+            input,
+            output,
+            pipeline,
+            group,
+        }
     }
 
     /// Pack a header and cases: the header's source count is set to the case count.
@@ -153,12 +171,17 @@ impl LawProbe {
         }
         let need = HEADER_BYTES as usize + 64 * cases.len();
         if out.len() < need {
-            return Err(AcousticsError::OutputTooSmall { need, got: out.len() });
+            return Err(AcousticsError::OutputTooSmall {
+                need,
+                got: out.len(),
+            });
         }
         let mut h = *header;
         h.counts[0] = cases.len() as u32;
-        out.slice(..HEADER_BYTES as usize).copy_from_slice(bytemuck::bytes_of(&h));
-        out.slice(HEADER_BYTES as usize..need).copy_from_slice(bytemuck::cast_slice(cases));
+        out.slice(..HEADER_BYTES as usize)
+            .copy_from_slice(bytemuck::bytes_of(&h));
+        out.slice(HEADER_BYTES as usize..need)
+            .copy_from_slice(bytemuck::cast_slice(cases));
         Ok(need)
     }
 
@@ -187,7 +210,13 @@ impl LawProbe {
     /// let mut enc = device.create_command_encoder(&Default::default());
     /// probe.encode(&mut enc, Staged { buffer: &stage, offset: 0, len: 224 }, 1, &dst);
     /// ```
-    pub fn encode(&self, enc: &mut wgpu::CommandEncoder, staged: Staged<'_>, cases: u32, dst: &wgpu::Buffer) {
+    pub fn encode(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        staged: Staged<'_>,
+        cases: u32,
+        dst: &wgpu::Buffer,
+    ) {
         enc.copy_buffer_to_buffer(staged.buffer, staged.offset, &self.input, 0, staged.len);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -7,7 +7,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::acoustics::{Air, band, surfaces};
+use crate::acoustics::{band, surfaces, Air};
 
 /// The four bands the laws are evaluated in, in hertz: octaves two apart from the bass to
 /// the top of the treble. The fit (see [`crate::acoustics::band`]) turns them into one gain
@@ -53,9 +53,8 @@ pub const NO_MOVER: u8 = 255;
 pub const MAX_TAG: u32 = (1 << 24) - 1;
 
 /// Bytes of one readback slot: [`MAX_SOURCES`] results and the listener field.
-pub const READBACK_BYTES: u64 =
-    MAX_SOURCES as u64 * std::mem::size_of::<SourceResult>() as u64
-        + std::mem::size_of::<ListenerField>() as u64;
+pub const READBACK_BYTES: u64 = MAX_SOURCES as u64 * std::mem::size_of::<SourceResult>() as u64
+    + std::mem::size_of::<ListenerField>() as u64;
 
 /// Bytes of the dispatch header at the front of every packed dispatch.
 pub const HEADER_BYTES: u64 = std::mem::size_of::<DispatchHeader>() as u64;
@@ -685,7 +684,11 @@ impl AcousticLimits {
         let m = AcousticLimits::MAX;
         let check = |what: &'static str, got: u32, max: u32| {
             if got > max {
-                Err(AcousticsError::Limit { what, got: got as u64, max: max as u64 })
+                Err(AcousticsError::Limit {
+                    what,
+                    got: got as u64,
+                    max: max as u64,
+                })
             } else {
                 Ok(())
             }
