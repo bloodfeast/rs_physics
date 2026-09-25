@@ -284,86 +284,98 @@ fn legibility(r: f32, n: u32) -> f32 {
     return last.y;
 }
 
-// The whole per-source law chain, from the march's maxima to a result, written at `at`.
-fn laws(s: vec3<f32>, directivity: f32, vs: vec3<f32>, tag: u32, ex: vec4<f32>, ex_probe: f32,
-        foliage: f32, at: u32) {
+// The whole per-source law chain, from the march's maxima to a result written at `at`,
+// run by a whole workgroup: lanes 0 to 3 take one band each (air, barrier, foliage, the
+// band's transmission), lane 4 the ears and the Doppler ratio, lane 5 spreading and the
+// legibility ceiling; lane 0 then fits and writes. Every lane must call it. Each band's
+// operations are the ones a single lane would do, in the same order.
+var<workgroup> law_y: array<f32, 4>;
+var<workgroup> law_ears: vec4<f32>;
+var<workgroup> law_misc: vec4<f32>;
+
+fn laws(lane: u32, s: vec3<f32>, directivity: f32, vs: vec3<f32>, tag: u32, ex: vec4<f32>,
+        ex_probe: f32, foliage: f32, at: u32) {
     let lv = bitcast<vec4<f32>>(inb[HV_LISTENER]);
     let l = lv.xyz;
     let c = lv.w;
-    let right = bitcast<vec4<f32>>(inb[HV_RIGHT]).xyz;
-    let vl = bitcast<vec4<f32>>(inb[HV_VELOCITY]).xyz;
-    let alpha = bitcast<vec4<f32>>(inb[HV_AIR]);
-    let n_leg = inb[HV_COUNTS].z;
-
     let d = l - s;
     let r = length(d);
-
-    let spread = max(directivity, 0.0) / max(r, REFERENCE_M);
-    let fol = clamp(foliage, 0.0, FOLIAGE_MAX_M);
-    var loss = alpha * r + FOLIAGE_DB_PER_M * fol;
-    let lam = c * BAND_INV_HZ;
-    loss.x = loss.x + barrier_db(ex.x, lam.x);
-    loss.y = loss.y + barrier_db(ex.y, lam.y);
-    loss.z = loss.z + barrier_db(ex.z, lam.z);
-    loss.w = loss.w + barrier_db(ex.w, lam.w);
-
-    // The fit: 1/T = a + b x, T = 10^(-L/10), closed-form least squares over the bands.
-    let y = exp2(loss * LOG2_10_OVER_10);
-    let b = dot(FIT_W, y);
-    let y_mean = (y.x + y.y + y.z + y.w) * 0.25;
-    let a = max(y_mean - b * FIT_X_MEAN, 1.0);
-    let g = inverseSqrt(a);
-    var cutoff = NO_LOWPASS_HZ;
-    if (b > 0.0) {
-        cutoff = min(FIT_REFERENCE_HZ * sqrt(a / b), NO_LOWPASS_HZ);
+    if (lane < 4u) {
+        let alpha = bitcast<vec4<f32>>(inb[HV_AIR])[lane];
+        let fol = clamp(foliage, 0.0, FOLIAGE_MAX_M);
+        let lam = c * BAND_INV_HZ[lane];
+        let loss = alpha * r + FOLIAGE_DB_PER_M[lane] * fol + barrier_db(ex[lane], lam);
+        // The fit's ordinate: 1/T = 10^(L/10).
+        law_y[lane] = exp2(loss * LOG2_10_OVER_10);
+    } else if (lane == 4u) {
+        // The ears: Woodworth timing and the head shadow at the probe band.
+        let right = bitcast<vec4<f32>>(inb[HV_RIGHT]).xyz;
+        let vl = bitcast<vec4<f32>>(inb[HV_VELOCITY]).xyz;
+        var itd = 0.0;
+        var gl = 1.0;
+        var gr = 1.0;
+        var pitch = 1.0;
+        if (r > 0.0) {
+            let beside = dot(s - l, right) / r;
+            let ab = min(abs(beside), 1.0);
+            let lateral = asin_unit(ab);
+            itd = HEAD_RADIUS_M * (lateral + ab) / c;
+            let far = max(1.0 - SHADOW_K * abs(beside), 0.0);
+            if (beside >= 0.0) {
+                gl = far;
+            } else {
+                gr = far;
+                itd = -itd;
+            }
+            let toward = dot(vs, d) / r;
+            let listener_toward = dot(vl, -d) / r;
+            let closing = clamp(toward, -DOPPLER_MAX * c, DOPPLER_MAX * c);
+            pitch = (c + listener_toward) / (c - closing);
+        }
+        law_ears = vec4<f32>(gl, gr, itd, pitch);
+    } else if (lane == 5u) {
+        let n_leg = inb[HV_COUNTS].z;
+        var ceiling = -1.0;
+        if (n_leg > 0u) {
+            ceiling = legibility(r, n_leg);
+        }
+        law_misc = vec4<f32>(max(directivity, 0.0) / max(r, REFERENCE_M), ceiling, 0.0, 0.0);
     }
-    var flags = 0u;
-    if (n_leg > 0u) {
-        let ceiling = legibility(r, n_leg);
-        if (ceiling < cutoff) {
+    workgroupBarrier();
+    if (lane == 0u) {
+        // The fit: 1/T = a + b x, closed-form least squares over the bands.
+        let y = vec4<f32>(law_y[0], law_y[1], law_y[2], law_y[3]);
+        let b = dot(FIT_W, y);
+        let y_mean = (y.x + y.y + y.z + y.w) * 0.25;
+        let a = max(y_mean - b * FIT_X_MEAN, 1.0);
+        let g = inverseSqrt(a);
+        var cutoff = NO_LOWPASS_HZ;
+        if (b > 0.0) {
+            cutoff = min(FIT_REFERENCE_HZ * sqrt(a / b), NO_LOWPASS_HZ);
+        }
+        var flags = 0u;
+        let ceiling = law_misc.y;
+        if (ceiling >= 0.0 && ceiling < cutoff) {
             cutoff = ceiling;
             flags = flags | 4u;
         }
-    }
-
-    // The ears: Woodworth timing and the head shadow at the probe band.
-    var itd = 0.0;
-    var gl = 1.0;
-    var gr = 1.0;
-    var pitch = 1.0;
-    if (r > 0.0) {
-        let beside = dot(s - l, right) / r;
-        let ab = min(abs(beside), 1.0);
-        let lateral = asin_unit(ab);
-        itd = HEAD_RADIUS_M * (lateral + ab) / c;
-        let far = max(1.0 - SHADOW_K * abs(beside), 0.0);
-        if (beside >= 0.0) {
-            gl = far;
-        } else {
-            gr = far;
-            itd = -itd;
+        if (ex_probe > 0.0) {
+            flags = flags | 1u;
         }
-        let toward = dot(vs, d) / r;
-        let listener_toward = dot(vl, -d) / r;
-        let closing = clamp(toward, -DOPPLER_MAX * c, DOPPLER_MAX * c);
-        pitch = (c + listener_toward) / (c - closing);
+        if (2.0 * ex_probe / (c * PROBE_INV_HZ) > -LIT_N0) {
+            flags = flags | 2u;
+        }
+        let ears = law_ears;
+        let amp = law_misc.x * g;
+        outb[at] = bitcast<u32>(amp * ears.x);
+        outb[at + 1u] = bitcast<u32>(amp * ears.y);
+        outb[at + 2u] = bitcast<u32>(ears.z);
+        outb[at + 3u] = bitcast<u32>(cutoff);
+        outb[at + 4u] = bitcast<u32>(ears.w);
+        outb[at + 5u] = bitcast<u32>(ex_probe);
+        outb[at + 6u] = bitcast<u32>(foliage);
+        outb[at + 7u] = (tag & 0xFFFFFFu) | (flags << 24u);
     }
-
-    if (ex_probe > 0.0) {
-        flags = flags | 1u;
-    }
-    if (2.0 * ex_probe / (c * PROBE_INV_HZ) > -LIT_N0) {
-        flags = flags | 2u;
-    }
-    let amp = spread * g;
-    outb[at] = bitcast<u32>(amp * gl);
-    outb[at + 1u] = bitcast<u32>(amp * gr);
-    outb[at + 2u] = bitcast<u32>(itd);
-    outb[at + 3u] = bitcast<u32>(cutoff);
-    outb[at + 4u] = bitcast<u32>(pitch);
-    outb[at + 5u] = bitcast<u32>(ex_probe);
-    outb[at + 6u] = bitcast<u32>(foliage);
-    outb[at + 7u] = (tag & 0xFFFFFFu) | (flags << 24u);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -476,13 +488,11 @@ fn mover_rows(n_src: u32, j: u32) -> Rows {
                 bitcast<vec4<f32>>(inb[base + 2u]));
 }
 
-@compute @workgroup_size(64)
-fn sources(@builtin(workgroup_id) wg: vec3<u32>,
-           @builtin(local_invocation_index) lane: u32) {
+// Source `i` of the dispatch, by a whole workgroup.
+fn source_query(i: u32, lane: u32) {
     let counts = inb[HV_COUNTS];
     let n_src = counts.x;
     let n_mov = counts.y;
-    let i = wg.x;
     let a = inb[HV_SOURCES + 2u * i];
     let b = inb[HV_SOURCES + 2u * i + 1u];
     let s = bitcast<vec3<f32>>(a.xyz);
@@ -524,17 +534,18 @@ fn sources(@builtin(workgroup_id) wg: vec3<u32>,
         }
         workgroupBarrier();
     }
-    if (lane == 0u && i < n_src) {
-        laws(s, directivity, vs, word, red_band[0], red_probe[0].x, red_probe[0].y,
-             OUT_SOURCES + 8u * i);
-        // The march's own answer, for the oracles: five stores a source.
+    let band = red_band[0];
+    let probe_fol = red_probe[0];
+    laws(lane, s, directivity, vs, word, band, probe_fol.x, probe_fol.y, OUT_SOURCES + 8u * i);
+    if (lane == 0u) {
+        // The march's own answer, for the oracles: six stores a source.
         let at = OUT_EDGES + 8u * i;
-        outb[at] = bitcast<u32>(red_band[0].x);
-        outb[at + 1u] = bitcast<u32>(red_band[0].y);
-        outb[at + 2u] = bitcast<u32>(red_band[0].z);
-        outb[at + 3u] = bitcast<u32>(red_band[0].w);
-        outb[at + 4u] = bitcast<u32>(red_probe[0].x);
-        outb[at + 5u] = bitcast<u32>(red_probe[0].y);
+        outb[at] = bitcast<u32>(band.x);
+        outb[at + 1u] = bitcast<u32>(band.y);
+        outb[at + 2u] = bitcast<u32>(band.z);
+        outb[at + 3u] = bitcast<u32>(band.w);
+        outb[at + 4u] = bitcast<u32>(probe_fol.x);
+        outb[at + 5u] = bitcast<u32>(probe_fol.y);
     }
 }
 
@@ -631,17 +642,17 @@ fn hit_cell(g: Grid, o: vec3<f32>, d: vec3<f32>, ci: u32, cj: u32, u0: f32, u1: 
     }
 }
 
-// March a unit ray from `o` up to `tmax` metres against the terrain and the statics: 16 m
+// March a unit ray from `o`, from `tmin` to `tmax` metres, against the terrain and the statics: 16 m
 // blocks of the max pyramid first, skipping any block the ray passes wholly above, then
 // the cells of the blocks it does not.
-fn march(g: Grid, o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Hit {
+fn march(g: Grid, o: vec3<f32>, d: vec3<f32>, tmin: f32, tmax: f32) -> Hit {
     var none = Hit(-1.0, vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), 0u);
     if (g.cols == 0u || g.rows == 0u) {
         return none;
     }
     let lo = g.origin;
     let hi = g.origin + vec2<f32>(f32(g.cols), f32(g.rows)) * g.cell;
-    var c0 = T_START;
+    var c0 = tmin;
     var c1 = tmax;
     clip1(o.x, d.x, lo.x, hi.x, &c0, &c1);
     clip1(o.z, d.z, lo.y, hi.y, &c0, &c1);
@@ -743,74 +754,158 @@ fn march(g: Grid, o: vec3<f32>, d: vec3<f32>, tmax: f32) -> Hit {
 
 var<private> FIELD_DIRS: array<vec4<f32>, 64> = FIELD_DIR_TABLE;
 
+// ---------------------------------------------------------------------------------------
+// The field rays: one workgroup per ray. Each segment of the ray is split into 64 equal
+// lengths, one per lane, and the nearest hit wins, so a ray costs about two cells a lane
+// rather than a lane marching 55 m alone.
+
+var<workgroup> first_lane: atomic<u32>;
+var<workgroup> hit_shared: array<vec4<f32>, 2>; // n.xyz and t; face.xyz and material
+
+// The nearest of the lanes' hits. Lane k marches the k-th sixty-fourth of the segment and
+// reports only hits inside it, so the nearest hit is the lowest lane's: one atomic, not a
+// tree. The answer comes back workgroup-uniform, so the caller may branch on it and still
+// reach its next barrier in uniform control flow.
+fn nearest(lane: u32, h: Hit) -> Hit {
+    if (lane == 0u) {
+        atomicStore(&first_lane, 64u);
+        hit_shared[0] = vec4<f32>(0.0, 1.0, 0.0, -1.0);
+        hit_shared[1] = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+    }
+    workgroupBarrier();
+    if (h.t >= 0.0) {
+        atomicMin(&first_lane, lane);
+    }
+    workgroupBarrier();
+    if (lane == atomicLoad(&first_lane)) {
+        hit_shared[0] = vec4<f32>(h.n, h.t);
+        hit_shared[1] = vec4<f32>(h.face, bitcast<f32>(h.material));
+    }
+    let a = workgroupUniformLoad(&hit_shared[0]);
+    let b = workgroupUniformLoad(&hit_shared[1]);
+    workgroupBarrier();
+    return Hit(a.w, a.xyz, b.xyz, bitcast<u32>(b.w));
+}
+
+// Field ray `ray`, by a whole workgroup.
+fn field_ray(ray: u32, lane: u32) {
+    let lv = bitcast<vec4<f32>>(inb[HV_LISTENER]);
+    let l = lv.xyz;
+    let c = lv.w;
+    let right = bitcast<vec4<f32>>(inb[HV_RIGHT]).xyz;
+    let g = grid();
+    let dw = FIELD_DIRS[ray];
+    let range = TAP_WINDOW_S * c * 0.5;
+    let piece = (range - T_START) / 64.0;
+    let t0 = T_START + piece * f32(lane);
+    let t1 = T_START + piece * f32(lane + 1u);
+
+    let h1 = nearest(lane, march(g, l, dw.xyz, t0, t1));
+    var rec = array<f32, 16>();
+    rec[0] = -1.0;
+    rec[4] = -1.0;
+    if (h1.t >= 0.0) {
+        let p1 = l + h1.t * dw.xyz;
+        let d1 = reflect(dw.xyz, h1.n);
+        let r1 = material_r(h1.material);
+        let rbar1 = (r1.x + r1.y + r1.z + r1.w) * 0.25;
+        let path1 = 2.0 * h1.t;
+        rec[0] = h1.t;
+        rec[1] = d1.x;
+        rec[2] = d1.y;
+        rec[3] = d1.z;
+        rec[8] = abs(dot(dw.xyz, h1.n));
+        rec[9] = bitcast<f32>(h1.material);
+        rec[10] = path1 / c;
+        rec[11] = rbar1 * REFERENCE_M / max(path1, REFERENCE_M);
+        rec[12] = dot(dw.xyz, right);
+        // The second leg, from just off the face, split the same way.
+        let o2 = p1 + h1.face * T_START;
+        let h2 = nearest(lane, march(g, o2, d1, t0, t1));
+        if (h2.t >= 0.0) {
+            let p2 = o2 + h2.t * d1;
+            let d2 = reflect(d1, h2.n);
+            let r2 = material_r(h2.material);
+            let rbar2 = (r2.x + r2.y + r2.z + r2.w) * 0.25;
+            let path2 = h1.t + h2.t + length(p2 - l);
+            rec[4] = h2.t;
+            rec[5] = d2.x;
+            rec[6] = d2.y;
+            rec[7] = d2.z;
+            rec[13] = path2 / c;
+            rec[14] = rbar1 * rbar2 * REFERENCE_M / max(path2, REFERENCE_M);
+            rec[15] = dot(normalize(p2 - l), right);
+        }
+    }
+    if (lane < 16u) {
+        outb[OUT_RAYS + 16u * ray + lane] = bitcast<u32>(rec[lane]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The query: the 64 field rays and the sources in one dispatch, so they overlap. The rays
+// go first because they are the longer.
+
+@compute @workgroup_size(64)
+fn query(@builtin(workgroup_id) wg: vec3<u32>,
+         @builtin(local_invocation_index) lane: u32) {
+    if (wg.x < FIELD_RAYS) {
+        field_ray(wg.x, lane);
+    } else {
+        source_query(wg.x - FIELD_RAYS, lane);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The field's reduction: taps, the quadrature of 4V/S, the clear fraction and RT60, from
+// the 64 rays' records.
+
 var<workgroup> arr_delay: array<f32, 128>;
 var<workgroup> arr_gain: array<f32, 128>;
 var<workgroup> arr_pan: array<f32, 128>;
 var<workgroup> bin_gain: array<atomic<u32>, 64>;
 var<workgroup> bin_arrival: array<atomic<u32>, 64>;
 var<workgroup> red_field: array<vec4<f32>, 64>;
+var<workgroup> bin_plain: array<u32, 64>;
+var<workgroup> bin_chosen: array<u32, 64>;
+
+fn ray_word(ray: u32, k: u32) -> f32 {
+    return bitcast<f32>(outb[OUT_RAYS + 16u * ray + k]);
+}
 
 @compute @workgroup_size(64)
-fn field(@builtin(local_invocation_index) lane: u32) {
-    let lv = bitcast<vec4<f32>>(inb[HV_LISTENER]);
-    let l = lv.xyz;
-    let c = lv.w;
-    let right = bitcast<vec4<f32>>(inb[HV_RIGHT]).xyz;
-    let g = grid();
+fn field_reduce(@builtin(local_invocation_index) lane: u32) {
+    let c = bitcast<vec4<f32>>(inb[HV_LISTENER]).w;
     let dw = FIELD_DIRS[lane];
-    let range = TAP_WINDOW_S * c * 0.5;
-
     atomicStore(&bin_gain[lane], 0u);
     atomicStore(&bin_arrival[lane], 0xFFFFFFFFu);
+    // Unused taps are zero: written first, and ordered before the chosen taps' writes.
+    if (lane < 8u) {
+        let at = OUT_FIELD + 4u * lane;
+        outb[at] = 0u;
+        outb[at + 1u] = 0u;
+        outb[at + 2u] = 0u;
+        outb[at + 3u] = 0u;
+    }
+    storageBarrier();
+    let t1 = ray_word(lane, 0u);
+    var sums = vec4<f32>(0.0, 0.0, 0.0, dw.w); // w l^3, w l^2 / |cos|, (that) x alpha, w escaped
     arr_gain[2u * lane] = 0.0;
     arr_gain[2u * lane + 1u] = 0.0;
-
-    var ray = array<f32, 16>();
-    ray[0] = -1.0;
-    ray[4] = -1.0;
-    var sums = vec4<f32>(0.0, 0.0, 0.0, 0.0); // w l^3, w l^2 / |cos|, (that) x alpha, w escaped
-
-    let h1 = march(g, l, dw.xyz, range);
-    if (h1.t >= 0.0) {
-        let p1 = l + h1.t * dw.xyz;
-        let r1 = material_r(h1.material);
-        let cosi = abs(dot(dw.xyz, h1.n));
-        let area = dw.w * h1.t * h1.t / max(cosi, COS_FLOOR);
+    if (t1 >= 0.0) {
+        let cosi = ray_word(lane, 8u);
+        let r1 = material_r(outb[OUT_RAYS + 16u * lane + 9u]);
+        let area = dw.w * t1 * t1 / max(cosi, COS_FLOOR);
         let alpha = 1.0 - r1.y * r1.y; // energy absorption at 500 Hz
-        sums = vec4<f32>(dw.w * h1.t * h1.t * h1.t, area, area * alpha, 0.0);
-        let d1 = reflect(dw.xyz, h1.n);
-        let rbar1 = (r1.x + r1.y + r1.z + r1.w) * 0.25;
-        let path1 = 2.0 * h1.t;
-        arr_delay[2u * lane] = path1 / c;
-        arr_gain[2u * lane] = rbar1 * REFERENCE_M / max(path1, REFERENCE_M);
-        arr_pan[2u * lane] = dot(normalize(p1 - l), right);
-        ray[0] = h1.t;
-        ray[1] = d1.x;
-        ray[2] = d1.y;
-        ray[3] = d1.z;
-        ray[8] = cosi;
-        ray[9] = bitcast<f32>(h1.material);
-        let o2 = p1 + h1.face * T_START;
-        let h2 = march(g, o2, d1, range);
-        if (h2.t >= 0.0) {
-            let p2 = o2 + h2.t * d1;
-            let r2 = material_r(h2.material);
-            let d2 = reflect(d1, h2.n);
-            let rbar2 = (r2.x + r2.y + r2.z + r2.w) * 0.25;
-            let path2 = h1.t + h2.t + length(p2 - l);
-            arr_delay[2u * lane + 1u] = path2 / c;
-            arr_gain[2u * lane + 1u] = rbar1 * rbar2 * REFERENCE_M / max(path2, REFERENCE_M);
-            arr_pan[2u * lane + 1u] = dot(normalize(p2 - l), right);
-            ray[4] = h2.t;
-            ray[5] = d2.x;
-            ray[6] = d2.y;
-            ray[7] = d2.z;
+        sums = vec4<f32>(dw.w * t1 * t1 * t1, area, area * alpha, 0.0);
+        arr_delay[2u * lane] = ray_word(lane, 10u);
+        arr_gain[2u * lane] = ray_word(lane, 11u);
+        arr_pan[2u * lane] = ray_word(lane, 12u);
+        if (ray_word(lane, 4u) >= 0.0) {
+            arr_delay[2u * lane + 1u] = ray_word(lane, 13u);
+            arr_gain[2u * lane + 1u] = ray_word(lane, 14u);
+            arr_pan[2u * lane + 1u] = ray_word(lane, 15u);
         }
-    } else {
-        sums.w = dw.w;
-    }
-    for (var k = 0u; k < 16u; k = k + 1u) {
-        outb[OUT_RAYS + 16u * lane + k] = bitcast<u32>(ray[k]);
     }
     red_field[lane] = sums;
     workgroupBarrier();
@@ -839,47 +934,33 @@ fn field(@builtin(local_invocation_index) lane: u32) {
         }
         workgroupBarrier();
     }
-    if (lane == 0u) {
-        // The eight strongest bins, reported in delay order.
-        var chosen_lo = 0u;
-        var chosen_hi = 0u;
-        for (var pick = 0u; pick < 8u; pick = pick + 1u) {
-            var best_bin = TAP_BINS;
-            var best_gain = 0u;
-            for (var b = 0u; b < TAP_BINS; b = b + 1u) {
-                let taken = select((chosen_hi >> (b - 32u)) & 1u, (chosen_lo >> b) & 1u, b < 32u);
-                let gb = atomicLoad(&bin_gain[b]);
-                if (taken == 0u && gb > best_gain) {
-                    best_gain = gb;
-                    best_bin = b;
-                }
-            }
-            if (best_bin < 32u) {
-                chosen_lo = chosen_lo | (1u << best_bin);
-            } else if (best_bin < TAP_BINS) {
-                chosen_hi = chosen_hi | (1u << (best_bin - 32u));
-            }
-        }
-        var tap = 0u;
+    // The eight strongest bins: each lane counts the bins stronger than its own (ties to
+    // the earlier bin), from a plain copy, and a bin with fewer than eight above it is a
+    // tap. Taps go out in delay order: a tap's slot is the number of chosen bins before it.
+    bin_plain[lane] = atomicLoad(&bin_gain[lane]);
+    workgroupBarrier();
+    let mine = bin_plain[lane];
+    var above = 0u;
+    for (var b = 0u; b < TAP_BINS; b = b + 1u) {
+        let gb = bin_plain[b];
+        above = above + select(0u, 1u, gb > mine || (gb == mine && b < lane));
+    }
+    let chosen = mine > 0u && above < 8u;
+    bin_chosen[lane] = select(0u, 1u, chosen);
+    workgroupBarrier();
+    if (chosen) {
+        var slot = 0u;
         for (var b = 0u; b < TAP_BINS; b = b + 1u) {
-            let taken = select((chosen_hi >> (b - 32u)) & 1u, (chosen_lo >> b) & 1u, b < 32u);
-            if (taken != 0u && tap < 8u) {
-                let idx = atomicLoad(&bin_arrival[b]);
-                let at = OUT_FIELD + 4u * tap;
-                outb[at] = bitcast<u32>(arr_delay[idx]);
-                outb[at + 1u] = bitcast<u32>(arr_gain[idx]);
-                outb[at + 2u] = bitcast<u32>(clamp(arr_pan[idx], -1.0, 1.0));
-                outb[at + 3u] = 0u;
-                tap = tap + 1u;
-            }
+            slot = slot + select(0u, bin_chosen[b], b < lane);
         }
-        for (; tap < 8u; tap = tap + 1u) {
-            let at = OUT_FIELD + 4u * tap;
-            outb[at] = 0u;
-            outb[at + 1u] = 0u;
-            outb[at + 2u] = 0u;
-            outb[at + 3u] = 0u;
-        }
+        let idx = atomicLoad(&bin_arrival[lane]);
+        let at = OUT_FIELD + 4u * slot;
+        outb[at] = bitcast<u32>(arr_delay[idx]);
+        outb[at + 1u] = bitcast<u32>(arr_gain[idx]);
+        outb[at + 2u] = bitcast<u32>(clamp(arr_pan[idx], -1.0, 1.0));
+        outb[at + 3u] = 0u;
+    }
+    if (lane == 0u) {
         let s = red_field[0];
         var mfp = 0.0;
         var rt60 = 0.0;
@@ -904,8 +985,9 @@ fn field(@builtin(local_invocation_index) lane: u32) {
 // excess, and the probe excess with the foliage path.
 
 @compute @workgroup_size(64)
-fn probe_laws(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+fn probe_laws(@builtin(workgroup_id) wg: vec3<u32>,
+              @builtin(local_invocation_index) lane: u32) {
+    let i = wg.x;
     if (i >= inb[HV_COUNTS].x) {
         return;
     }
@@ -914,5 +996,5 @@ fn probe_laws(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = inb[base + 1u];
     let ex = bitcast<vec4<f32>>(inb[base + 2u]);
     let pf = bitcast<vec4<f32>>(inb[base + 3u]);
-    laws(a.xyz, a.w, bitcast<vec3<f32>>(b.xyz), b.w, ex, pf.x, pf.y, 8u * i);
+    laws(lane, a.xyz, a.w, bitcast<vec3<f32>>(b.xyz), b.w, ex, pf.x, pf.y, 8u * i);
 }

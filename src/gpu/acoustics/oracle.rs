@@ -196,7 +196,7 @@ impl LawProbe {
             });
             pass.set_bind_group(0, &self.group, &[]);
             pass.set_pipeline(&self.pipeline);
-            pass.dispatch_workgroups(cases.div_ceil(64).max(1), 1, 1);
+            pass.dispatch_workgroups(cases.max(1), 1, 1);
         }
         enc.copy_buffer_to_buffer(&self.output, 0, dst, 0, 32 * cases.max(1) as u64);
     }

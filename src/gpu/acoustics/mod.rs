@@ -178,8 +178,8 @@ pub struct GpuAcoustics {
     build_bgl: wgpu::BindGroupLayout,
     query_group: wgpu::BindGroup,
     build_group: wgpu::BindGroup,
-    sources: wgpu::ComputePipeline,
-    field: wgpu::ComputePipeline,
+    query: wgpu::ComputePipeline,
+    field_reduce: wgpu::ComputePipeline,
     statics_bin: wgpu::ComputePipeline,
     scan: wgpu::ComputePipeline,
     statics_fill: wgpu::ComputePipeline,
@@ -331,8 +331,8 @@ impl GpuAcoustics {
             Self::groups(device, &query_bgl, &build_bgl, &input, &output, &scene);
         Ok(GpuAcoustics {
             limits,
-            sources: q("sources"),
-            field: q("field"),
+            query: q("query"),
+            field_reduce: q("field_reduce"),
             statics_bin: b("statics_bin", &[]),
             scan: b("scan", &[]),
             statics_fill: b("statics_fill", &[]),
@@ -810,11 +810,9 @@ impl GpuAcoustics {
                 timestamp_writes: timestamps,
             });
             pass.set_bind_group(0, &self.query_group, &[]);
-            if shape.sources > 0 {
-                pass.set_pipeline(&self.sources);
-                pass.dispatch_workgroups(shape.sources, 1, 1);
-            }
-            pass.set_pipeline(&self.field);
+            pass.set_pipeline(&self.query);
+            pass.dispatch_workgroups(MAX_FIELD_RAYS + shape.sources, 1, 1);
+            pass.set_pipeline(&self.field_reduce);
             pass.dispatch_workgroups(1, 1, 1);
         }
         self.ring.record(enc, &self.output, slot);

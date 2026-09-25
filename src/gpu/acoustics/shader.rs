@@ -177,6 +177,7 @@ pub(crate) fn query_source() -> String {
     c("OUT_RAYS", format!("{OUT_RAYS}u"), &mut s);
     c("OUT_EDGES", format!("{OUT_EDGES}u"), &mut s);
     c("MAX_STATICS", format!("{MAX_STATICS}u"), &mut s);
+    c("FIELD_RAYS", format!("{MAX_FIELD_RAYS}u"), &mut s);
     c("MAX_LANE_STEPS", format!("{}u", 2 * MAX_TERRAIN_SIDE / 64 + 4), &mut s);
     c("MAX_BLOCK_STEPS", format!("{}u", 2 * MAX_TERRAIN_SIDE / 8 + 4), &mut s);
     c("MAX_CELL_STEPS", format!("{}u", 2 * 8 + 4), &mut s);

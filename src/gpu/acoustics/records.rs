@@ -555,8 +555,10 @@ pub struct FieldRay {
     pub first_cos: f32,
     /// Material index at the first hit.
     pub first_material: u32,
-    /// Padding to 64 bytes.
-    pub pad: [u32; 6],
+    /// The first reflection's arrival back at the listener: delay in seconds, gain, pan.
+    pub first_arrival: [f32; 3],
+    /// The second reflection's arrival: delay in seconds, gain, pan; zero when none.
+    pub second_arrival: [f32; 3],
 }
 
 const _: () = assert!(std::mem::size_of::<FieldRay>() == 64);
