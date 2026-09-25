@@ -399,6 +399,29 @@ fn laws(lane: u32, s: vec3<f32>, directivity: f32, vs: vec3<f32>, tag: u32, ex: 
 var<workgroup> red_band: array<vec4<f32>, 64>;
 var<workgroup> red_probe: array<vec2<f32>, 64>;
 
+// The static queue. A lane that walks a cell does not test the cell's statics itself: it
+// queues them, and the whole workgroup tests the queue strided across its lanes, so a
+// cell dense with statics costs one test a lane instead of a list a lane. Entries past
+// QCAP are tested inline by the lane that found them: slower, never dropped.
+const QCAP: u32 = 512u;
+var<workgroup> q_count: atomic<u32>;
+var<workgroup> q_slot: array<u32, 512>;
+var<workgroup> q_lo: array<f32, 512>;
+var<workgroup> q_hi: array<f32, 512>;
+
+// One static against the source's path: its crossing, the claim (a static is evaluated by
+// the piece its crossing starts in), and its edge in the admitted bands.
+fn source_static(g: Grid, slot: u32, claim_lo: f32, claim_hi: f32, s: vec3<f32>, l: vec3<f32>,
+                 d: vec3<f32>, len: f32, c: f32, best: ptr<function, vec4<f32>>,
+                 probe: ptr<function, f32>) {
+    // One 16-word record a static: its inverse, top, bottom and half-width.
+    let base = g.sx + 16u * scene[g.list + slot];
+    let x = crossing(scene_rows(base), s, d);
+    if (x.ta < x.tb && x.ta >= claim_lo && x.ta < claim_hi) {
+        obstacle(sf(base + 12u), sf(base + 13u), sf(base + 14u), x, s, l, d, len, c, best, probe);
+    }
+}
+
 fn clip1(o: f32, d: f32, lo: f32, hi: f32, t0: ptr<function, f32>, t1: ptr<function, f32>) {
     if (abs(d) < 1e-30) {
         if (o < lo || o > hi) {
@@ -467,17 +490,20 @@ fn walk_terrain(g: Grid, s: vec3<f32>, l: vec3<f32>, d: vec3<f32>, len: f32, c: 
             let claim_lo = select(t, -BIG, lane == 0u && k == 0u);
             let claim_hi = select(te, BIG, last && lane == 63u);
             let head = scene[g.heads + cell];
-            let end = scene[g.heads + cell + 1u];
-            for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
-                if (head + q >= end) {
-                    break;
-                }
-                // One 16-word record a static: its inverse, top, bottom and half-width.
-                let base = g.sx + 16u * scene[g.list + head + q];
-                let x = crossing(scene_rows(base), s, d);
-                if (x.ta < x.tb && x.ta >= claim_lo && x.ta < claim_hi) {
-                    obstacle(sf(base + 12u), sf(base + 13u), sf(base + 14u), x, s, l, d, len, c,
-                             best, probe);
+            let n = scene[g.heads + cell + 1u] - head;
+            if (n > 0u) {
+                let at = atomicAdd(&q_count, n);
+                for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
+                    if (q >= n) {
+                        break;
+                    }
+                    if (at + q < QCAP) {
+                        q_slot[at + q] = head + q;
+                        q_lo[at + q] = claim_lo;
+                        q_hi[at + q] = claim_hi;
+                    } else {
+                        source_static(g, head + q, claim_lo, claim_hi, s, l, d, len, c, best, probe);
+                    }
                 }
             }
         }
@@ -523,8 +549,12 @@ fn source_query(i: u32, lane: u32) {
     var best = vec4<f32>(-BIG);
     var probe = -BIG;
     var fol = 0.0;
+    if (lane == 0u) {
+        atomicStore(&q_count, 0u);
+    }
+    workgroupBarrier();
+    let g = grid();
     if (len > 0.0 && i < n_src) {
-        let g = grid();
         if (g.cols > 0u && g.rows > 0u) {
             walk_terrain(g, s, l, d, len, c, lane, &best, &probe, &fol);
         }
@@ -538,6 +568,18 @@ fn source_query(i: u32, lane: u32) {
                 obstacle(m.r1.w + half_y, m.r1.w - half_y, bitcast<f32>(extra.y), x, s, l, d, len,
                          c, &best, &probe);
             }
+        }
+    }
+    // The queued statics, strided across the lanes.
+    workgroupBarrier();
+    let queued = min(atomicLoad(&q_count), QCAP);
+    if (len > 0.0) {
+        for (var k = 0u; k < QCAP / 64u; k = k + 1u) {
+            let e = lane + 64u * k;
+            if (e >= queued) {
+                break;
+            }
+            source_static(g, q_slot[e], q_lo[e], q_hi[e], s, l, d, len, c, &best, &probe);
         }
     }
     red_band[lane] = best;
@@ -591,49 +633,64 @@ fn smooth_normal(g: Grid, ci: u32, cj: u32) -> vec3<f32> {
     return normalize(vec3<f32>(-dx, 1.0, -dz));
 }
 
-// The static and terrain hits inside one cell piece [u0, u1] of the ray.
+// One static against a ray's cell piece [u0, u1]: the nearest entry inside it.
+fn ray_static(g: Grid, slot: u32, u0: f32, u1: f32, o: vec3<f32>, d: vec3<f32>,
+              best: ptr<function, Hit>) {
+    let base = g.sx + 16u * scene[g.list + slot];
+    let inv = scene_rows(base);
+    let ol = to_local(inv, o);
+    let dl = to_local_dir(inv, d);
+    var t0 = -BIG;
+    var t1 = BIG;
+    var axis = 0u;
+    for (var k = 0u; k < 3u; k = k + 1u) {
+        if (abs(dl[k]) < 1e-30) {
+            if (abs(ol[k]) > 0.5) {
+                t0 = BIG;
+            }
+            continue;
+        }
+        let a = (-0.5 - ol[k]) / dl[k];
+        let b = (0.5 - ol[k]) / dl[k];
+        let near = min(a, b);
+        if (near > t0) {
+            t0 = near;
+            axis = k;
+        }
+        t1 = min(t1, max(a, b));
+    }
+    if (t0 <= t1 && t0 >= u0 && t0 <= u1 && ((*best).t < 0.0 || t0 < (*best).t)) {
+        var row = inv.r0.xyz;
+        if (axis == 1u) {
+            row = inv.r1.xyz;
+        } else if (axis == 2u) {
+            row = inv.r2.xyz;
+        }
+        let n = normalize(row) * -sign(dl[axis]);
+        *best = Hit(t0, n, n, scene[base + 15u]);
+    }
+}
+
+// A cell piece [u0, u1] of the ray: its statics queued (or tested inline past QCAP), and
+// its terrain column tested.
 fn hit_cell(g: Grid, o: vec3<f32>, d: vec3<f32>, ci: u32, cj: u32, u0: f32, u1: f32,
             entered: vec3<f32>, best: ptr<function, Hit>) {
     let cell = cj * g.cols + ci;
-    // Statics listed in the cell: the nearest entry at or after u0.
     let head = scene[g.heads + cell];
-    let end = scene[g.heads + cell + 1u];
-    for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
-        if (head + q >= end) {
-            break;
-        }
-        let base = g.sx + 16u * scene[g.list + head + q];
-        let inv = scene_rows(base);
-        let ol = to_local(inv, o);
-        let dl = to_local_dir(inv, d);
-        var t0 = -BIG;
-        var t1 = BIG;
-        var axis = 0u;
-        for (var k = 0u; k < 3u; k = k + 1u) {
-            if (abs(dl[k]) < 1e-30) {
-                if (abs(ol[k]) > 0.5) {
-                    t0 = BIG;
-                }
-                continue;
+    let n = scene[g.heads + cell + 1u] - head;
+    if (n > 0u) {
+        let at = atomicAdd(&q_count, n);
+        for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
+            if (q >= n) {
+                break;
             }
-            let a = (-0.5 - ol[k]) / dl[k];
-            let b = (0.5 - ol[k]) / dl[k];
-            let near = min(a, b);
-            if (near > t0) {
-                t0 = near;
-                axis = k;
+            if (at + q < QCAP) {
+                q_slot[at + q] = head + q;
+                q_lo[at + q] = u0;
+                q_hi[at + q] = u1;
+            } else {
+                ray_static(g, head + q, u0, u1, o, d, best);
             }
-            t1 = min(t1, max(a, b));
-        }
-        if (t0 <= t1 && t0 >= u0 && t0 <= u1 && ((*best).t < 0.0 || t0 < (*best).t)) {
-            var row = inv.r0.xyz;
-            if (axis == 1u) {
-                row = inv.r1.xyz;
-            } else if (axis == 2u) {
-                row = inv.r2.xyz;
-            }
-            let n = normalize(row) * -sign(dl[axis]);
-            *best = Hit(t0, n, n, scene[base + 15u]);
         }
     }
     // The terrain column.
@@ -729,6 +786,8 @@ fn march(g: Grid, o: vec3<f32>, d: vec3<f32>, tmin: f32, tmax: f32) -> Hit {
                 let ue = max(min(min(ux, uz), te), u);
                 hit_cell(g, o, d, u32(ci), u32(cj), u, ue, entered, &found);
                 if (found.t >= 0.0) {
+                    // A terrain hit (or an overflowed static's) ends this lane's piece; the
+                    // statics queued before it are tested with the rest.
                     return found;
                 }
                 if (ue >= te) {
@@ -772,24 +831,45 @@ var<private> FIELD_DIRS: array<vec4<f32>, 64> = FIELD_DIR_TABLE;
 
 // ---------------------------------------------------------------------------------------
 // The field rays: one workgroup per ray. Each segment of the ray is split into 64 equal
-// lengths, one per lane, and the nearest hit wins, so a ray costs about two cells a lane
-// rather than a lane marching 55 m alone.
+// lengths, one per lane, whose statics go through the queue, and the nearest hit wins, so a
+// ray costs about two cells and one static a lane rather than a lane marching 55 m alone.
 
 var<workgroup> first_lane: atomic<u32>;
+var<workgroup> best_bits: atomic<u32>;
 var<workgroup> hit_shared: array<vec4<f32>, 2>; // n.xyz and t; face.xyz and material
 
-// The nearest of the lanes' hits. Lane k marches the k-th sixty-fourth of the segment and
-// reports only hits inside it, so the nearest hit is the lowest lane's: one atomic, not a
-// tree. The answer comes back workgroup-uniform, so the caller may branch on it and still
-// reach its next barrier in uniform control flow.
-fn nearest(lane: u32, h: Hit) -> Hit {
+fn reset_nearest(lane: u32) {
     if (lane == 0u) {
+        atomicStore(&q_count, 0u);
+        atomicStore(&best_bits, 0x7F800000u); // +inf; hit distances are positive
         atomicStore(&first_lane, 64u);
         hit_shared[0] = vec4<f32>(0.0, 1.0, 0.0, -1.0);
         hit_shared[1] = vec4<f32>(0.0, 1.0, 0.0, 0.0);
     }
     workgroupBarrier();
+}
+
+// The nearest hit of the segment: each lane's terrain hit, and the queued statics tested
+// across the lanes, reduced by the distance's bits (positive floats order as their bits),
+// ties to the lowest lane. The answer comes back workgroup-uniform, so the caller may
+// branch on it and still reach its next barrier in uniform control flow. Leaves the queue
+// and the state reset for the next segment.
+fn nearest(lane: u32, g: Grid, o: vec3<f32>, d: vec3<f32>, found: Hit) -> Hit {
+    var h = found;
+    workgroupBarrier();
+    let queued = min(atomicLoad(&q_count), QCAP);
+    for (var k = 0u; k < QCAP / 64u; k = k + 1u) {
+        let e = lane + 64u * k;
+        if (e >= queued) {
+            break;
+        }
+        ray_static(g, q_slot[e], q_lo[e], q_hi[e], o, d, &h);
+    }
     if (h.t >= 0.0) {
+        atomicMin(&best_bits, bitcast<u32>(h.t));
+    }
+    workgroupBarrier();
+    if (h.t >= 0.0 && bitcast<u32>(h.t) == atomicLoad(&best_bits)) {
         atomicMin(&first_lane, lane);
     }
     workgroupBarrier();
@@ -800,6 +880,7 @@ fn nearest(lane: u32, h: Hit) -> Hit {
     let a = workgroupUniformLoad(&hit_shared[0]);
     let b = workgroupUniformLoad(&hit_shared[1]);
     workgroupBarrier();
+    reset_nearest(lane);
     return Hit(a.w, a.xyz, b.xyz, bitcast<u32>(b.w));
 }
 
@@ -816,7 +897,8 @@ fn field_ray(ray: u32, lane: u32) {
     let t0 = T_START + piece * f32(lane);
     let t1 = T_START + piece * f32(lane + 1u);
 
-    let h1 = nearest(lane, march(g, l, dw.xyz, t0, t1));
+    reset_nearest(lane);
+    let h1 = nearest(lane, g, l, dw.xyz, march(g, l, dw.xyz, t0, t1));
     var rec = array<f32, 16>();
     var sums = vec4<f32>(0.0, 0.0, 0.0, dw.w); // escaped until it hits
     rec[0] = -1.0;
@@ -843,7 +925,7 @@ fn field_ray(ray: u32, lane: u32) {
         rec[12] = dot(dw.xyz, right);
         // The second leg, from just off the face, split the same way.
         let o2 = p1 + h1.face * T_START;
-        let h2 = nearest(lane, march(g, o2, d1, t0, t1));
+        let h2 = nearest(lane, g, o2, d1, march(g, o2, d1, t0, t1));
         if (h2.t >= 0.0) {
             let p2 = o2 + h2.t * d1;
             let d2 = reflect(d1, h2.n);

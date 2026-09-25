@@ -146,9 +146,10 @@ fn dense_max(s: [f64; 3], l: [f64; 3], t0: f64, t1: f64, h: f64, step_t: f64) ->
 struct CpuEdges {
     /// Four bands and the probe.
     edges: [f64; 5],
-    /// A Fresnel admission within rounding of its threshold, or a crossing too short to
-    /// sample: the pair is counted, not asserted.
+    /// A Fresnel admission within rounding of its threshold: counted, not asserted.
     ambiguous: bool,
+    /// A footprint crossing under 0.3 m, too short for L2's 0.1 m march to be sure of.
+    short: bool,
     /// The largest |d t| of any t the GPU computes (cell boundaries, footprint crossings),
     /// from the f32 inputs' magnitudes and the crossing's angle.
     dt: f64,
@@ -163,6 +164,7 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
     let step_t = step_m / dh;
     let mut edges = [f64::MIN; 5];
     let mut ambiguous = false;
+    let mut short = false;
     let mut dt = 8.0 * U;
     // The terrain: every cell piece, max-grid heights at the boundaries.
     let cell = scene.cell as f64;
@@ -224,12 +226,12 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
         let (ya, yb) = (s[1] + ta * d[1], s[1] + tb * d[1]);
         if ya < cc.bottom && yb < cc.bottom {
             if (ya - cc.bottom).abs() < 1e-3 || (yb - cc.bottom).abs() < 1e-3 {
-                ambiguous = true;
+                short = true;
             }
             continue;
         }
         if (tb - ta) * dh < 0.3 {
-            ambiguous = true;
+            short = true;
         }
         let dl = local(&cc.inv, d, 0.0);
         for k in [0, 2] {
@@ -252,7 +254,7 @@ fn cpu_edges(scene: &Scene, cols: &[Col], s32: [f32; 3], l32: [f32; 3], c: f64, 
             }
         }
     }
-    CpuEdges { edges, ambiguous, dt }
+    CpuEdges { edges, ambiguous, short, dt }
 }
 
 /// A march at `step` metres plus every cell boundary: blocked at the probe band, and the
@@ -412,7 +414,7 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
                 // L2: the blocked flag.
                 let (blocked, clear, step) = cpu_blocked(&scene, &cols, src.position, listener, c32);
                 l2_pairs += 1;
-                if clear <= step.max(1e-6) || cpu.ambiguous {
+                if clear <= step.max(1e-6) || cpu.ambiguous || cpu.short {
                     l2_counted += 1;
                 } else {
                     assert_eq!(out.sources[i].blocked(), blocked, "{name}: pair {i} clearance {clear} step {step}");
@@ -425,7 +427,95 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
         assert!(4 * t_asserted >= t_name_pairs, "{name}: under a quarter of the pairs were asserted");
     }
     println!(
-        "L3: {l3_pairs} pairs x 5 bands, {l3_counted} counted (Fresnel threshold or a crossing under 0.3 m), worst {l3_worst:.3} of the bound"
+        "L3: {l3_pairs} pairs x 5 bands, {l3_counted} counted (a Fresnel admission within rounding of its threshold), worst {l3_worst:.3} of the bound"
     );
     println!("L2: {l2_pairs} pairs, {l2_counted} within one cell's height step (counted), {l2_blocked} blocked among the asserted");
+}
+
+/// L3 past the static queue's capacity: 1,200 statics stacked on a few cells, so a lane's
+/// cells hold more than the 512-entry queue and the overflow is tested inline. Every band
+/// still matches the CPU, and field rays through the crowd still hit the nearest face.
+#[test]
+fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
+    let Some(gpu) = gpu() else { return };
+    let air = Air::standard();
+    let mut scene = Scene::flat(60, 60, 2.0, 0.0);
+    let mut rng = Rng(0xc20d);
+    // 1,200 boxes, each 2.6 m across (wider than the 4 kHz Fresnel zone here), crowded into a 6 m
+    // square: every cell there lists hundreds of them.
+    scene.statics = (0..1_200)
+        .map(|_| {
+            Obb::upright(
+                [rng.range(57.0, 63.0) as f32, rng.range(0.5, 3.0) as f32, rng.range(57.0, 63.0) as f32],
+                [3.0, rng.range(1.0, 6.0) as f32, 2.6],
+                rng.range(0.0, 3.14) as f32,
+                0,
+            )
+        })
+        .collect();
+    let mut ac = GpuAcoustics::new(&gpu.device, AcousticLimits::MAX).unwrap();
+    scene.load(&gpu, &mut ac);
+    let cols: Vec<Col> = scene.statics.iter().map(col).collect();
+    let listener = [30.0f32, 1.6, 60.0];
+    let header = DispatchHeader::new(&listener_at(listener), &air, &[]).unwrap();
+    let sources: Vec<Source> = (0..32)
+        .map(|i| Source::new([90.0, 0.5 + 0.2 * i as f32, 50.0 + 0.6 * i as f32], 1.0, [0.0; 3], i, NO_MOVER).unwrap())
+        .collect();
+    let out = dispatch(&gpu, &mut ac, &header, &sources, &[]);
+    let dst = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4096,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let mut enc = gpu.encoder();
+    ac.copy_source_edges(&mut enc, &dst, 0);
+    gpu.submit_wait(enc);
+    let edges: Vec<SourceEdges> = bytemuck::cast_slice(&gpu.read(&dst, 4096)).to_vec();
+    let c32 = header.listener[3] as f64;
+    let (mut asserted, mut counted, mut worst) = (0, 0, 0.0f64);
+    for (i, src) in sources.iter().enumerate() {
+        let cpu = cpu_edges(&scene, &cols, src.position, listener, c32, 0.01);
+        if cpu.ambiguous {
+            counted += 1;
+            continue;
+        }
+        let s = src.position.map(|v| v as f64);
+        let l = listener.map(|v| v as f64);
+        let len = ((l[0] - s[0]).powi(2) + (l[1] - s[1]).powi(2) + (l[2] - s[2]).powi(2)).sqrt();
+        let mag = s.iter().chain(l.iter()).map(|v| v.abs()).fold(0.0, f64::max);
+        let gpu_e = [edges[i].excess_m[0], edges[i].excess_m[1], edges[i].excess_m[2], edges[i].excess_m[3], edges[i].probe_excess_m];
+        for b in 0..5 {
+            let (g, want) = (gpu_e[b] as f64, cpu.edges[b]);
+            let bound = 16.0 * U * (2.0 * len + want.abs() + 2.0 * mag) + 8.0 * U * mag + 2.0 * len * cpu.dt;
+            assert!((g - want).abs() <= bound, "crowd: pair {i} band {b}: gpu {g} cpu {want}");
+            worst = worst.max((g - want).abs() / bound);
+        }
+        asserted += 1;
+    }
+    assert!(out.results().iter().any(|r| r.blocked()), "the crowd blocked nothing");
+    // The queue really overflowed: the cells one path crosses list more statics than it holds.
+    let per_cell = |ci: i64, cj: i64| {
+        scene.statics.iter().filter(|o| {
+            let r = o.rows;
+            let hx = 0.5 * (r[0][0].abs() + r[0][1].abs() + r[0][2].abs());
+            let hz = 0.5 * (r[2][0].abs() + r[2][1].abs() + r[2][2].abs());
+            let (x0, x1) = (((r[0][3] - hx) / 2.0).floor() as i64, ((r[0][3] + hx) / 2.0).floor() as i64);
+            let (z0, z1) = (((r[2][3] - hz) / 2.0).floor() as i64, ((r[2][3] + hz) / 2.0).floor() as i64);
+            (x0..=x1).contains(&ci) && (z0..=z1).contains(&cj)
+        }).count()
+    };
+    let mut most = 0usize;
+    for src in &sources {
+        let (s, l) = (src.position.map(|v| v as f64), listener.map(|v| v as f64));
+        let mut cells = std::collections::BTreeSet::new();
+        for k in 0..=20_000 {
+            let t = k as f64 / 20_000.0;
+            cells.insert((((s[0] + t * (l[0] - s[0])) / 2.0).floor() as i64, ((s[2] + t * (l[2] - s[2])) / 2.0).floor() as i64));
+        }
+        most = most.max(cells.iter().map(|&(i, j)| per_cell(i, j)).sum());
+    }
+    assert!(most > 512, "the busiest path lists only {most} statics: the queue did not overflow");
+    assert!(asserted >= 8, "only {asserted} pairs were asserted ({counted} counted)");
+    println!("L3 crowd: {asserted} pairs asserted, the busiest path listing {most} statics against a queue of 512, {counted} counted, worst {worst:.3} of the bound");
 }
