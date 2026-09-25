@@ -54,11 +54,15 @@
 //! assert!(high > low * 10.0);
 //! ```
 
+pub mod band;
 pub mod spatial;
 pub mod surfaces;
 
 pub use spatial::{Ears, Heard};
-pub use surfaces::{barrier_insertion_db, impedance, reflection_coefficient};
+pub use surfaces::{
+    barrier_insertion_db, fresnel_radius, impedance, lit_zone_limit, occludes,
+    reflection_coefficient,
+};
 
 /// Reference distance for [`spreading_gain`], in metres.
 ///
