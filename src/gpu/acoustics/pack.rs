@@ -386,17 +386,16 @@ pub(crate) fn layout(
     Ok(SceneLayout { header: h, staged_words, total_words })
 }
 
-fn put(out: &mut [u8], word: u32, value: u32) {
-    let at = word as usize * 4;
-    out[at..at + 4].copy_from_slice(&value.to_le_bytes());
-}
+/// Where packed bytes go: a CPU slice, or mapped staging memory lent as a
+/// [`wgpu::WriteOnly`] (write-combined, so it is only ever written, in order).
+pub type Out<'o> = wgpu::WriteOnly<'o, [u8]>;
 
-fn put_bytes_as_words(out: &mut [u8], word: u32, bytes: &[u8]) {
+fn put_bytes_as_words(out: &mut Out<'_>, word: u32, bytes: &[u8]) {
     let at = word as usize * 4;
-    out[at..at + bytes.len()].copy_from_slice(bytes);
+    out.slice(at..at + bytes.len()).copy_from_slice(bytes);
     // The tail of the last word is zeroed so the staged bytes are fully determined.
     let end = at + bytes.len().div_ceil(4) * 4;
-    out[at + bytes.len()..end].fill(0);
+    out.slice(at + bytes.len()..end).fill(0);
 }
 
 /// Pack a scene into `out`. See [`super::GpuAcoustics::pack_scene`].
@@ -406,7 +405,7 @@ pub(crate) fn pack_scene(
     statics: &[Obb],
     materials: &[AcousticMaterial],
     foliage: Option<&DensityGrid<'_>>,
-    out: &mut [u8],
+    mut out: Out<'_>,
 ) -> Result<(), AcousticsError> {
     let again = self::layout(terrain, statics, materials.len() as u32, foliage)?;
     if again != *layout {
@@ -422,11 +421,9 @@ pub(crate) fn pack_scene(
             return Err(AcousticsError::Material { index: m as u32, len: materials.len() as u32 });
         }
     }
-    let out = &mut out[..need];
-    for (i, w) in layout.header.iter().enumerate() {
-        put(out, i as u32, *w);
-    }
+    let out = &mut out;
     let h = &layout.header;
+    put_bytes_as_words(out, 0, bytemuck::cast_slice(h));
     let heights: &[u8] = bytemuck::cast_slice(terrain.heights);
     put_bytes_as_words(out, h[H_OFF_HEIGHTS], heights);
     put_bytes_as_words(out, h[H_OFF_MATERIAL], terrain.material);
@@ -436,9 +433,7 @@ pub(crate) fn pack_scene(
     put_bytes_as_words(out, h[H_OFF_STATICS], bytemuck::cast_slice(statics));
     for (i, s) in statics.iter().enumerate() {
         let r = static_range(i as u32, s, terrain.cols, terrain.rows, terrain.cell_m, terrain.origin)?;
-        for (k, v) in r.iter().enumerate() {
-            put(out, h[H_OFF_RANGES] + 4 * i as u32 + k as u32, *v);
-        }
+        put_bytes_as_words(out, h[H_OFF_RANGES] + 4 * i as u32, bytemuck::cast_slice(&r));
     }
     put_bytes_as_words(out, h[H_OFF_MATERIALS], bytemuck::cast_slice(materials));
     Ok(())
@@ -469,7 +464,7 @@ pub fn terrain_rect_bytes(rect: GridRect) -> usize {
 pub(crate) fn pack_terrain_rect(
     rect: GridRect,
     heights: &[f32],
-    out: &mut [u8],
+    mut out: Out<'_>,
 ) -> Result<usize, AcousticsError> {
     let n = rect.cols as usize * rect.rows as usize;
     if heights.len() != n || n == 0 {
@@ -482,10 +477,9 @@ pub(crate) fn pack_terrain_rect(
     if out.len() < need {
         return Err(AcousticsError::OutputTooSmall { need, got: out.len() });
     }
-    for (k, v) in [rect.col, rect.row, rect.cols, rect.rows].iter().enumerate() {
-        put(out, k as u32, *v);
-    }
-    out[16..need].copy_from_slice(bytemuck::cast_slice(heights));
+    let head = [rect.col, rect.row, rect.cols, rect.rows];
+    out.slice(..16).copy_from_slice(bytemuck::cast_slice(&head));
+    out.slice(16..need).copy_from_slice(bytemuck::cast_slice(heights));
     Ok(need)
 }
 
@@ -529,7 +523,7 @@ pub(crate) fn pack_dispatch(
     header: &DispatchHeader,
     sources: &[Source],
     movers: &[Obb],
-    out: &mut [u8],
+    mut out: Out<'_>,
 ) -> Result<DispatchShape, AcousticsError> {
     if sources.len() > MAX_SOURCES as usize {
         return Err(AcousticsError::Limit {
@@ -553,10 +547,10 @@ pub(crate) fn pack_dispatch(
     h.counts[0] = sources.len() as u32;
     h.counts[1] = movers.len() as u32;
     let head = HEADER_BYTES as usize;
-    out[..head].copy_from_slice(bytemuck::bytes_of(&h));
+    out.slice(..head).copy_from_slice(bytemuck::bytes_of(&h));
     let src_end = head + 32 * sources.len();
-    out[head..src_end].copy_from_slice(bytemuck::cast_slice(sources));
-    out[src_end..need].copy_from_slice(bytemuck::cast_slice(movers));
+    out.slice(head..src_end).copy_from_slice(bytemuck::cast_slice(sources));
+    out.slice(src_end..need).copy_from_slice(bytemuck::cast_slice(movers));
     Ok(DispatchShape {
         bytes: need as u64,
         sources: sources.len() as u32,

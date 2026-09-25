@@ -135,14 +135,15 @@ impl LawProbe {
     /// use rs_physics::gpu::acoustics::oracle::{LawCase, LawProbe};
     ///
     /// let mut out = [0u8; 224];
-    /// let n = LawProbe::pack(&DispatchHeader::default(), &[LawCase::default()], &mut out).unwrap();
+    /// let n = LawProbe::pack(&DispatchHeader::default(), &[LawCase::default()], &mut out[..]).unwrap();
     /// assert_eq!(n, 224);
     /// ```
-    pub fn pack(
+    pub fn pack<'o>(
         header: &DispatchHeader,
         cases: &[LawCase],
-        out: &mut [u8],
+        out: impl Into<super::Out<'o>>,
     ) -> Result<usize, AcousticsError> {
+        let mut out = out.into();
         if cases.len() > Self::MAX_CASES as usize {
             return Err(AcousticsError::Limit {
                 what: "law probe cases",
@@ -156,8 +157,8 @@ impl LawProbe {
         }
         let mut h = *header;
         h.counts[0] = cases.len() as u32;
-        out[..HEADER_BYTES as usize].copy_from_slice(bytemuck::bytes_of(&h));
-        out[HEADER_BYTES as usize..need].copy_from_slice(bytemuck::cast_slice(cases));
+        out.slice(..HEADER_BYTES as usize).copy_from_slice(bytemuck::bytes_of(&h));
+        out.slice(HEADER_BYTES as usize..need).copy_from_slice(bytemuck::cast_slice(cases));
         Ok(need)
     }
 

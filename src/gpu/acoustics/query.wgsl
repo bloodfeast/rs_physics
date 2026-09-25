@@ -8,7 +8,7 @@
 @group(0) @binding(1) var<storage, read_write> outb: array<u32>;
 @group(0) @binding(2) var<storage, read> scene: array<u32>;
 
-const BIG: f32 = 3.0e38;
+const BIG: f32 = 3.4028234663852886e38; // f32::MAX
 
 // Dispatch header, in 16-byte vectors.
 const HV_LISTENER: u32 = 0u;
@@ -177,7 +177,7 @@ fn obstacle(m: Rows, hw: f32, x: Crossing, s: vec3<f32>, l: vec3<f32>, d: vec3<f
     let zone = d1 * d2 / len; // r1^2 = lambda * zone
     let hw2 = hw * hw;
     let lam = c * BAND_INV_HZ;
-    let admitted = hw2 >= lam * zone;
+    let admitted = vec4<f32>(hw2) >= lam * zone;
     *best = select(*best, max(*best, vec4<f32>(e)), admitted);
     if (hw2 >= c * PROBE_INV_HZ * zone) {
         *probe = max(*probe, e);
@@ -506,10 +506,10 @@ fn sources(@builtin(workgroup_id) wg: vec3<u32>,
         let ignore = word >> 24u;
         if (lane < n_mov && lane != ignore) {
             let m = mover_rows(n_src, lane);
-            let meta = inb[HV_SOURCES + 2u * n_src + 4u * lane + 3u];
+            let extra = inb[HV_SOURCES + 2u * n_src + 4u * lane + 3u];
             let x = crossing(inverse_rows(m), s, d);
             if (x.ta < x.tb) {
-                obstacle(m, bitcast<f32>(meta.y), x, s, l, d, len, c, &best, &probe);
+                obstacle(m, bitcast<f32>(extra.y), x, s, l, d, len, c, &best, &probe);
             }
         }
     }

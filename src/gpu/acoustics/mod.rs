@@ -76,7 +76,7 @@
 //! });
 //! {
 //!     let mut view = stage.slice(..).get_mapped_range_mut().unwrap();
-//!     GpuAcoustics::pack_scene(&layout, &terrain, &[], &materials, None, &mut view).unwrap();
+//!     GpuAcoustics::pack_scene(&layout, &terrain, &[], &materials, None, view.slice(..)).unwrap();
 //! }
 //! stage.unmap();
 //! let mut enc = device.create_command_encoder(&Default::default());
@@ -92,7 +92,7 @@
 //! let header = DispatchHeader::new(&listener, &Air::standard(), &[]).unwrap();
 //! let shot = Source::new([180.0, 1.0, 90.0], 1.0, [0.0; 3], 1, NO_MOVER).unwrap();
 //! let mut bytes = [0u8; 512];
-//! let shape = GpuAcoustics::pack_dispatch(&header, &[shot], &[], &mut bytes).unwrap();
+//! let shape = GpuAcoustics::pack_dispatch(&header, &[shot], &[], &mut bytes[..]).unwrap();
 //! // ... the host writes `bytes[..shape.bytes]` into its ring and gets a `Staged` back ...
 //! # let tick = Staged { buffer: &stage, offset: 0, len: shape.bytes };
 //! let mut enc = device.create_command_encoder(&Default::default());
@@ -117,7 +117,7 @@ mod shader;
 pub mod oracle;
 
 pub use pack::{
-    dispatch_bytes, terrain_rect_bytes, DensityGrid, DispatchShape, GridRect, SceneLayout,
+    dispatch_bytes, terrain_rect_bytes, DensityGrid, DispatchShape, GridRect, Out, SceneLayout,
     TerrainGrid, HEADER_WORDS, PYRAMID_LEVELS,
 };
 pub use records::{
@@ -428,7 +428,8 @@ impl GpuAcoustics {
     /// * `layout` - from [`GpuAcoustics::scene_bytes`] for this same scene.
     /// * `terrain`, `statics`, `foliage` - the scene.
     /// * `materials` - the material table.
-    /// * `out` - at least [`SceneLayout::staged_bytes`] bytes.
+    /// * `out` - at least [`SceneLayout::staged_bytes`] bytes: a `&mut [u8]`, or the
+    ///   staging ring's mapped memory as a [`wgpu::WriteOnly`], packed straight into.
     ///
     /// # Returns
     ///
@@ -452,18 +453,18 @@ impl GpuAcoustics {
     /// let table = [AcousticMaterial { reflection: [0.9; 4] }];
     /// let layout = GpuAcoustics::scene_bytes(&terrain, &[], 1, None).unwrap();
     /// let mut out = vec![0u8; layout.staged_bytes() as usize];
-    /// GpuAcoustics::pack_scene(&layout, &terrain, &[], &table, None, &mut out).unwrap();
+    /// GpuAcoustics::pack_scene(&layout, &terrain, &[], &table, None, &mut out[..]).unwrap();
     /// assert_eq!(&out[..4], &2u32.to_le_bytes()); // the header opens with the columns
     /// ```
-    pub fn pack_scene(
+    pub fn pack_scene<'o>(
         layout: &SceneLayout,
         terrain: &TerrainGrid<'_>,
         statics: &[Obb],
         materials: &[AcousticMaterial],
         foliage: Option<&DensityGrid<'_>>,
-        out: &mut [u8],
+        out: impl Into<Out<'o>>,
     ) -> Result<(), AcousticsError> {
-        pack::pack_scene(layout, terrain, statics, materials, foliage, out)
+        pack::pack_scene(layout, terrain, statics, materials, foliage, out.into())
     }
 
     /// Pack a rectangle of new terrain heights (a crater), for
@@ -473,7 +474,7 @@ impl GpuAcoustics {
     ///
     /// * `rect` - the cells.
     /// * `heights` - the new heights, row-major within the rect, in metres.
-    /// * `out` - at least [`terrain_rect_bytes`] bytes.
+    /// * `out` - at least [`terrain_rect_bytes`] bytes: a `&mut [u8]` or a [`wgpu::WriteOnly`].
     ///
     /// # Returns
     ///
@@ -491,15 +492,15 @@ impl GpuAcoustics {
     ///
     /// let rect = GridRect { col: 10, row: 20, cols: 2, rows: 2 };
     /// let mut out = [0u8; 64];
-    /// let n = GpuAcoustics::pack_terrain_rect(rect, &[-1.0; 4], &mut out).unwrap();
+    /// let n = GpuAcoustics::pack_terrain_rect(rect, &[-1.0; 4], &mut out[..]).unwrap();
     /// assert_eq!(n, 32);
     /// ```
-    pub fn pack_terrain_rect(
+    pub fn pack_terrain_rect<'o>(
         rect: GridRect,
         heights: &[f32],
-        out: &mut [u8],
+        out: impl Into<Out<'o>>,
     ) -> Result<usize, AcousticsError> {
-        pack::pack_terrain_rect(rect, heights, out)
+        pack::pack_terrain_rect(rect, heights, out.into())
     }
 
     /// Pack a dispatch: the header, the sources and the movers.
@@ -509,7 +510,8 @@ impl GpuAcoustics {
     /// * `header` - from [`DispatchHeader::new`]; its counts are filled here.
     /// * `sources` - at most [`MAX_SOURCES`]; zero is valid.
     /// * `movers` - at most [`MAX_MOVERS`], the large movers the Fresnel rule keeps.
-    /// * `out` - at least [`dispatch_bytes`] bytes.
+    /// * `out` - at least [`dispatch_bytes`] bytes: a `&mut [u8]`, or the staging ring's
+    ///   mapped memory as a [`wgpu::WriteOnly`], so the dispatch is written once, in place.
     ///
     /// # Returns
     ///
@@ -527,17 +529,17 @@ impl GpuAcoustics {
     /// let header = DispatchHeader::default();
     /// let s = Source::new([1.0, 1.0, 1.0], 1.0, [0.0; 3], 9, NO_MOVER).unwrap();
     /// let mut out = [0u8; 256];
-    /// let shape = GpuAcoustics::pack_dispatch(&header, &[s], &[], &mut out).unwrap();
+    /// let shape = GpuAcoustics::pack_dispatch(&header, &[s], &[], &mut out[..]).unwrap();
     /// assert_eq!(shape.bytes, 192);
     /// assert_eq!(shape.sources, 1);
     /// ```
-    pub fn pack_dispatch(
+    pub fn pack_dispatch<'o>(
         header: &DispatchHeader,
         sources: &[Source],
         movers: &[Obb],
-        out: &mut [u8],
+        out: impl Into<Out<'o>>,
     ) -> Result<DispatchShape, AcousticsError> {
-        pack::pack_dispatch(header, sources, movers, out)
+        pack::pack_dispatch(header, sources, movers, out.into())
     }
 
     /// Record a scene: the copy of the staged bytes, then the grid and pyramid build.
