@@ -334,12 +334,15 @@ pub fn foliage_absorption_db_per_m(frequency_hz: f64) -> f64 {
 /// path, because beyond that the sound is arriving over the canopy rather than through
 /// it, and a model that kept integrating would silence a forest.
 pub fn foliage_attenuation_db(metres: f64, frequency_hz: f64) -> f64 {
-    const MAX_CREDITED_M: f64 = 200.0;
     if metres <= 0.0 {
         return 0.0;
     }
-    foliage_absorption_db_per_m(frequency_hz) * metres.min(MAX_CREDITED_M)
+    foliage_absorption_db_per_m(frequency_hz) * metres.min(FOLIAGE_MAX_CREDITED_M)
 }
+
+/// The longest path through foliage ISO 9613-2 credits, in metres. Past it the sound is
+/// arriving over the canopy rather than through it; see [`foliage_attenuation_db`].
+pub const FOLIAGE_MAX_CREDITED_M: f64 = 200.0;
 
 /// A loss in decibels as a linear amplitude multiplier.
 ///

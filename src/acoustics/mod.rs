@@ -181,6 +181,11 @@ pub fn spreading_gain(metres: f64, directivity: f64) -> f64 {
     directivity.max(0.0) * REFERENCE_M / r
 }
 
+/// The largest closing speed [`doppler_ratio`] credits a source with, as a fraction of the
+/// speed of sound. The classical expression diverges at 1; a shell that outruns its own
+/// report is a different phenomenon than a Doppler shift.
+pub const DOPPLER_MAX_CLOSING: f64 = 0.95;
+
 /// How long sound takes to arrive, in seconds.
 ///
 /// The reason a distant explosion is seen before it is heard, and — applied per
@@ -198,7 +203,7 @@ pub fn delay(metres: f64, air: &Air) -> f64 {
 /// a shell that outruns its own report is a different phenomenon than a Doppler shift.
 pub fn doppler_ratio(source_toward: f64, listener_toward: f64, air: &Air) -> f64 {
     let c = air.speed_of_sound();
-    let closing = source_toward.clamp(-0.95 * c, 0.95 * c);
+    let closing = source_toward.clamp(-DOPPLER_MAX_CLOSING * c, DOPPLER_MAX_CLOSING * c);
     (c + listener_toward) / (c - closing)
 }
 

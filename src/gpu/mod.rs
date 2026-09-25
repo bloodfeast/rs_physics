@@ -61,6 +61,7 @@
 //! let results = sim.read_particles(&gpu);
 //! ```
 
+pub mod acoustics;
 mod context;
 mod particle_sim;
 mod nbody;
