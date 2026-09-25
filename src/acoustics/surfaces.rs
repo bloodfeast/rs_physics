@@ -78,19 +78,195 @@ pub fn absorption_coefficient(material: &Material) -> f64 {
 /// and a firefight removes the crack and leaves the thump, which is exactly what a ridge
 /// does in life and is not a rule anybody has to write down separately.
 ///
-/// Returns 0 for a clear line of sight, and is capped: real barriers stop attenuating
-/// somewhere around 20-25 dB because sound arrives by other routes, and a model that
-/// returned 60 would silence things the player can plainly see.
+/// # Signed, and continuous at grazing (Kurze-Anderson)
+///
+/// The path difference is **signed**: positive when the obstacle's edge stands above the
+/// straight line (the listener is in its shadow), negative when the line clears the edge
+/// by that much (the lit zone). With `N = 2 x path_difference / wavelength`:
+///
+/// | Zone | Insertion loss, dB |
+/// |---|---|
+/// | `N > 0` (shadow) | `5 + 20 log10( sqrt(2 pi N) / tanh(sqrt(2 pi N)) )` |
+/// | `-N0 < N <= 0` (lit, inside the first Fresnel zone) | `5 + 20 log10( sqrt(2 pi \|N\|) / tan(sqrt(2 pi \|N\|)) )` |
+/// | `N <= -N0` | 0 |
+///
+/// Both branches give [`BARRIER_GRAZING_DB`] at `N = 0`, so a source that walks over a
+/// crest fades through it instead of stepping 5 dB the instant the line is cut. That step
+/// was here until 2026-09-25 (the function returned 0 for any `path_difference <= 0` and 5
+/// just past it) and was an audible click. `N0` is where the lit-zone branch reaches 0 dB;
+/// it is computed by [`lit_zone_limit`], never typed.
+///
+/// Capped at [`BARRIER_CAP_DB`]: real barriers stop attenuating somewhere around 20-25 dB
+/// because sound arrives by other routes, and a model that returned 60 would silence
+/// things the player can plainly see.
+///
+/// # Arguments
+///
+/// * `path_difference_m` - the signed excess path `|SQ| + |QL| - |SL|` over the edge `Q`,
+///   in metres: positive in the shadow, negative in the lit zone.
+/// * `wavelength_m` - the wavelength, in metres (see [`wavelength`]).
+///
+/// # Returns
+///
+/// The insertion loss in decibels, in `0..=BARRIER_CAP_DB`. A non-positive or non-finite
+/// wavelength returns 0.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::acoustics::surfaces::{
+///     barrier_insertion_db, lit_zone_limit, wavelength, BARRIER_GRAZING_DB,
+/// };
+///
+/// let lambda = wavelength(4_000.0, 343.0);
+/// // Grazing is 5 dB from both sides, so a crest fades rather than clicks.
+/// assert!((barrier_insertion_db(0.0, lambda) - BARRIER_GRAZING_DB).abs() < 1e-12);
+/// assert!((barrier_insertion_db(1e-9, lambda) - BARRIER_GRAZING_DB).abs() < 1e-3);
+/// assert!((barrier_insertion_db(-1e-9, lambda) - BARRIER_GRAZING_DB).abs() < 1e-3);
+/// // Clear by more than the lit zone, nothing is lost.
+/// let clear = -lit_zone_limit() * lambda / 2.0;
+/// assert_eq!(barrier_insertion_db(clear * 1.01, lambda), 0.0);
+/// // Deep in the shadow, a ridge takes a good deal.
+/// assert!(barrier_insertion_db(1.0, lambda) > 15.0);
+/// ```
 pub fn barrier_insertion_db(path_difference_m: f64, wavelength_m: f64) -> f64 {
-    if path_difference_m <= 0.0 || wavelength_m <= 0.0 {
+    if !(wavelength_m > 0.0) || !wavelength_m.is_finite() || path_difference_m.is_nan() {
         return 0.0;
     }
     let n = 2.0 * path_difference_m / wavelength_m;
-    let arg = (2.0 * std::f64::consts::PI * n).sqrt();
-    // `tanh` saturates, so this is the whole curve: it rises steeply for small N and then
-    // flattens, which is the measured shape.
-    let db = 5.0 + 20.0 * (arg / arg.tanh()).log10();
-    db.clamp(0.0, 24.0)
+    if n == 0.0 {
+        return BARRIER_GRAZING_DB;
+    }
+    let x = (2.0 * std::f64::consts::PI * n.abs()).sqrt();
+    let ratio = if n > 0.0 {
+        // `tanh` saturates, so this is the whole shadow curve: it rises steeply for small
+        // N and then flattens, which is the measured shape.
+        x / x.tanh()
+    } else {
+        // `x / tan x` falls from 1 at grazing through zero at pi/2; past the root of the
+        // loss (x0 < pi/2) the edge is outside the first Fresnel zone and costs nothing.
+        if x >= std::f64::consts::FRAC_PI_2 {
+            return 0.0;
+        }
+        x / x.tan()
+    };
+    let db = BARRIER_GRAZING_DB + 20.0 * ratio.log10();
+    db.clamp(0.0, BARRIER_CAP_DB)
+}
+
+/// Insertion loss at grazing incidence (`N = 0`), in decibels: Maekawa's and
+/// Kurze-Anderson's value for an edge exactly on the line of sight.
+pub const BARRIER_GRAZING_DB: f64 = 5.0;
+
+/// The most a single barrier takes, in decibels.
+///
+/// Measured barriers stop gaining somewhere between 20 and 25 dB because sound reaches the
+/// far side by other routes (over the top of the ground effect, off anything nearby). This
+/// sits inside that range; the GPU acoustics use the same figure.
+pub const BARRIER_CAP_DB: f64 = 24.0;
+
+/// `N0`, the Fresnel number at which the lit-zone branch of [`barrier_insertion_db`]
+/// reaches 0 dB: the root of `5 + 20 log10(x / tan x) = 0` with `N0 = x^2 / (2 pi)`.
+///
+/// Computed, not typed. It comes out at about 0.19, and a path that clears its edge by
+/// more than `N0 x wavelength / 2` loses nothing to it.
+///
+/// # Returns
+///
+/// `N0`, dimensionless, in `(0, 0.25)`.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::acoustics::surfaces::{barrier_insertion_db, lit_zone_limit};
+///
+/// let n0 = lit_zone_limit();
+/// assert!(n0 > 0.18 && n0 < 0.20);
+/// // At `-N0` the lit zone ends: the loss is zero to rounding.
+/// let lambda = 1.0;
+/// assert!(barrier_insertion_db(-n0 * lambda / 2.0, lambda) < 1e-9);
+/// ```
+pub fn lit_zone_limit() -> f64 {
+    static N0: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *N0.get_or_init(|| {
+        // x / tan x falls monotonically from 1 (x -> 0) to 0 (x = pi/2), so bisection on
+        // it against the ratio that makes the loss zero converges to the one root.
+        let target = 10f64.powf(-BARRIER_GRAZING_DB / 20.0);
+        let (mut lo, mut hi) = (1e-6f64, std::f64::consts::FRAC_PI_2);
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if mid / mid.tan() > target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let x0 = 0.5 * (lo + hi);
+        x0 * x0 / (2.0 * std::f64::consts::PI)
+    })
+}
+
+/// Radius of the first Fresnel zone at a point on a path, in metres.
+///
+/// `r1 = sqrt(wavelength x d1 x d2 / (d1 + d2))`, where the point splits the path into
+/// `d1` and `d2`. An obstacle narrower than this does not shadow the wavelength: the wave
+/// passes round both sides of it (see [`occludes`]).
+///
+/// # Arguments
+///
+/// * `wavelength_m` - the wavelength, in metres.
+/// * `d1_m` - distance from the source to the point, in metres.
+/// * `d2_m` - distance from the point to the listener, in metres.
+///
+/// # Returns
+///
+/// The radius in metres; 0 when either distance is non-positive or the wavelength is.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::acoustics::surfaces::{fresnel_radius, wavelength};
+///
+/// // The midpoint of a 17.4 m path at 4 kHz: the scene rule's threshold, about 0.61 m.
+/// let r1 = fresnel_radius(wavelength(4_000.0, 343.2), 8.7, 8.7);
+/// assert!((r1 - 0.611).abs() < 0.002);
+/// ```
+pub fn fresnel_radius(wavelength_m: f64, d1_m: f64, d2_m: f64) -> f64 {
+    if !(wavelength_m > 0.0) || !(d1_m > 0.0) || !(d2_m > 0.0) {
+        return 0.0;
+    }
+    (wavelength_m * d1_m * d2_m / (d1_m + d2_m)).sqrt()
+}
+
+/// Whether an obstacle of a lateral half-width counts as an occluder at a wavelength.
+///
+/// **The Fresnel rule.** An obstacle whose half-width is under the first Fresnel radius at
+/// the point where the path crosses it does not shadow that band: sound goes round both
+/// sides. So a soldier does not muffle a gunshot behind him, and a tank does. This is the
+/// one rule for what occludes; no list of kinds stands beside it.
+///
+/// # Arguments
+///
+/// * `half_width_m` - the obstacle's lateral half-width across the path, in metres.
+/// * `wavelength_m` - the wavelength, in metres.
+/// * `d1_m`, `d2_m` - the path's lengths either side of the crossing point, in metres.
+///
+/// # Returns
+///
+/// `true` when `half_width_m >= fresnel_radius(wavelength_m, d1_m, d2_m)`.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::acoustics::surfaces::{occludes, wavelength};
+///
+/// let lambda = wavelength(4_000.0, 343.2);
+/// // Midway along a 17.4 m path: an infantryman (0.5 m) is dropped, a tank (1.25 m) is kept.
+/// assert!(!occludes(0.5, lambda, 8.7, 8.7));
+/// assert!(occludes(1.25, lambda, 8.7, 8.7));
+/// ```
+pub fn occludes(half_width_m: f64, wavelength_m: f64, d1_m: f64, d2_m: f64) -> bool {
+    half_width_m >= fresnel_radius(wavelength_m, d1_m, d2_m)
 }
 
 /// Wavelength in metres, for a frequency in a medium of a given sound speed.
@@ -158,12 +334,15 @@ pub fn foliage_absorption_db_per_m(frequency_hz: f64) -> f64 {
 /// path, because beyond that the sound is arriving over the canopy rather than through
 /// it, and a model that kept integrating would silence a forest.
 pub fn foliage_attenuation_db(metres: f64, frequency_hz: f64) -> f64 {
-    const MAX_CREDITED_M: f64 = 200.0;
     if metres <= 0.0 {
         return 0.0;
     }
-    foliage_absorption_db_per_m(frequency_hz) * metres.min(MAX_CREDITED_M)
+    foliage_absorption_db_per_m(frequency_hz) * metres.min(FOLIAGE_MAX_CREDITED_M)
 }
+
+/// The longest path through foliage ISO 9613-2 credits, in metres. Past it the sound is
+/// arriving over the canopy rather than through it; see [`foliage_attenuation_db`].
+pub const FOLIAGE_MAX_CREDITED_M: f64 = 200.0;
 
 /// A loss in decibels as a linear amplitude multiplier.
 ///
@@ -333,8 +512,51 @@ mod tests {
     #[test]
     fn a_barrier_is_bounded_at_both_ends() {
         let c = Air::standard().speed_of_sound();
-        assert_eq!(barrier_insertion_db(0.0, wavelength(1_000.0, c)), 0.0);
-        assert!(barrier_insertion_db(500.0, wavelength(16_000.0, c)) <= 24.0);
+        let lambda = wavelength(1_000.0, c);
+        // A clear line of sight, by more than the lit zone, costs nothing. (Grazing costs
+        // 5 dB since the law became signed; see `the_barrier_law_is_continuous_at_grazing`.)
+        assert_eq!(barrier_insertion_db(-lit_zone_limit() * lambda, lambda), 0.0);
+        assert_eq!(barrier_insertion_db(-10.0, lambda), 0.0);
+        assert!(barrier_insertion_db(500.0, wavelength(16_000.0, c)) <= BARRIER_CAP_DB);
+    }
+
+    /// **L6, the law half.** Both branches meet at 5 dB at grazing, the lit branch reaches
+    /// 0 at `-N0` and stays there, and the whole curve is monotone in the signed excess -
+    /// so a source walking over a crest fades through it instead of clicking.
+    #[test]
+    fn the_barrier_law_is_continuous_at_grazing() {
+        let lambda = 0.0858;
+        let n0 = lit_zone_limit();
+        let at = |n: f64| barrier_insertion_db(n * lambda / 2.0, lambda);
+        assert_eq!(at(0.0), BARRIER_GRAZING_DB);
+        for eps in [1e-3, 1e-6, 1e-9] {
+            assert!((at(eps) - BARRIER_GRAZING_DB).abs() < 20.0 * eps.sqrt(), "shadow side at {eps}");
+            assert!((at(-eps) - BARRIER_GRAZING_DB).abs() < 20.0 * eps.sqrt(), "lit side at {eps}");
+        }
+        assert!(at(-n0).abs() < 1e-9, "the lit zone does not end at -N0: {}", at(-n0));
+        assert_eq!(at(-n0 * 1.001), 0.0);
+        let mut last = 0.0;
+        for k in 0..=4000 {
+            let n = -0.3 + k as f64 * 0.001;
+            let db = at(n);
+            assert!(db >= last - 1e-12, "not monotone at N = {n}: {db} after {last}");
+            last = db;
+        }
+    }
+
+    /// The Fresnel rule's threshold at the design's path: a 17.4 m path at 4 kHz has a
+    /// first-zone radius of 0.611 m at its midpoint, which keeps a Siege (1.25 m) and
+    /// drops a Worker (0.50 m).
+    #[test]
+    fn the_fresnel_rule_keeps_vehicles_and_drops_infantry() {
+        let lambda = wavelength(4_000.0, Air::standard().speed_of_sound());
+        let r1 = fresnel_radius(lambda, 8.7, 8.7);
+        assert!((r1 - 0.611).abs() < 0.003, "r1 came out {r1}");
+        assert!(occludes(1.25, lambda, 8.7, 8.7));
+        assert!(!occludes(0.50, lambda, 8.7, 8.7));
+        // Degenerate paths have no zone.
+        assert_eq!(fresnel_radius(lambda, 0.0, 10.0), 0.0);
+        assert_eq!(fresnel_radius(0.0, 5.0, 10.0), 0.0);
     }
 
     /// More detour is more loss, monotonically — a bigger hill hides more.
