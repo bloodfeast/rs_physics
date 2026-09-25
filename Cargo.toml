@@ -81,3 +81,8 @@ harness = false
 [[bench]]
 name = "articulated"
 harness = false
+
+[[bench]]
+name = "acoustics"
+harness = false
+required-features = ["gpu"]
