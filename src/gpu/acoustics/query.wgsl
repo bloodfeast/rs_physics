@@ -26,21 +26,36 @@ fn sf(i: u32) -> f32 {
     return bitcast<f32>(scene[i]);
 }
 
+// The scene header, read once per workgroup call and carried in registers: a header word
+// re-read inside a loop is a dependent load per iteration, which is what a latency-bound
+// pass pays for.
 struct Grid {
     cols: u32,
     rows: u32,
     cell: f32,
     inv_cell: f32,
     origin: vec2<f32>,
+    heights: u32,
+    material: u32,
+    foliage: u32,
+    has_foliage: bool,
+    statics: u32,
+    sx: u32,
+    heads: u32,
+    list: u32,
+    materials: u32,
 }
 
 fn grid() -> Grid {
     return Grid(scene[H_COLS], scene[H_ROWS], sf(H_CELL), sf(H_INV_CELL),
-                vec2<f32>(sf(H_ORIGIN_X), sf(H_ORIGIN_Z)));
+                vec2<f32>(sf(H_ORIGIN_X), sf(H_ORIGIN_Z)), scene[H_OFF_HEIGHTS],
+                scene[H_OFF_MATERIAL], scene[H_OFF_FOLIAGE], scene[H_HAS_FOLIAGE] != 0u,
+                scene[H_STATICS], scene[H_OFF_INV], scene[H_OFF_HEADS], scene[H_OFF_LIST],
+                scene[H_OFF_MATERIALS]);
 }
 
 fn height(g: Grid, c: u32, r: u32) -> f32 {
-    return sf(scene[H_OFF_HEIGHTS] + r * g.cols + c);
+    return sf(g.heights + r * g.cols + c);
 }
 
 fn byte_at(off: u32, idx: u32) -> u32 {
@@ -160,11 +175,9 @@ fn crossing(inv: Rows, s: vec3<f32>, d: vec3<f32>) -> Crossing {
 
 // One obstacle's contribution to the per-band maxima, with the Fresnel rule applied per
 // band at the crossing's midpoint.
-fn obstacle(m: Rows, hw: f32, x: Crossing, s: vec3<f32>, l: vec3<f32>, d: vec3<f32>,
-            len: f32, c: f32, best: ptr<function, vec4<f32>>, probe: ptr<function, f32>) {
-    let half_y = 0.5 * (abs(m.r1.x) + abs(m.r1.y) + abs(m.r1.z));
-    let top = m.r1.w + half_y;
-    let bottom = m.r1.w - half_y;
+fn obstacle(top: f32, bottom: f32, hw: f32, x: Crossing, s: vec3<f32>, l: vec3<f32>,
+            d: vec3<f32>, len: f32, c: f32, best: ptr<function, vec4<f32>>,
+            probe: ptr<function, f32>) {
     let ya = s.y + x.ta * d.y;
     let yb = s.y + x.tb * d.y;
     if (ya < bottom && yb < bottom) {
@@ -252,17 +265,17 @@ fn asin_unit(x: f32) -> f32 {
     return HALF_PI - sqrt(1.0 - x) * p;
 }
 
-fn leg_point(k: u32) -> vec2<f32> {
-    let v = bitcast<vec4<f32>>(inb[HV_LEGIBILITY + k / 2u]);
-    return select(v.zw, v.xy, k % 2u == 0u);
-}
-
 fn legibility(r: f32, n: u32) -> f32 {
-    let first = leg_point(0u);
+    // The curve's four vectors, loaded together rather than one per iteration.
+    let pts = array<vec4<f32>, 4>(
+        bitcast<vec4<f32>>(inb[HV_LEGIBILITY]), bitcast<vec4<f32>>(inb[HV_LEGIBILITY + 1u]),
+        bitcast<vec4<f32>>(inb[HV_LEGIBILITY + 2u]), bitcast<vec4<f32>>(inb[HV_LEGIBILITY + 3u]));
+    let first = pts[0].xy;
     if (r <= first.x) {
         return first.y;
     }
-    let last = leg_point(n - 1u);
+    let lv = pts[(n - 1u) / 2u];
+    let last = select(lv.zw, lv.xy, (n - 1u) % 2u == 0u);
     if (r >= last.x) {
         return last.y;
     }
@@ -270,8 +283,10 @@ fn legibility(r: f32, n: u32) -> f32 {
         if (k >= n) {
             break;
         }
-        let a = leg_point(k - 1u);
-        let b = leg_point(k);
+        let av = pts[(k - 1u) / 2u];
+        let a = select(av.zw, av.xy, (k - 1u) % 2u == 0u);
+        let bv = pts[k / 2u];
+        let b = select(bv.zw, bv.xy, k % 2u == 0u);
         if (r <= b.x) {
             let span = b.x - a.x;
             var t = 1.0;
@@ -421,8 +436,8 @@ fn walk_terrain(g: Grid, s: vec3<f32>, l: vec3<f32>, d: vec3<f32>, len: f32, c: 
     var cj = clamp(i32(floor((p.z - g.origin.y) * g.inv_cell)), 0, i32(g.rows) - 1);
     let step_i = select(-1, 1, d.x > 0.0);
     let step_j = select(-1, 1, d.z > 0.0);
-    let has_foliage = scene[H_HAS_FOLIAGE] != 0u;
-    let n_statics = scene[H_STATICS];
+    let has_foliage = g.has_foliage;
+    let n_statics = g.statics;
     var t = ta;
     for (var k = 0u; k < MAX_LANE_STEPS; k = k + 1u) {
         var tx = BIG;
@@ -444,25 +459,25 @@ fn walk_terrain(g: Grid, s: vec3<f32>, l: vec3<f32>, d: vec3<f32>, len: f32, c: 
         *best = max(*best, vec4<f32>(e));
         *probe = max(*probe, e);
         if (has_foliage) {
-            let rho = f32(byte_at(scene[H_OFF_FOLIAGE], cell)) / 255.0;
+            let rho = f32(byte_at(g.foliage, cell)) / 255.0;
             *fol = *fol + rho * (te - t) * len;
         }
         if (n_statics > 0u) {
             let last = te >= tb;
             let claim_lo = select(t, -BIG, lane == 0u && k == 0u);
             let claim_hi = select(te, BIG, last && lane == 63u);
-            let head = scene[scene[H_OFF_HEADS] + cell];
-            let end = scene[scene[H_OFF_HEADS] + cell + 1u];
+            let head = scene[g.heads + cell];
+            let end = scene[g.heads + cell + 1u];
             for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
                 if (head + q >= end) {
                     break;
                 }
-                let si = scene[scene[H_OFF_LIST] + head + q];
-                let inv = scene_rows(scene[H_OFF_INV] + 12u * si);
-                let x = crossing(inv, s, d);
+                // One 16-word record a static: its inverse, top, bottom and half-width.
+                let base = g.sx + 16u * scene[g.list + head + q];
+                let x = crossing(scene_rows(base), s, d);
                 if (x.ta < x.tb && x.ta >= claim_lo && x.ta < claim_hi) {
-                    let base = scene[H_OFF_STATICS] + 16u * si;
-                    obstacle(scene_rows(base), sf(base + 13u), x, s, l, d, len, c, best, probe);
+                    obstacle(sf(base + 12u), sf(base + 13u), sf(base + 14u), x, s, l, d, len, c,
+                             best, probe);
                 }
             }
         }
@@ -519,7 +534,9 @@ fn source_query(i: u32, lane: u32) {
             let extra = inb[HV_SOURCES + 2u * n_src + 4u * lane + 3u];
             let x = crossing(inverse_rows(m), s, d);
             if (x.ta < x.tb) {
-                obstacle(m, bitcast<f32>(extra.y), x, s, l, d, len, c, &best, &probe);
+                let half_y = 0.5 * (abs(m.r1.x) + abs(m.r1.y) + abs(m.r1.z));
+                obstacle(m.r1.w + half_y, m.r1.w - half_y, bitcast<f32>(extra.y), x, s, l, d, len,
+                         c, &best, &probe);
             }
         }
     }
@@ -559,8 +576,8 @@ struct Hit {
     material: u32,
 }
 
-fn material_r(m: u32) -> vec4<f32> {
-    let off = scene[H_OFF_MATERIALS] + 4u * m;
+fn material_r(g: Grid, m: u32) -> vec4<f32> {
+    let off = g.materials + 4u * m;
     return vec4<f32>(sf(off), sf(off + 1u), sf(off + 2u), sf(off + 3u));
 }
 
@@ -579,14 +596,14 @@ fn hit_cell(g: Grid, o: vec3<f32>, d: vec3<f32>, ci: u32, cj: u32, u0: f32, u1: 
             entered: vec3<f32>, best: ptr<function, Hit>) {
     let cell = cj * g.cols + ci;
     // Statics listed in the cell: the nearest entry at or after u0.
-    let head = scene[scene[H_OFF_HEADS] + cell];
-    let end = scene[scene[H_OFF_HEADS] + cell + 1u];
+    let head = scene[g.heads + cell];
+    let end = scene[g.heads + cell + 1u];
     for (var q = 0u; q < MAX_STATICS; q = q + 1u) {
         if (head + q >= end) {
             break;
         }
-        let si = scene[scene[H_OFF_LIST] + head + q];
-        let inv = scene_rows(scene[H_OFF_INV] + 12u * si);
+        let base = g.sx + 16u * scene[g.list + head + q];
+        let inv = scene_rows(base);
         let ol = to_local(inv, o);
         let dl = to_local_dir(inv, d);
         var t0 = -BIG;
@@ -616,8 +633,7 @@ fn hit_cell(g: Grid, o: vec3<f32>, d: vec3<f32>, ci: u32, cj: u32, u0: f32, u1: 
                 row = inv.r2.xyz;
             }
             let n = normalize(row) * -sign(dl[axis]);
-            let base = scene[H_OFF_STATICS] + 16u * si;
-            *best = Hit(t0, n, n, scene[base + 12u]);
+            *best = Hit(t0, n, n, scene[base + 15u]);
         }
     }
     // The terrain column.
@@ -637,7 +653,7 @@ fn hit_cell(g: Grid, o: vec3<f32>, d: vec3<f32>, ci: u32, cj: u32, u0: f32, u1: 
             if (dot(d, ns) < 0.0 && dot(reflect(d, ns), face) > 0.0) {
                 n = ns;
             }
-            *best = Hit(t, n, face, byte_at(scene[H_OFF_MATERIAL], cell));
+            *best = Hit(t, n, face, byte_at(g.material, cell));
         }
     }
 }
@@ -802,19 +818,25 @@ fn field_ray(ray: u32, lane: u32) {
 
     let h1 = nearest(lane, march(g, l, dw.xyz, t0, t1));
     var rec = array<f32, 16>();
+    var sums = vec4<f32>(0.0, 0.0, 0.0, dw.w); // escaped until it hits
     rec[0] = -1.0;
     rec[4] = -1.0;
     if (h1.t >= 0.0) {
         let p1 = l + h1.t * dw.xyz;
         let d1 = reflect(dw.xyz, h1.n);
-        let r1 = material_r(h1.material);
+        let r1 = material_r(g, h1.material);
         let rbar1 = (r1.x + r1.y + r1.z + r1.w) * 0.25;
         let path1 = 2.0 * h1.t;
         rec[0] = h1.t;
         rec[1] = d1.x;
         rec[2] = d1.y;
         rec[3] = d1.z;
-        rec[8] = abs(dot(dw.xyz, h1.n));
+        let cosi = abs(dot(dw.xyz, h1.n));
+        rec[8] = cosi;
+        // This ray's terms of the quadrature: w l^3, w l^2 / |cos| and that times the 500 Hz
+        // absorption, summed by the reduce.
+        let area = dw.w * h1.t * h1.t / max(cosi, COS_FLOOR);
+        sums = vec4<f32>(dw.w * h1.t * h1.t * h1.t, area, area * (1.0 - r1.y * r1.y), 0.0);
         rec[9] = bitcast<f32>(h1.material);
         rec[10] = path1 / c;
         rec[11] = rbar1 * REFERENCE_M / max(path1, REFERENCE_M);
@@ -825,7 +847,7 @@ fn field_ray(ray: u32, lane: u32) {
         if (h2.t >= 0.0) {
             let p2 = o2 + h2.t * d1;
             let d2 = reflect(d1, h2.n);
-            let r2 = material_r(h2.material);
+            let r2 = material_r(g, h2.material);
             let rbar2 = (r2.x + r2.y + r2.z + r2.w) * 0.25;
             let path2 = h1.t + h2.t + length(p2 - l);
             rec[4] = h2.t;
@@ -839,6 +861,8 @@ fn field_ray(ray: u32, lane: u32) {
     }
     if (lane < 16u) {
         outb[OUT_RAYS + 16u * ray + lane] = bitcast<u32>(rec[lane]);
+    } else if (lane < 20u) {
+        outb[OUT_SUMS + 4u * ray + lane - 16u] = bitcast<u32>(sums[lane - 16u]);
     }
 }
 
@@ -869,6 +893,10 @@ var<workgroup> red_field: array<vec4<f32>, 64>;
 var<workgroup> bin_plain: array<u32, 64>;
 var<workgroup> bin_chosen: array<u32, 64>;
 
+fn ray_word_at(i: u32) -> f32 {
+    return bitcast<f32>(outb[i]);
+}
+
 fn ray_word(ray: u32, k: u32) -> f32 {
     return bitcast<f32>(outb[OUT_RAYS + 16u * ray + k]);
 }
@@ -889,15 +917,11 @@ fn field_reduce(@builtin(local_invocation_index) lane: u32) {
     }
     storageBarrier();
     let t1 = ray_word(lane, 0u);
-    var sums = vec4<f32>(0.0, 0.0, 0.0, dw.w); // w l^3, w l^2 / |cos|, (that) x alpha, w escaped
+    let sums = vec4<f32>(ray_word_at(OUT_SUMS + 4u * lane), ray_word_at(OUT_SUMS + 4u * lane + 1u),
+                         ray_word_at(OUT_SUMS + 4u * lane + 2u), ray_word_at(OUT_SUMS + 4u * lane + 3u));
     arr_gain[2u * lane] = 0.0;
     arr_gain[2u * lane + 1u] = 0.0;
     if (t1 >= 0.0) {
-        let cosi = ray_word(lane, 8u);
-        let r1 = material_r(outb[OUT_RAYS + 16u * lane + 9u]);
-        let area = dw.w * t1 * t1 / max(cosi, COS_FLOOR);
-        let alpha = 1.0 - r1.y * r1.y; // energy absorption at 500 Hz
-        sums = vec4<f32>(dw.w * t1 * t1 * t1, area, area * alpha, 0.0);
         arr_delay[2u * lane] = ray_word(lane, 10u);
         arr_gain[2u * lane] = ray_word(lane, 11u);
         arr_pan[2u * lane] = ray_word(lane, 12u);

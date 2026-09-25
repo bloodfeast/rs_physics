@@ -15,8 +15,10 @@ pub(crate) const OUT_FIELD: u32 = MAX_SOURCES * 8;
 pub(crate) const OUT_RAYS: u32 = OUT_FIELD + 36;
 /// Word offset of the per-source main edges in the output buffer.
 pub(crate) const OUT_EDGES: u32 = OUT_RAYS + 16 * MAX_FIELD_RAYS;
+/// Word offset of the field rays' quadrature terms in the output buffer.
+pub(crate) const OUT_SUMS: u32 = OUT_EDGES + 8 * MAX_SOURCES;
 /// Words in the output buffer.
-pub(crate) const OUT_WORDS: u32 = OUT_EDGES + 8 * MAX_SOURCES;
+pub(crate) const OUT_WORDS: u32 = OUT_SUMS + 4 * MAX_FIELD_RAYS;
 
 /// Seconds a tap bin spans: arrivals closer than this are one early reflection to the ear.
 pub const TAP_BIN_S: f32 = 0.005;
@@ -176,6 +178,7 @@ pub(crate) fn query_source() -> String {
     c("OUT_FIELD", format!("{OUT_FIELD}u"), &mut s);
     c("OUT_RAYS", format!("{OUT_RAYS}u"), &mut s);
     c("OUT_EDGES", format!("{OUT_EDGES}u"), &mut s);
+    c("OUT_SUMS", format!("{OUT_SUMS}u"), &mut s);
     c("MAX_STATICS", format!("{MAX_STATICS}u"), &mut s);
     c("FIELD_RAYS", format!("{MAX_FIELD_RAYS}u"), &mut s);
     c("MAX_LANE_STEPS", format!("{}u", 2 * MAX_TERRAIN_SIDE / 64 + 4), &mut s);

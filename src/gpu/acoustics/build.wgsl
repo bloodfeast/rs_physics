@@ -53,7 +53,9 @@ fn statics_bin(@builtin(global_invocation_id) gid: vec3<u32>) {
         i1 = vec3<f32>(c0.y, c1.y, c2.y) * inv;
         i2 = vec3<f32>(c0.z, c1.z, c2.z) * inv;
     }
-    let out = ld(H_OFF_INV) + 12u * s;
+    // The static's record for the query: its inverse, top, bottom, half-width and
+    // material, 16 words, so a test against it is one round of loads.
+    let out = ld(H_OFF_INV) + 16u * s;
     stf(out, i0.x);
     stf(out + 1u, i0.y);
     stf(out + 2u, i0.z);
@@ -66,8 +68,13 @@ fn statics_bin(@builtin(global_invocation_id) gid: vec3<u32>) {
     stf(out + 9u, i2.y);
     stf(out + 10u, i2.z);
     stf(out + 11u, -dot(i2, t));
+    let half_y = 0.5 * (abs(a1.x) + abs(a1.y) + abs(a1.z));
+    let top = t.y + half_y;
+    stf(out + 12u, top);
+    stf(out + 13u, t.y - half_y);
+    stf(out + 14u, ldf(base + 13u));
+    atomicStore(&scene[out + 15u], ld(base + 12u));
 
-    let top = t.y + 0.5 * (abs(a1.x) + abs(a1.y) + abs(a1.z));
     let r = ld(H_OFF_RANGES) + 4u * s;
     let col0 = ld(r);
     let row0 = ld(r + 1u);

@@ -21,7 +21,7 @@
 //! | statics, [`Obb`] | 16 each | [`pack_scene`] |
 //! | statics' cell ranges | 4 each | [`pack_scene`] |
 //! | materials, [`AcousticMaterial`] | 4 each | [`pack_scene`] |
-//! | statics' inverse transforms | 12 each | the GPU |
+//! | statics' query records: inverse, top, bottom, half-width, material | 16 each | the GPU |
 //! | grid counts, heads and lists | cells, cells + 1, one per covered cell | the GPU |
 //! | static tops per cell | cells | the GPU |
 //! | max pyramid, levels 1 to 3 | about cells / 3 | the GPU |
@@ -341,7 +341,7 @@ pub(crate) fn layout(
     let (off_statics, _) = take(16 * n);
     let (off_ranges, _) = take(4 * n);
     let (off_materials, staged_words) = take(4 * materials);
-    let (off_inv, _) = take(12 * n);
+    let (off_inv, _) = take(16 * n);
     let (off_count, _) = take(cells);
     let (off_heads, _) = take(cells + 1);
     let (off_list, _) = take(list_len as u32);
