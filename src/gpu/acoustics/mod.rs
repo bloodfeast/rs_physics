@@ -806,7 +806,7 @@ impl GpuAcoustics {
         enc.copy_buffer_to_buffer(staged.buffer, staged.offset, &self.input, 0, staged.len);
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("acoustics"),
+                label: None,
                 timestamp_writes: timestamps,
             });
             pass.set_bind_group(0, &self.query_group, &[]);
