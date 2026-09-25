@@ -122,7 +122,8 @@ pub use pack::{
 };
 pub use records::{
     AcousticCounters, AcousticLimits, AcousticMaterial, AcousticsError, DispatchHeader,
-    FieldRay, Listener, ListenerField, Obb, Source, SourceResult, Tap, TickResults, BANDS_HZ,
+    FieldRay, Listener, ListenerField, Obb, Source, SourceEdges, SourceResult, Tap, TickResults,
+    BANDS_HZ,
     HEADER_BYTES, MAX_BOUNCES, MAX_CELLS_PER_STATIC, MAX_FIELD_RAYS, MAX_LEGIBILITY_POINTS,
     MAX_MOVERS, MAX_SOURCES, MAX_STATICS, MAX_TAG, MAX_TERRAIN_SIDE, NO_MOVER, PROBE_HZ,
     READBACK_BYTES,
@@ -915,5 +916,34 @@ impl GpuAcoustics {
     pub fn copy_field_rays(&self, enc: &mut wgpu::CommandEncoder, dst: &wgpu::Buffer, offset: u64) {
         let bytes = 16 * 4 * MAX_FIELD_RAYS as u64;
         enc.copy_buffer_to_buffer(&self.output, shader::OUT_RAYS as u64 * 4, dst, offset, bytes);
+    }
+
+    /// Record a copy of the last dispatch's per-source main edges into a caller buffer, for
+    /// the oracles: [`MAX_SOURCES`] [`SourceEdges`] records, 4,096 bytes, the first as
+    /// many as the dispatch had sources valid.
+    ///
+    /// # Arguments
+    ///
+    /// * `enc` - the caller's encoder, after the dispatch it reads.
+    /// * `dst` - a `COPY_DST` buffer of at least 4,096 bytes from `offset`.
+    /// * `offset` - where in `dst`, bytes; a multiple of 4.
+    ///
+    /// # Returns
+    ///
+    /// Nothing; the copy is recorded.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::gpu::acoustics::GpuAcoustics;
+    ///
+    /// # fn setup() -> (GpuAcoustics, wgpu::Device, wgpu::Buffer) { unimplemented!() }
+    /// let (acoustics, device, dst) = setup();
+    /// let mut enc = device.create_command_encoder(&Default::default());
+    /// acoustics.copy_source_edges(&mut enc, &dst, 0);
+    /// ```
+    pub fn copy_source_edges(&self, enc: &mut wgpu::CommandEncoder, dst: &wgpu::Buffer, offset: u64) {
+        let bytes = 32 * MAX_SOURCES as u64;
+        enc.copy_buffer_to_buffer(&self.output, shader::OUT_EDGES as u64 * 4, dst, offset, bytes);
     }
 }

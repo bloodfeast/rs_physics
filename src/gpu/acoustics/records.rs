@@ -561,6 +561,24 @@ pub struct FieldRay {
 
 const _: () = assert!(std::mem::size_of::<FieldRay>() == 64);
 
+/// One source's main edges as the march found them, for the oracles: the per-band maxima
+/// that the laws were given.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct SourceEdges {
+    /// The largest signed excess path per band of [`BANDS_HZ`], in metres, with each
+    /// obstacle admitted by the Fresnel rule at that band; `f32::MIN` for none.
+    pub excess_m: [f32; 4],
+    /// The same at [`PROBE_HZ`].
+    pub probe_excess_m: f32,
+    /// Path length through foliage, in metres.
+    pub foliage_m: f32,
+    /// Padding to 32 bytes.
+    pub pad: [f32; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<SourceEdges>() == 32);
+
 /// Everything one readback slot carries, copied out by
 /// [`crate::gpu::acoustics::GpuAcoustics::take_ready`].
 #[derive(Clone, Debug)]

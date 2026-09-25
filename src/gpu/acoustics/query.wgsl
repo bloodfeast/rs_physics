@@ -527,6 +527,14 @@ fn sources(@builtin(workgroup_id) wg: vec3<u32>,
     if (lane == 0u && i < n_src) {
         laws(s, directivity, vs, word, red_band[0], red_probe[0].x, red_probe[0].y,
              OUT_SOURCES + 8u * i);
+        // The march's own answer, for the oracles: five stores a source.
+        let at = OUT_EDGES + 8u * i;
+        outb[at] = bitcast<u32>(red_band[0].x);
+        outb[at + 1u] = bitcast<u32>(red_band[0].y);
+        outb[at + 2u] = bitcast<u32>(red_band[0].z);
+        outb[at + 3u] = bitcast<u32>(red_band[0].w);
+        outb[at + 4u] = bitcast<u32>(red_probe[0].x);
+        outb[at + 5u] = bitcast<u32>(red_probe[0].y);
     }
 }
 
