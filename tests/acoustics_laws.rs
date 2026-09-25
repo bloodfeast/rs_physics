@@ -173,8 +173,8 @@ fn horner(coeffs: &[f64], z: E) -> E {
 
 /// The shader's `barrier_db`, bounded, with its method error; branches that the interval
 /// straddles are both evaluated and the worse taken. Returns (bound on |gpu - exact law|).
-fn barrier_bound(ex: f32, lam: E) -> f64 {
-    let n = E { v: 2.0 * ex as f64, e: 0.0 }.div(lam);
+fn barrier_bound(ex: E, lam: E) -> f64 {
+    let n = E { v: 2.0 * ex.v, e: 2.0 * ex.e }.div(lam);
     let exact = |n: f64| barrier_insertion_db(n * lam.v / 2.0, lam.v);
     let series = series_coefficients();
     let x0 = (2.0 * std::f64::consts::PI * lit_zone_limit()).sqrt();
@@ -411,8 +411,9 @@ fn l1_the_f32_laws_hold_to_the_f64_laws_within_the_derived_bound() {
         // ---- The bound, through the shader's operations, at the f32 speed of sound the
         // GPU was handed; and the same mirror at the f64 one, whose difference is the
         // effect of that input's rounding. ----
-        let at32 = mirror(c, x(h.listener[3]));
-        let at64 = mirror(c, E { v: c64, e: 0.0 });
+        let ex = c.case.excess.map(x);
+        let at32 = mirror(c, x(h.listener[3]), ex);
+        let at64 = mirror(c, E { v: c64, e: 0.0 }, ex);
         let got = [c.gpu.gain_l, c.gpu.gain_r, c.gpu.itd_s, c.gpu.cutoff_hz, c.gpu.pitch];
         for i in 0..5 {
             let input = (at32.out[i].v - at64.out[i].v).abs();
@@ -446,7 +447,7 @@ struct Mirrored {
     flip: [f64; 5],
 }
 
-fn mirror(c: &Case, c_e: E) -> Mirrored {
+fn mirror(c: &Case, c_e: E, ex: [E; 4]) -> Mirrored {
     let h = &c.header;
     let air = &c.air;
     let (s, l) = (c.case.source, [h.listener[0], h.listener[1], h.listener[2]]);
@@ -466,8 +467,8 @@ fn mirror(c: &Case, c_e: E) -> Mirrored {
         let lam = c_e.mul(k(1.0 / f));
         let base = alpha.mul(r).add(k(foliage_absorption_db_per_m(f)).mul(fol));
         let bar = E {
-            v: barrier_insertion_db(c.case.excess[b] as f64, lam.v),
-            e: barrier_bound(c.case.excess[b], lam),
+            v: barrier_insertion_db(ex[b].v, lam.v),
+            e: barrier_bound(ex[b], lam),
         };
         loss[b] = base.add(bar);
     }
@@ -540,4 +541,170 @@ fn mirror(c: &Case, c_e: E) -> Mirrored {
         [0.0; 5]
     };
     Mirrored { out: [gl, gr, itd, cutoff, pitch], flip }
+}
+
+/// The largest signed excess over the terrain columns between `s` and `l`, in f64: every
+/// cell piece, refined by golden-section search (the L3 oracle, terrain only).
+fn terrain_edge(scene: &Scene, s: [f64; 3], l: [f64; 3]) -> f64 {
+    let d = [l[0] - s[0], l[1] - s[1], l[2] - s[2]];
+    let cell = scene.cell as f64;
+    let mut cuts = vec![0.0, 1.0];
+    for (o, dd, n) in [(s[0], d[0], scene.cols), (s[2], d[2], scene.rows)] {
+        if dd.abs() > 1e-300 {
+            for k in 0..=n {
+                let t = (k as f64 * cell - o) / dd;
+                if t > 0.0 && t < 1.0 {
+                    cuts.push(t);
+                }
+            }
+        }
+    }
+    cuts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let signed = |t: f64, h: f64| {
+        let p = [s[0] + t * d[0], s[1] + t * d[1], s[2] + t * d[2]];
+        let q = [p[0], h, p[2]];
+        let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let e = dist(q, s) + dist(l, q) - dist(l, s);
+        if h > p[1] { e } else { -e }
+    };
+    let mut best = f64::MIN;
+    for w in cuts.windows(2) {
+        let (t0, t1) = (w[0], w[1]);
+        if t1 <= t0 {
+            continue;
+        }
+        let m = 0.5 * (t0 + t1);
+        let Some(h) = scene.height_at(s[0] + m * d[0], s[2] + m * d[2]) else { continue };
+        best = best.max(signed(t0, h)).max(signed(t1, h));
+        let g = (5f64.sqrt() - 1.0) / 2.0;
+        let (mut a, mut b) = (t0, t1);
+        for _ in 0..100 {
+            let (c, dd) = (b - g * (b - a), a + g * (b - a));
+            if signed(c, h) > signed(dd, h) { b = dd } else { a = c }
+        }
+        best = best.max(signed(0.5 * (a + b), h));
+    }
+    best
+}
+
+/// **L13. Temporal stability.** A source walks over a ridge crest at 11.5 m/s, the fastest
+/// recorded ground speed, sampled at 1/60 s. No step in `gain_l`, `gain_r` or `cutoff_hz`
+/// may exceed the continuous law's own change over that step (its largest slope there,
+/// by finite differences of the f64 law at eight sub-steps, times the distance moved),
+/// plus the GPU's derived distance from the law at each end: the L3 bound on the edge
+/// carried through the L1 mirror.
+#[test]
+fn l13_a_source_walking_over_a_crest_does_not_click() {
+    let Some(gpu) = gpu() else { return };
+    let air = Air::standard();
+    let c64 = air.speed_of_sound();
+    // A smooth ridge along z at x = 100 m, 6 m high, sigma 8 m, sampled into 2 m columns.
+    let ridge = |x: f64| 6.0 * (-((x - 100.0) / 8.0).powi(2) / 2.0).exp();
+    let mut scene = Scene::flat(140, 100, 2.0, 0.0);
+    for r in 0..100 {
+        for cc in 0..140 {
+            scene.heights[r * 140 + cc] = ridge(cc as f64 * 2.0 + 1.0) as f32;
+        }
+    }
+    let mut ac = GpuAcoustics::new(&gpu.device, AcousticLimits::MAX).unwrap();
+    scene.load(&gpu, &mut ac);
+    let listener = Listener {
+        position: [60.0, 1.6, 80.0],
+        forward: [0.0, 0.0, -1.0],
+        right: [1.0, 0.0, 0.0],
+        velocity: [0.0; 3],
+    };
+    let ladder = [(0.0f32, 20_000.0f32), (45.0, 1_400.0), (130.0, 480.0)];
+    let header = DispatchHeader::new(&listener, &air, &ladder).unwrap();
+    let speed = 11.5f64;
+    let step = speed / 60.0;
+    let at = |k: f64| -> [f64; 3] {
+        let x = 80.0 + k * step;
+        [x, ridge(x) + 1.0, 110.0]
+    };
+    let steps = ((130.0 - 80.0) / step) as usize;
+    let positions: Vec<[f32; 3]> = (0..=steps).map(|k| at(k as f64).map(|v| v as f32)).collect();
+    let mut gpu_out: Vec<SourceResult> = Vec::new();
+    for chunk in positions.chunks(MAX_SOURCES as usize) {
+        let sources: Vec<Source> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Source::new(*p, 1.0, [speed as f32, 0.0, 0.0], i as u32, NO_MOVER).unwrap())
+            .collect();
+        let out = dispatch(&gpu, &mut ac, &header, &sources, &[]);
+        gpu_out.extend_from_slice(out.results());
+    }
+    let l = listener.position.map(|v| v as f64);
+    // The continuous law at a point: the f64 edge and the f64 laws.
+    let law = |p: [f64; 3]| -> [f64; 3] {
+        let e = terrain_edge(&scene, p, l);
+        let d = [l[0] - p[0], l[1] - p[1], l[2] - p[2]];
+        let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let mut loss = [0.0; 4];
+        for b in 0..4 {
+            let f = BANDS_HZ[b] as f64;
+            loss[b] = air.absorption_db_per_m(f) * r + barrier_insertion_db(e, c64 / f);
+        }
+        let fit = fit_lowpass(&BANDS_HZ.map(|v| v as f64), &loss);
+        let pts: Vec<(f64, f64)> = ladder.iter().map(|&(m, hz)| (m as f64, hz as f64)).collect();
+        let cutoff = fit.cutoff_hz.min(cutoff_ceiling(&pts, r).unwrap());
+        let ears = Ears { position: l, forward: [0.0, 0.0, -1.0], right: [1.0, 0.0, 0.0] };
+        let heard = ears.hear(p, &air, PROBE_HZ as f64);
+        let g = spreading_gain(r, 1.0) * fit.gain;
+        [g * heard.left_gain, g * heard.right_gain, cutoff]
+    };
+    // The GPU's bound against the law at a sampled position.
+    let bound = |k: usize| -> [f64; 3] {
+        let p32 = positions[k];
+        let p = p32.map(|v| v as f64);
+        let e = terrain_edge(&scene, p, l);
+        let len = ((l[0] - p[0]).powi(2) + (l[1] - p[1]).powi(2) + (l[2] - p[2]).powi(2)).sqrt();
+        let mag = p.iter().chain(l.iter()).map(|v| v.abs()).fold(0.0, f64::max);
+        let dt = [(p[0], l[0] - p[0], 280.0), (p[2], l[2] - p[2], 200.0)]
+            .iter()
+            .map(|&(o, dd, hi): &(f64, f64, f64)| 4.0 * U * (hi + o.abs()) / dd.abs().max(1e-300))
+            .fold(8.0 * U, f64::max);
+        let e3 = 16.0 * U * (2.0 * len + e.abs() + 2.0 * mag) + 8.0 * U * mag + 2.0 * len * dt;
+        let case = Case {
+            gpu: SourceResult::default(),
+            header,
+            air,
+            curve: ladder.to_vec(),
+            case: LawCase { source: p32, directivity: 1.0, velocity: [speed as f32, 0.0, 0.0], tag: 0, excess: [e as f32; 4], probe_excess: e as f32, foliage_m: 0.0, pad: [0.0; 2] },
+        };
+        let ex = [E { v: e, e: e3 }; 4];
+        let m32 = mirror(&case, x(header.listener[3]), ex);
+        let m64 = mirror(&case, E { v: c64, e: 0.0 }, ex);
+        [0, 1, 3].map(|i| m32.out[i].e + m32.flip[i] + (m32.out[i].v - m64.out[i].v).abs())
+    };
+    let mut worst = [0.0f64; 3];
+    let mut largest_step = [0.0f64; 3];
+    let bounds: Vec<[f64; 3]> = (0..positions.len()).map(bound).collect();
+    for k in 0..steps {
+        let sub = 8;
+        let mut slope = [0.0f64; 3];
+        let mut prev = law(at(k as f64));
+        for j in 1..=sub {
+            let next = law(at(k as f64 + j as f64 / sub as f64));
+            for o in 0..3 {
+                slope[o] = slope[o].max((next[o] - prev[o]).abs() / (step / sub as f64));
+            }
+            prev = next;
+        }
+        let g0 = [gpu_out[k].gain_l, gpu_out[k].gain_r, gpu_out[k].cutoff_hz];
+        let g1 = [gpu_out[k + 1].gain_l, gpu_out[k + 1].gain_r, gpu_out[k + 1].cutoff_hz];
+        for o in 0..3 {
+            let moved = (g1[o] as f64 - g0[o] as f64).abs();
+            let allowed = slope[o] * step + bounds[k][o] + bounds[k + 1][o];
+            assert!(moved <= allowed, "step {k}, output {o}: moved {moved:e}, the law allows {allowed:e}");
+            worst[o] = worst[o].max(moved / allowed);
+            largest_step[o] = largest_step[o].max(moved);
+        }
+    }
+    let crossed = gpu_out.iter().any(|r| r.blocked()) && gpu_out.iter().any(|r| !r.blocked());
+    assert!(crossed, "the walk never crossed the shadow boundary");
+    println!(
+        "L13: {steps} steps of {step:.4} m over the crest; worst step as a share of the law's: gain_l {:.3}, gain_r {:.3}, cutoff {:.3}; largest steps {:.3e}, {:.3e}, {:.1} Hz",
+        worst[0], worst[1], worst[2], largest_step[0], largest_step[1], largest_step[2]
+    );
 }
