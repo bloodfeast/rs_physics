@@ -86,3 +86,7 @@ harness = false
 name = "acoustics"
 harness = false
 required-features = ["gpu"]
+
+[[example]]
+name = "r2_bench"
+required-features = ["particles", "fluid_simulation"]
