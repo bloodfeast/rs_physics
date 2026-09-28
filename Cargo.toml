@@ -90,3 +90,7 @@ required-features = ["gpu"]
 [[example]]
 name = "r2_bench"
 required-features = ["particles", "fluid_simulation"]
+
+[[example]]
+name = "r2_phases"
+required-features = ["fluid_simulation"]
