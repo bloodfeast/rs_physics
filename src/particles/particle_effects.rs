@@ -1,8 +1,8 @@
-//! Short-lived 3D particle effects — sparks, dust, debris, smoke.
+//! Short-lived 3D particle effects -- sparks, dust, debris, smoke.
 //!
 //! This module fills a genuine gap. Every other particle system in this crate is a
 //! *simulation* system: a fixed population of mutually-interacting bodies
-//! integrated for accuracy — Barnes-Hut N-body, SPH fluid coupling, the GPU
+//! integrated for accuracy -- Barnes-Hut N-body, SPH fluid coupling, the GPU
 //! compute path. All of them are two-dimensional, and **none of them has a
 //! lifetime**.
 //!
@@ -24,7 +24,7 @@
 //!
 //! A deliberate second exception, alongside the low-precision Barnes-Hut path. The
 //! error in a spark's position is invisible at any zoom a human uses, and halving
-//! the bytes per particle doubles the number that fit in cache — which is the whole
+//! the bytes per particle doubles the number that fit in cache -- which is the whole
 //! cost model for a system whose per-particle work is a handful of multiply-adds.
 //! It is also what any GPU backend wants. Precision would buy nothing and cost the
 //! only thing that matters here.
@@ -38,7 +38,7 @@
 //! The split between [`ParticleEffects::integrate`] and
 //! [`ParticleEffects::collide_ground`] is deliberate and is the seam a GPU backend
 //! drops into: `integrate` is pure data-parallel arithmetic over flat arrays with
-//! no callbacks and no branching on external state — a direct translation to a
+//! no callbacks and no branching on external state -- a direct translation to a
 //! CUDA or compute-shader kernel. Ground collision needs the host's heightmap, so
 //! it stays a separate, optional, host-side pass.
 //!
@@ -87,7 +87,7 @@ pub const MAX_CLASSES: usize = 8;
 /// Per-class physical behaviour.
 ///
 /// Deliberately not per-particle. Every particle of a class shares these, so the
-/// integration loop loads three floats once instead of three per particle — and
+/// integration loop loads three floats once instead of three per particle -- and
 /// "all the sparks behave like sparks" is what an artist wants anyway.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParticleClass {
@@ -117,7 +117,7 @@ pub struct Burst {
     /// Where every particle of the burst starts, metres.
     pub origin: [f32; 3],
     /// Index into the class table. Out-of-range values are clamped rather than
-    /// rejected — a bad class is a visual bug, not a reason to fail an emit.
+    /// rejected -- a bad class is a visual bug, not a reason to fail an emit.
     pub class: u8,
     /// How many particles to emit.
     pub count: u32,
@@ -156,7 +156,7 @@ pub struct Landing {
 /// A pool of live effect particles.
 
 ///
-/// Capacity is fixed at construction. When full, the oldest particle is replaced —
+/// Capacity is fixed at construction. When full, the oldest particle is replaced --
 /// which keeps the *most recent* event fully drawn, since that is the one the
 /// viewer is looking at. An unbounded pool is the same resource-exhaustion hazard
 /// as any other unbounded collection; it just fails as a stutter rather than a
@@ -228,7 +228,7 @@ impl ParticleEffects {
             oldest: 0,
             // No GPU backend is registered until a caller supplies one, so `Auto`
             // resolves to the CPU until then. The policy still calibrates its CPU
-            // cost meanwhile, so `crossover()` is meaningful before any GPU exists —
+            // cost meanwhile, so `crossover()` is meaningful before any GPU exists --
             // which is exactly when you want to know whether building one is worth it.
             policy: BackendPolicy::default(),
         }
@@ -443,7 +443,7 @@ impl ParticleEffects {
     }
 
     /// Emit a single particle with an explicit velocity, for cases an isotropic
-    /// burst does not cover — a directed jet, a trail, a shaped charge.
+    /// burst does not cover -- a directed jet, a trail, a shaped charge.
     ///
     /// # Arguments
     ///
@@ -665,7 +665,7 @@ impl ParticleEffects {
             self.class.swap_remove(i);
         }
         // Compaction moved everything, so the rotation cursor no longer refers to
-        // the particle it was pointing at. Reset rather than track it — being
+        // the particle it was pointing at. Reset rather than track it -- being
         // approximately-oldest is all this needs to be.
         if self.oldest >= self.len() {
             self.oldest = 0;
@@ -703,7 +703,7 @@ impl ParticleEffects {
     ///
     /// The reporting variant exists because *where a particle landed* is usually
     /// more interesting than the particle. Blood decides where a stain goes, sparks
-    /// decide where a scorch mark goes, debris decides where a dent goes — and all
+    /// decide where a scorch mark goes, debris decides where a dent goes -- and all
     /// of that information is generated here and thrown away by the plain version.
     /// Recovering it afterwards is impossible: by the next frame the particle has
     /// either bounced or been retired.
@@ -930,7 +930,7 @@ impl ParticleEffects {
 /// Seeded xorshift32 for emission.
 ///
 /// Small and specified, so effects are reproducible from a seed when a caller wants
-/// that — a replay, a regression screenshot, or a lockstep game that wants both
+/// that -- a replay, a regression screenshot, or a lockstep game that wants both
 /// peers to see identical sparks. Callers that do not care simply never reuse a
 /// seed.
 #[derive(Debug, Clone)]
@@ -982,7 +982,7 @@ impl EffectRng {
         x
     }
 
-    /// Uniform in `[0, 1)`, taken from the top bits — xorshift's low bits are the
+    /// Uniform in `[0, 1)`, taken from the top bits -- xorshift's low bits are the
     /// weakest.
     ///
     /// # Returns
@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn drag_removes_speed_and_never_reverses_it() {
         let mut fx = ParticleEffects::with_capacity(16);
-        // Drag high enough that `drag * dt` exceeds 1 — the case the damping clamp
+        // Drag high enough that `drag * dt` exceeds 1 -- the case the damping clamp
         // exists for. Without it the velocity flips sign and heavy air resistance
         // turns into a bounce.
         fx.set_class(
