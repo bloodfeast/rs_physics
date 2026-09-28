@@ -514,7 +514,7 @@ impl ParticleEffects {
     ///
     /// This is the GPU-portable half: flat arrays, no callbacks, no branching on
     /// anything the host owns. A CUDA or compute-shader backend replaces the body
-    /// of [`Self::integrate_free_flight`] and leaves compaction on the host.
+    /// of the private `integrate_free_flight` and leaves compaction on the host.
     ///
     /// A velocity component too small to move its particle is set to zero, exactly: the
     /// position it would have reached is bit for bit the position it keeps. Drag alone

@@ -1880,9 +1880,6 @@ mod tests {
         assert!(cohesion_kernel(h * 0.5, h) > 0.0, "should peak in the middle");
     }
 
-    /// A splash has to end. Particles that stop must be handed back so the caller
-    /// can bake them into whatever they leave behind, and must leave the solver.
-    #[test]
     /// The presets are not interchangeable, and the ordering between them is what
     /// makes each one look like the substance it is named after. If gel ever stops
     /// being the thickest and stickiest of the three, napalm stops crawling and
@@ -1907,6 +1904,8 @@ mod tests {
         assert!(gel.rest_density < water.rest_density);
     }
 
+    /// A splash has to end. Particles that stop must be handed back so the caller
+    /// can bake them into whatever they leave behind, and must leave the solver.
     #[test]
     fn settled_particles_are_drained_and_reported() {
 
