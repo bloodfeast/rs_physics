@@ -82,9 +82,15 @@ pub enum GpuResidency {
 
 /// Nanoseconds per particle for the CPU path, before any measurement.
 ///
-/// Seeded from a measured scalar run so the first few frames are not wild; it is
-/// replaced by real numbers as soon as the pool does meaningful work.
-const CPU_SEED_NS: f32 = 15.0;
+/// Seeded from a measured run so the first few frames are not wild; it is replaced
+/// by real numbers as soon as the pool does meaningful work.
+///
+/// 3.0 is `ParticleEffects::integrate` on a live, re-emitting pool (3.19 ns at 16k,
+/// 2.88 ns at 100k: `examples/r2_bench.rs`, 2026-09-28, i9-10980XE). It was 15.0 until
+/// then, taken from a bench whose never-retiring pool had drifted into subnormal
+/// velocities; that seed put the resident crossover near 4,000 particles, about six
+/// times too early.
+const CPU_SEED_NS: f32 = 3.0;
 
 /// Fixed cost of getting onto and off the GPU: launch, plus a synchronise.
 const GPU_SEED_FIXED_NS: f32 = 60_000.0;
@@ -336,8 +342,9 @@ mod tests {
     /// Asserted against the model's own crossover rather than a hardcoded
     /// population, because the crossover *moves* — that is the entire point of the
     /// design. An earlier version of this test hardcoded 10,000 and failed, and it
-    /// was the test that was wrong: with the seeded costs and a resident pool the
-    /// crossover sits near 4,000, so 10,000 genuinely belongs on the GPU.
+    /// was the test that was wrong: the seeded costs decide where the crossover sits
+    /// (about 23,000 for a resident pool since the CPU seed was re-measured, near
+    /// 4,000 before), and the test must follow them.
     #[test]
     fn populations_either_side_of_the_crossover_go_the_right_way() {
         let mut p = ready();
@@ -422,9 +429,11 @@ mod tests {
         let mut p = ready();
         let before = p.crossover().unwrap();
 
-        // Report the CPU doing the same work ten times faster.
+        // Report the CPU doing the same work five times faster than its seed. Relative
+        // to the seed, so re-measuring the seed does not silently weaken this test.
+        let faster = Duration::from_nanos((1_000_000.0 * CPU_SEED_NS / 5.0) as u64);
         for _ in 0..40 {
-            p.record(Backend::Cpu, 1_000_000, Duration::from_micros(1_500));
+            p.record(Backend::Cpu, 1_000_000, faster);
         }
         let after = p.crossover().unwrap();
 

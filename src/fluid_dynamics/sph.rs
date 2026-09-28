@@ -1,12 +1,12 @@
-//! Smoothed-particle hydrodynamics — liquid that holds itself together.
+//! Smoothed-particle hydrodynamics -- liquid that holds itself together.
 //!
 //! # The gap this fills
 //!
 //! `rs_physics` had two fluid models and neither could do a splash. [`FluidGrid3D`]
 //! is Eulerian: excellent for smoke and large volumes, hopeless for droplets, since
 //! resolving a 3 mm drop over a 280 m map would need a grid nobody can afford.
-//! [`FluidParticle3D`] is a *solid particle moving through* a fluid medium — a
-//! bubble or a grain of sediment — and its particles do not interact with each
+//! [`FluidParticle3D`] is a *solid particle moving through* a fluid medium -- a
+//! bubble or a grain of sediment -- and its particles do not interact with each
 //! other at all.
 //!
 //! SPH is the third thing: **the particles are the liquid**. Each one carries a
@@ -20,7 +20,7 @@
 //!
 //! # The kernels
 //!
-//! Standard Müller-style SPH with an Akinci cohesion term:
+//! Standard Muller-style SPH with an Akinci cohesion term:
 //!
 //! - **Poly6** for density. Smooth and cheap, but its gradient vanishes at zero
 //!   distance, which is why it is not used for pressure.
@@ -32,13 +32,73 @@
 //!   look like a liquid instead of like dust: without it particles disperse, and
 //!   with it they pull into rounded blobs and separate into droplets.
 //!
-//! # Determinism
+//! # Layout
 //!
-//! Neighbour search is a uniform grid of `Vec`s walked in index order, and every
-//! force loop runs over particle indices. No hash iteration, no parallelism, no
-//! transcendentals in the inner loop. This is presentation-side in the game that
-//! prompted it, but a solver that is deterministic by construction costs nothing
-//! extra and can be used for gameplay later.
+//! Structure-of-arrays throughout: one `Vec<f64>` a component. Until 2026-09-28 the
+//! particle state was `Vec<[f64; 3]>` and the neighbour walk chased a `sorted` index
+//! into it for every candidate; now each step copies the state into cell order once,
+//! so every candidate range the walk reads is contiguous memory.
+//!
+//! The cell hash puts a row of cells (fixed `y` and `z`) in consecutive buckets, so
+//! the three cells of a row that a particle's neighbourhood covers are one run of the
+//! sorted arrays: at most nine runs a cell rather than twenty-seven hash lookups a
+//! particle. The nine intervals are merged where two rows' buckets overlap, so every
+//! bucket is walked once, and they are built once a cell (the sorted order keeps a
+//! cell's particles together). Every particle within a smoothing radius lies in one of
+//! the 27 cells, so the distance test alone is the membership test: a particle from a
+//! far cell that shares a bucket fails it, and none is visited twice.
+//!
+//! The density pass records each particle's neighbours (a `u32` a neighbour, in a
+//! list owned by a fixed chunk of particles), and the force pass reads that list
+//! rather than searching again. Positions do not move between the two passes, so the
+//! list is exact.
+//!
+//! # Parallelism and determinism
+//!
+//! Density and forces run over fixed chunks of [`SPH_CHUNK`] particles with rayon, on
+//! whatever pool the caller is running in (`pool.install(|| fluid.step(..))`), or the
+//! global one; the O(n) passes (binning, the gathers into and out of cell order, the
+//! move) run over larger fixed chunks the same way. The answer is **bit-identical at any thread count**, by construction
+//! rather than by care:
+//!
+//! - Every particle's sums are gathers, written only to that particle's own slot, in
+//!   an order fixed by the data: the nine rows in order, each row's slots in sorted
+//!   order. No thread ever adds into another particle's total.
+//! - The sums run in four interleaved partial sums (a candidate's lane is its position
+//!   in its row, a neighbour's its position in the list) combined as
+//!   `(a0 + a1) + (a2 + a3)`, which lets the adds pipeline and vectorise without
+//!   reassociation that a thread count could change.
+//! - The counting sort is serial and O(n), and it is what fixes the order. Every pass
+//!   back to particle order is a gather through the sort's inverse, one particle a
+//!   slot, so it too is independent of the schedule. The ground callback runs serially:
+//!   it is the caller's closure and is not assumed to be `Sync`.
+//!
+//! `parallel_steps_are_bit_identical_at_any_thread_count` asserts it at 1, 3 and 8
+//! threads. No hash iteration and no transcendentals in the inner loops, so the
+//! solver is deterministic on one machine; across machines it is as deterministic as
+//! `f64` `sqrt` and division, which IEEE 754 fixes.
+//!
+//! # Examples
+//!
+//! ```
+//! use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+//!
+//! let mut blood = SphFluid::new(SphParams::blood(), 512).unwrap();
+//! for i in 0..64 {
+//!     let (x, z) = ((i % 8) as f64 * 0.01, (i / 8) as f64 * 0.01);
+//!     blood.spawn([x, 0.5, z], [0.0, -1.0, 0.0]);
+//! }
+//! for _ in 0..240 {
+//!     blood.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+//! }
+//! assert!((0..blood.len()).all(|i| blood.position(i)[1] >= 0.0));
+//! ```
+
+#![warn(missing_docs)]
+
+use std::time::{Duration, Instant};
+
+use rayon::prelude::*;
 
 use crate::utils::PhysicsError;
 
@@ -79,14 +139,31 @@ impl SphParams {
     /// support in every direction, so the smoothing radius is about twice the
     /// spacing.
     ///
-    /// Set them inconsistently and the solver does not fail — it computes a sampled
+    /// Set them inconsistently and the solver does not fail -- it computes a sampled
     /// density far below the rest density, which makes pressure clamp to zero, which
     /// silently removes incompressibility altogether. The fluid still moves, still
     /// looks plausible, and is no longer a fluid. The first draft of this module had
     /// exactly that bug and a density test is what caught it.
     ///
-    /// `spacing` is in metres, and it is the real handle on cost: halving it is eight
-    /// times the particles for the same volume.
+    /// # Arguments
+    ///
+    /// * `spacing` - distance between neighbouring particles at rest, metres. It is
+    ///   the real handle on cost: halving it is eight times the particles for the
+    ///   same volume.
+    ///
+    /// # Returns
+    ///
+    /// The same parameters with `smoothing_radius` and `particle_mass` derived.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::SphParams;
+    ///
+    /// let p = SphParams::water().with_spacing(0.05);
+    /// assert_eq!(p.smoothing_radius, 0.1);
+    /// assert!((p.particle_mass - 1000.0 * 0.05f64.powi(3)).abs() < 1e-12);
+    /// ```
     pub fn with_spacing(mut self, spacing: f64) -> SphParams {
         self.smoothing_radius = spacing * 2.0;
         self.particle_mass = self.rest_density * spacing * spacing * spacing;
@@ -94,11 +171,23 @@ impl SphParams {
     }
 
     /// Blood: a little denser than water, several times as viscous, and with high
-    /// surface tension — which is why it travels as discrete drops rather than a
+    /// surface tension -- which is why it travels as discrete drops rather than a
     /// spray, and why a splash beads on the ground instead of spreading thin.
     ///
     /// Spaced at 2 cm, so a particle is about 8 ml and a splash of a few dozen is a
     /// realistic quarter-litre rather than a bathtub.
+    ///
+    /// # Returns
+    ///
+    /// Blood's parameters at a 2 cm spacing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::SphParams;
+    ///
+    /// assert_eq!(SphParams::blood().rest_density, 1060.0);
+    /// ```
     pub fn blood() -> SphParams {
         SphParams {
             rest_density: 1060.0,
@@ -115,7 +204,7 @@ impl SphParams {
 
     /// Napalm: gelled hydrocarbon fuel.
     ///
-    /// Every number here is doing the same job — making the fluid **refuse to
+    /// Every number here is doing the same job -- making the fluid **refuse to
     /// spread**. Thickened fuel is the whole point of the weapon: petrol splashes,
     /// runs off and burns out in seconds, so it is gelled until it clings to whatever
     /// it lands on and burns there. That behaviour is not decoration on top of the
@@ -134,6 +223,18 @@ impl SphParams {
     /// kilograms thrown across metres of ground, not a droplet-scale splash, and
     /// resolving it at droplet scale would spend the entire particle budget on one
     /// shell.
+    ///
+    /// # Returns
+    ///
+    /// Napalm's parameters at a 12 cm spacing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::SphParams;
+    ///
+    /// assert!(SphParams::napalm().viscosity > SphParams::blood().viscosity);
+    /// ```
     pub fn napalm() -> SphParams {
         SphParams {
             rest_density: 900.0,
@@ -150,7 +251,18 @@ impl SphParams {
 
     /// Water: lighter, thinner, and less cohesive, so it sheets and spreads where
     /// blood beads.
-
+    ///
+    /// # Returns
+    ///
+    /// Water's parameters at a 2 cm spacing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::SphParams;
+    ///
+    /// assert!(SphParams::water().cohesion < SphParams::blood().cohesion);
+    /// ```
     pub fn water() -> SphParams {
         SphParams {
             rest_density: 1000.0,
@@ -174,6 +286,7 @@ impl SphParams {
 /// searches forever to render something that is no longer changing.
 #[derive(Debug, Clone, Copy)]
 pub struct Settled {
+    /// Where it came to rest, metres.
     pub position: [f64; 3],
     /// How much fluid this particle represented, kg. A stain can scale with it.
     pub mass: f64,
@@ -186,29 +299,106 @@ pub struct Settled {
     pub velocity: [f64; 3],
 }
 
+/// Wall time of each phase of the last [`SphFluid::step`], read with
+/// [`SphFluid::phase_times`].
+///
+/// Taken in-process with [`Instant`] on every step, which costs five clock reads, so a
+/// caller can put the phases on a HUD or in a trace without a profiler, and a
+/// benchmark can compare thread counts inside one process rather than across a
+/// machine whose clock drifts with heat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SphPhaseTimes {
+    /// Binning into cells, the counting sort, and the copy into cell order. Serial.
+    pub grid: Duration,
+    /// The neighbour search and the density and pressure it gives. Parallel.
+    pub density: Duration,
+    /// Pressure, viscosity and cohesion over the recorded neighbours, and the velocity
+    /// update. Parallel, then a serial scatter.
+    pub forces: Duration,
+    /// The speed cap, the move and the ground. Serial: the ground is the caller's
+    /// closure.
+    pub integrate: Duration,
+}
+
+impl SphPhaseTimes {
+    /// The whole step.
+    ///
+    /// # Returns
+    ///
+    /// The sum of the four phases.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use rs_physics::fluid_dynamics::SphPhaseTimes;
+    ///
+    /// let t = SphPhaseTimes { grid: Duration::from_micros(1), ..Default::default() };
+    /// assert_eq!(t.total(), Duration::from_micros(1));
+    /// ```
+    pub fn total(&self) -> Duration {
+        self.grid + self.density + self.forces + self.integrate
+    }
+}
+
+/// Particles per unit of parallel work.
+///
+/// Both parallel passes hand rayon whole chunks, so this is the scheduling grain, and
+/// it never changes an answer: each particle's sums are its own whichever chunk or
+/// thread computes them. At about a microsecond a particle a chunk is about 64 us of
+/// work, far above the few microseconds a rayon split costs, and small enough that
+/// 1,024 particles still give sixteen chunks to spread over eight threads.
+pub const SPH_CHUNK: usize = 64;
+
+/// Particles per unit of parallel work in the O(n) streaming passes (binning, the
+/// gathers into and out of cell order, the move).
+///
+/// A few nanoseconds a particle, so the grain is sixteen times [`SPH_CHUNK`]: about
+/// 5 to 20 us a piece, still well above a split's cost. Below it a pass runs as one
+/// piece on the calling thread. Like `SPH_CHUNK`, it never changes an answer.
+const STREAM_CHUNK: usize = SPH_CHUNK * 16;
+
+/// One chunk's neighbour lists: `index[end[k - 1]..end[k]]` are the sorted slots
+/// of particle `k`'s neighbours, itself excluded.
+///
+/// Owned per chunk so the parallel density pass can append without coordination.
+/// Cleared rather than freed, so after the first steps nothing here allocates.
+#[derive(Debug, Clone, Default)]
+struct NeighbourList {
+    index: Vec<u32>,
+    end: Vec<u32>,
+}
+
 /// A body of SPH fluid.
 ///
-/// Structure-of-arrays for the same reason the effect particles are: every pass
-/// touches positions and velocities and little else.
+/// Structure-of-arrays: every pass touches positions and velocities and little else.
+/// See the module documentation for the layout and the determinism argument.
 #[derive(Debug, Clone)]
 pub struct SphFluid {
-    pos: Vec<[f64; 3]>,
+    // Particle state, in the order particles were spawned (compacted by
+    // `drain_settled`). Indices are stable across a step.
+    px: Vec<f64>,
+    py: Vec<f64>,
+    pz: Vec<f64>,
     /// Where each particle was at the *start* of the last completed substep.
     ///
     /// Kept so a renderer running faster than the solver can draw **between** two
-    /// solved states instead of on them. SPH has to substep — pressure is stiff — so
+    /// solved states instead of on them. SPH has to substep -- pressure is stiff -- so
     /// a caller accumulating frame time always finishes a frame with a remainder it
     /// cannot spend, and drawing `pos` directly shows the fluid advancing in visible
     /// quanta at the substep rate rather than tracking render time.
     ///
-    /// Maintained in lockstep with `pos` by every operation that changes the particle
-    /// set — `spawn` pushes, `drain_settled` swap-removes, `clear` clears — so
-    /// `prev_pos.len() == pos.len()` is an invariant of the type rather than something
+    /// Maintained in lockstep with the position by every operation that changes the
+    /// particle set -- `spawn` pushes, `drain_settled` swap-removes, `clear` clears --
+    /// so equal lengths are an invariant of the type rather than something
     /// [`SphFluid::interpolated_position`] has to check.
-    prev_pos: Vec<[f64; 3]>,
-    vel: Vec<[f64; 3]>,
+    ppx: Vec<f64>,
+    ppy: Vec<f64>,
+    ppz: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    vz: Vec<f64>,
     density: Vec<f64>,
-    pressure: Vec<f64>,
     /// Seconds this particle has been below the settle speed. A drop is only retired
     /// once it has been still for a moment, so a drip that is briefly slow at the
     /// apex of a bounce is not mistaken for one that has stopped.
@@ -217,25 +407,47 @@ pub struct SphFluid {
     params: SphParams,
     capacity: usize,
 
-    // Scratch, all owned by the solver and cleared rather than reallocated. The
-    // engine's rule: a `step` that allocates is a `step` that stutters, and this one
-    // runs every frame for as long as there is fluid on screen.
-    /// Integer grid coordinate of each particle's cell. Kept so a neighbour lookup
-    /// can reject hash collisions by comparing the real coordinate.
-    cell_coord: Vec<[i32; 3]>,
-    /// Which hash bucket each particle landed in.
-    bucket_of: Vec<usize>,
-    /// Prefix sums into `sorted`, one entry per bucket plus a terminator.
-    bucket_start: Vec<usize>,
-    /// Write cursor for the counting sort. A field rather than a `clone()` of
-    /// `bucket_start`, which would allocate a whole table every single step.
-    bucket_cursor: Vec<usize>,
-    sorted: Vec<usize>,
-    /// Per-particle acceleration, accumulated before any velocity is touched so the
-    /// result does not depend on index order.
-    accel: Vec<[f64; 3]>,
+    // Scratch, all owned by the solver, sized for `capacity` in `new`, and cleared
+    // rather than reallocated. The engine's rule: a `step` that allocates is a `step`
+    // that stutters, and this one runs every frame for as long as there is fluid on
+    // screen.
+    /// Cell coordinate of each particle, in particle order.
+    cell_x: Vec<i32>,
+    cell_y: Vec<i32>,
+    cell_z: Vec<i32>,
+    /// Which hash bucket each particle landed in, in particle order.
+    bucket_of: Vec<u32>,
+    /// Prefix sums into the sorted arrays, one entry per bucket plus a terminator.
+    bucket_start: Vec<u32>,
+    /// Write cursor for the counting sort.
+    bucket_cursor: Vec<u32>,
+    /// Sorted slot to particle index.
+    order: Vec<u32>,
+    /// Particle index to sorted slot: the inverse of `order`, so every pass back to
+    /// particle order is a parallel gather rather than a serial scatter.
+    slot_of: Vec<u32>,
+    // The state in sorted (cell) order, which is what the neighbour walk reads.
+    sx: Vec<f64>,
+    sy: Vec<f64>,
+    sz: Vec<f64>,
+    svx: Vec<f64>,
+    svy: Vec<f64>,
+    svz: Vec<f64>,
+    s_cell_x: Vec<i32>,
+    s_cell_y: Vec<i32>,
+    s_cell_z: Vec<i32>,
+    s_density: Vec<f64>,
+    s_pressure: Vec<f64>,
+    s_inv_density: Vec<f64>,
+    /// Acceleration in sorted order, accumulated before any velocity is touched so
+    /// the result does not depend on the order particles are visited.
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    az: Vec<f64>,
+    lists: Vec<NeighbourList>,
     /// Bucket count, always a power of two so the hash reduces with a mask.
     table_mask: usize,
+    times: SphPhaseTimes,
 }
 
 /// Below this speed, and touching ground, a particle is considered to have landed.
@@ -243,7 +455,49 @@ const SETTLE_SPEED: f64 = 0.35;
 /// ...and it must stay that way for this long before it is retired.
 const SETTLE_TIME: f64 = 0.25;
 
+/// Buckets for `n` particles: about two a particle keeps collisions rare, and a power
+/// of two reduces the hash with a mask.
+fn table_size(n: usize) -> usize {
+    (n * 2).next_power_of_two().max(64)
+}
+
 impl SphFluid {
+    /// An empty fluid that will hold at most `capacity` particles.
+    ///
+    /// Every buffer the step uses is allocated here, for `capacity`. The neighbour
+    /// lists are the one exception: their length is the number of neighbours, which
+    /// depends on how packed the fluid is, so they grow to their high-water mark over
+    /// the first steps and are reused after.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - the fluid; see [`SphParams::with_spacing`] for the three numbers
+    ///   that have to agree.
+    /// * `capacity` - the most particles alive at once.
+    ///
+    /// # Returns
+    ///
+    /// An empty fluid.
+    ///
+    /// # Errors
+    ///
+    /// * [`PhysicsError::InvalidDistance`] if the smoothing radius is not positive.
+    /// * [`PhysicsError::InvalidMass`] if the particle mass is not positive.
+    /// * [`PhysicsError::CalculationError`] if the rest density is not positive, or if
+    ///   `capacity` does not fit the `u32` neighbour indices.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let fluid = SphFluid::new(SphParams::water(), 1_000).unwrap();
+    /// assert_eq!(fluid.capacity(), 1_000);
+    ///
+    /// let mut bad = SphParams::water();
+    /// bad.particle_mass = 0.0;
+    /// assert!(SphFluid::new(bad, 1_000).is_err());
+    /// ```
     pub fn new(params: SphParams, capacity: usize) -> Result<SphFluid, PhysicsError> {
         if params.smoothing_radius <= 0.0 {
             return Err(PhysicsError::InvalidDistance);
@@ -256,54 +510,185 @@ impl SphFluid {
                 "rest density must be positive".to_string(),
             ));
         }
+        if capacity >= u32::MAX as usize / 2 {
+            return Err(PhysicsError::CalculationError(
+                "capacity must fit the solver's u32 neighbour indices".to_string(),
+            ));
+        }
 
+        let f = || Vec::<f64>::with_capacity(capacity);
+        let c = || Vec::<i32>::with_capacity(capacity);
+        let table = table_size(capacity);
         Ok(SphFluid {
-            pos: Vec::with_capacity(capacity),
-            prev_pos: Vec::with_capacity(capacity),
-            vel: Vec::with_capacity(capacity),
-            density: Vec::with_capacity(capacity),
-            pressure: Vec::with_capacity(capacity),
-            still_for: Vec::with_capacity(capacity),
+            px: f(),
+            py: f(),
+            pz: f(),
+            ppx: f(),
+            ppy: f(),
+            ppz: f(),
+            vx: f(),
+            vy: f(),
+            vz: f(),
+            density: f(),
+            still_for: f(),
             params,
             capacity,
-            cell_coord: Vec::new(),
-            bucket_of: Vec::new(),
-            bucket_start: Vec::new(),
-            bucket_cursor: Vec::new(),
-            sorted: Vec::new(),
-            accel: Vec::new(),
+            cell_x: c(),
+            cell_y: c(),
+            cell_z: c(),
+            bucket_of: Vec::with_capacity(capacity),
+            bucket_start: Vec::with_capacity(table + 1),
+            bucket_cursor: Vec::with_capacity(table + 1),
+            order: Vec::with_capacity(capacity),
+            slot_of: Vec::with_capacity(capacity),
+            sx: f(),
+            sy: f(),
+            sz: f(),
+            svx: f(),
+            svy: f(),
+            svz: f(),
+            s_cell_x: c(),
+            s_cell_y: c(),
+            s_cell_z: c(),
+            s_density: f(),
+            s_pressure: f(),
+            s_inv_density: f(),
+            ax: f(),
+            ay: f(),
+            az: f(),
+            lists: vec![NeighbourList::default(); capacity.div_ceil(SPH_CHUNK)],
             table_mask: 0,
-
+            times: SphPhaseTimes::default(),
         })
     }
 
+    /// How many particles are alive.
+    ///
+    /// # Returns
+    ///
+    /// The live count, at most [`Self::capacity`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// assert_eq!(fluid.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
-        self.pos.len()
+        self.px.len()
     }
 
+    /// Whether no particle is alive.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Self::len`] is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// assert!(SphFluid::new(SphParams::blood(), 8).unwrap().is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
-        self.pos.is_empty()
+        self.px.is_empty()
     }
 
+    /// The most particles the fluid holds, fixed at construction.
+    ///
+    /// # Returns
+    ///
+    /// The capacity passed to [`Self::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// assert_eq!(SphFluid::new(SphParams::blood(), 8).unwrap().capacity(), 8);
+    /// ```
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    /// The fluid's parameters.
+    ///
+    /// # Returns
+    ///
+    /// The [`SphParams`] passed to [`Self::new`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let fluid = SphFluid::new(SphParams::napalm(), 8).unwrap();
+    /// assert_eq!(fluid.params().rest_density, 900.0);
+    /// ```
     pub fn params(&self) -> &SphParams {
         &self.params
     }
 
+    /// Remove every particle at once, keeping the allocations.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// fluid.clear();
+    /// assert!(fluid.is_empty());
+    /// ```
     pub fn clear(&mut self) {
-        self.pos.clear();
-        self.prev_pos.clear();
-        self.vel.clear();
-        self.density.clear();
-        self.pressure.clear();
-        self.still_for.clear();
+        for v in [
+            &mut self.px,
+            &mut self.py,
+            &mut self.pz,
+            &mut self.ppx,
+            &mut self.ppy,
+            &mut self.ppz,
+            &mut self.vx,
+            &mut self.vy,
+            &mut self.vz,
+            &mut self.density,
+            &mut self.still_for,
+        ] {
+            v.clear();
+        }
     }
 
+    /// Position of particle `i`, metres, as of the last completed substep.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - particle index, `0..len()`. Stable across a step; `drain_settled`
+    ///   compacts with `swap_remove`.
+    ///
+    /// # Returns
+    ///
+    /// `[x, y, z]`.
+    ///
+    /// # Panics
+    ///
+    /// If `i >= len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([1.0, 2.0, 3.0], [0.0; 3]);
+    /// assert_eq!(fluid.position(0), [1.0, 2.0, 3.0]);
+    /// ```
     pub fn position(&self, i: usize) -> [f64; 3] {
-        self.pos[i]
+        [self.px[i], self.py[i], self.pz[i]]
     }
 
     /// Where particle `i` was at the start of the last completed substep.
@@ -311,8 +696,31 @@ impl SphFluid {
     /// The other half of [`Self::interpolated_position`]; exposed so a caller that
     /// wants to do its own blending does not have to keep a shadow copy that
     /// `drain_settled`'s `swap_remove` would silently misalign.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - particle index, `0..len()`.
+    ///
+    /// # Returns
+    ///
+    /// `[x, y, z]`, metres.
+    ///
+    /// # Panics
+    ///
+    /// If `i >= len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+    /// assert_eq!(fluid.previous_position(0), [0.0, 1.0, 0.0]);
+    /// ```
     pub fn previous_position(&self, i: usize) -> [f64; 3] {
-        self.prev_pos[i]
+        [self.ppx[i], self.ppy[i], self.ppz[i]]
     }
 
     /// Particle `i` drawn `alpha` of the way through the last completed substep.
@@ -323,10 +731,10 @@ impl SphFluid {
     /// SPH must substep, so a renderer accumulating frame time always ends a frame
     /// with a remainder shorter than one substep and no way to spend it. Reading
     /// [`Self::position`] draws the last *solved* state, so the fluid advances in
-    /// quanta at the substep rate however smooth the frame rate is — visible
+    /// quanta at the substep rate however smooth the frame rate is -- visible
     /// immediately as a liquid running downhill in steps.
     ///
-    /// The obvious client-side fix — keep a `Vec` of previous positions — does not
+    /// The obvious client-side fix -- keep a `Vec` of previous positions -- does not
     /// work, because [`Self::drain_settled`] compacts with `swap_remove`. A shadow
     /// buffer would need to mirror that, so the buffer belongs to whatever performs
     /// the removal. That is this type.
@@ -336,17 +744,37 @@ impl SphFluid {
     /// Read-only, and it never touches solver state: the fluid still advances by
     /// whole substeps and integrates nothing between them. This blends the two most
     /// recent solved states the way a fixed-tick renderer blends ticks, so the drawn
-    /// position lags the solved one by up to one substep. At the rates SPH needs —
-    /// 240 Hz is four milliseconds — that lag is well under a frame.
+    /// position lags the solved one by up to one substep. At the rates SPH needs --
+    /// 240 Hz is four milliseconds -- that lag is well under a frame.
     ///
     /// `alpha` is clamped to `[0, 1]`, so an accumulator that ran past a substep
     /// cannot extrapolate a particle somewhere the solver never put it.
     ///
     /// # Arguments
     ///
-    /// * `i` — particle index, `0..len()`.
-    /// * `alpha` — fraction of a substep elapsed since the last one completed,
-    ///   normally `accumulator / substep`.
+    /// * `i` - particle index, `0..len()`.
+    /// * `alpha` - fraction of a substep elapsed since the last one completed,
+    ///   normally `accumulator / substep`. NaN or infinite draws the solved state.
+    ///
+    /// # Returns
+    ///
+    /// `[x, y, z]`, metres.
+    ///
+    /// # Panics
+    ///
+    /// If `i >= len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+    /// fluid.step(1.0 / 240.0, 0.0, |_, _| 0.0);
+    /// let halfway = fluid.interpolated_position(0, 0.5)[1];
+    /// assert!(halfway < 1.0 && halfway > fluid.position(0)[1]);
+    /// ```
     pub fn interpolated_position(&self, i: usize, alpha: f64) -> [f64; 3] {
         // NaN would take the false branch of every comparison inside `clamp` and is
         // not representable as "somewhere between", so it resolves to the solved
@@ -356,12 +784,11 @@ impl SphFluid {
         } else {
             1.0
         };
-        let from = self.prev_pos[i];
-        let to = self.pos[i];
+        let lerp = |from: f64, to: f64| from + (to - from) * a;
         [
-            from[0] + (to[0] - from[0]) * a,
-            from[1] + (to[1] - from[1]) * a,
-            from[2] + (to[2] - from[2]) * a,
+            lerp(self.ppx[i], self.px[i]),
+            lerp(self.ppy[i], self.py[i]),
+            lerp(self.ppz[i], self.pz[i]),
         ]
     }
 
@@ -370,10 +797,10 @@ impl SphFluid {
     /// # Why this is public
     ///
     /// Because [`Self::step`] enforces it silently and callers have been building
-    /// designs on top of speeds it deletes. The cap is a CFL condition — a particle
+    /// designs on top of speeds it deletes. The cap is a CFL condition -- a particle
     /// may not cross more than a fraction of a smoothing radius in one step, or the
     /// neighbour search stops finding the neighbours whose forces were meant to act
-    /// on it — so it is not negotiable and not a tuning knob. But it *is* invisible:
+    /// on it -- so it is not negotiable and not a tuning knob. But it *is* invisible:
     /// [`Self::spawn`] accepts any velocity and the next step quietly truncates it,
     /// which reads as the solver working and the emitter's numbers not mattering.
     ///
@@ -387,19 +814,100 @@ impl SphFluid {
     ///
     /// # Arguments
     ///
-    /// * `dt` — the substep this fluid is stepped with, seconds.
+    /// * `dt` - the substep this fluid is stepped with, seconds.
+    ///
+    /// # Returns
+    ///
+    /// The speed cap, m/s.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// // 0.4 of a 4 cm smoothing radius a 1/240 s substep.
+    /// assert!((fluid.speed_ceiling(1.0 / 240.0) - 3.84).abs() < 1e-9);
+    /// ```
     pub fn speed_ceiling(&self, dt: f64) -> f64 {
         cfl_speed_ceiling(self.params.smoothing_radius, dt)
     }
 
+    /// Velocity of particle `i`, m/s.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - particle index, `0..len()`.
+    ///
+    /// # Returns
+    ///
+    /// `[x, y, z]`.
+    ///
+    /// # Panics
+    ///
+    /// If `i >= len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.5, 0.0, 0.0]);
+    /// assert_eq!(fluid.velocity(0), [0.5, 0.0, 0.0]);
+    /// ```
     pub fn velocity(&self, i: usize) -> [f64; 3] {
-        self.vel[i]
+        [self.vx[i], self.vy[i], self.vz[i]]
     }
 
     /// Sampled density at a particle, which for a surface particle is well below
     /// rest density. Useful for rendering: the sparse ones are the spray.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - particle index, `0..len()`.
+    ///
+    /// # Returns
+    ///
+    /// Density in kg/m^3 as of the last step; the rest density before the first.
+    ///
+    /// # Panics
+    ///
+    /// If `i >= len()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+    /// // A lone drop samples only itself.
+    /// assert!(fluid.density(0) < fluid.params().rest_density);
+    /// ```
     pub fn density(&self, i: usize) -> f64 {
         self.density[i]
+    }
+
+    /// Wall time of each phase of the last [`Self::step`].
+    ///
+    /// # Returns
+    ///
+    /// The phases of the most recent step that did work; all zero before the first.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+    /// assert!(fluid.phase_times().total() > std::time::Duration::ZERO);
+    /// ```
+    pub fn phase_times(&self) -> SphPhaseTimes {
+        self.times
     }
 
     /// Add one particle. Silently refuses once full rather than growing, so a long
@@ -407,28 +915,73 @@ impl SphFluid {
     ///
     /// **`velocity` is a request, not a promise.** The first step clamps it to
     /// [`Self::speed_ceiling`], which at typical droplet spacings is a few metres per
-    /// second — far below anything a projectile or an explosion would suggest. Ask
+    /// second -- far below anything a projectile or an explosion would suggest. Ask
     /// the ceiling before spreading emitter speeds across a range, or the spread
     /// collapses to a single value and the emission design stops existing.
+    ///
+    /// # Arguments
+    ///
+    /// * `position` - metres.
+    /// * `velocity` - m/s, clamped by the next step.
+    ///
+    /// # Returns
+    ///
+    /// `false` if the fluid was full and nothing was added.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 1).unwrap();
+    /// assert!(fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]));
+    /// assert!(!fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]));
+    /// ```
     pub fn spawn(&mut self, position: [f64; 3], velocity: [f64; 3]) -> bool {
-        if self.pos.len() >= self.capacity {
+        if self.len() >= self.capacity {
             return false;
         }
-        self.pos.push(position);
+        self.px.push(position[0]);
+        self.py.push(position[1]);
+        self.pz.push(position[2]);
         // A particle that has never been stepped is where it is: `alpha` blending on
         // the spawn frame must give the spawn point, not a lerp from stale memory.
-        self.prev_pos.push(position);
-        self.vel.push(velocity);
+        self.ppx.push(position[0]);
+        self.ppy.push(position[1]);
+        self.ppz.push(position[2]);
+        self.vx.push(velocity[0]);
+        self.vy.push(velocity[1]);
+        self.vz.push(velocity[2]);
         self.density.push(self.params.rest_density);
-        self.pressure.push(0.0);
         self.still_for.push(0.0);
         true
     }
 
-    /// Advance the fluid.
+    /// Advance the fluid one substep.
     ///
-    /// `ground_height` is sampled per particle, so the fluid follows terrain rather
-    /// than a flat plane — a splash on a slope runs downhill.
+    /// Density and forces run in parallel on the current rayon pool; the result is
+    /// bit-identical whatever that pool's size (see the module documentation).
+    /// Allocates nothing once the neighbour lists have reached their high-water mark.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` - the substep, seconds. Zero or less does nothing.
+    /// * `gravity` - downward acceleration, m/s^2.
+    /// * `ground_height` - terrain height in metres at a world `(x, z)`, sampled per
+    ///   particle, so the fluid follows terrain rather than a flat plane.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::water(), 8).unwrap();
+    /// fluid.spawn([0.0, 0.01, 0.0], [0.0, -1.0, 0.0]);
+    /// for _ in 0..24 {
+    ///     fluid.step(1.0 / 240.0, 9.81, |x, _| 0.1 * x);
+    /// }
+    /// assert!(fluid.position(0)[1] >= 0.0);
+    /// ```
     pub fn step<F>(&mut self, dt: f64, gravity: f64, ground_height: F)
     where
         F: Fn(f64, f64) -> f64,
@@ -436,29 +989,36 @@ impl SphFluid {
         if dt <= 0.0 || self.is_empty() {
             return;
         }
+        let t0 = Instant::now();
 
         // Snapshot before anything moves, so `interpolated_position` has the two ends
-        // of the interval the renderer is blending across. `clear` + `extend` rather
-        // than an assignment, so the buffer is reused and `step` still allocates
-        // nothing after the first call.
-        self.prev_pos.clear();
-        self.prev_pos.extend_from_slice(&self.pos);
+        // of the interval the renderer is blending across.
+        self.ppx.copy_from_slice(&self.px);
+        self.ppy.copy_from_slice(&self.py);
+        self.ppz.copy_from_slice(&self.pz);
 
         self.build_grid();
+        let t1 = Instant::now();
         self.compute_density_and_pressure();
-        self.apply_forces(dt, gravity);
+        let t2 = Instant::now();
+        self.apply_forces(gravity);
+        let t3 = Instant::now();
         self.integrate(dt, &ground_height);
+        let t4 = Instant::now();
+
+        self.times = SphPhaseTimes {
+            grid: t1 - t0,
+            density: t2 - t1,
+            forces: t3 - t2,
+            integrate: t4 - t3,
+        };
     }
 
-    // ── Neighbour search ─────────────────────────────────────────────────────
+    // -- Neighbour search -----------------------------------------------------
 
-    /// Bin particles into a uniform grid of one smoothing radius per cell, so each
-    /// particle only has to look at its own cell and the 26 around it.
-    ///
-    /// Counting sort into flat `Vec`s rather than a map of buckets: no hashing, no
-    /// allocation per cell, and the iteration order is fixed by construction.
     /// Bin particles into a spatial hash so neighbour lookups cost what the
-    /// particle count costs, not what the map size costs.
+    /// particle count costs, not what the map size costs, and copy the state into
+    /// bucket order.
     ///
     /// # Why not a dense grid
     ///
@@ -466,7 +1026,7 @@ impl SphFluid {
     /// box. That is fine for one splash and catastrophic for two: blood at opposite
     /// ends of a 100 m map produced a grid covering the gap, which at a 4 cm cell is
     /// about 10^10 cells. Measured, the same 256 particles cost 274 us clustered and
-    /// 268,000 us spread — a thousandfold cliff — and the scratch buffer stayed
+    /// 268,000 us spread -- a thousandfold cliff -- and the scratch buffer stayed
     /// resident at that size afterwards, because `Vec::resize` grows and never
     /// shrinks.
     ///
@@ -474,172 +1034,249 @@ impl SphFluid {
     /// problems at once: memory is O(n) whatever the spread, and empty space between
     /// splashes costs nothing at all.
     ///
-    /// Collisions are resolved by storing each particle's real cell coordinate and
-    /// comparing it during the walk, so two distant cells sharing a bucket cannot be
-    /// mistaken for neighbours.
+    /// Counting sort into flat arrays: no allocation per cell, and within a bucket
+    /// particles keep index order, so the sorted order is fixed by the data.
     fn build_grid(&mut self) {
         let h = self.params.smoothing_radius;
         let n = self.len();
-
-        // Roughly two buckets per particle keeps collisions rare. Power of two so
-        // the hash reduces with a mask instead of a modulo.
-        let table = (n * 2).next_power_of_two().max(64);
+        let table = table_size(n);
         self.table_mask = table - 1;
+        let mask = self.table_mask;
 
-        self.cell_coord.clear();
-        self.cell_coord.reserve(n);
+        for v in [&mut self.cell_x, &mut self.cell_y, &mut self.cell_z] {
+            v.clear();
+            v.resize(n, 0);
+        }
         self.bucket_of.clear();
         self.bucket_of.resize(n, 0);
+
+        // Cells and buckets: independent a particle, so parallel.
+        (
+            self.cell_x.par_chunks_mut(STREAM_CHUNK),
+            self.cell_y.par_chunks_mut(STREAM_CHUNK),
+            self.cell_z.par_chunks_mut(STREAM_CHUNK),
+            self.bucket_of.par_chunks_mut(STREAM_CHUNK),
+            self.px.par_chunks(STREAM_CHUNK),
+            self.py.par_chunks(STREAM_CHUNK),
+            self.pz.par_chunks(STREAM_CHUNK),
+        )
+            .into_par_iter()
+            .for_each(|(cx, cy, cz, bo, px, py, pz)| {
+                for i in 0..bo.len() {
+                    cx[i] = cell_of(px[i], h);
+                    cy[i] = cell_of(py[i], h);
+                    cz[i] = cell_of(pz[i], h);
+                    bo[i] = bucket(row_hash(cy[i], cz[i]), cx[i], mask) as u32;
+                }
+            });
+
+        // The counting sort: serial, O(n), and what fixes the order.
         self.bucket_start.clear();
         self.bucket_start.resize(table + 1, 0);
-        self.sorted.clear();
-        self.sorted.resize(n, 0);
-
-        for i in 0..n {
-            let coord = cell_coord(self.pos[i], h);
-            let bucket = hash_cell(coord, self.table_mask);
-            self.cell_coord.push(coord);
-            self.bucket_of[i] = bucket;
-            self.bucket_start[bucket + 1] += 1;
+        for &b in &self.bucket_of {
+            self.bucket_start[b as usize + 1] += 1;
         }
         for b in 0..table {
             self.bucket_start[b + 1] += self.bucket_start[b];
         }
-
-        // Second pass fills each bucket's slice. The cursor is a reused buffer
-        // rather than a clone of `bucket_start`, whose prefix sums have to survive
-        // for lookup.
         self.bucket_cursor.clear();
         self.bucket_cursor.extend_from_slice(&self.bucket_start);
+        self.order.clear();
+        self.order.resize(n, 0);
+        self.slot_of.clear();
+        self.slot_of.resize(n, 0);
         for i in 0..n {
-            let b = self.bucket_of[i];
-            self.sorted[self.bucket_cursor[b]] = i;
-            self.bucket_cursor[b] += 1;
+            let b = self.bucket_of[i] as usize;
+            let slot = self.bucket_cursor[b];
+            self.order[slot as usize] = i as u32;
+            self.slot_of[i] = slot;
+            self.bucket_cursor[b] = slot + 1;
         }
-    }
 
-    /// Call `f` with every particle within one smoothing radius of `i`, itself
-    /// included.
-    fn for_each_neighbour<F: FnMut(usize, f64, [f64; 3])>(&self, i: usize, mut f: F) {
-        let h = self.params.smoothing_radius;
-        let p = self.pos[i];
-        let base = self.cell_coord[i];
-
-        for dz in -1..=1i32 {
-            for dy in -1..=1i32 {
-                for dx in -1..=1i32 {
-                    let coord = [base[0] + dx, base[1] + dy, base[2] + dz];
-                    let bucket = hash_cell(coord, self.table_mask);
-
-                    for slot in self.bucket_start[bucket]..self.bucket_start[bucket + 1] {
-                        let j = self.sorted[slot];
-                        // Reject hash collisions: two far-apart cells can share a
-                        // bucket, and treating their contents as neighbours would
-                        // apply forces across the map.
-                        if self.cell_coord[j] != coord {
-                            continue;
-                        }
-
-                        let d = [
-                            p[0] - self.pos[j][0],
-                            p[1] - self.pos[j][1],
-                            p[2] - self.pos[j][2],
-                        ];
-                        let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-                        if r2 <= h * h {
-                            f(j, r2.sqrt(), d);
-                        }
+        // Gather into sorted order: one scattered read a particle here, so that the
+        // neighbour walk's hundreds of reads a particle are contiguous. Parallel.
+        for v in [
+            &mut self.sx,
+            &mut self.sy,
+            &mut self.sz,
+            &mut self.svx,
+            &mut self.svy,
+            &mut self.svz,
+        ] {
+            v.clear();
+            v.resize(n, 0.0);
+        }
+        for v in [&mut self.s_cell_x, &mut self.s_cell_y, &mut self.s_cell_z] {
+            v.clear();
+            v.resize(n, 0);
+        }
+        let (px, py, pz) = (&self.px, &self.py, &self.pz);
+        let (vx, vy, vz) = (&self.vx, &self.vy, &self.vz);
+        let (cx, cy, cz) = (&self.cell_x, &self.cell_y, &self.cell_z);
+        (
+            (
+                self.sx.par_chunks_mut(STREAM_CHUNK),
+                self.sy.par_chunks_mut(STREAM_CHUNK),
+                self.sz.par_chunks_mut(STREAM_CHUNK),
+                self.svx.par_chunks_mut(STREAM_CHUNK),
+                self.svy.par_chunks_mut(STREAM_CHUNK),
+                self.svz.par_chunks_mut(STREAM_CHUNK),
+            ),
+            (
+                self.s_cell_x.par_chunks_mut(STREAM_CHUNK),
+                self.s_cell_y.par_chunks_mut(STREAM_CHUNK),
+                self.s_cell_z.par_chunks_mut(STREAM_CHUNK),
+                self.order.par_chunks(STREAM_CHUNK),
+            ),
+        )
+            .into_par_iter()
+            .for_each(|((sx, sy, sz, svx, svy, svz), (scx, scy, scz, ord))| {
+                // One source array at a time: each pass's random reads then share
+                // the cache with one array rather than nine.
+                fn pass<T: Copy>(dst: &mut [T], src: &[T], ord: &[u32]) {
+                    for (d, &i) in dst.iter_mut().zip(ord) {
+                        *d = src[i as usize];
                     }
                 }
-            }
-        }
+                pass(sx, px, ord);
+                pass(sy, py, ord);
+                pass(sz, pz, ord);
+                pass(svx, vx, ord);
+                pass(svy, vy, ord);
+                pass(svz, vz, ord);
+                pass(scx, cx, ord);
+                pass(scy, cy, ord);
+                pass(scz, cz, ord);
+            });
     }
 
+    /// Search each particle's neighbourhood, record its neighbours, and sum its
+    /// density and pressure. Parallel over chunks; see the module documentation.
     fn compute_density_and_pressure(&mut self) {
+        let n = self.len();
         let h = self.params.smoothing_radius;
+        let h2 = h * h;
         let mass = self.params.particle_mass;
         let poly6 = 315.0 / (64.0 * core::f64::consts::PI * h.powi(9));
+        let (stiffness, rest) = (self.params.stiffness, self.params.rest_density);
 
-        for i in 0..self.len() {
-            let mut density = 0.0;
-            self.for_each_neighbour(i, |_, r, _| {
-                let diff = h * h - r * r;
-                if diff > 0.0 {
-                    density += mass * poly6 * diff * diff * diff;
+        self.s_density.clear();
+        self.s_density.resize(n, 0.0);
+        self.s_pressure.clear();
+        self.s_pressure.resize(n, 0.0);
+        self.s_inv_density.clear();
+        self.s_inv_density.resize(n, 0.0);
+        let chunks = n.div_ceil(SPH_CHUNK);
+        if self.lists.len() < chunks {
+            self.lists.resize_with(chunks, NeighbourList::default);
+        }
+
+        let grid = Grid {
+            x: &self.sx,
+            y: &self.sy,
+            z: &self.sz,
+            cx: &self.s_cell_x,
+            cy: &self.s_cell_y,
+            cz: &self.s_cell_z,
+            start: &self.bucket_start,
+            mask: self.table_mask,
+            h2,
+        };
+
+        self.lists[..chunks]
+            .par_iter_mut()
+            .zip(self.s_density.par_chunks_mut(SPH_CHUNK))
+            .zip(self.s_pressure.par_chunks_mut(SPH_CHUNK))
+            .zip(self.s_inv_density.par_chunks_mut(SPH_CHUNK))
+            .enumerate()
+            .for_each(|(c, (((list, dens), press), inv))| {
+                list.end.clear();
+                let first = c * SPH_CHUNK;
+                let mut runs = Runs::default();
+                let mut len = 0usize;
+                for local in 0..dens.len() {
+                    let k = first + local;
+                    let begin = len;
+                    len = grid.neighbours(k, &mut runs, &mut list.index, len);
+                    list.end.push(len as u32);
+                    // The particle itself, at r = 0, is the one term every density
+                    // has, so a lone drop's density is never zero.
+                    let sum = h2 * h2 * h2 + grid.density_sum(k, &list.index[begin..len]);
+
+                    let density = (mass * poly6 * sum).max(1e-9);
+                    dens[local] = density;
+                    inv[local] = 1.0 / density;
+                    // Ideal-gas pressure, clamped non-negative. Negative pressure
+                    // would make sparse regions suck inward, which is what cohesion is
+                    // for and it does it far more stably.
+                    press[local] = (stiffness * (density - rest)).max(0.0);
                 }
             });
 
-            // A lone particle still has its own self-contribution, so density never
-            // reaches zero and the pressure division below is always safe.
-            self.density[i] = density.max(1e-9);
-
-            // Ideal-gas pressure, clamped non-negative. Negative pressure would make
-            // sparse regions suck inward, which is what cohesion is for and it does
-            // it far more stably.
-            self.pressure[i] =
-                (self.params.stiffness * (self.density[i] - self.params.rest_density)).max(0.0);
-        }
+        let s_density = &self.s_density;
+        self.density
+            .par_chunks_mut(STREAM_CHUNK)
+            .zip(self.slot_of.par_chunks(STREAM_CHUNK))
+            .for_each(|(d, slots)| {
+                for (d, &k) in d.iter_mut().zip(slots) {
+                    *d = s_density[k as usize];
+                }
+            });
     }
 
-    fn apply_forces(&mut self, dt: f64, gravity: f64) {
+    /// Pressure, viscosity and cohesion over each particle's recorded neighbours:
+    /// the acceleration, in sorted order. `integrate` applies it.
+    fn apply_forces(&mut self, gravity: f64) {
+        let n = self.len();
         let h = self.params.smoothing_radius;
         let mass = self.params.particle_mass;
         let spiky_grad = -45.0 / (core::f64::consts::PI * h.powi(6));
         let visc_lap = 45.0 / (core::f64::consts::PI * h.powi(6));
+        let k = Kernels {
+            h,
+            // Pressure: the symmetric form `-(m (p_i + p_j) / 2 rho_j) grad W`.
+            pressure: -mass * 0.5 * spiky_grad,
+            viscosity: self.params.viscosity * mass * visc_lap,
+            cohesion: self.params.cohesion * mass * 32.0 / (core::f64::consts::PI * h.powi(9)),
+            cohesion_floor: h.powi(6) / 64.0,
+        };
 
-        // Accumulated separately so every particle sees the same density field —
-        // updating velocities in place would make the result depend on index order.
-        // Reused buffer: `vec![]` here would allocate once per step, forever.
-        self.accel.clear();
-        self.accel.resize(self.len(), [0.0; 3]);
+        for a in [&mut self.ax, &mut self.ay, &mut self.az] {
+            a.clear();
+            a.resize(n, 0.0);
+        }
+        let chunks = n.div_ceil(SPH_CHUNK);
+        let state = Sorted {
+            x: &self.sx,
+            y: &self.sy,
+            z: &self.sz,
+            vx: &self.svx,
+            vy: &self.svy,
+            vz: &self.svz,
+            pressure: &self.s_pressure,
+            inv_density: &self.s_inv_density,
+        };
 
-        for i in 0..self.len() {
-            let mut force = [0.0f64; 3];
-            let di = self.density[i];
-            let pi = self.pressure[i];
-            let vi = self.vel[i];
-
-            self.for_each_neighbour(i, |j, r, d| {
-                if j == i || r <= 1e-9 {
-                    return;
-                }
-                let dj = self.density[j];
-                let dir = [d[0] / r, d[1] / r, d[2] / r];
-
-                // Pressure: symmetric form, so equal and opposite between a pair.
-                let shared = (pi + self.pressure[j]) / (2.0 * dj);
-                let grad = spiky_grad * (h - r) * (h - r);
-                let pressure_term = -mass * shared * grad;
-
-                // Viscosity: pulls neighbouring velocities toward each other.
-                let lap = visc_lap * (h - r);
-                let visc = self.params.viscosity * mass * lap / dj;
-
-                // Cohesion: the surface-tension term, and the reason a splash forms
-                // droplets instead of dispersing. Uses Akinci's spline, which is
-                // zero at both r = 0 and r = h and peaked in between — so particles
-                // neither collapse together nor pull from beyond the kernel.
-                let cohesion = self.params.cohesion * mass * cohesion_kernel(r, h);
-
-                for axis in 0..3 {
-                    force[axis] += pressure_term * dir[axis];
-                    force[axis] += visc * (self.vel[j][axis] - vi[axis]);
-                    force[axis] -= cohesion * dir[axis];
+        self.lists[..chunks]
+            .par_iter()
+            .zip(self.ax.par_chunks_mut(SPH_CHUNK))
+            .zip(self.ay.par_chunks_mut(SPH_CHUNK))
+            .zip(self.az.par_chunks_mut(SPH_CHUNK))
+            .enumerate()
+            .for_each(|(c, (((list, ax), ay), az))| {
+                let first = c * SPH_CHUNK;
+                let mut begin = 0usize;
+                for local in 0..ax.len() {
+                    let i = first + local;
+                    let end = list.end[local] as usize;
+                    let f = state.force(i, &list.index[begin..end], &k);
+                    begin = end;
+                    let inv = state.inv_density[i];
+                    ax[local] = f[0] * inv;
+                    ay[local] = f[1] * inv - gravity;
+                    az[local] = f[2] * inv;
                 }
             });
-
-            for axis in 0..3 {
-                self.accel[i][axis] = force[axis] / di;
-            }
-            self.accel[i][1] -= gravity;
-        }
-
-        for i in 0..self.len() {
-            for axis in 0..3 {
-                self.vel[i][axis] += self.accel[i][axis] * dt;
-            }
-        }
-
     }
 
     fn integrate<F>(&mut self, dt: f64, ground_height: &F)
@@ -654,43 +1291,64 @@ impl SphFluid {
         // outside, which is why the arithmetic lives in one shared function that
         // callers can query through `speed_ceiling` rather than being written twice.
         let max_speed = cfl_speed_ceiling(self.params.smoothing_radius, dt);
+        let max_sq = max_speed * max_speed;
+        let n = self.len();
 
-        for i in 0..self.len() {
-            let speed_sq: f64 = self.vel[i].iter().map(|v| v * v).sum();
-            if speed_sq > max_speed * max_speed {
-                let scale = max_speed / speed_sq.sqrt();
-                for axis in 0..3 {
-                    self.vel[i][axis] *= scale;
+        // The acceleration (read through `slot_of`, a gather), the cap and the move:
+        // independent a particle, so parallel, and branch-free. Scaling by exactly 1.0
+        // leaves an uncapped velocity bit for bit.
+        let (ax, ay, az) = (&self.ax, &self.ay, &self.az);
+        (
+            self.vx.par_chunks_mut(STREAM_CHUNK),
+            self.vy.par_chunks_mut(STREAM_CHUNK),
+            self.vz.par_chunks_mut(STREAM_CHUNK),
+            self.px.par_chunks_mut(STREAM_CHUNK),
+            self.py.par_chunks_mut(STREAM_CHUNK),
+            self.pz.par_chunks_mut(STREAM_CHUNK),
+            self.slot_of.par_chunks(STREAM_CHUNK),
+        )
+            .into_par_iter()
+            .for_each(|(vx, vy, vz, px, py, pz, slots)| {
+                for i in 0..slots.len() {
+                    let k = slots[i] as usize;
+                    let (mut x, mut y, mut z) =
+                        (vx[i] + ax[k] * dt, vy[i] + ay[k] * dt, vz[i] + az[k] * dt);
+                    let sq = x * x + y * y + z * z;
+                    let scale = if sq > max_sq { max_speed / sq.sqrt() } else { 1.0 };
+                    x *= scale;
+                    y *= scale;
+                    z *= scale;
+                    vx[i] = x;
+                    vy[i] = y;
+                    vz[i] = z;
+                    px[i] += x * dt;
+                    py[i] += y * dt;
+                    pz[i] += z * dt;
                 }
-            }
+            });
 
-            for axis in 0..3 {
-                self.pos[i][axis] += self.vel[i][axis] * dt;
-            }
-
-            let floor = ground_height(self.pos[i][0], self.pos[i][2]);
+        // The ground: one call into the caller's closure a particle, so scalar.
+        let (restitution, friction) = (self.params.restitution, self.params.friction);
+        for i in 0..n {
+            let floor = ground_height(self.px[i], self.pz[i]);
             let mut on_ground = false;
-            if self.pos[i][1] < floor {
-                self.pos[i][1] = floor;
-                self.vel[i][1] = -self.vel[i][1] * self.params.restitution;
-                self.vel[i][0] *= self.params.friction;
-                self.vel[i][2] *= self.params.friction;
+            if self.py[i] < floor {
+                self.py[i] = floor;
+                self.vy[i] = -self.vy[i] * restitution;
+                self.vx[i] *= friction;
+                self.vz[i] *= friction;
                 on_ground = true;
             }
 
-            let speed: f64 = self.vel[i]
-                .iter()
-                .map(|v| v * v)
-                .sum::<f64>()
-                .sqrt();
-            if on_ground && speed < SETTLE_SPEED {
+            let speed_sq = self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i] + self.vz[i] * self.vz[i];
+            if on_ground && speed_sq < SETTLE_SPEED * SETTLE_SPEED {
                 self.still_for[i] += dt;
             } else {
                 self.still_for[i] = 0.0;
             }
 
             debug_assert!(
-                self.pos[i].iter().all(|c| c.is_finite()),
+                self.px[i].is_finite() && self.py[i].is_finite() && self.pz[i].is_finite(),
                 "sph particle {i} went non-finite"
             );
         }
@@ -700,7 +1358,27 @@ impl SphFluid {
     ///
     /// This is the seam between the fluid and whatever it leaves behind: the solver
     /// handles the splash while it is moving, and hands the caller a position the
-    /// instant it is not. Walked backwards so `swap_remove` never skips a particle.
+    /// instant it is not. Walked backwards so `swap_remove` never skips a particle;
+    /// the last particle takes a removed one's index.
+    ///
+    /// # Arguments
+    ///
+    /// * `on_settled` - called once for each particle removed, before it is removed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+    /// fluid.spawn([0.0, 0.0, 0.0], [0.0; 3]);
+    /// for _ in 0..120 {
+    ///     fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+    /// }
+    /// let mut stains = 0;
+    /// fluid.drain_settled(|_| stains += 1);
+    /// assert_eq!((stains, fluid.len()), (1, 0));
+    /// ```
     pub fn drain_settled<F: FnMut(Settled)>(&mut self, mut on_settled: F) {
         let mass = self.params.particle_mass;
         let mut i = self.len();
@@ -710,19 +1388,309 @@ impl SphFluid {
                 continue;
             }
             on_settled(Settled {
-                position: self.pos[i],
+                position: self.position(i),
                 mass,
-                velocity: self.vel[i],
+                velocity: self.velocity(i),
             });
 
-            self.pos.swap_remove(i);
-            // Kept aligned with `pos` by the same removal, which is the whole reason
-            // this buffer lives in the solver rather than in the renderer.
-            self.prev_pos.swap_remove(i);
-            self.vel.swap_remove(i);
-            self.density.swap_remove(i);
-            self.pressure.swap_remove(i);
-            self.still_for.swap_remove(i);
+            // The previous positions are removed with the rest, which is the whole
+            // reason that buffer lives in the solver rather than in the renderer.
+            for v in [
+                &mut self.px,
+                &mut self.py,
+                &mut self.pz,
+                &mut self.ppx,
+                &mut self.ppy,
+                &mut self.ppz,
+                &mut self.vx,
+                &mut self.vy,
+                &mut self.vz,
+                &mut self.density,
+                &mut self.still_for,
+            ] {
+                v.swap_remove(i);
+            }
+        }
+    }
+}
+
+/// The sorted positions and cells the neighbour search reads, borrowed for one pass.
+struct Grid<'a> {
+    x: &'a [f64],
+    y: &'a [f64],
+    z: &'a [f64],
+    cx: &'a [i32],
+    cy: &'a [i32],
+    cz: &'a [i32],
+    start: &'a [u32],
+    mask: usize,
+    h2: f64,
+}
+
+/// The runs of sorted slots a cell's neighbourhood covers: its nine rows' bucket
+/// intervals, merged so no bucket appears twice. Every particle of a cell shares them,
+/// and the sorted order keeps a cell's particles together, so they are built once a
+/// cell rather than once a particle.
+#[derive(Default)]
+struct Runs {
+    cell: [i32; 3],
+    fresh: bool,
+    count: usize,
+    slots: [(u32, u32); 18],
+}
+
+impl Grid<'_> {
+    /// Build `runs` for the cell `(cx, cy, cz)`.
+    ///
+    /// A row's three cells are three consecutive buckets, one interval, or two where
+    /// it wraps the table. Two rows can hash to overlapping intervals; merging them is
+    /// what lets the walk skip any per-candidate cell check. With each bucket visited
+    /// once, each particle is visited at most once, and every particle within `h` lies
+    /// in one of the 27 cells and so in a visited bucket. The distance test is then
+    /// the whole membership test: a particle from a colliding far cell simply fails it.
+    fn build_runs(&self, cell: [i32; 3], runs: &mut Runs) {
+        let table = self.mask + 1;
+        let mut iv = [(0usize, 0usize); 18];
+        let mut m = 0;
+        for dz in -1..=1i32 {
+            for dy in -1..=1i32 {
+                let row = row_hash(cell[1].wrapping_add(dy), cell[2].wrapping_add(dz));
+                let b0 = bucket(row, cell[0].wrapping_sub(1), self.mask);
+                if b0 + 3 <= table {
+                    iv[m] = (b0, b0 + 3);
+                    m += 1;
+                } else {
+                    iv[m] = (b0, table);
+                    iv[m + 1] = (0, b0 + 3 - table);
+                    m += 2;
+                }
+            }
+        }
+        // Insertion sort: at most eighteen, nearly always nine.
+        for a in 1..m {
+            let mut b = a;
+            while b > 0 && iv[b - 1].0 > iv[b].0 {
+                iv.swap(b - 1, b);
+                b -= 1;
+            }
+        }
+        let mut count = 0;
+        let mut cur = iv[0];
+        let mut emit = |from: usize, to: usize, count: &mut usize| {
+            let (s, e) = (self.start[from], self.start[to]);
+            if s < e {
+                runs.slots[*count] = (s, e);
+                *count += 1;
+            }
+        };
+        for &next in &iv[1..m] {
+            if next.0 <= cur.1 {
+                cur.1 = cur.1.max(next.1);
+            } else {
+                emit(cur.0, cur.1, &mut count);
+                cur = next;
+            }
+        }
+        emit(cur.0, cur.1, &mut count);
+        runs.count = count;
+        runs.cell = cell;
+        runs.fresh = true;
+    }
+
+    /// Write the sorted slots of every particle within one smoothing radius of `k`,
+    /// itself excluded, into `out` from `len`, and return the new length.
+    ///
+    /// `out` is a buffer that only grows: it is resized when a run could overflow it
+    /// and never shrunk, so after the first steps the walk writes into memory it
+    /// already owns. Branch-free per candidate: every candidate's slot is written and
+    /// the cursor advances only on a hit.
+    #[inline]
+    fn neighbours(&self, k: usize, runs: &mut Runs, out: &mut Vec<u32>, len: usize) -> usize {
+        let cell = [self.cx[k], self.cy[k], self.cz[k]];
+        if !runs.fresh || runs.cell != cell {
+            self.build_runs(cell, runs);
+        }
+        let (x, y, z) = (self.x[k], self.y[k], self.z[k]);
+        let h2 = self.h2;
+        let mut w = len;
+        for &(s, e) in &runs.slots[..runs.count] {
+            let (s, e) = (s as usize, e as usize);
+            if out.len() < w + (e - s) {
+                out.resize(w + (e - s), 0);
+            }
+            let (xs, ys, zs) = (&self.x[s..e], &self.y[s..e], &self.z[s..e]);
+            let slots = &mut out[w..w + (e - s)];
+            let mut hits = 0usize;
+            // Distances four at a time into lane arrays, which vectorise; then the
+            // compaction, which cannot, as four scalar stores.
+            let blocks = (e - s) / 4;
+            for b in 0..blocks {
+                let o = b * 4;
+                let mut r2 = [0.0f64; 4];
+                for l in 0..4 {
+                    let (dx, dy, dz) = (x - xs[o + l], y - ys[o + l], z - zs[o + l]);
+                    r2[l] = dx * dx + dy * dy + dz * dz;
+                }
+                for l in 0..4 {
+                    let j = s + o + l;
+                    slots[hits] = j as u32;
+                    hits += ((r2[l] <= h2) & (j != k)) as usize;
+                }
+            }
+            for o in blocks * 4..e - s {
+                let (dx, dy, dz) = (x - xs[o], y - ys[o], z - zs[o]);
+                let j = s + o;
+                slots[hits] = j as u32;
+                hits += ((dx * dx + dy * dy + dz * dz <= h2) & (j != k)) as usize;
+            }
+            w += hits;
+        }
+        w
+    }
+
+    /// The sum of `(h^2 - r^2)^3` over `k`'s neighbours: the poly6 density without its
+    /// constant. Four partial sums, a neighbour's lane its position in the list.
+    #[inline]
+    fn density_sum(&self, k: usize, nbrs: &[u32]) -> f64 {
+        let (x, y, z) = (self.x[k], self.y[k], self.z[k]);
+        let h2 = self.h2;
+        let term = |j: u32| {
+            let j = j as usize;
+            let (dx, dy, dz) = (x - self.x[j], y - self.y[j], z - self.z[j]);
+            let d = h2 - (dx * dx + dy * dy + dz * dz);
+            d * d * d
+        };
+        let mut acc = [0.0f64; 4];
+        let mut blocks = nbrs.chunks_exact(4);
+        for block in &mut blocks {
+            for l in 0..4 {
+                acc[l] += term(block[l]);
+            }
+        }
+        for (l, &j) in blocks.remainder().iter().enumerate() {
+            acc[l] += term(j);
+        }
+        (acc[0] + acc[1]) + (acc[2] + acc[3])
+    }
+}
+
+/// The sorted state the force pass reads, borrowed for one pass.
+struct Sorted<'a> {
+    x: &'a [f64],
+    y: &'a [f64],
+    z: &'a [f64],
+    vx: &'a [f64],
+    vy: &'a [f64],
+    vz: &'a [f64],
+    pressure: &'a [f64],
+    inv_density: &'a [f64],
+}
+
+/// The force kernels' constants, folded with the particle mass once a step.
+struct Kernels {
+    h: f64,
+    /// `-m * spiky / 2`, positive: multiplies `(p_i + p_j) / rho_j * (h - r)^2`.
+    pressure: f64,
+    /// `mu * m * lap`: multiplies `(h - r) / rho_j`.
+    viscosity: f64,
+    /// `sigma * m * 32 / (pi h^9)`: Akinci's normalisation.
+    cohesion: f64,
+    /// `h^6 / 64`, the inner branch's offset.
+    cohesion_floor: f64,
+}
+
+impl Sorted<'_> {
+    /// The force on sorted particle `i` from its neighbours `nbrs`, before dividing
+    /// by its density.
+    ///
+    /// Four neighbours a block, each lane its own partial sum, combined in a fixed
+    /// order. The block is gathered into lane arrays first and every operation after
+    /// is element-wise over them, so the arithmetic (the square roots and divisions
+    /// above all) compiles to packed instructions. A short final block is padded with
+    /// `i` itself: at `r = 0` every term is selected to zero, so the padding adds
+    /// exactly `+0.0`. Coincident particles (`r <= 1e-9`) contribute nothing the same
+    /// way.
+    #[inline]
+    fn force(&self, i: usize, nbrs: &[u32], k: &Kernels) -> [f64; 3] {
+        let mut fx = [0.0f64; 4];
+        let mut fy = [0.0f64; 4];
+        let mut fz = [0.0f64; 4];
+        let mut blocks = nbrs.chunks_exact(4);
+        for b in &mut blocks {
+            let js = [b[0] as usize, b[1] as usize, b[2] as usize, b[3] as usize];
+            self.block(i, js, k, &mut fx, &mut fy, &mut fz);
+        }
+        let rest = blocks.remainder();
+        if !rest.is_empty() {
+            let mut js = [i; 4];
+            for (l, &j) in rest.iter().enumerate() {
+                js[l] = j as usize;
+            }
+            self.block(i, js, k, &mut fx, &mut fy, &mut fz);
+        }
+        let sum = |a: [f64; 4]| (a[0] + a[1]) + (a[2] + a[3]);
+        [sum(fx), sum(fy), sum(fz)]
+    }
+
+    /// Four neighbours' pressure, viscosity and cohesion on `i`, added lane by lane.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn block(
+        &self,
+        i: usize,
+        js: [usize; 4],
+        k: &Kernels,
+        fx: &mut [f64; 4],
+        fy: &mut [f64; 4],
+        fz: &mut [f64; 4],
+    ) {
+        let (x, y, z) = (self.x[i], self.y[i], self.z[i]);
+        let (vx, vy, vz) = (self.vx[i], self.vy[i], self.vz[i]);
+        let (pi, h) = (self.pressure[i], k.h);
+
+        let mut dx = [0.0f64; 4];
+        let mut dy = [0.0f64; 4];
+        let mut dz = [0.0f64; 4];
+        let mut dvx = [0.0f64; 4];
+        let mut dvy = [0.0f64; 4];
+        let mut dvz = [0.0f64; 4];
+        let mut pj = [0.0f64; 4];
+        let mut inv_dj = [0.0f64; 4];
+        for l in 0..4 {
+            let j = js[l];
+            dx[l] = x - self.x[j];
+            dy[l] = y - self.y[j];
+            dz[l] = z - self.z[j];
+            dvx[l] = self.vx[j] - vx;
+            dvy[l] = self.vy[j] - vy;
+            dvz[l] = self.vz[j] - vz;
+            pj[l] = self.pressure[j];
+            inv_dj[l] = self.inv_density[j];
+        }
+
+        let mut r = [0.0f64; 4];
+        for l in 0..4 {
+            r[l] = (dx[l] * dx[l] + dy[l] * dy[l] + dz[l] * dz[l]).sqrt();
+        }
+        let mut radial = [0.0f64; 4];
+        let mut visc = [0.0f64; 4];
+        for l in 0..4 {
+            let live = r[l] > 1e-9;
+            let inv_r = 1.0 / if live { r[l] } else { 1.0 };
+            let hr = h - r[l];
+            let pressure = k.pressure * (pi + pj[l]) * inv_dj[l] * hr * hr;
+            // Akinci's spline: zero at both ends, peaked between, so particles neither
+            // collapse together nor pull from beyond the kernel.
+            let a3r3 = hr * hr * hr * r[l] * r[l] * r[l];
+            let spline = if 2.0 * r[l] > h { a3r3 } else { 2.0 * a3r3 - k.cohesion_floor };
+            let cohesion = if r[l] <= h { k.cohesion * spline } else { 0.0 };
+            radial[l] = if live { (pressure - cohesion) * inv_r } else { 0.0 };
+            visc[l] = if live { k.viscosity * hr * inv_dj[l] } else { 0.0 };
+        }
+        for l in 0..4 {
+            fx[l] += radial[l] * dx[l] + visc[l] * dvx[l];
+            fy[l] += radial[l] * dy[l] + visc[l] * dvy[l];
+            fz[l] += radial[l] * dz[l] + visc[l] * dvz[l];
         }
     }
 }
@@ -745,12 +1713,9 @@ fn cfl_speed_ceiling(smoothing_radius: f64, dt: f64) -> f64 {
 /// for it, so the forces it received were for somewhere it no longer is.
 const CFL_FRACTION: f64 = 0.4;
 
-/// Akinci's cohesion spline, normalised over the kernel support.
-///
-/// Zero at both ends and peaked around `h/2`, which is what makes it stable: it
-/// cannot pull particles that are already touching any closer, and it has no reach
-/// beyond the neighbour radius.
-#[inline]
+/// Akinci's cohesion spline, normalised over the kernel support. The scalar form the
+/// force pass inlines, kept for the tests that pin its shape.
+#[cfg(test)]
 fn cohesion_kernel(r: f64, h: f64) -> f64 {
     if r <= 0.0 || r > h {
         return 0.0;
@@ -762,6 +1727,32 @@ fn cohesion_kernel(r: f64, h: f64) -> f64 {
     } else {
         norm * (2.0 * a * a * a * r * r * r - h.powi(6) / 64.0)
     }
+}
+
+/// Integer cell coordinate of one axis, at a given cell size.
+///
+/// `floor` rather than a cast: casting truncates toward zero, so positions either
+/// side of an axis would share a cell and neighbours would be found asymmetrically.
+#[inline]
+fn cell_of(p: f64, cell_size: f64) -> i32 {
+    (p / cell_size).floor() as i32
+}
+
+/// Hash of a row of cells (fixed `y`, `z`). Integer arithmetic only, so it produces
+/// the same buckets on every machine -- a hash that varied would make the neighbour
+/// walk order vary with it.
+#[inline]
+fn row_hash(cy: i32, cz: i32) -> i64 {
+    const P2: i64 = 19_349_663;
+    const P3: i64 = 83_492_791;
+    (cy as i64).wrapping_mul(P2) ^ (cz as i64).wrapping_mul(P3)
+}
+
+/// The bucket of cell `cx` in a row: consecutive cells of a row are consecutive
+/// buckets, which is what makes a row's three cells one run of the sorted arrays.
+#[inline]
+fn bucket(row: i64, cx: i32, mask: usize) -> usize {
+    (row.wrapping_add(cx as i64) as usize) & mask
 }
 
 #[cfg(test)]
@@ -777,7 +1768,7 @@ mod tests {
     ///
     /// This is the load-bearing test of the whole module. Sampled density feeds
     /// pressure, and pressure clamps at zero, so a density that comes out too low
-    /// does not error — it quietly deletes incompressibility and leaves something
+    /// does not error -- it quietly deletes incompressibility and leaves something
     /// that still moves and is no longer a fluid. The first draft failed this at
     /// 34 against a rest density of 1000, because mass, spacing and rest density had
     /// been set independently. See [`SphParams::with_spacing`].
@@ -810,7 +1801,7 @@ mod tests {
         assert!(
             error < 0.35,
             "interior density {d:.0} against a rest density of {rest:.0} \
-             ({:.0}% off) — mass, spacing and rest density are inconsistent",
+             ({:.0}% off) -- mass, spacing and rest density are inconsistent",
             error * 100.0
         );
     }
@@ -884,9 +1875,6 @@ mod tests {
         assert!(cohesion_kernel(h * 0.5, h) > 0.0, "should peak in the middle");
     }
 
-    /// A splash has to end. Particles that stop must be handed back so the caller
-    /// can bake them into whatever they leave behind, and must leave the solver.
-    #[test]
     /// The presets are not interchangeable, and the ordering between them is what
     /// makes each one look like the substance it is named after. If gel ever stops
     /// being the thickest and stickiest of the three, napalm stops crawling and
@@ -911,6 +1899,8 @@ mod tests {
         assert!(gel.rest_density < water.rest_density);
     }
 
+    /// A splash has to end. Particles that stop must be handed back so the caller
+    /// can bake them into whatever they leave behind, and must leave the solver.
     #[test]
     fn settled_particles_are_drained_and_reported() {
 
@@ -968,7 +1958,7 @@ mod tests {
     /// Cost must track the particle count, not how far apart the particles are.
     ///
     /// The first neighbour search was a dense grid over the bounding box, which made
-    /// two splashes at opposite ends of a map allocate a grid spanning the gap —
+    /// two splashes at opposite ends of a map allocate a grid spanning the gap --
     /// measured at 274 us clustered against 268,000 us spread over 100 m, with the
     /// scratch buffer staying resident at that size afterwards. This is the guard
     /// against anyone reintroducing that.
@@ -1007,7 +1997,7 @@ mod tests {
         assert!(
             scattered < clustered * 4.0,
             "spreading particles over 100 m cost {scattered:.6} s against {clustered:.6} s \
-             clustered — the neighbour search is scaling with map size again"
+             clustered -- the neighbour search is scaling with map size again"
         );
     }
 
@@ -1070,7 +2060,7 @@ mod tests {
         // that some *other* limit is actually doing the work of.
         assert!(
             peak > ceiling * 0.99,
-            "peak {peak:.3} m/s never approached the ceiling {ceiling:.3} m/s — \
+            "peak {peak:.3} m/s never approached the ceiling {ceiling:.3} m/s -- \
              something else is limiting the fluid and `speed_ceiling` is not it"
         );
     }
@@ -1081,7 +2071,7 @@ mod tests {
     /// Blood spaced for droplets at 240 Hz cannot be flung across a field however
     /// hard it is launched, and an emitter that believes otherwise is writing
     /// constants that do nothing. The number here is the one that matters at the call
-    /// site — a splash throws metres, not tens of metres.
+    /// site -- a splash throws metres, not tens of metres.
     #[test]
     fn a_droplet_splash_throws_metres_not_tens_of_metres() {
         let dt = 1.0 / 240.0;
@@ -1128,7 +2118,7 @@ mod tests {
         );
         assert!(
             furthest > 0.5,
-            "a splash reached only {furthest:.2} m — that is a puddle, not a spray"
+            "a splash reached only {furthest:.2} m -- that is a puddle, not a spray"
         );
     }
 
@@ -1136,7 +2126,7 @@ mod tests {
     /// the arrays: spawning and `swap_remove`.
     ///
     /// If `prev_pos` ever falls out of step with `pos`, `interpolated_position`
-    /// blends one particle's history into another particle's present — which draws as
+    /// blends one particle's history into another particle's present -- which draws as
     /// a droplet streaking across the map between two unrelated splashes, and is
     /// exactly the failure a client-side shadow buffer would have.
     #[test]
@@ -1171,7 +2161,7 @@ mod tests {
                 assert!(
                     travelled <= fluid.params().smoothing_radius * CFL_FRACTION + 1e-9,
                     "round {round}: particle {i} moved {travelled:.4} m in one substep \
-                     — prev_pos is aligned with a different particle"
+                     -- prev_pos is aligned with a different particle"
                 );
 
                 for a in 0..3 {
@@ -1214,7 +2204,7 @@ mod tests {
     ///
     /// This is what "not smooth, running at a fixed rate instead of interpolated"
     /// actually is. At 144 fps over a 240 Hz solver a frame consumes 1.67 substeps, so
-    /// some frames advance one substep's worth and some two — the drawn position moves
+    /// some frames advance one substep's worth and some two -- the drawn position moves
     /// twice as far on some frames as on others, and the eye reads that as stutter
     /// however high the frame rate is. Sixty exactly would have hidden it: four
     /// substeps every frame, perfectly even, which is why this test does not use it.
@@ -1231,7 +2221,7 @@ mod tests {
             // One drop, alone, in **zero gravity**, well clear of the ground.
             //
             // Deliberately not a parabola. The first version of this test fell under
-            // gravity and measured a ratio of 1.89 even when interpolated — because a
+            // gravity and measured a ratio of 1.89 even when interpolated -- because a
             // falling drop genuinely does cover more ground on a late frame than an
             // early one, so a global max-over-min was measuring acceleration and
             // calling it stutter. Under no forces the true motion is exactly linear,
@@ -1278,7 +2268,7 @@ mod tests {
         // worth and some one, so the ratio is close to two.
         assert!(
             stepped > 1.9,
-            "reading the solved position gave a step ratio of {stepped:.2} — this test \
+            "reading the solved position gave a step ratio of {stepped:.2} -- this test \
              is supposed to reproduce the quantisation before asserting it is gone"
         );
 
@@ -1294,7 +2284,7 @@ mod tests {
     /// Interpolating must not feed back into the solver.
     ///
     /// The failure it guards against is a render-side convenience that ends up
-    /// writing to solver state — at which point the fluid's behaviour depends on the
+    /// writing to solver state -- at which point the fluid's behaviour depends on the
     /// frame rate, which is the one thing substepping exists to prevent.
     #[test]
     fn reading_interpolated_positions_does_not_perturb_the_solver() {
@@ -1335,32 +2325,92 @@ mod tests {
         }
         assert_eq!(run(), run());
     }
-}
 
-/// Integer cell coordinate of a position, at a given cell size.
-///
-/// `floor` rather than a cast: casting truncates toward zero, so positions either
-/// side of an axis would share a cell and neighbours would be found asymmetrically.
-#[inline]
-fn cell_coord(p: [f64; 3], cell_size: f64) -> [i32; 3] {
-    [
-        (p[0] / cell_size).floor() as i32,
-        (p[1] / cell_size).floor() as i32,
-        (p[2] / cell_size).floor() as i32,
-    ]
-}
+    /// The parallel passes write each particle's sums only into its own slot, in an
+    /// order fixed by the data, so the thread count must not change a single bit.
+    /// A splash large enough for dozens of chunks, stepped through a fall, an impact
+    /// and a settle, on pools of 1, 3 and 8 threads.
+    #[test]
+    fn parallel_steps_are_bit_identical_at_any_thread_count() {
+        fn run() -> Vec<u64> {
+            let mut fluid = SphFluid::new(SphParams::blood(), 4096).unwrap();
+            let spacing = fluid.params().smoothing_radius * 0.5;
+            for i in 0..3000usize {
+                let (x, y, z) = (i % 15, (i / 15) % 15, i / 225);
+                fluid.spawn(
+                    [x as f64 * spacing, 0.3 + y as f64 * spacing, z as f64 * spacing],
+                    [0.4 * (i % 7) as f64 - 1.2, -1.0, 0.3 * (i % 5) as f64 - 0.6],
+                );
+            }
+            for step in 0..90 {
+                fluid.step(1.0 / 240.0, 9.81, |x, z| 0.05 * (x - z));
+                if step % 30 == 29 {
+                    fluid.drain_settled(|_| {});
+                }
+            }
+            let mut bits = Vec::new();
+            for i in 0..fluid.len() {
+                let (p, v) = (fluid.position(i), fluid.velocity(i));
+                bits.extend(p.iter().chain(v.iter()).map(|c| c.to_bits()));
+                bits.push(fluid.density(i).to_bits());
+            }
+            bits
+        }
 
-/// The standard three-prime spatial hash. Integer arithmetic only, so it produces
-/// the same buckets on every machine — a hash that varied would make the neighbour
-/// walk order vary with it.
-#[inline]
-fn hash_cell(c: [i32; 3], mask: usize) -> usize {
-    const P1: i64 = 73_856_093;
-    const P2: i64 = 19_349_663;
-    const P3: i64 = 83_492_791;
+        let answers: Vec<Vec<u64>> = [1usize, 3, 8]
+            .iter()
+            .map(|&t| {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(t).build().unwrap();
+                pool.install(run)
+            })
+            .collect();
+        assert!(answers[0].len() > 1000, "the splash drained before it was compared");
+        for (t, other) in [3, 8].iter().zip(&answers[1..]) {
+            assert!(
+                answers[0] == *other,
+                "stepping on {t} threads gave a different fluid from stepping on one"
+            );
+        }
+    }
 
-    let h = (c[0] as i64).wrapping_mul(P1)
-        ^ (c[1] as i64).wrapping_mul(P2)
-        ^ (c[2] as i64).wrapping_mul(P3);
-    (h as usize) & mask
+    /// The neighbour walk rejects candidates by their real cell, so a hash collision
+    /// cannot count a particle twice or from across the map. Checked against brute
+    /// force: every density equals the all-pairs sum to rounding.
+    #[test]
+    fn the_neighbour_walk_finds_exactly_the_all_pairs_neighbours() {
+        let params = SphParams::water();
+        let mut fluid = SphFluid::new(params, 600).unwrap();
+        let mut seed = 11u32;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f64 / ((1u32 << 24) as f64)
+        };
+        // Half a dense blob, half scattered over 50 m so distant cells collide.
+        for i in 0..600 {
+            let spread = if i % 2 == 0 { 0.2 } else { 50.0 };
+            fluid.spawn([rand() * spread, 1.0 + rand() * 0.2, rand() * spread], [0.0; 3]);
+        }
+        let before: Vec<[f64; 3]> = (0..fluid.len()).map(|i| fluid.position(i)).collect();
+        fluid.step(1e-9, 0.0, |_, _| -10.0);
+
+        let h = params.smoothing_radius;
+        let poly6 = 315.0 / (64.0 * core::f64::consts::PI * h.powi(9));
+        for (i, a) in before.iter().enumerate() {
+            let mut sum = 0.0;
+            for b in &before {
+                let r2 = (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+                if r2 <= h * h {
+                    sum += (h * h - r2).powi(3);
+                }
+            }
+            let expect = params.particle_mass * poly6 * sum;
+            let got = fluid.density(i);
+            assert!(
+                (got - expect).abs() <= 1e-9 * expect,
+                "particle {i}: walked density {got}, all-pairs {expect}"
+            );
+        }
+    }
 }

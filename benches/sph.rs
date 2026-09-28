@@ -3,6 +3,11 @@
 //! SPH is O(n) in particles but with a large constant: every particle walks 27 grid
 //! cells and evaluates three kernels per neighbour. The number that matters for a
 //! game is how many particles fit in a frame budget, so that is what this measures.
+//!
+//! Since 2026-09-28 the step runs in parallel on the calling rayon pool, here the
+//! global one, so these figures are whole-machine figures. The per-thread-count and
+//! per-phase numbers come from `examples/r2_bench.rs` and `examples/r2_phases.rs`,
+//! which alternate 1, 4 and 8 threads inside one process.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rs_physics::fluid_dynamics::{SphFluid, SphParams};
