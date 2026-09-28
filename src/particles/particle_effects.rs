@@ -519,7 +519,7 @@ impl ParticleEffects {
     /// A velocity component too small to move its particle is set to zero, exactly: the
     /// position it would have reached is bit for bit the position it keeps. Drag alone
     /// never reaches zero and used to strand long-lived particles in the subnormal range,
-    /// where a step cost about 25 times as much. The derivation is on the private
+    /// where a step cost about ten times as much. The derivation is on the private
     /// `integrate_free_flight`.
     ///
     /// # Arguments
@@ -567,9 +567,13 @@ impl ParticleEffects {
     /// Drag multiplies each velocity by `d < 1` every step, so on its own it never
     /// reaches zero: it decays through the subnormal range and, at the bottom of it,
     /// `v * d` rounds back to `v` and stays there. Every multiply on a subnormal takes a
-    /// microcode assist, measured at about 40 ns a particle against 1.5 ns for the same
-    /// loop on normal numbers, so a long-lived drifting class (dust, smoke) that had
-    /// come to rest cost more than a burst of fresh sparks.
+    /// microcode assist. Measured 2026-09-28 (`examples/r2_bench.rs`, medians of four
+    /// rounds in one process): a pool that never retires, after 500 s of drag, cost
+    /// 27.2 ns a particle at 16k and 22.3 ns at 100k, against 2.45 and 2.17 ns for the
+    /// same pool fresh. A game pool with a long-lived drifting class (dust living 20 to
+    /// 40 s beside short sparks) cost 8.3 ns, because its dust got there before it
+    /// retired. With the flush: 3.05 ns aged, 3.19 ns live, 2.86 ns fresh; the check
+    /// itself costs about 0.4 ns a particle, which the live pool repays 2.6 times over.
     ///
     /// The fix is physical rather than a tuned epsilon. A component is set to zero when
     /// the displacement it would produce this step, `v * dt`, is below a quarter of the
