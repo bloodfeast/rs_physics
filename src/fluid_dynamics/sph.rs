@@ -1431,17 +1431,12 @@ struct Grid<'a> {
 /// intervals, merged so no bucket appears twice. Every particle of a cell shares them,
 /// and the sorted order keeps a cell's particles together, so they are built once a
 /// cell rather than once a particle.
+#[derive(Default)]
 struct Runs {
     cell: [i32; 3],
     fresh: bool,
     count: usize,
     slots: [(u32, u32); 18],
-}
-
-impl Default for Runs {
-    fn default() -> Self {
-        Runs { cell: [0; 3], fresh: false, count: 0, slots: [(0, 0); 18] }
-    }
 }
 
 impl Grid<'_> {

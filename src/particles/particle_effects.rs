@@ -154,7 +154,6 @@ pub struct Landing {
 }
 
 /// A pool of live effect particles.
-
 ///
 /// Capacity is fixed at construction. When full, the oldest particle is replaced --
 /// which keeps the *most recent* event fully drawn, since that is the one the
