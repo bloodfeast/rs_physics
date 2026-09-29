@@ -8,7 +8,8 @@ use crate::utils::vector3::{angular_effective_inv_mass, angular_velocity_delta, 
 pub struct CcdCollisionResult {
     /// Whether a collision is predicted within the time step
     pub will_collide: bool,
-    /// The time of impact in the range [0, 1] where 0 is the start of the time step and 1 is the end
+    /// The time of impact in seconds from the start of the time step, in the
+    /// range [0, dt]. It is not a fraction of the step.
     pub time_of_impact: f64,
     /// The collision normal at the time of impact (points from obj2 to obj1)
     pub normal: (f64, f64, f64),
@@ -21,7 +22,8 @@ pub struct CcdCollisionResult {
 /// Result of a time of impact calculation
 #[derive(Debug, Clone)]
 pub struct ToiResult {
-    /// The time of impact in the range [0, 1]
+    /// The time of impact in seconds from the start of the time step, in the
+    /// range [0, dt]. It is not a fraction of the step.
     pub toi: f64,
     /// The collision normal at the time of impact (points from obj2 to obj1)
     pub normal: (f64, f64, f64),
@@ -47,6 +49,18 @@ const MIN_VELOCITY_FOR_RESTITUTION: f64 = 0.1;
 
 /// Separation distance for position correction
 const SEPARATION_DISTANCE: f64 = 0.0001;
+
+/// Whether a mass denotes an immovable body. This module has historically
+/// used `mass <= 0.0` for that, while `PhysicsWorld` uses `f64::INFINITY`;
+/// both are static here, as is a NaN mass.
+fn is_static_mass(mass: f64) -> bool {
+    mass <= 0.0 || !mass.is_finite()
+}
+
+/// Whether `dt` is a usable time step: finite and non-negative.
+fn is_valid_dt(dt: f64) -> bool {
+    dt.is_finite() && dt >= 0.0
+}
 
 //==============================================================================
 // HELPER FUNCTIONS
@@ -145,7 +159,8 @@ fn calculate_face_impact(
     sphere_radius: f64,
     face_center: (f64, f64, f64),
     face_normal: (f64, f64, f64),
-    half_dims: (f64, f64, f64)
+    half_dims: (f64, f64, f64),
+    dt: f64
 ) -> Option<(f64, (f64, f64, f64), (f64, f64, f64))> {
     // Distance from sphere center to the face plane
     let dist_to_plane = dot_product(
@@ -165,20 +180,21 @@ fn calculate_face_impact(
         return None;
     }
 
-    // Calculate time of impact
+    // Calculate time of impact: the gap still to close, over the closing
+    // speed (`vel_normal` is negative here, so `-vel_normal` is positive).
     let time = if dist_to_plane <= sphere_radius + TINY_EPSILON {
         0.0 // Already colliding or very close
     } else {
-        (sphere_radius - dist_to_plane) / -vel_normal
+        (dist_to_plane - sphere_radius) / -vel_normal
     };
 
-    // Validate time
-    if time < -TINY_EPSILON || time > 1.0 + TINY_EPSILON {
+    // Validate time. It is in seconds, so the window is [0, dt], not [0, 1].
+    if time < -TINY_EPSILON || time > dt + TINY_EPSILON {
         return None;
     }
 
     // Clamp time to valid range
-    let time = time.max(0.0).min(1.0);
+    let time = time.max(0.0).min(dt);
 
     // Calculate sphere position at time of impact
     let sphere_at_impact = (
@@ -560,25 +576,29 @@ pub fn calculate_sphere_sphere_toi(
     let b = 2.0 * dot_product(x, v);
     let c = dot_product(x, x) - sum_radii * sum_radii;
 
-    // Check if already overlapping
-    if c <= EPSILON {
+    // Check if already overlapping, or touching to within EPSILON metres. The
+    // tolerance is on the gap (a length), not on `c` (an area), so it does not
+    // grow or shrink with the size of the spheres.
+    let center_dist = vector_magnitude(x);
+    if center_dist - sum_radii <= EPSILON {
         // Calculate normal (from obj2 to obj1)
-        let normal = if vector_magnitude(x) > TINY_EPSILON {
-            let mag = vector_magnitude(x);
-            (-x.0 / mag, -x.1 / mag, -x.2 / mag)
+        let normal = if center_dist > TINY_EPSILON {
+            (-x.0 / center_dist, -x.1 / center_dist, -x.2 / center_dist)
         } else {
             (1.0, 0.0, 0.0)
         };
 
+        // Contact points face each other: obj1's lies against the normal
+        // (towards obj2), obj2's along it (towards obj1).
         let point1 = (
-            pos1.0 + normal.0 * radius1,
-            pos1.1 + normal.1 * radius1,
-            pos1.2 + normal.2 * radius1
+            pos1.0 - normal.0 * radius1,
+            pos1.1 - normal.1 * radius1,
+            pos1.2 - normal.2 * radius1
         );
         let point2 = (
-            pos2.0 - normal.0 * radius2,
-            pos2.1 - normal.1 * radius2,
-            pos2.2 - normal.2 * radius2
+            pos2.0 + normal.0 * radius2,
+            pos2.1 + normal.1 * radius2,
+            pos2.2 + normal.2 * radius2
         );
 
         return Some(ToiResult {
@@ -679,7 +699,7 @@ fn calculate_sphere_cuboid_toi(
     for (face_center, face_normal) in get_cuboid_faces(half_dims.0, half_dims.1, half_dims.2) {
         if let Some((toi, normal, point)) = calculate_face_impact(
             local_rel_pos, local_rel_vel, sphere_radius,
-            face_center, face_normal, half_dims
+            face_center, face_normal, half_dims, dt
         ) {
             if toi < min_toi && toi <= dt {
                 min_toi = toi;
@@ -743,12 +763,16 @@ fn calculate_sphere_aabb_toi(
         half_dims.2 + sphere_radius
     );
 
-    // Check collision with expanded box
-    let mut toi = dt + 1.0;
-    let mut collision_axis = 0;
-    let mut collision_dir = 1.0;
+    // Slab test of the sphere centre's path against the expanded box. The
+    // centre is inside the expanded box during [t_near, t_far] on every axis
+    // at once; the first contact is the latest of the per-axis entry times,
+    // and it happens on the axis that entered last. Edges and corners are
+    // treated as square rather than rounded, so a hit there can be slightly
+    // early or reported where the true rounded shape would be missed.
+    let mut toi = 0.0_f64;
+    let mut t_exit = dt;
+    let mut entered: Option<(usize, f64)> = None;
 
-    // Check each axis
     for axis in 0..3 {
         let (pos_comp, vel_comp, half_dim) = match axis {
             0 => (rel_pos.0, rel_vel.0, expanded_dims.0),
@@ -756,55 +780,34 @@ fn calculate_sphere_aabb_toi(
             _ => (rel_pos.2, rel_vel.2, expanded_dims.2)
         };
 
-        // Already inside on this axis
-        if pos_comp.abs() <= half_dim {
-            if axis == 0 { toi = 0.0; collision_axis = 0; collision_dir = pos_comp.signum(); break; }
-            continue;
-        }
-
-        // Not moving toward box on this axis
+        // Not moving along this axis: either always inside the slab or never
         if vel_comp.abs() < TINY_EPSILON {
+            if pos_comp.abs() > half_dim {
+                return None;
+            }
             continue;
         }
 
-        // Calculate time to hit this face
-        let entry_time = if (pos_comp > 0.0 && vel_comp < 0.0) || (pos_comp < 0.0 && vel_comp > 0.0) {
-            (pos_comp.abs() - half_dim) / vel_comp.abs()
-        } else {
-            continue; // Moving away
-        };
+        let t0 = (-half_dim - pos_comp) / vel_comp;
+        let t1 = (half_dim - pos_comp) / vel_comp;
+        let (t_near, t_far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
 
-        if entry_time >= 0.0 && entry_time < toi && entry_time <= dt {
-            // Check if sphere is within the box on other axes at this time
-            let mut valid = true;
+        if t_near > toi {
+            toi = t_near;
+            // Entering through the face the sphere is moving towards, so the
+            // normal (box to sphere) opposes the velocity on this axis.
+            entered = Some((axis, -vel_comp.signum()));
+        }
+        t_exit = t_exit.min(t_far);
 
-            for check_axis in 0..3 {
-                if check_axis == axis { continue; }
-
-                let (check_pos, check_vel, check_dim) = match check_axis {
-                    0 => (rel_pos.0, rel_vel.0, half_dims.0),
-                    1 => (rel_pos.1, rel_vel.1, half_dims.1),
-                    _ => (rel_pos.2, rel_vel.2, half_dims.2)
-                };
-
-                let pos_at_impact = check_pos + check_vel * entry_time;
-                if pos_at_impact.abs() > check_dim + sphere_radius {
-                    valid = false;
-                    break;
-                }
-            }
-
-            if valid {
-                toi = entry_time;
-                collision_axis = axis;
-                collision_dir = pos_comp.signum();
-            }
+        if toi > t_exit {
+            return None;
         }
     }
 
-    if toi > dt {
-        return None;
-    }
+    // `None` here means the centre started inside every slab. Real overlap at
+    // t = 0 is reported by the GJK check in `check_continuous_collision`.
+    let (collision_axis, collision_dir) = entered?;
 
     // Calculate final positions
     let sphere_pos_at_impact = calculate_position_at_time(sphere_pos, sphere_vel, toi);
@@ -872,13 +875,14 @@ fn calculate_cuboid_cuboid_toi(
     let z_overlap = rel_pos.2.abs() <= (half1.2 + half2.2);
 
     if x_overlap && y_overlap && z_overlap {
-        // Already overlapping
+        // Already overlapping. `rel_pos` runs obj1 -> obj2, so the normal
+        // (obj2 -> obj1) is its negated sign on the dominant axis.
         let normal = if rel_pos.0.abs() > rel_pos.1.abs() && rel_pos.0.abs() > rel_pos.2.abs() {
-            (rel_pos.0.signum(), 0.0, 0.0)
+            (-rel_pos.0.signum(), 0.0, 0.0)
         } else if rel_pos.1.abs() > rel_pos.2.abs() {
-            (0.0, rel_pos.1.signum(), 0.0)
+            (0.0, -rel_pos.1.signum(), 0.0)
         } else {
-            (0.0, 0.0, rel_pos.2.signum())
+            (0.0, 0.0, -rel_pos.2.signum())
         };
 
         return Some(ToiResult {
@@ -941,11 +945,11 @@ fn calculate_cuboid_cuboid_toi(
             earliest_time = time_to_collision;
             collision_axis = axis;
 
-            // Set collision normal
+            // Set collision normal, obj2 -> obj1 (`rel_pos` runs obj1 -> obj2)
             match axis {
-                0 => collision_normal = (rel_pos.0.signum(), 0.0, 0.0),
-                1 => collision_normal = (0.0, rel_pos.1.signum(), 0.0),
-                _ => collision_normal = (0.0, 0.0, rel_pos.2.signum())
+                0 => collision_normal = (-rel_pos.0.signum(), 0.0, 0.0),
+                1 => collision_normal = (0.0, -rel_pos.1.signum(), 0.0),
+                _ => collision_normal = (0.0, 0.0, -rel_pos.2.signum())
             }
         }
     }
@@ -958,17 +962,18 @@ fn calculate_cuboid_cuboid_toi(
     let pos1_at_impact = calculate_position_at_time(pos1, vel1, earliest_time);
     let pos2_at_impact = calculate_position_at_time(pos2, vel2, earliest_time);
 
-    // Calculate contact points
+    // Calculate contact points on the facing faces: obj1's face lies against
+    // the normal (towards obj2), obj2's along it (towards obj1).
     let point1 = match collision_axis {
-        0 => (pos1_at_impact.0 + half1.0 * collision_normal.0, pos1_at_impact.1, pos1_at_impact.2),
-        1 => (pos1_at_impact.0, pos1_at_impact.1 + half1.1 * collision_normal.1, pos1_at_impact.2),
-        _ => (pos1_at_impact.0, pos1_at_impact.1, pos1_at_impact.2 + half1.2 * collision_normal.2)
+        0 => (pos1_at_impact.0 - half1.0 * collision_normal.0, pos1_at_impact.1, pos1_at_impact.2),
+        1 => (pos1_at_impact.0, pos1_at_impact.1 - half1.1 * collision_normal.1, pos1_at_impact.2),
+        _ => (pos1_at_impact.0, pos1_at_impact.1, pos1_at_impact.2 - half1.2 * collision_normal.2)
     };
 
     let point2 = match collision_axis {
-        0 => (pos2_at_impact.0 - half2.0 * collision_normal.0, pos2_at_impact.1, pos2_at_impact.2),
-        1 => (pos2_at_impact.0, pos2_at_impact.1 - half2.1 * collision_normal.1, pos2_at_impact.2),
-        _ => (pos2_at_impact.0, pos2_at_impact.1, pos2_at_impact.2 - half2.2 * collision_normal.2)
+        0 => (pos2_at_impact.0 + half2.0 * collision_normal.0, pos2_at_impact.1, pos2_at_impact.2),
+        1 => (pos2_at_impact.0, pos2_at_impact.1 + half2.1 * collision_normal.1, pos2_at_impact.2),
+        _ => (pos2_at_impact.0, pos2_at_impact.1, pos2_at_impact.2 + half2.2 * collision_normal.2)
     };
 
     Some(ToiResult {
@@ -1026,7 +1031,8 @@ fn calculate_conservative_advancement_toi(
             if let Some(contact_info) = contact {
                 return Some(ToiResult {
                     toi: curr_time,
-                    normal: contact_info.normal,
+                    // EPA's normal runs shape1 -> shape2; ours runs obj2 -> obj1
+                    normal: negate(contact_info.normal),
                     point1: contact_info.point1,
                     point2: contact_info.point2,
                 });
@@ -1115,13 +1121,19 @@ fn calculate_conservative_advancement_toi(
 /// * `dt` - The time step duration in seconds
 ///
 /// # Returns
-/// A `CcdCollisionResult` containing collision information if a collision is detected
+/// A `CcdCollisionResult` containing collision information if a collision is
+/// detected, with `time_of_impact` in seconds within [0, dt]. Returns `None`
+/// when `dt` is negative or not finite.
 pub fn check_continuous_collision(
     obj1: &PhysicalObject3D,
     obj2: &PhysicalObject3D,
     dt: f64
 ) -> Option<CcdCollisionResult> {
     use crate::interactions::gjk_collision_3d::{gjk_collision_detection_ex, epa_contact_points_ex, GjkResult};
+
+    if !is_valid_dt(dt) {
+        return None;
+    }
 
     let pos1 = extract_position(obj1);
     let pos2 = extract_position(obj2);
@@ -1149,7 +1161,8 @@ pub fn check_continuous_collision(
                 return Some(CcdCollisionResult {
                     will_collide: true,
                     time_of_impact: 0.0,  // Already colliding
-                    normal: contact.normal,
+                    // EPA's normal runs shape1 -> shape2; ours runs obj2 -> obj1
+                    normal: negate(contact.normal),
                     point1: contact.point1,
                     point2: contact.point2,
                 });
@@ -1166,8 +1179,21 @@ pub fn check_continuous_collision(
     let ang_vel1 = extract_angular_velocity(obj1);
     let ang_vel2 = extract_angular_velocity(obj2);
 
-    // Early exit for objects with no significant relative motion
-    if !is_relative_motion_significant(vel1, vel2, ang_vel1, ang_vel2, pos1, pos2) {
+    // Early exit when the centres are not approaching. That rules out a hit
+    // for two spheres, but not for a box: a sphere can strike a long box while
+    // moving away from the box's centre. The analytic sphere-box and box-box
+    // routines below handle separating motion themselves, so they skip it.
+    // Pairs that fall through to conservative advancement keep it, because
+    // that routine's bounding-sphere contact test would otherwise report
+    // contact between bodies that are merely near each other.
+    let analytic_box_pair = match (&obj1.shape, &obj2.shape) {
+        (Shape3D::Sphere(_), Shape3D::Cuboid(..)) | (Shape3D::Cuboid(..), Shape3D::Sphere(_)) => true,
+        (Shape3D::Cuboid(..), Shape3D::Cuboid(..)) => {
+            vector_magnitude(ang_vel1) < EPSILON && vector_magnitude(ang_vel2) < EPSILON
+        }
+        _ => false,
+    };
+    if !analytic_box_pair && !is_relative_motion_significant(vel1, vel2, ang_vel1, ang_vel2, pos1, pos2) {
         return None;
     }
 
@@ -1455,8 +1481,9 @@ fn apply_collision_response_with_contact(
         return;
     }
 
-    // Coefficient of restitution
-    let restitution = 0.8;
+    // Coefficient of restitution from the bodies' materials (their mean, as in
+    // `shape_collisions_3d::handle_collision`)
+    let restitution = 0.5 * (obj1.get_restitution() + obj2.get_restitution());
 
     // Compute impulse magnitude
     let m1 = obj1.object.mass;
@@ -1468,8 +1495,10 @@ fn apply_collision_response_with_contact(
     let inertia1 = obj1.shape.moment_of_inertia(m1);
     let inertia2 = obj2.shape.moment_of_inertia(m2);
 
-    let angular_factor1 = angular_effective_inv_mass(r1, normal, &inertia1);
-    let angular_factor2 = angular_effective_inv_mass(r2, normal, &inertia2);
+    // An immovable body (inverse mass 0) takes no angular response either.
+    // Its inertia can be 0 (mass 0), and (r x n)^2 / 0 is NaN when r x n = 0.
+    let angular_factor1 = if inv_m1 > 0.0 { angular_effective_inv_mass(r1, normal, &inertia1) } else { 0.0 };
+    let angular_factor2 = if inv_m2 > 0.0 { angular_effective_inv_mass(r2, normal, &inertia2) } else { 0.0 };
 
     let denom = inv_m1 + inv_m2 + angular_factor1 + angular_factor2;
     if denom < EPSILON {
@@ -1491,16 +1520,20 @@ fn apply_collision_response_with_contact(
     // Apply angular impulse using shared utilities (no dt multiplication - impulses are instantaneous)
     let angular_response = 0.8;
 
-    let delta1 = angular_velocity_delta(r1, impulse, &inertia1, angular_response);
-    obj1.angular_velocity.0 += delta1.0;
-    obj1.angular_velocity.1 += delta1.1;
-    obj1.angular_velocity.2 += delta1.2;
+    if inv_m1 > 0.0 {
+        let delta1 = angular_velocity_delta(r1, impulse, &inertia1, angular_response);
+        obj1.angular_velocity.0 += delta1.0;
+        obj1.angular_velocity.1 += delta1.1;
+        obj1.angular_velocity.2 += delta1.2;
+    }
 
-    let neg_impulse = negate(impulse);
-    let delta2 = angular_velocity_delta(r2, neg_impulse, &inertia2, angular_response);
-    obj2.angular_velocity.0 += delta2.0;
-    obj2.angular_velocity.1 += delta2.1;
-    obj2.angular_velocity.2 += delta2.2;
+    if inv_m2 > 0.0 {
+        let neg_impulse = negate(impulse);
+        let delta2 = angular_velocity_delta(r2, neg_impulse, &inertia2, angular_response);
+        obj2.angular_velocity.0 += delta2.0;
+        obj2.angular_velocity.1 += delta2.1;
+        obj2.angular_velocity.2 += delta2.2;
+    }
 }
 
 /// Applies continuous collision response by updating positions and velocities
@@ -1509,18 +1542,22 @@ fn apply_collision_response_with_contact(
 /// * `obj1` - First physical object to update
 /// * `obj2` - Second physical object to update
 /// * `result` - The continuous collision result
-/// * `dt` - The full time step duration
+/// * `dt` - The full time step duration in seconds
 ///
 /// This function updates the objects' positions and velocities based on the
 /// CCD result, applying appropriate impulses and moving objects to their
-/// positions at the time of impact.
-
+/// positions at the time of impact. It does nothing when `dt` is negative or
+/// not finite.
 pub fn apply_continuous_collision_response(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
     result: &CcdCollisionResult,
     dt: f64
 ) {
+    if !is_valid_dt(dt) {
+        return;
+    }
+
     // Extract original velocities for time advancement
     let original_vel1 = extract_velocity(obj1);
     let original_vel2 = extract_velocity(obj2);
@@ -1536,6 +1573,10 @@ pub fn apply_continuous_collision_response(
     obj2.object.position.x += original_vel2.0 * toi;
     obj2.object.position.y += original_vel2.1 * toi;
     obj2.object.position.z += original_vel2.2 * toi;
+
+    // Rotate to collision time too; the remainder of the step is applied below
+    update_object_orientation(obj1, toi);
+    update_object_orientation(obj2, toi);
 
     // Apply small separation to ensure objects are not overlapping
     let separation = SEPARATION_DISTANCE;
@@ -1586,13 +1627,18 @@ pub fn apply_continuous_collision_response(
 }
 
 /// Simplified collision response for testing - handles basic elastic collision
-/// This is an alternative to the above function for when we want more control
+/// This is an alternative to the above function for when we want more control.
+/// It does nothing when `dt` is negative or not finite.
 pub fn apply_simple_collision_response(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
     result: &CcdCollisionResult,
     dt: f64
 ) {
+    if !is_valid_dt(dt) {
+        return;
+    }
+
     // Extract original velocities
     let v1_before = extract_velocity(obj1);
     let v2_before = extract_velocity(obj2);
@@ -1758,8 +1804,10 @@ fn find_collision_pairs(
 
     for i in 0..objects.len() {
         for j in (i + 1)..objects.len() {
-            // Skip if both objects have infinite mass
-            if objects[i].object.mass <= 0.0 && objects[j].object.mass <= 0.0 {
+            // Skip if both objects are immovable (mass <= 0 or infinite). Two
+            // overlapping static bodies would otherwise form a t = 0 pair on
+            // every step.
+            if is_static_mass(objects[i].object.mass) && is_static_mass(objects[j].object.mass) {
                 continue;
             }
 
@@ -1840,6 +1888,34 @@ fn handle_collision_pairs(
     }
 }
 
+/// Integrate, over the whole of `dt`, every body that appears in none of
+/// `collision_pairs`. `handle_collision_pairs` only moves the bodies it
+/// resolves, so without this a single collision anywhere would stop every
+/// other body in the world for that step.
+///
+/// Bodies that appear in a pair which `handle_collision_pairs` then skipped
+/// (because the other body was already processed) are left where they are,
+/// as before: integrating them blind could carry them through the body they
+/// were about to hit.
+fn integrate_bodies_outside_pairs(
+    objects: &mut [PhysicalObject3D],
+    collision_pairs: &[(usize, usize, CcdCollisionResult)],
+    dt: f64
+) {
+    let mut in_pair = vec![false; objects.len()];
+    for (i, j, _) in collision_pairs {
+        in_pair[*i] = true;
+        in_pair[*j] = true;
+    }
+
+    for (obj, _) in objects.iter_mut().zip(in_pair).filter(|(_, in_pair)| !in_pair) {
+        obj.object.position.x += obj.object.velocity.x * dt;
+        obj.object.position.y += obj.object.velocity.y * dt;
+        obj.object.position.z += obj.object.velocity.z * dt;
+        update_object_orientation(obj, dt);
+    }
+}
+
 /// Resolve any remaining discrete collisions
 fn resolve_remaining_discrete_collisions(
     objects: &mut [PhysicalObject3D],
@@ -1890,7 +1966,12 @@ fn resolve_penetrations(objects: &mut [PhysicalObject3D]) {
                         &simplex
                     );
 
-                    if let Some(contact_info) = contact {
+                    if let Some(mut contact_info) = contact {
+                        // EPA's normal runs obj1 -> obj2. Everything below moves
+                        // obj1 along +normal and obj2 along -normal, which only
+                        // separates them if the normal runs obj2 -> obj1.
+                        contact_info.normal = negate(contact_info.normal);
+
                         // Only resolve if penetration is significant
                         if contact_info.penetration < PENETRATION_EPSILON {
                             continue;
@@ -1960,22 +2041,27 @@ fn resolve_penetrations(objects: &mut [PhysicalObject3D]) {
 ///
 /// # Arguments
 /// * `objects` - Mutable slice of physical objects to update
-/// * `dt` - The time step duration in seconds
+/// * `dt` - The time step duration in seconds. A negative or non-finite `dt`
+///   leaves every object untouched.
 /// * `constants` - The physics constants to use for the simulation
 pub fn update_physics_with_ccd(
     objects: &mut [PhysicalObject3D],
     dt: f64,
     constants: &PhysicsConstants
 ) {
+    if !is_valid_dt(dt) {
+        return;
+    }
+
     // Set a smaller time step for better stability, but not too small for the test
     const SUB_STEPS: usize = 1; // Changed from 2 to 1 to reduce complexity
     let sub_dt = dt / SUB_STEPS as f64;
 
     // Process in smaller time steps for better stability
     for step in 0..SUB_STEPS {
-        // First apply gravity to all objects (only if gravity is significant)
+        // First apply gravity to all movable objects (only if gravity is significant)
         if constants.gravity.abs() > EPSILON {
-            for obj in objects.iter_mut() {
+            for obj in objects.iter_mut().filter(|obj| !is_static_mass(obj.object.mass)) {
                 crate::interactions::shape_collisions_3d::apply_gravity(obj, constants.gravity, sub_dt);
             }
         }
@@ -1985,6 +2071,7 @@ pub fn update_physics_with_ccd(
 
         // Handle collisions in order of time of impact
         if !collision_pairs.is_empty() {
+            integrate_bodies_outside_pairs(objects, &collision_pairs, sub_dt);
             handle_collision_pairs(objects, collision_pairs, sub_dt);
         } else {
             // If no CCD collisions, update physics normally and check for discrete collisions
@@ -2022,15 +2109,20 @@ pub fn update_physics_with_ccd(
     resolve_penetrations(objects);
 }
 
-/// Simplified update function for testing that avoids damping and other effects
+/// Simplified update function for testing that avoids damping and other effects.
+/// A negative or non-finite `dt` leaves every object untouched.
 pub fn update_physics_with_ccd_simple(
     objects: &mut [PhysicalObject3D],
     dt: f64,
     constants: &PhysicsConstants
 ) {
-    // Apply gravity if significant
+    if !is_valid_dt(dt) {
+        return;
+    }
+
+    // Apply gravity to movable objects if significant
     if constants.gravity.abs() > EPSILON {
-        for obj in objects.iter_mut() {
+        for obj in objects.iter_mut().filter(|obj| !is_static_mass(obj.object.mass)) {
             crate::interactions::shape_collisions_3d::apply_gravity(obj, constants.gravity, dt);
         }
     }
@@ -2040,6 +2132,7 @@ pub fn update_physics_with_ccd_simple(
 
     if !collision_pairs.is_empty() {
         // Handle collisions in order of time of impact
+        integrate_bodies_outside_pairs(objects, &collision_pairs, dt);
         handle_collision_pairs(objects, collision_pairs, dt);
     } else {
         // No CCD collisions, update physics normally
