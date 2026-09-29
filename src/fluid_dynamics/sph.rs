@@ -67,6 +67,10 @@ pub struct SphParams {
     pub restitution: f64,
     /// Fraction of tangential velocity kept when hitting the ground. Below one, a
     /// splash spreads and then stops rather than sliding forever.
+    ///
+    /// Stated per 1/240 s substep of contact and applied as the equivalent decay
+    /// rate, so how far a drop slides does not depend on the substep it is solved
+    /// at.
     pub friction: f64,
 }
 
@@ -234,6 +238,12 @@ pub struct SphFluid {
     /// Per-particle acceleration, accumulated before any velocity is touched so the
     /// result does not depend on index order.
     accel: Vec<[f64; 3]>,
+    /// Every particle's neighbours (itself excluded), recorded by the density pass
+    /// in walk order so the force pass reuses them instead of walking the 27 cells a
+    /// second time. Flat, with `nbr_start[i]..nbr_start[i + 1]` indexing particle
+    /// `i`'s slice.
+    nbr: Vec<u32>,
+    nbr_start: Vec<usize>,
     /// Bucket count, always a power of two so the hash reduces with a mask.
     table_mask: usize,
 }
@@ -245,16 +255,37 @@ const SETTLE_TIME: f64 = 0.25;
 
 impl SphFluid {
     pub fn new(params: SphParams, capacity: usize) -> Result<SphFluid, PhysicsError> {
-        if params.smoothing_radius <= 0.0 {
+        // Written as "is not a positive finite number" rather than `<= 0.0`, which
+        // NaN passes — and a NaN here turns every particle NaN on the first step.
+        let positive = |v: f64| v > 0.0 && v.is_finite();
+        let non_negative = |v: f64| v >= 0.0 && v.is_finite();
+        let fraction = |v: f64| (0.0..=1.0).contains(&v);
+
+        if !positive(params.smoothing_radius) {
             return Err(PhysicsError::InvalidDistance);
         }
-        if params.particle_mass <= 0.0 {
+        if !positive(params.particle_mass) {
             return Err(PhysicsError::InvalidMass);
         }
-        if params.rest_density <= 0.0 {
+        if !positive(params.rest_density) {
             return Err(PhysicsError::CalculationError(
                 "rest density must be positive".to_string(),
             ));
+        }
+        // Negative stiffness or viscosity feeds energy in instead of taking it out.
+        if !non_negative(params.stiffness)
+            || !non_negative(params.viscosity)
+            || !non_negative(params.cohesion)
+        {
+            return Err(PhysicsError::CalculationError(
+                "stiffness, viscosity and cohesion must be finite and non-negative"
+                    .to_string(),
+            ));
+        }
+        // Fractions of velocity kept at the ground: above one, every contact gains
+        // energy.
+        if !fraction(params.restitution) || !fraction(params.friction) {
+            return Err(PhysicsError::InvalidCoefficient);
         }
 
         Ok(SphFluid {
@@ -272,6 +303,8 @@ impl SphFluid {
             bucket_cursor: Vec::new(),
             sorted: Vec::new(),
             accel: Vec::new(),
+            nbr: Vec::new(),
+            nbr_start: Vec::new(),
             table_mask: 0,
 
         })
@@ -410,8 +443,14 @@ impl SphFluid {
     /// second — far below anything a projectile or an explosion would suggest. Ask
     /// the ceiling before spreading emitter speeds across a range, or the spread
     /// collapses to a single value and the emission design stops existing.
+    ///
+    /// A non-finite position or velocity is refused too: one NaN particle turns its
+    /// neighbours NaN within a step, through the viscosity term.
     pub fn spawn(&mut self, position: [f64; 3], velocity: [f64; 3]) -> bool {
         if self.pos.len() >= self.capacity {
+            return false;
+        }
+        if !position.iter().chain(&velocity).all(|c| c.is_finite()) {
             return false;
         }
         self.pos.push(position);
@@ -427,13 +466,19 @@ impl SphFluid {
 
     /// Advance the fluid.
     ///
-    /// `ground_height` is sampled per particle, so the fluid follows terrain rather
-    /// than a flat plane — a splash on a slope runs downhill.
+    /// `ground_height` is sampled per particle, so the fluid rests on terrain rather
+    /// than a flat plane. The contact only clamps height and reflects vertical
+    /// velocity, though: it has no slope normal, so a drop on an incline does not
+    /// run downhill on its own (see `docs/reviews/2026-09-29-correctness-performance.md`,
+    /// SPH-F5).
+    ///
+    /// A `dt` that is not a positive finite number, or a non-finite `gravity`, is a
+    /// no-op rather than a step that turns every particle NaN.
     pub fn step<F>(&mut self, dt: f64, gravity: f64, ground_height: F)
     where
         F: Fn(f64, f64) -> f64,
     {
-        if dt <= 0.0 || self.is_empty() {
+        if !(dt > 0.0 && dt.is_finite() && gravity.is_finite()) || self.is_empty() {
             return;
         }
 
@@ -525,9 +570,35 @@ impl SphFluid {
         let p = self.pos[i];
         let base = self.cell_coord[i];
 
+        // Squared distance from `p` to the nearest face of the cell one step below,
+        // level with, and one step above it on each axis. A cell whose nearest point
+        // is out of reach cannot hold a neighbour, so it is not scanned; on a packed
+        // block that takes about a quarter off the density pass. Skipping changes
+        // which cells are read, never the order neighbours are found in. The margin
+        // keeps `floor` rounding at a cell face from skipping a neighbour sitting at
+        // exactly `r = h`.
+        let reach = h * h * (1.0 + 1e-12);
+        let mut gap = [[0.0f64; 3]; 3];
+        for axis in 0..3 {
+            let below = p[axis] - base[axis] as f64 * h;
+            let above = h - below;
+            gap[axis] = [below * below, 0.0, above * above];
+        }
+
         for dz in -1..=1i32 {
+            let gz = gap[2][(dz + 1) as usize];
+            if gz > reach {
+                continue;
+            }
             for dy in -1..=1i32 {
+                let gy = gz + gap[1][(dy + 1) as usize];
+                if gy > reach {
+                    continue;
+                }
                 for dx in -1..=1i32 {
+                    if gy + gap[0][(dx + 1) as usize] > reach {
+                        continue;
+                    }
                     let coord = [base[0] + dx, base[1] + dy, base[2] + dz];
                     let bucket = hash_cell(coord, self.table_mask);
 
@@ -560,14 +631,26 @@ impl SphFluid {
         let mass = self.params.particle_mass;
         let poly6 = 315.0 / (64.0 * core::f64::consts::PI * h.powi(9));
 
+        // Taken out of `self` for the walk, which borrows `self`, and put back after:
+        // the buffers are reused, never reallocated once they reach their high-water
+        // mark.
+        let mut nbr = std::mem::take(&mut self.nbr);
+        let mut nbr_start = std::mem::take(&mut self.nbr_start);
+        nbr.clear();
+        nbr_start.clear();
+        nbr_start.push(0);
         for i in 0..self.len() {
             let mut density = 0.0;
-            self.for_each_neighbour(i, |_, r, _| {
+            self.for_each_neighbour(i, |j, r, _| {
                 let diff = h * h - r * r;
                 if diff > 0.0 {
                     density += mass * poly6 * diff * diff * diff;
                 }
+                if j != i {
+                    nbr.push(j as u32);
+                }
             });
+            nbr_start.push(nbr.len());
 
             // A lone particle still has its own self-contribution, so density never
             // reaches zero and the pressure division below is always safe.
@@ -579,6 +662,8 @@ impl SphFluid {
             self.pressure[i] =
                 (self.params.stiffness * (self.density[i] - self.params.rest_density)).max(0.0);
         }
+        self.nbr = nbr;
+        self.nbr_start = nbr_start;
     }
 
     fn apply_forces(&mut self, dt: f64, gravity: f64) {
@@ -599,9 +684,19 @@ impl SphFluid {
             let pi = self.pressure[i];
             let vi = self.vel[i];
 
-            self.for_each_neighbour(i, |j, r, d| {
-                if j == i || r <= 1e-9 {
-                    return;
+            // The neighbour set the density pass found, in the same order, so the
+            // sums are bit-for-bit what a second walk would produce.
+            let p = self.pos[i];
+            for &j in &self.nbr[self.nbr_start[i]..self.nbr_start[i + 1]] {
+                let j = j as usize;
+                let d = [
+                    p[0] - self.pos[j][0],
+                    p[1] - self.pos[j][1],
+                    p[2] - self.pos[j][2],
+                ];
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if r <= 1e-9 {
+                    continue;
                 }
                 let dj = self.density[j];
                 let dir = [d[0] / r, d[1] / r, d[2] / r];
@@ -619,14 +714,23 @@ impl SphFluid {
                 // droplets instead of dispersing. Uses Akinci's spline, which is
                 // zero at both r = 0 and r = h and peaked in between — so particles
                 // neither collapse together nor pull from beyond the kernel.
-                let cohesion = self.params.cohesion * mass * cohesion_kernel(r, h);
+                //
+                // Scaled by 2 rho_i / (rho_i + rho_j) so that, after the division by
+                // rho_i below, the pair's accelerations are equal and opposite. Divided
+                // by rho_i alone, a surface particle next to a denser interior one
+                // pulled harder than it was pulled, and a free blob self-propelled.
+                // Unchanged wherever the density is uniform.
+                let cohesion = self.params.cohesion
+                    * mass
+                    * cohesion_kernel(r, h)
+                    * (2.0 * di / (di + dj));
 
                 for axis in 0..3 {
                     force[axis] += pressure_term * dir[axis];
                     force[axis] += visc * (self.vel[j][axis] - vi[axis]);
                     force[axis] -= cohesion * dir[axis];
                 }
-            });
+            }
 
             for axis in 0..3 {
                 self.accel[i][axis] = force[axis] / di;
@@ -655,10 +759,30 @@ impl SphFluid {
         // callers can query through `speed_ceiling` rather than being written twice.
         let max_speed = cfl_speed_ceiling(self.params.smoothing_radius, dt);
 
+        // Ground friction as a decay *rate*, not a per-step multiplier. A resting or
+        // sliding particle is in contact on every substep, so multiplying by
+        // `friction` each time made the slide distance proportional to `dt` — four
+        // times shorter at 960 Hz than at 240 Hz, and zero in the limit. Implicit
+        // decay at a rate calibrated so that one 240 Hz substep keeps exactly
+        // `friction` slides `v / rate` whatever the substep, and stays rational
+        // arithmetic, with no transcendental in the loop.
+        let friction_rate = FRICTION_REFERENCE_HZ * (1.0 / self.params.friction - 1.0);
+        let friction_keep = 1.0 / (1.0 + friction_rate * dt);
+
         for i in 0..self.len() {
             let speed_sq: f64 = self.vel[i].iter().map(|v| v * v).sum();
             if speed_sq > max_speed * max_speed {
-                let scale = max_speed / speed_sq.sqrt();
+                // Squaring overflows past ~1.3e154 m/s, and `max / inf` would stop
+                // the particle dead instead of capping it, so rescale by the largest
+                // component first there.
+                let speed = if speed_sq.is_finite() {
+                    speed_sq.sqrt()
+                } else {
+                    let big = self.vel[i].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                    let unit_sq: f64 = self.vel[i].iter().map(|v| (v / big) * (v / big)).sum();
+                    big * unit_sq.sqrt()
+                };
+                let scale = max_speed / speed;
                 for axis in 0..3 {
                     self.vel[i][axis] *= scale;
                 }
@@ -673,8 +797,8 @@ impl SphFluid {
             if self.pos[i][1] < floor {
                 self.pos[i][1] = floor;
                 self.vel[i][1] = -self.vel[i][1] * self.params.restitution;
-                self.vel[i][0] *= self.params.friction;
-                self.vel[i][2] *= self.params.friction;
+                self.vel[i][0] *= friction_keep;
+                self.vel[i][2] *= friction_keep;
                 on_ground = true;
             }
 
@@ -744,6 +868,11 @@ fn cfl_speed_ceiling(smoothing_radius: f64, dt: f64) -> f64 {
 /// moved a whole radius has left the set of neighbours whose forces were computed
 /// for it, so the forces it received were for somewhere it no longer is.
 const CFL_FRACTION: f64 = 0.4;
+
+/// The substep rate `SphParams::friction` is calibrated at: one substep of ground
+/// contact at this rate keeps exactly `friction` of the tangential velocity, and
+/// other rates keep whatever gives the same slide distance.
+const FRICTION_REFERENCE_HZ: f64 = 240.0;
 
 /// Akinci's cohesion spline, normalised over the kernel support.
 ///
@@ -1341,12 +1470,18 @@ mod tests {
 ///
 /// `floor` rather than a cast: casting truncates toward zero, so positions either
 /// side of an axis would share a cell and neighbours would be found asymmetrically.
+///
+/// Clamped one short of the `i32` range, so the neighbour walk's `base ± 1` can never
+/// overflow. Anything past it (8.6e7 m at blood's spacing) shares the edge cell,
+/// where the distance test still separates what is and is not a neighbour.
 #[inline]
 fn cell_coord(p: [f64; 3], cell_size: f64) -> [i32; 3] {
+    const LO: f64 = i32::MIN as f64 + 1.0;
+    const HI: f64 = i32::MAX as f64 - 1.0;
     [
-        (p[0] / cell_size).floor() as i32,
-        (p[1] / cell_size).floor() as i32,
-        (p[2] / cell_size).floor() as i32,
+        (p[0] / cell_size).floor().clamp(LO, HI) as i32,
+        (p[1] / cell_size).floor().clamp(LO, HI) as i32,
+        (p[2] / cell_size).floor().clamp(LO, HI) as i32,
     ]
 }
 
@@ -1364,3 +1499,7 @@ fn hash_cell(c: [i32; 3], mask: usize) -> usize {
         ^ (c[2] as i64).wrapping_mul(P3);
     (h as usize) & mask
 }
+
+#[cfg(test)]
+#[path = "sph_regression_tests.rs"]
+mod regression_tests;

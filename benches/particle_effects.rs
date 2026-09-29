@@ -9,7 +9,7 @@
 //! This bench exists to find that crossover with a number instead of an intuition.
 //! Run it before wiring a GPU backend, and again after, on the same machine.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects};
 
 /// Populations spanning "a few sparks from one hit" to "a debris field".
@@ -60,10 +60,19 @@ fn integrate(c: &mut Criterion) {
     let mut group = c.benchmark_group("particle_effects/integrate");
 
     for &n in &SCALES {
-        let mut fx = filled_pool(n);
+        let fx = filled_pool(n);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| fx.integrate(std::hint::black_box(1.0 / 60.0)));
+            // A fresh copy of the pool per iteration. Criterion integrates the same
+            // pool thousands of times at the smaller sizes, which ages it by
+            // minutes of simulated time (enough, before `flush_to_rest`, to leave
+            // every velocity subnormal and read ~11× slow), so each size would
+            // otherwise measure a differently aged pool.
+            b.iter_batched_ref(
+                || fx.clone(),
+                |fx| fx.integrate(std::hint::black_box(1.0 / 60.0)),
+                BatchSize::LargeInput,
+            );
         });
     }
 

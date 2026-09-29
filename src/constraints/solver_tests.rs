@@ -208,7 +208,7 @@ fn test_collision_contact_solver_3d() {
     // Contact point with penetration
     let contact_point = ContactPoint3D {
         position: (0.0, -0.25, 0.0),
-        normal: (0.0, 1.0, 0.0),  // Points up from floor to obj1
+        normal: (0.0, -1.0, 0.0),  // From obj1 down toward the floor (obj2)
         penetration: 0.25,  // 25cm penetration
     };
 
@@ -241,7 +241,7 @@ fn test_multiple_contacts_3d() {
         floor.clone(),
         ContactPoint3D {
             position: (-0.5, 0.0, 0.0),
-            normal: (0.0, 1.0, 0.0),
+            normal: (0.0, -1.0, 0.0), // from obj (object1) toward the floor
             penetration: 0.1,
         },
         0.3,
@@ -253,7 +253,7 @@ fn test_multiple_contacts_3d() {
         floor,
         ContactPoint3D {
             position: (0.5, 0.0, 0.0),
-            normal: (0.0, 1.0, 0.0),
+            normal: (0.0, -1.0, 0.0), // from obj (object1) toward the floor
             penetration: 0.1,
         },
         0.3,
@@ -291,7 +291,7 @@ fn test_mixed_constraints_3d() {
         floor,
         ContactPoint3D {
             position: (0.0, 0.0, 0.0),
-            normal: (0.0, 1.0, 0.0),
+            normal: (0.0, -1.0, 0.0), // from obj (object1) toward the floor
             penetration: 0.0,  // Just touching
         },
         0.5,

@@ -81,10 +81,13 @@ pub struct Hinge3D {
     pub moment_of_inertia: f64,
     /// Angular restitution coefficient for bouncing at limits (0.0 to 1.0)
     pub restitution: f64,
-    /// Angular damping coefficient (friction in the hinge)
+    /// Angular damping rate in 1/s (friction in the hinge): ω decays as
+    /// `exp(-angular_damping · t)`, independent of the timestep.
     pub angular_damping: f64,
     /// Reference direction for angle=0 (perpendicular to axis, in swing plane)
     pub reference_direction: (f64, f64, f64),
+    /// Offset of object2's centre along the hinge axis from the anchor (m).
+    pub axial_offset: f64,
 }
 
 impl Hinge3D {
@@ -189,8 +192,11 @@ impl Hinge3D {
             arm_length,
             moment_of_inertia,
             restitution: 0.5,       // Default bounce at limits
-            angular_damping: 0.02,  // Small friction
+            // Small friction. 1.2 /s matches the old 2%-per-call default at 60 Hz;
+            // the old per-call rule decayed ten times faster at 600 Hz.
+            angular_damping: 1.2,
             reference_direction,
+            axial_offset: arm_dot_axis,
         })
     }
 
@@ -226,7 +232,7 @@ impl Hinge3D {
     ///
     /// # Arguments
     ///
-    /// * `damping` - Damping coefficient (0.0 = no friction, higher = more friction)
+    /// * `damping` - Damping rate in 1/s (0.0 = no friction, higher = more friction)
     pub fn with_angular_damping(mut self, damping: f64) -> Self {
         self.angular_damping = damping.max(0.0);
         self
@@ -375,7 +381,7 @@ impl Hinge3D {
         self.angular_velocity += angular_acceleration * dt;
 
         // Apply angular damping (friction in the hinge)
-        self.angular_velocity *= 1.0 - self.angular_damping;
+        self.angular_velocity *= (-self.angular_damping * dt).exp();
 
         // === Step 4: Integrate angle ===
         self.angle += self.angular_velocity * dt;
@@ -418,9 +424,9 @@ impl Hinge3D {
         let anchor = self.anchor_world_1();
 
         // New position = anchor + arm
-        self.object2.position.x = anchor.0 + current_dir.0 * self.arm_length;
-        self.object2.position.y = anchor.1 + current_dir.1 * self.arm_length;
-        self.object2.position.z = anchor.2 + current_dir.2 * self.arm_length;
+        self.object2.position.x = anchor.0 + current_dir.0 * self.arm_length + axis.0 * self.axial_offset;
+        self.object2.position.y = anchor.1 + current_dir.1 * self.arm_length + axis.1 * self.axial_offset;
+        self.object2.position.z = anchor.2 + current_dir.2 * self.arm_length + axis.2 * self.axial_offset;
 
         // === Step 7: Update linear velocity to match angular motion ===
         // Linear velocity = ω × r (angular velocity cross arm)

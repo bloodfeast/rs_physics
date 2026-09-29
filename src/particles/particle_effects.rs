@@ -347,7 +347,9 @@ impl ParticleEffects {
             // not worth an error path through a renderer.
             Backend::Cpu | Backend::Gpu => self.integrate_free_flight(dt),
         }
-        self.policy.record(backend, count, started.elapsed());
+        // Record what actually ran. Only the CPU path exists here, and filing a
+        // fallback under `Gpu` would calibrate the GPU model on CPU timings.
+        self.policy.record(Backend::Cpu, count, started.elapsed());
 
         self.retire_expired();
     }
@@ -374,9 +376,9 @@ impl ParticleEffects {
             let d = damping[c];
 
             self.vel_y[i] -= gravity[c];
-            self.vel_x[i] *= d;
-            self.vel_y[i] *= d;
-            self.vel_z[i] *= d;
+            self.vel_x[i] = flush_to_rest(self.vel_x[i] * d);
+            self.vel_y[i] = flush_to_rest(self.vel_y[i] * d);
+            self.vel_z[i] = flush_to_rest(self.vel_z[i] * d);
 
             self.pos_x[i] += self.vel_x[i] * dt;
             self.pos_y[i] += self.vel_y[i] * dt;
@@ -512,6 +514,26 @@ impl ParticleEffects {
     /// without a per-particle copy.
     pub fn positions_soa(&self) -> (&[f32], &[f32], &[f32]) {
         (&self.pos_x, &self.pos_y, &self.pos_z)
+    }
+}
+
+/// Speed, m/s, below which a velocity component is invisible at any zoom and is
+/// snapped to exactly zero.
+const REST_SPEED: f32 = 1e-12;
+
+/// Snap a velocity component too small to see to exactly zero.
+///
+/// Drag and contact friction scale a velocity by a factor above 0.5, so on their
+/// own they never bring it to rest: once it is subnormal, rounding returns the
+/// same value (`round(0.55 · m) == m` for a one-ulp subnormal). It then stays
+/// subnormal for good, every operation on it takes a microcode assist on x86, and
+/// a long-lived pool integrates about 13× slower per particle.
+#[inline]
+fn flush_to_rest(v: f32) -> f32 {
+    if v.abs() < REST_SPEED {
+        0.0
+    } else {
+        v
     }
 }
 

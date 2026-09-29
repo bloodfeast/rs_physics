@@ -25,6 +25,13 @@ impl Quad {
             y <  self.cy + self.half_size
     }
 
+    /// Closed-interval containment, edges included. The opening test uses this
+    /// rather than `contains`: a particle on a node's upper edge still belongs to
+    /// that node, so the node must not be approximated as seen from it.
+    fn encloses(&self, x: f64, y: f64) -> bool {
+        (x - self.cx).abs() <= self.half_size && (y - self.cy).abs() <= self.half_size
+    }
+
     /// Subdivides the quad into four smaller quads (NW, NE, SW, SE).
     ///
     /// # Example
@@ -110,11 +117,33 @@ impl BarnesHutNode {
     /// }
     /// ```
     pub fn insert(&mut self, p: ParticleData) {
+        self.insert_at(p, 0);
+    }
+
+    /// `insert` for a node `depth` levels below the root, so the recursion can be capped.
+    fn insert_at(&mut self, p: ParticleData, depth: u32) {
         match self {
             BarnesHutNode::Empty(quad) => {
                 *self = BarnesHutNode::Leaf(*quad, p);
             }
             BarnesHutNode::Leaf(quad, existing) => {
+                // Coincident particles cannot be separated by subdividing — the
+                // recursion would run until the half-size underflows — so they share
+                // one leaf. At MAX_TREE_DEPTH nothing is left to resolve either, so
+                // the pair merges at its centre of mass.
+                if existing.x == p.x && existing.y == p.y {
+                    existing.mass += p.mass;
+                    return;
+                }
+                if depth >= MAX_TREE_DEPTH {
+                    let mass = existing.mass + p.mass;
+                    *existing = ParticleData {
+                        x: (existing.x * existing.mass + p.x * p.mass) / mass,
+                        y: (existing.y * existing.mass + p.y * p.mass) / mass,
+                        mass,
+                    };
+                    return;
+                }
                 let (nw_quad, ne_quad, sw_quad, se_quad) = quad.subdivide();
                 let mut internal = BarnesHutNode::Internal {
                     quad: *quad,
@@ -127,33 +156,24 @@ impl BarnesHutNode {
                     se: Box::new(BarnesHutNode::new(se_quad)),
                 };
 
-                let existing_particle = *existing;
-                if nw_quad.contains(existing_particle.x, existing_particle.y) {
-                    internal.insert(existing_particle);
-                } else if ne_quad.contains(existing_particle.x, existing_particle.y) {
-                    internal.insert(existing_particle);
-                } else if sw_quad.contains(existing_particle.x, existing_particle.y) {
-                    internal.insert(existing_particle);
-                } else if se_quad.contains(existing_particle.x, existing_particle.y) {
-                    internal.insert(existing_particle);
-                }
-                internal.insert(p);
+                internal.insert_at(*existing, depth);
+                internal.insert_at(p, depth);
                 *self = internal;
             }
-            BarnesHutNode::Internal { quad: _, mass, com_x, com_y, nw, ne, sw, se } => {
+            BarnesHutNode::Internal { quad, mass, com_x, com_y, nw, ne, sw, se } => {
                 let total_mass = *mass + p.mass;
                 *com_x = (*com_x * *mass + p.x * p.mass) / total_mass;
                 *com_y = (*com_y * *mass + p.y * p.mass) / total_mass;
                 *mass = total_mass;
-                if nw.as_ref().quad().contains(p.x, p.y) {
-                    nw.insert(p);
-                } else if ne.as_ref().quad().contains(p.x, p.y) {
-                    ne.insert(p);
-                } else if sw.as_ref().quad().contains(p.x, p.y) {
-                    sw.insert(p);
-                } else if se.as_ref().quad().contains(p.x, p.y) {
-                    se.insert(p);
-                }
+                // Classify against the centre only, so every particle lands in exactly
+                // one child, including one on the upper edge or outside the root.
+                let child = match (p.x >= quad.cx, p.y >= quad.cy) {
+                    (false, true) => nw,
+                    (true, true) => ne,
+                    (false, false) => sw,
+                    (true, false) => se,
+                };
+                child.insert_at(p, depth + 1);
             }
         }
     }
@@ -216,7 +236,9 @@ impl BarnesHutNode {
                 let dy = *com_y - p.y;
                 let dist_sq = dx * dx + dy * dy + 1e-12;
                 let dist = dist_sq.sqrt();
-                if (quad.half_size * 2.0 / dist) < theta {
+                // Never approximate a node that contains `p`: its mass includes `p`
+                // itself, so `p` would attract itself (possible once theta > 1/√2).
+                if !quad.encloses(p.x, p.y) && (quad.half_size * 2.0 / dist) < theta {
                     let force = g * p.mass * (*mass) / dist_sq;
                     (force * dx / dist, force * dy / dist)
                 } else {
@@ -233,6 +255,10 @@ impl BarnesHutNode {
 
 /// Constructs a Barnes–Hut tree from a slice of particles within a given quad.
 /// Particles are partitioned into quadrants and subtrees are built in parallel.
+///
+/// No particle is dropped: each is assigned to a quadrant by comparison with the
+/// node's centre, so one on the quad's upper edge (or outside it) is still counted,
+/// and particles at an identical position share a single leaf.
 ///
 /// # Example
 ///
@@ -252,11 +278,39 @@ impl BarnesHutNode {
 /// }
 /// ```
 pub fn build_tree(particles: &[ParticleData], quad: Quad) -> BarnesHutNode {
+    build_tree_at(particles, quad, 0)
+}
+
+/// How many levels a tree may subdivide below its root. A node this deep is
+/// 2^-60 of the root's size, which f64 cannot usefully resolve any further, so
+/// whatever is left there is carried as one aggregate leaf.
+const MAX_TREE_DEPTH: u32 = 60;
+
+/// `build_tree` for a node `depth` levels below the root, so the recursion can be capped.
+fn build_tree_at(particles: &[ParticleData], quad: Quad, depth: u32) -> BarnesHutNode {
     if particles.is_empty() {
         return BarnesHutNode::Empty(quad);
     }
     if particles.len() == 1 {
         return BarnesHutNode::Leaf(quad, particles[0]);
+    }
+
+    // Coincident particles cannot be separated by subdividing — the recursion would
+    // run until the half-size underflows — so they share one leaf at their exact
+    // common position. Past MAX_TREE_DEPTH, merge at the centre of mass instead.
+    let first = particles[0];
+    let coincident = particles.iter().all(|p| p.x == first.x && p.y == first.y);
+    if coincident || depth >= MAX_TREE_DEPTH {
+        let mass: f64 = particles.iter().map(|p| p.mass).sum();
+        let (x, y) = if coincident {
+            (first.x, first.y)
+        } else {
+            (
+                particles.iter().map(|p| p.x * p.mass).sum::<f64>() / mass,
+                particles.iter().map(|p| p.y * p.mass).sum::<f64>() / mass,
+            )
+        };
+        return BarnesHutNode::Leaf(quad, ParticleData { x, y, mass });
     }
 
     let (nw_quad, ne_quad, sw_quad, se_quad) = quad.subdivide();
@@ -268,25 +322,24 @@ pub fn build_tree(particles: &[ParticleData], quad: Quad) -> BarnesHutNode {
     let mut sw_particles = Vec::with_capacity(estimated_capacity);
     let mut se_particles = Vec::with_capacity(estimated_capacity);
 
+    // Classify against the centre only, so every particle lands in exactly one
+    // child, including one on the upper edge or outside the root.
     for &p in particles {
-        if nw_quad.contains(p.x, p.y) {
-            nw_particles.push(p);
-        } else if ne_quad.contains(p.x, p.y) {
-            ne_particles.push(p);
-        } else if sw_quad.contains(p.x, p.y) {
-            sw_particles.push(p);
-        } else if se_quad.contains(p.x, p.y) {
-            se_particles.push(p);
+        match (p.x >= quad.cx, p.y >= quad.cy) {
+            (false, true) => nw_particles.push(p),
+            (true, true) => ne_particles.push(p),
+            (false, false) => sw_particles.push(p),
+            (true, false) => se_particles.push(p),
         }
     }
 
     let (nw_tree, ne_tree) = rayon::join(
-        || build_tree(&nw_particles, nw_quad),
-        || build_tree(&ne_particles, ne_quad)
+        || build_tree_at(&nw_particles, nw_quad, depth + 1),
+        || build_tree_at(&ne_particles, ne_quad, depth + 1)
     );
     let (sw_tree, se_tree) = rayon::join(
-        || build_tree(&sw_particles, sw_quad),
-        || build_tree(&se_particles, se_quad)
+        || build_tree_at(&sw_particles, sw_quad, depth + 1),
+        || build_tree_at(&se_particles, se_quad, depth + 1)
     );
 
     let mut total_mass = 0.0;
@@ -379,7 +432,9 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: ParticleData, theta: f64, w
             let dx = *com_x - p.x;
             let dy = *com_y - p.y;
             let dist = (dx * dx + dy * dy).sqrt();
-            if (quad.half_size * 2.0 / dist) < theta {
+            // Never approximate a node that contains `p`: its mass includes `p`
+            // itself, so `p` would attract itself (possible once theta > 1/√2).
+            if !quad.encloses(p.x, p.y) && (quad.half_size * 2.0 / dist) < theta {
                 worklist.push(ApproxNode { mass: *mass, com_x: *com_x, com_y: *com_y });
             } else {
                 collect_approx_nodes(nw, p, theta, worklist);
@@ -402,26 +457,24 @@ pub fn collect_approx_nodes(node: &BarnesHutNode, p: ParticleData, theta: f64, w
 /// # Example
 ///
 /// ```
-///
-///
-/// # #[cfg(target_feature = "avx")]
-/// {
-///     use rs_physics::particles::{ApproxNode, ParticleData, compute_force_simd_avx, DGirth};
-///     // This example assumes AVX is available.
+/// # #[cfg(target_arch = "x86_64")]
+/// if std::is_x86_feature_detected!("avx") {
+///     use rs_physics::particles::{ApproxNode, ParticleData, compute_force_simd_avx};
+///     // The heavier node breaks the symmetry, so the net force is not zero.
 ///     let worklist = vec![
-///         ApproxNode { mass: 1.0, com_x: 0.5, com_y: 0.5 },
+///         ApproxNode { mass: 2.0, com_x: 0.5, com_y: 0.5 },
 ///         ApproxNode { mass: 1.0, com_x: -0.5, com_y: -0.5 },
 ///         ApproxNode { mass: 1.0, com_x: 0.5, com_y: -0.5 },
 ///         ApproxNode { mass: 1.0, com_x: -0.5, com_y: 0.5 },
 ///     ];
 ///     let p = ParticleData { x: 0.0, y: 0.0, mass: 1.0 };
 ///     let g = 6.67430e-11;
-///     unsafe {
-///         let (fx, fy) = compute_force_simd_avx(p, &worklist, g);
-///         assert!(fx.abs() > 0.0 || fy.abs() > 0.0);
-///     }
+///     // SAFETY: AVX support was detected at runtime just above.
+///     let (fx, fy) = unsafe { compute_force_simd_avx(p, &worklist, g) };
+///     assert!(fx > 0.0 && fy > 0.0);
 /// }
 /// ```
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g: f64) -> (f64, f64) {
     use std::arch::x86_64::*;
@@ -484,6 +537,21 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
     }
     (force_x, force_y)
 }
+
+/// Single-precision (`f32`) variant of [`compute_force_simd_avx`], eight lanes wide.
+///
+/// An explicit opt-in: [`compute_net_force`] never calls it. Every input is
+/// narrowed to `f32` before any arithmetic, so in SI units the product of two
+/// masses overflows once it passes ~3.4e38 (two 1e20 kg bodies) and the result is
+/// non-finite, and positions far from the origin lose their separation to
+/// cancellation. Use it only on data already scaled to near unity.
+///
+/// # Safety
+///
+/// Must be called only when AVX support is available, for example after
+/// `is_x86_feature_detected!("avx")` has returned true.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
 pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[ApproxNode], g: f32) -> (f32, f32) {
     use std::arch::x86_64::*;
     let mut force_x = 0.0_f32;
@@ -578,8 +646,8 @@ pub fn compute_force_scalar(p: ParticleData, worklist: &[ApproxNode], g: f64) ->
 
 /// Computes the net force on particle `p` using the Barnes–Hut tree.
 /// It first collects a worklist of approximated nodes (using threshold `theta`),
-/// then computes the net force using the AVX-optimized function if available,
-/// or falls back to scalar computation.
+/// then computes the net force in `f64`, using the AVX-optimized function if
+/// available or falling back to scalar computation.
 ///
 /// # Parameters
 ///
@@ -614,15 +682,11 @@ pub fn compute_net_force(tree: &BarnesHutNode, p: ParticleData, theta: f64, g: f
     let mut worklist = Vec::new();
     collect_approx_nodes(tree, p, theta, &mut worklist);
 
+    #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx") {
-        if worklist.len() > 1000 {
-            return unsafe {
-                let res = compute_force_simd_avx_low_precision(p, &worklist, g as f32);
-                (res.0 as f64, res.1 as f64)
-            };
-        }
-        unsafe { compute_force_simd_avx(p, &worklist, g) }
-    } else {
-        compute_force_scalar(p, &worklist, g)
+        // SAFETY: AVX support was confirmed at runtime on the line above, which is
+        // the only precondition of `compute_force_simd_avx`.
+        return unsafe { compute_force_simd_avx(p, &worklist, g) };
     }
+    compute_force_scalar(p, &worklist, g)
 }

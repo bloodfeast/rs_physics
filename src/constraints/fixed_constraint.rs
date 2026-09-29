@@ -100,6 +100,9 @@ impl Fixed2D {
     ///
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         // Calculate current offset
         let current_offset_x = self.object2.position.x - self.object1.position.x;
         let current_offset_y = self.object2.position.y - self.object1.position.y;
@@ -145,12 +148,9 @@ impl Fixed2D {
         let rel_vy = self.object2.velocity.y - self.object1.velocity.y;
         let relative_velocity = rel_vx * nx + rel_vy * ny;
 
-        // Impulse magnitude
+        // Impulse magnitude. No clamp: a bound of `0.1 / dt` has units of 1/s,
+        // not N·s, so it capped heavy bodies to almost nothing.
         let lambda = -(relative_velocity + bias) / total_inv_mass;
-
-        // Clamp impulse for stability
-        let max_impulse = 0.1 / dt;
-        let lambda = lambda.clamp(-max_impulse, max_impulse);
 
         // Apply velocity corrections (mass-weighted)
         self.object1.velocity.x -= lambda * inv_mass1 * nx;
@@ -302,6 +302,9 @@ impl Fixed3D {
     ///
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         // Calculate current offset
         let current_offset_x = self.object2.position.x - self.object1.position.x;
         let current_offset_y = self.object2.position.y - self.object1.position.y;
@@ -351,12 +354,9 @@ impl Fixed3D {
         let rel_vz = self.object2.velocity.z - self.object1.velocity.z;
         let relative_velocity = rel_vx * nx + rel_vy * ny + rel_vz * nz;
 
-        // Impulse magnitude
+        // Impulse magnitude. No clamp: a bound of `0.1 / dt` has units of 1/s,
+        // not N·s, so it capped heavy bodies to almost nothing.
         let lambda = -(relative_velocity + bias) / total_inv_mass;
-
-        // Clamp impulse for stability
-        let max_impulse = 0.1 / dt;
-        let lambda = lambda.clamp(-max_impulse, max_impulse);
 
         // Apply velocity corrections (mass-weighted)
         self.object1.velocity.x -= lambda * inv_mass1 * nx;

@@ -33,3 +33,6 @@ mod particle_simulation_tests;
 #[cfg(test)]
 #[cfg(feature = "particles")]
 mod particle_interactions_barnes_hut_tests;
+#[cfg(test)]
+#[cfg(feature = "particles")]
+mod particle_regression_tests;
