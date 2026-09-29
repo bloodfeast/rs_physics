@@ -1,4 +1,6 @@
-use crate::particles::{ApproxNode, BarnesHutNode, build_tree, collect_approx_nodes, compute_force_scalar, compute_force_simd_avx, compute_net_force, ParticleData, Quad};
+use crate::particles::{ApproxNode, BarnesHutNode, build_tree, collect_approx_nodes, compute_force_scalar, compute_net_force, ParticleData, Quad};
+#[cfg(target_arch = "x86_64")]
+use crate::particles::compute_force_simd_avx;
 
 #[test]
 fn test_quad_contains() {
@@ -77,6 +79,7 @@ fn test_compute_net_force() {
     assert!(fx > 0.0, "Expected positive force in x-direction");
 }
 
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn test_compute_force_simd_vs_scalar() {
     // Create a worklist with 8 nodes.
@@ -98,7 +101,9 @@ fn test_compute_force_simd_vs_scalar() {
     } else {
         scalar_result
     };
-    // The results should be nearly equal.
-    assert!((scalar_result.0 - simd_result.0).abs() < 1e-10);
-    assert!((scalar_result.1 - simd_result.1).abs() < 1e-10);
+    // The results should agree to rounding. Relative, because with G = 6.67e-11
+    // the forces are ~1e-9 and an absolute 1e-10 would pass an 11% error.
+    let tolerance = 1e-12 * scalar_result.0.hypot(scalar_result.1);
+    assert!((scalar_result.0 - simd_result.0).abs() <= tolerance);
+    assert!((scalar_result.1 - simd_result.1).abs() <= tolerance);
 }

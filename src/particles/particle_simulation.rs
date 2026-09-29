@@ -66,7 +66,8 @@ impl Simulation {
     ///
     /// # Errors
     ///
-    /// Returns an error if `initial_direction` is the zero vector.
+    /// Returns an error if `initial_direction` is the zero vector, or
+    /// `PhysicsError::InvalidMass` if `mass` is not positive and finite.
     ///
     /// # Examples
     ///
@@ -95,6 +96,9 @@ impl Simulation {
         constants: PhysicsConstants,
         dt: f64,
     ) -> Result<Self, PhysicsError> {
+        if !(mass > 0.0 && mass.is_finite()) {
+            return Err(PhysicsError::InvalidMass);
+        }
         let norm = (initial_direction.0.powi(2) + initial_direction.1.powi(2)).sqrt();
         if norm == 0.0 {
             return Err(PhysicsError::CalculationError(
@@ -123,6 +127,12 @@ impl Simulation {
     ///
     /// This method uses runtime detection to decide whether to use an AVX‑optimized update or a Rayon‑based fallback.
     ///
+    /// # Errors
+    ///
+    /// Returns `PhysicsError::InvalidTime` if `dt` is not finite, and
+    /// `PhysicsError::CalculationError` if the particle arrays (which are public)
+    /// do not all have the same length. Nothing is updated in either case.
+    ///
     /// # Examples (non-AVX)
     ///
     /// ```
@@ -141,15 +151,31 @@ impl Simulation {
     /// assert!(sim.positions_y[0] > initial_y, "Particle did not move vertically");
     /// ```
     pub fn step(&mut self) -> Result<(), PhysicsError> {
-        if std::is_x86_feature_detected!("avx") {
-            // SAFETY: We have confirmed at runtime that the CPU supports AVX.
-            unsafe {
-                Self::step_avx(self)
-                    .expect("AVX step failed");
-            }
-        } else {
-            Self::step_fallback(self);
+        if !self.dt.is_finite() {
+            return Err(PhysicsError::InvalidTime);
         }
+        let n = self.speeds.len();
+        if self.positions_x.len() != n
+            || self.positions_y.len() != n
+            || self.directions_x.len() != n
+            || self.directions_y.len() != n
+        {
+            return Err(PhysicsError::CalculationError(
+                "positions, speeds and directions must all have the same length".to_string(),
+            ));
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx") {
+            // SAFETY: `step_avx` has two preconditions and both hold here. The CPU
+            // supports AVX (detected at runtime on the line above), and all five
+            // arrays it loads from and stores to have the same length `n` (checked
+            // above), so every 4-wide access at `i` with `i + 4 <= n` is in bounds.
+            unsafe { self.step_avx() };
+            return Ok(());
+        }
+
+        Self::step_fallback(self);
         Ok(())
     }
 
@@ -157,9 +183,13 @@ impl Simulation {
     ///
     /// # Safety
     ///
-    /// This function must only be called when AVX is available.
+    /// This function must only be called when AVX is available, and when
+    /// `positions_x`, `positions_y`, `directions_x` and `directions_y` all have
+    /// the same length as `speeds`: the loop is bounded by `speeds.len()` and reads
+    /// and writes the others through raw pointers.
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx")]
-    unsafe fn step_avx(&mut self) -> Result<(), PhysicsError> {
+    unsafe fn step_avx(&mut self) {
 
         let n = self.speeds.len();
         let mut i = 0;
@@ -201,20 +231,19 @@ impl Simulation {
             i += 4;
         }
 
-        // If there are any remaining particles, use the update_slice function.
-        if i < n {
-            Self::update_slice(
-                &mut self.positions_x[i..n],
-                &mut self.positions_y[i..n],
-                &mut self.speeds[i..n],
-                &mut self.directions_x[i..n],
-                &mut self.directions_y[i..n],
+        // The 0..=3 remaining particles, sequentially: handing them to Rayon costs
+        // far more than the whole vectorized loop above.
+        for j in i..n {
+            Self::update_one(
+                &mut self.positions_x[j],
+                &mut self.positions_y[j],
+                &mut self.speeds[j],
+                &mut self.directions_x[j],
+                &mut self.directions_y[j],
                 self.dt,
                 self.constants.gravity,
             );
         }
-
-        Ok(())
     }
 
     /// Fallback update function when AVX is not available.
@@ -285,16 +314,31 @@ impl Simulation {
             .zip(directions_x.par_iter_mut())
             .zip(directions_y.par_iter_mut())
             .for_each(|((((px, py), speed), dx), dy)| {
-                let vx = *speed * *dx;
-                let vy = *speed * *dy + gravity * dt;
-                *px += vx * dt;
-                *py += vy * dt;
-                let new_speed = (vx * vx + vy * vy).sqrt();
-                if new_speed != 0.0 {
-                    *dx = vx / new_speed;
-                    *dy = vy / new_speed;
-                }
-                *speed = new_speed;
+                Self::update_one(px, py, speed, dx, dy, dt, gravity);
             });
+    }
+
+    /// Advances one particle. Shared by the Rayon path and the AVX path's scalar
+    /// tail so both apply exactly the same arithmetic as the vectorized loop.
+    #[inline]
+    fn update_one(
+        px: &mut f64,
+        py: &mut f64,
+        speed: &mut f64,
+        dx: &mut f64,
+        dy: &mut f64,
+        dt: f64,
+        gravity: f64,
+    ) {
+        let vx = *speed * *dx;
+        let vy = *speed * *dy + gravity * dt;
+        *px += vx * dt;
+        *py += vy * dt;
+        let new_speed = (vx * vx + vy * vy).sqrt();
+        if new_speed != 0.0 {
+            *dx = vx / new_speed;
+            *dy = vy / new_speed;
+        }
+        *speed = new_speed;
     }
 }

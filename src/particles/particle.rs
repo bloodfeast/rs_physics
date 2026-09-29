@@ -149,19 +149,22 @@ impl Particle {
                 let drag_acceleration = drag_force / self.mass;
                 let drag_velocity = drag_acceleration * dt;
 
+                let speed_before_drag = current_speed;
                 current_speed = if current_speed > drag_velocity {
                     current_speed - drag_velocity
                 } else {
                     0.0
                 };
 
-                if current_speed != 0.0 {
-                    vx = self.direction.0 * current_speed;
-                    vy = self.direction.1 * current_speed;
+                // Scale the post-gravity velocity. Rebuilding it from the pre-gravity
+                // `self.direction` would throw away the turn gravity just gave it.
+                let scale = if speed_before_drag > 0.0 {
+                    current_speed / speed_before_drag
                 } else {
-                    vx = 0.0;
-                    vy = 0.0;
-                }
+                    0.0
+                };
+                vx *= scale;
+                vy *= scale;
             }
             None => {}
         }
