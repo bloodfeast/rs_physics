@@ -44,7 +44,9 @@ use std::f64::consts::PI;
 /// * `y` - The y-coordinate (can be fractional)
 ///
 /// # Returns
-/// A tuple (vx, vy) of interpolated velocity components.
+/// A tuple (vx, vy) of interpolated velocity components, in the grid's own unit:
+/// domain widths per second, not m/s. `FluidGrid` moves a quantity `dt * width * v`
+/// cells per step.
 ///
 /// # Note
 /// Coordinates outside the grid are clamped to the boundary.
@@ -146,7 +148,8 @@ pub fn sample_density_2d(grid: &FluidGrid, x: f64, y: f64) -> f64 {
 /// * `z` - The z-coordinate (can be fractional)
 ///
 /// # Returns
-/// A tuple (vx, vy, vz) of interpolated velocity components.
+/// A tuple (vx, vy, vz) of interpolated velocity components, in domain widths per
+/// second, not m/s, as for [`sample_velocity_2d`].
 ///
 /// # Examples
 /// ```
@@ -522,6 +525,9 @@ impl FluidParticle2D {
 
     /// Updates the particle state based on fluid forces.
     ///
+    /// Position is in grid cells and velocity in the grid's unit, domain widths per
+    /// second, not m/s.
+    ///
     /// # Arguments
     /// * `grid` - The fluid grid to interact with
     /// * `fluid_density` - Density of the fluid for drag calculation
@@ -541,20 +547,39 @@ impl FluidParticle2D {
             fluid_viscosity,
         );
 
-        // Apply two-way coupling if enabled
+        // Drag acts along the relative velocity, so |F| / (m |u - v|) is the rate at
+        // which it relaxes v toward u. Integrated implicitly: explicit Euler
+        // overshoots u and diverges once dt exceeds twice the relaxation time, which
+        // a 0.1 mm grain in water already does at 60 Hz.
+        let (rel_vx, rel_vy) = (fluid_vel.0 - self.vx, fluid_vel.1 - self.vy);
+        let rel_speed = (rel_vx * rel_vx + rel_vy * rel_vy).sqrt();
+        let rate = if rel_speed > 1e-10 {
+            (drag.0 * drag.0 + drag.1 * drag.1).sqrt() / (self.mass * rel_speed)
+        } else {
+            0.0
+        };
+        let keep = 1.0 / (1.0 + rate * dt);
+        let new_vx = fluid_vel.0 - rel_vx * keep;
+        let new_vy = fluid_vel.1 - rel_vy * keep;
+
+        // Apply two-way coupling if enabled: the impulse the particle actually
+        // received over *its* `dt`, expressed as the force that delivers it over the
+        // grid's step, which is what the grid-side function multiplies by.
         if two_way_coupling {
-            apply_particle_force_to_grid_2d(grid, (self.x, self.y), drag, self.mass);
+            let to_force = self.mass / grid.get_dt();
+            let force = ((new_vx - self.vx) * to_force, (new_vy - self.vy) * to_force);
+            apply_particle_force_to_grid_2d(grid, (self.x, self.y), force, self.mass);
         }
 
-        // Update particle velocity (F = ma, so a = F/m)
-        let ax = drag.0 / self.mass;
-        let ay = drag.1 / self.mass;
-        self.vx += ax * dt;
-        self.vy += ay * dt;
+        self.vx = new_vx;
+        self.vy = new_vy;
 
-        // Update position
-        self.x += self.vx * dt;
-        self.y += self.vy * dt;
+        // Update position. The grid's velocities are in domain widths per second
+        // (its `advect` moves a quantity `dt * width * v` cells), so this does too:
+        // a particle moving with the flow keeps pace with what the flow carries.
+        let cells_per_width = grid.get_width() as f64;
+        self.x += self.vx * dt * cells_per_width;
+        self.y += self.vy * dt * cells_per_width;
     }
 }
 
@@ -578,6 +603,8 @@ impl FluidParticle3D {
     }
 
     /// Updates the particle state based on fluid forces.
+    ///
+    /// Position is in grid cells and velocity in domain widths per second, not m/s.
     pub fn update(&mut self, grid: &mut FluidGrid3D, fluid_density: f64, fluid_viscosity: f64, dt: f64, two_way_coupling: bool) {
         let fluid_vel = sample_velocity_3d(grid, self.x, self.y, self.z);
 
@@ -589,20 +616,45 @@ impl FluidParticle3D {
             fluid_viscosity,
         );
 
+        // Implicit drag relaxation, as in `FluidParticle2D::update`.
+        let rel_v = (
+            fluid_vel.0 - self.vx,
+            fluid_vel.1 - self.vy,
+            fluid_vel.2 - self.vz,
+        );
+        let rel_speed = (rel_v.0 * rel_v.0 + rel_v.1 * rel_v.1 + rel_v.2 * rel_v.2).sqrt();
+        let rate = if rel_speed > 1e-10 {
+            (drag.0 * drag.0 + drag.1 * drag.1 + drag.2 * drag.2).sqrt()
+                / (self.mass * rel_speed)
+        } else {
+            0.0
+        };
+        let keep = 1.0 / (1.0 + rate * dt);
+        let new_v = (
+            fluid_vel.0 - rel_v.0 * keep,
+            fluid_vel.1 - rel_v.1 * keep,
+            fluid_vel.2 - rel_v.2 * keep,
+        );
+
         if two_way_coupling {
-            apply_particle_force_to_grid_3d(grid, (self.x, self.y, self.z), drag, self.mass);
+            let to_force = self.mass / grid.get_dt();
+            let force = (
+                (new_v.0 - self.vx) * to_force,
+                (new_v.1 - self.vy) * to_force,
+                (new_v.2 - self.vz) * to_force,
+            );
+            apply_particle_force_to_grid_3d(grid, (self.x, self.y, self.z), force, self.mass);
         }
 
-        let ax = drag.0 / self.mass;
-        let ay = drag.1 / self.mass;
-        let az = drag.2 / self.mass;
-        self.vx += ax * dt;
-        self.vy += ay * dt;
-        self.vz += az * dt;
+        self.vx = new_v.0;
+        self.vy = new_v.1;
+        self.vz = new_v.2;
 
-        self.x += self.vx * dt;
-        self.y += self.vy * dt;
-        self.z += self.vz * dt;
+        // Domain widths per second to cells, matching the grid's `advect`.
+        let cells_per_width = grid.get_width() as f64;
+        self.x += self.vx * dt * cells_per_width;
+        self.y += self.vy * dt * cells_per_width;
+        self.z += self.vz * dt * cells_per_width;
     }
 }
 
@@ -750,3 +802,7 @@ mod tests {
         assert!((result - 0.5).abs() < 1e-10);
     }
 }
+
+#[cfg(test)]
+#[path = "particle_coupling_regression_tests.rs"]
+mod regression_tests;
