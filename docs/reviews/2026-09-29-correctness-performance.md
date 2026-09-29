@@ -224,9 +224,11 @@ On the branch head:
 |---|---|
 | `cargo test --lib`, default features | 643 passed, 0 failed, 16 ignored |
 | `cargo test --lib`, every feature except `gpu` | 1083 passed, 0 failed, 32 ignored |
+| `cargo test --features all` (CI's command, including `gpu` and doctests) | lib 1094 passed, 0 failed, 32 ignored; doctests 237 passed, 0 failed |
 | `RUSTFLAGS="" cargo test --lib --features particles` (the build a downstream crate gets, without the repo's `+avx`) | green |
 | `cargo check --lib --features particles --target aarch64-unknown-linux-gnu` | clean; it failed with 7 errors before |
 | `cargo check -p rs_physics_wasm` | clean |
+| `cargo check -p bevy_visual_tests --bins` | clean (warnings only, all already on `master`) |
 | `cargo bench --no-run` | clean |
 
 The ignored tests are open-defect repros, timing probes, and the pre-existing `bench_step_cost`. Each open-defect repro was confirmed to still fail with `--ignored`, so nothing is ignored that already passes.

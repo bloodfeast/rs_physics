@@ -624,43 +624,17 @@ fn initialize_epa_faces(polytope: &[SupportPoint], interior: (f64, f64, f64)) ->
     let mut faces = Vec::with_capacity(4);
 
     for &indices in &faces_data {
-        if let Some(face) = create_epa_face_with_orientation(polytope, indices, interior) {
+        // Either winding may face outward, depending on the handedness of the
+        // tetrahedron GJK hands over; keep whichever does.
+        let flipped = [indices[0], indices[2], indices[1]];
+        if let Some(face) = create_epa_face_with_orientation(polytope, indices, interior)
+            .or_else(|| create_epa_face_with_orientation(polytope, flipped, interior))
+        {
             faces.push(face);
         }
     }
 
     if faces.len() == 4 { Some(faces) } else { None }
-}
-
-/// Create EPA face with proper orientation
-fn create_epa_face(polytope: &[SupportPoint], indices: [usize; 3]) -> Option<Face> {
-    let a = polytope[indices[0]].point;
-    let b = polytope[indices[1]].point;
-    let c = polytope[indices[2]].point;
-
-    let ab = sub_vec(b, a);
-    let ac = sub_vec(c, a);
-    let normal = cross_product(ab, ac);
-
-    let normal_length = vector_magnitude(normal);
-    if normal_length < EPSILON {
-        return None;
-    }
-
-    let unit_normal = scale_vec(normal, 1.0 / normal_length);
-    let distance = dot_product(unit_normal, a);
-
-    let (final_normal, final_distance) = if distance < 0.0 {
-        (negate_vector(unit_normal), -distance)
-    } else {
-        (unit_normal, distance)
-    };
-
-    Some(Face {
-        indices,
-        normal: final_normal,
-        distance: final_distance,
-    })
 }
 
 /// Find the face closest to origin
