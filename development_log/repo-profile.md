@@ -464,3 +464,19 @@ baseline lacked.
   defects filed in passing: `hud.rs:60` says `F1` toggles diagnostics when the binding is
   `Backquote` (`F1` is `Bookmark(0)`), and `menu.rs::field()` uses a bare `2.0` gap where
   `ui::stack()` uses `S1 = 4` for the identical figure-to-label relationship.
+- 2026-09-29 — Five-area correctness/performance review (GJK/EPA, CCD, joints, particles, SPH); full
+  findings in `docs/reviews/2026-09-29-correctness-performance.md`. Load-bearing facts for the next
+  reviewer:
+  - **`PhysicsWorld` does not run CCD at all**: `WorldConfig::enable_ccd` is read nowhere. "Does
+    this path route through CCD?" (hazard 3) is answered *no* for everything in the world.
+  - **The crate has three normal conventions**. `ContactInfo` and constraint `Contact*` point
+    1 → 2; `CcdCollisionResult` points 2 → 1. Check which one a call site assumes.
+  - **Anything `solve()`d inside the world's iteration loop must be a pure relaxation step.** A
+    constraint that integrates time or applies `F·dt` inside `solve()` runs `constraint_iterations`
+    times per step. `WorldConstraint::is_iterative` now gates this.
+  - **Per-call coefficients are a recurring defect class here.** Hinge damping, rope-chain bleed and
+    SPH ground friction were all per call. Write damping as `exp(−c·dt)` or `1/(1 + c·dt)`.
+  - **EPA must orient faces from an interior point, never from the origin.** GJK hands over the
+    origin on a face whenever the pair has a mirror plane through the centres.
+  - **`--features particles` did not compile off x86_64 until this review.** The SIMD sites are now
+    `cfg(target_arch)`-gated; keep new intrinsics behind the same gate.
