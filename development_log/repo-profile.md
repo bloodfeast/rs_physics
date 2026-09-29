@@ -480,3 +480,14 @@ baseline lacked.
     origin on a face whenever the pair has a mirror plane through the centres.
   - **`--features particles` did not compile off x86_64 until this review.** The SIMD sites are now
     `cfg(target_arch)`-gated; keep new intrinsics behind the same gate.
+- 2026-09-29 — Acoustics review (`docs/reviews/2026-09-29-acoustics.md`). The ray tracer is in
+  Ridgeline and was not reviewed; this covers what it asks `rs_physics` for.
+  - **The ISO 9613-1 absorption model is exact**: it matches an independent implementation to
+    1e-15 and all 48 values of ISO 9613-2 Table 2. Do not re-derive it; tighten tests against the
+    table instead.
+  - **No preset is acoustically soft.** Reflection comes from the bulk-impedance mismatch alone, so
+    every solid reflects >99.7% of pressure, including `dry_vegetation`. Porous absorption (flow
+    resistivity, Miki/Delany–Bazley) is the missing term, and it is an API decision (ACU-1).
+  - **`barrier_insertion_db` has no lit side.** It steps 0 → 5 dB at the shadow boundary. Fixing it
+    needs a signed path difference and a caller change in Ridgeline together (ACU-2).
+  - **`impedance` is the P-wave (bulk) impedance** as of this review, not `sqrt(Eρ)`.
