@@ -2266,11 +2266,13 @@ impl PhysicsWorld {
                 let dz = pos2.2 - pos1.2;
                 let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
-                if distance < 1e-10 {
-                    return None; // Overlapping centers, can't compute normal
-                }
-
-                let normal = (dx / distance, dy / distance, dz / distance);
+                // Coincident centres: any direction separates them; pick one
+                // (same fallback as `sphere_sphere_contact`).
+                let normal = if distance < 1e-10 {
+                    (1.0, 0.0, 0.0)
+                } else {
+                    (dx / distance, dy / distance, dz / distance)
+                };
                 let penetration = r1 + r2 - distance;
 
                 if penetration <= 0.0 {
@@ -3923,7 +3925,9 @@ mod tests {
         // Same speed, same shape, wildly different ballistic coefficient.
         let mut world = drag_world();
         world.add_object(sphere_with_mass(0.05, 10.0, 40.0)); // dense slug
-        world.add_object(sphere_with_mass(0.50, 0.2, 40.0));  // light beach ball
+        let mut ball = sphere_with_mass(0.50, 0.2, 40.0);  // light beach ball
+        ball.object.position.y = 5.0; // not co-located with the slug
+        world.add_object(ball);
 
         for _ in 0..240 {
             world.step();

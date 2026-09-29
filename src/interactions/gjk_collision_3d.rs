@@ -1,6 +1,5 @@
 use crate::interactions::{cross_product, dot_product, vector_magnitude};
 use crate::models::{Quaternion, Shape3D, Simplex, SupportPoint};
-use std::collections::HashMap;
 
 /// Contact information from collision detection
 /// Normal convention: points FROM shape1 TO shape2
@@ -407,47 +406,14 @@ fn beveled_cuboid_support(
     bevel: f64,
     dir: (f64, f64, f64)
 ) -> (f64, f64, f64) {
-    let half_extents = (width * 0.5, height * 0.5, depth * 0.5);
-
-    // Start with box support
-    let mut support = (
-        if dir.0 >= 0.0 { half_extents.0 } else { -half_extents.0 },
-        if dir.1 >= 0.0 { half_extents.1 } else { -half_extents.1 },
-        if dir.2 >= 0.0 { half_extents.2 } else { -half_extents.2 }
-    );
-
-    // Lower threshold for better edge detection in rotated cases
-    let threshold = 0.3; // More sensitive to diagonal directions
-    let axis_strength = (
-        dir.0.abs() > threshold,
-        dir.1.abs() > threshold,
-        dir.2.abs() > threshold
-    );
-
-    let strong_axes = (axis_strength.0 as u8) +
-        (axis_strength.1 as u8) +
-        (axis_strength.2 as u8);
-
-    if strong_axes >= 2 {
-        // Edge or corner case - apply beveling
-        if axis_strength.0 { support.0 -= bevel * support.0.signum(); }
-        if axis_strength.1 { support.1 -= bevel * support.1.signum(); }
-        if axis_strength.2 { support.2 -= bevel * support.2.signum(); }
-
-        // Add rounded contribution - more aggressive for edge detection
-        let bevel_scale = match strong_axes {
-            3 => bevel,           // Corner: full sphere
-            2 => bevel * 0.9,     // Edge: increased from 0.7071 for better detection
-            _ => 0.0
-        };
-
-        support = add_vec(support, scale_vec(dir, bevel_scale));
-    } else if strong_axes == 1 {
-        // Face case - but add small bevel for numerical stability
-        support = add_vec(support, scale_vec(dir, bevel * 0.1));
-    }
-
-    support
+    // Rounded box = inner box (half extents minus the bevel) swept by a sphere of
+    // radius `bevel`. `dir` is already unit length (normalised by the caller).
+    let inner = (width * 0.5 - bevel, height * 0.5 - bevel, depth * 0.5 - bevel);
+    (
+        if dir.0 >= 0.0 { inner.0 } else { -inner.0 } + bevel * dir.0,
+        if dir.1 >= 0.0 { inner.1 } else { -inner.1 } + bevel * dir.1,
+        if dir.2 >= 0.0 { inner.2 } else { -inner.2 } + bevel * dir.2,
+    )
 }
 
 /// Polyhedron support using hill-climbing optimization
@@ -608,9 +574,16 @@ fn run_epa(
     }
 
     let mut polytope = simplex.points.clone();
-    let mut faces = initialize_epa_faces(&polytope)?;
+    let interior = scale_vec(
+        polytope.iter().fold((0.0, 0.0, 0.0), |acc, p| add_vec(acc, p.point)),
+        0.25,
+    );
+    let mut faces = initialize_epa_faces(&polytope, interior)?;
 
     for _ in 0..EPA_MAX_ITERATIONS {
+        if faces.is_empty() {
+            return None;
+        }
         // Find closest face
         let (closest_idx, closest_distance) = find_closest_face(&faces);
         let closest_face = &faces[closest_idx];
@@ -630,14 +603,20 @@ fn run_epa(
         }
 
         // Expand polytope
-        expand_polytope(&mut polytope, &mut faces, support, closest_idx);
+        expand_polytope(&mut polytope, &mut faces, support, closest_idx, interior);
     }
 
-    None
+    // Out of iterations on a curved surface: the closest face is still a lower
+    // bound on the depth and within the last refinement step of the truth.
+    if faces.is_empty() {
+        return None;
+    }
+    let (idx, d) = find_closest_face(&faces);
+    build_contact_info(&polytope, &faces[idx], d)
 }
 
 /// Initialize EPA with tetrahedron faces
-fn initialize_epa_faces(polytope: &[SupportPoint]) -> Option<Vec<Face>> {
+fn initialize_epa_faces(polytope: &[SupportPoint], interior: (f64, f64, f64)) -> Option<Vec<Face>> {
     let faces_data = [
         [0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]
     ];
@@ -645,7 +624,7 @@ fn initialize_epa_faces(polytope: &[SupportPoint]) -> Option<Vec<Face>> {
     let mut faces = Vec::with_capacity(4);
 
     for &indices in &faces_data {
-        if let Some(face) = create_epa_face(polytope, indices) {
+        if let Some(face) = create_epa_face_with_orientation(polytope, indices, interior) {
             faces.push(face);
         }
     }
@@ -705,7 +684,8 @@ fn expand_polytope(
     polytope: &mut Vec<SupportPoint>,
     faces: &mut Vec<Face>,
     support: SupportPoint,
-    _remove_face_idx: usize  // Ignored - we find all visible faces
+    _remove_face_idx: usize,  // Ignored - we find all visible faces
+    interior: (f64, f64, f64),
 ) {
     polytope.push(support.clone());
     let new_vertex_idx = polytope.len() - 1;
@@ -731,29 +711,22 @@ fn expand_polytope(
 
     // Collect all edges from visible faces and count occurrences
     // Horizon edges appear exactly once; internal edges appear twice
-    let mut edge_count: HashMap<(usize, usize), usize> = HashMap::new();
-
+    let mut horizon_edges: Vec<(usize, usize)> = Vec::with_capacity(3 * visible_indices.len());
     for &face_idx in &visible_indices {
         let face = &faces[face_idx];
-        let edges = [
+        for (a, b) in [
             (face.indices[0], face.indices[1]),
             (face.indices[1], face.indices[2]),
             (face.indices[2], face.indices[0]),
-        ];
-
-        for (a, b) in edges {
-            // Use canonical edge representation (smaller index first)
+        ] {
             let edge = if a < b { (a, b) } else { (b, a) };
-            *edge_count.entry(edge).or_insert(0) += 1;
+            if let Some(pos) = horizon_edges.iter().position(|&e| e == edge) {
+                horizon_edges.swap_remove(pos); // shared by two visible faces: interior
+            } else {
+                horizon_edges.push(edge);
+            }
         }
     }
-
-    // Horizon edges are those that appear exactly once
-    let horizon_edges: Vec<(usize, usize)> = edge_count
-        .into_iter()
-        .filter(|(_, count)| *count == 1)
-        .map(|(edge, _)| edge)
-        .collect();
 
     // Remove visible faces (in reverse order to preserve indices)
     visible_indices.sort_by(|a, b| b.cmp(a));
@@ -769,16 +742,16 @@ fn expand_polytope(
         let indices2 = [b, a, new_vertex_idx];
 
         // Create face with first winding
-        if let Some(face) = create_epa_face_with_orientation(polytope, indices1) {
+        if let Some(face) = create_epa_face_with_orientation(polytope, indices1, interior) {
             faces.push(face);
-        } else if let Some(face) = create_epa_face_with_orientation(polytope, indices2) {
+        } else if let Some(face) = create_epa_face_with_orientation(polytope, indices2, interior) {
             faces.push(face);
         }
     }
 }
 
 /// Create EPA face ensuring normal points away from origin
-fn create_epa_face_with_orientation(polytope: &[SupportPoint], indices: [usize; 3]) -> Option<Face> {
+fn create_epa_face_with_orientation(polytope: &[SupportPoint], indices: [usize; 3], interior: (f64, f64, f64)) -> Option<Face> {
     let a = polytope[indices[0]].point;
     let b = polytope[indices[1]].point;
     let c = polytope[indices[2]].point;
@@ -797,8 +770,10 @@ fn create_epa_face_with_orientation(polytope: &[SupportPoint], indices: [usize; 
     // Distance from origin to face plane
     let distance = dot_product(unit_normal, a);
 
-    // For EPA, we want the normal pointing away from origin (positive distance)
-    if distance >= 0.0 {
+    // Orient outward: away from a point strictly inside the polytope. The origin
+    // cannot be used for this - GJK routinely hands over a simplex with the
+    // origin exactly on a face, where the sign of `distance` is rounding noise.
+    if dot_product(unit_normal, sub_vec(a, interior)) >= 0.0 {
         Some(Face {
             indices,
             normal: unit_normal,
