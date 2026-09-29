@@ -80,16 +80,17 @@ impl Rope2D {
     ///
     /// Only applies corrections if the rope is taut. When taut, the rope
     /// behaves like a distance constraint (Joint2D), preserving tangential
-    /// velocity while only correcting radial velocity and position.
-    ///
-    /// The key insight is that when position is corrected to keep the rope
-    /// at max_length, we must also add velocity in the tangential direction
-    /// so the object swings naturally rather than just dropping straight down.
+    /// velocity while only correcting radial velocity and position. It only
+    /// ever pulls: approaching ends get no impulse, so a rope cannot add
+    /// kinetic energy or momentum to the pair.
     ///
     /// # Arguments
     ///
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let dx = self.object2.position.x - self.object1.position.x;
         let dy = self.object2.position.y - self.object1.position.y;
         let current_length = (dx * dx + dy * dy).sqrt();
@@ -125,33 +126,8 @@ impl Rope2D {
         // Decompose velocity into radial component
         let radial_vel = rel_vx * nx + rel_vy * ny;
 
-        // Position correction - project object2 back onto the constraint circle
+        // Position correction - project back onto the constraint circle
         let position_correction = error.min(0.2);
-
-        // Calculate target position on the constraint circle
-        let target_length = self.max_length;
-        let scale = target_length / current_length;
-        let target_x2 = self.object1.position.x + dx * scale;
-        let target_y2 = self.object1.position.y + dy * scale;
-
-        // Position displacement caused by constraint
-        let disp_x = target_x2 - self.object2.position.x;
-        let disp_y = target_y2 - self.object2.position.y;
-
-        // KEY FIX: Convert position displacement into velocity
-        // This ensures that when the rope pulls the object onto the arc,
-        // the object gains velocity in that direction to continue swinging.
-        if dt > 1e-10 {
-            let vel_from_correction = self.baumgarte * 0.5;
-            if inv_mass2 > 0.0 {
-                self.object2.velocity.x += disp_x * vel_from_correction / dt;
-                self.object2.velocity.y += disp_y * vel_from_correction / dt;
-            }
-            if inv_mass1 > 0.0 {
-                self.object1.velocity.x -= disp_x * vel_from_correction / dt * (inv_mass1 / inv_mass2).min(1.0);
-                self.object1.velocity.y -= disp_y * vel_from_correction / dt * (inv_mass1 / inv_mass2).min(1.0);
-            }
-        }
 
         // Apply position correction (mass-weighted)
         self.object1.position.x += position_correction * (inv_mass1 / total_inv_mass) * nx;
@@ -161,18 +137,16 @@ impl Rope2D {
 
         // Handle velocity constraint - remove radial velocity component if separating
         if radial_vel > 0.0 {
+            // lambda is always negative here (the rope pulls), so no clamp is needed
             let bias = self.baumgarte * error / dt;
             let lambda = -(radial_vel + bias) / total_inv_mass;
 
-            let max_impulse = 0.1 / dt;
-            let clamped_lambda = lambda.min(max_impulse);
+            self.lambda += lambda;
 
-            self.lambda += clamped_lambda;
-
-            self.object1.velocity.x -= clamped_lambda * inv_mass1 * nx;
-            self.object1.velocity.y -= clamped_lambda * inv_mass1 * ny;
-            self.object2.velocity.x += clamped_lambda * inv_mass2 * nx;
-            self.object2.velocity.y += clamped_lambda * inv_mass2 * ny;
+            self.object1.velocity.x -= lambda * inv_mass1 * nx;
+            self.object1.velocity.y -= lambda * inv_mass1 * ny;
+            self.object2.velocity.x += lambda * inv_mass2 * nx;
+            self.object2.velocity.y += lambda * inv_mass2 * ny;
         }
 
         Ok(())
@@ -284,16 +258,17 @@ impl Rope3D {
     ///
     /// Only applies corrections if the rope is taut. When taut, the rope
     /// behaves like a distance constraint (Joint3D), preserving tangential
-    /// velocity while only correcting radial velocity and position.
-    ///
-    /// The key insight is that when position is corrected to keep the rope
-    /// at max_length, we must also add velocity in the tangential direction
-    /// so the object swings naturally rather than just dropping straight down.
+    /// velocity while only correcting radial velocity and position. It only
+    /// ever pulls: approaching ends get no impulse, so a rope cannot add
+    /// kinetic energy or momentum to the pair.
     ///
     /// # Arguments
     ///
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let dx = self.object2.position.x - self.object1.position.x;
         let dy = self.object2.position.y - self.object1.position.y;
         let dz = self.object2.position.z - self.object1.position.z;
@@ -344,40 +319,6 @@ impl Rope3D {
         // This is always needed when taut to maintain the max_length
         let position_correction = error.min(0.2);  // Limit correction per iteration
 
-        // Calculate what the position SHOULD be after correction
-        let target_length = self.max_length;
-        let scale = target_length / current_length;
-
-        // New position for object2 on the constraint sphere
-        let target_x2 = self.object1.position.x + dx * scale;
-        let target_y2 = self.object1.position.y + dy * scale;
-        let target_z2 = self.object1.position.z + dz * scale;
-
-        // Position displacement caused by constraint
-        let disp_x = target_x2 - self.object2.position.x;
-        let disp_y = target_y2 - self.object2.position.y;
-        let disp_z = target_z2 - self.object2.position.z;
-
-        // KEY FIX: Convert position displacement into velocity
-        // This ensures that when the rope pulls the object onto the arc,
-        // the object gains velocity in that direction to continue swinging.
-        // Without this, position correction moves the object but velocity
-        // stays purely downward, causing it to immediately try to stretch again.
-        if dt > 1e-10 {
-            // Add velocity from position correction (scale by Baumgarte to avoid overshoot)
-            let vel_from_correction = self.baumgarte * 0.5;  // Damped velocity addition
-            if inv_mass2 > 0.0 {
-                self.object2.velocity.x += disp_x * vel_from_correction / dt;
-                self.object2.velocity.y += disp_y * vel_from_correction / dt;
-                self.object2.velocity.z += disp_z * vel_from_correction / dt;
-            }
-            if inv_mass1 > 0.0 {
-                self.object1.velocity.x -= disp_x * vel_from_correction / dt * (inv_mass1 / inv_mass2).min(1.0);
-                self.object1.velocity.y -= disp_y * vel_from_correction / dt * (inv_mass1 / inv_mass2).min(1.0);
-                self.object1.velocity.z -= disp_z * vel_from_correction / dt * (inv_mass1 / inv_mass2).min(1.0);
-            }
-        }
-
         // Apply position correction (mass-weighted)
         self.object1.position.x += position_correction * (inv_mass1 / total_inv_mass) * nx;
         self.object1.position.y += position_correction * (inv_mass1 / total_inv_mass) * ny;
@@ -390,22 +331,19 @@ impl Rope3D {
         if radial_vel > 0.0 {
             // Objects are separating - apply impulse to stop radial separation
             // Baumgarte stabilization for remaining position error
+            // lambda is always negative here (the rope pulls), so no clamp is needed
             let bias = self.baumgarte * error / dt;
             let lambda = -(radial_vel + bias) / total_inv_mass;
 
-            // Clamp impulse for stability
-            let max_impulse = 0.1 / dt;
-            let clamped_lambda = lambda.min(max_impulse);
-
-            self.lambda += clamped_lambda;
+            self.lambda += lambda;
 
             // Apply velocity corrections (mass-weighted, radial direction only)
-            self.object1.velocity.x -= clamped_lambda * inv_mass1 * nx;
-            self.object1.velocity.y -= clamped_lambda * inv_mass1 * ny;
-            self.object1.velocity.z -= clamped_lambda * inv_mass1 * nz;
-            self.object2.velocity.x += clamped_lambda * inv_mass2 * nx;
-            self.object2.velocity.y += clamped_lambda * inv_mass2 * ny;
-            self.object2.velocity.z += clamped_lambda * inv_mass2 * nz;
+            self.object1.velocity.x -= lambda * inv_mass1 * nx;
+            self.object1.velocity.y -= lambda * inv_mass1 * ny;
+            self.object1.velocity.z -= lambda * inv_mass1 * nz;
+            self.object2.velocity.x += lambda * inv_mass2 * nx;
+            self.object2.velocity.y += lambda * inv_mass2 * ny;
+            self.object2.velocity.z += lambda * inv_mass2 * nz;
         }
 
         Ok(())
@@ -781,6 +719,10 @@ impl RopeChain3D {
     /// * `Ok(())` - Constraints solved successfully
     /// * `Err(PhysicsError)` - If an error occurred
     pub fn solve(&mut self, dt: f64, iterations: usize) -> Result<(), PhysicsError> {
+        // compliance / dt² is 0/0 at dt = 0 and the NaN lands in the positions
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let iterations = iterations.max(1);
 
         for _ in 0..iterations {
@@ -839,9 +781,11 @@ impl RopeChain3D {
         // Position correction magnitude
         let correction = error / effective_mass;
 
-        // Apply position corrections (mass-weighted)
-        let c1 = correction * (inv_mass1 / total_inv_mass);
-        let c2 = correction * (inv_mass2 / total_inv_mass);
+        // Apply position corrections: XPBD moves each particle by w_i * Δλ.
+        // (Scaling by the mass *fraction* w_i / Σw instead made the step
+        // proportional to particle mass, and chains of heavy particles diverge.)
+        let c1 = correction * inv_mass1;
+        let c2 = correction * inv_mass2;
 
         // Apply to first particle
         if inv_mass1 > 0.0 {
@@ -1112,6 +1056,10 @@ impl RopeChain2D {
 
     /// Solves constraints.
     pub fn solve(&mut self, dt: f64, iterations: usize) -> Result<(), PhysicsError> {
+        // compliance / dt² is 0/0 at dt = 0 and the NaN lands in the positions
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let iterations = iterations.max(1);
 
         for _ in 0..iterations {
@@ -1158,8 +1106,9 @@ impl RopeChain2D {
         let ny = dy / current_length;
 
         let correction = error / effective_mass;
-        let c1 = correction * (inv_mass1 / total_inv_mass);
-        let c2 = correction * (inv_mass2 / total_inv_mass);
+        // XPBD: each particle moves by w_i * Δλ, not by its mass fraction
+        let c1 = correction * inv_mass1;
+        let c2 = correction * inv_mass2;
 
         if inv_mass1 > 0.0 {
             self.particles[segment_index].position.0 += c1 * nx;

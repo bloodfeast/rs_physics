@@ -178,6 +178,12 @@ pub enum WorldConstraint {
 }
 
 impl WorldConstraint {
+    /// True for constraints that are relaxed by repeated Gauss-Seidel sweeps.
+    /// The rest advance time or apply a per-step force and must run once.
+    pub fn is_iterative(&self) -> bool {
+        matches!(self, WorldConstraint::Joint(_) | WorldConstraint::Rope(_))
+    }
+
     /// Solves the constraint for one iteration.
     ///
     /// # Arguments
@@ -336,7 +342,7 @@ fn solve_rope_chain(chain: &mut RopeChain3D, dt: f64) {
     }
 
     // Small bleed, so a plucked bridge settles instead of ringing forever.
-    chain.apply_damping(0.02);
+    chain.apply_damping(1.0 - (-0.05 * dt).exp());
 }
 
 /// Solves a joint constraint between world objects.
@@ -412,7 +418,51 @@ fn solve_joint(
         obj.object.position.z -= correction * ratio * nz;
     }
 
+    remove_relative_velocity_along(
+        joint.object1, idx2, (nx, ny, nz), inv_mass1, inv_mass2, object_ids, objects, false,
+    );
+
     joint.lambda += correction / dt;
+}
+
+/// Velocity half of a distance constraint: cancel the relative velocity along
+/// `n` (only the separating part when `unilateral`), with the inverse-mass
+/// weighting of an impulse, so momentum is conserved.
+#[allow(clippy::too_many_arguments)]
+fn remove_relative_velocity_along(
+    object1: Option<ObjectId>,
+    idx2: usize,
+    n: (f64, f64, f64),
+    inv_mass1: f64,
+    inv_mass2: f64,
+    object_ids: &HashMap<ObjectId, usize>,
+    objects: &mut [PhysicalObject3D],
+    unilateral: bool,
+) {
+    let idx1 = object1.and_then(|id| object_ids.get(&id).copied());
+    let v1 = match idx1 {
+        Some(i) => {
+            let v = &objects[i].object.velocity;
+            (v.x, v.y, v.z)
+        }
+        None => (0.0, 0.0, 0.0),
+    };
+    let v2 = &objects[idx2].object.velocity;
+    let vn = (v2.x - v1.0) * n.0 + (v2.y - v1.1) * n.1 + (v2.z - v1.2) * n.2;
+    if unilateral && vn <= 0.0 {
+        return;
+    }
+    let impulse = -vn / (inv_mass1 + inv_mass2);
+    if let Some(i) = idx1 {
+        let v = &mut objects[i].object.velocity;
+        v.x -= impulse * inv_mass1 * n.0;
+        v.y -= impulse * inv_mass1 * n.1;
+        v.z -= impulse * inv_mass1 * n.2;
+    }
+    let v = &mut objects[idx2].object.velocity;
+    v.x += impulse * inv_mass2 * n.0;
+    v.y += impulse * inv_mass2 * n.1;
+    v.z += impulse * inv_mass2 * n.2;
 }
 
 /// Solves a spring constraint between world objects.
@@ -582,6 +632,10 @@ fn solve_rope(
         obj.object.position.y -= correction * ratio * ny;
         obj.object.position.z -= correction * ratio * nz;
     }
+
+    remove_relative_velocity_along(
+        rope.object1, idx2, (nx, ny, nz), inv_mass1, inv_mass2, object_ids, objects, true,
+    );
 
     rope.lambda += correction / dt;
 }

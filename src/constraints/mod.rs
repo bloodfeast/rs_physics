@@ -113,3 +113,7 @@ mod constraint_solvers_tests;
 #[cfg(feature = "constraints")]
 #[cfg(test)]
 mod solver_tests;
+
+#[cfg(feature = "constraints")]
+#[cfg(test)]
+mod regression_tests;

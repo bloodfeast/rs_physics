@@ -2017,11 +2017,21 @@ impl PhysicsWorld {
             constraint.apply_gravity(gravity, dt);
         }
 
-        // Iterative constraint solving (Gauss-Seidel)
+        // Constraints that advance their own state (hinge, rope chain) or apply
+        // a force for the step (spring) run exactly once per step.
+        for constraint in self.constraints.values_mut() {
+            if !constraint.is_iterative() {
+                constraint.solve(&self.object_ids, &mut self.objects, dt, gravity);
+            }
+        }
+
+        // Iterative constraint solving (Gauss-Seidel) for joints and ropes only.
         let iterations = self.constraint_iterations;
         for _ in 0..iterations {
             for constraint in self.constraints.values_mut() {
-                constraint.solve(&self.object_ids, &mut self.objects, dt, gravity);
+                if constraint.is_iterative() {
+                    constraint.solve(&self.object_ids, &mut self.objects, dt, gravity);
+                }
             }
         }
     }

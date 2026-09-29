@@ -72,6 +72,9 @@ impl Joint2D {
     ///
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let dx = self.object2.position.x - self.object1.position.x;
         let dy = self.object2.position.y - self.object1.position.y;
         let current_distance = (dx * dx + dy * dy).sqrt();
@@ -105,21 +108,18 @@ impl Joint2D {
         let rel_vy = self.object2.velocity.y - self.object1.velocity.y;
         let relative_velocity = rel_vx * nx + rel_vy * ny;
 
-        // Impulse magnitude
+        // Impulse magnitude. No clamp: a bound of `0.1 / dt` has units of 1/s,
+        // not N·s, so it capped heavy bodies to almost nothing.
         let lambda = -(relative_velocity + bias) / total_inv_mass;
 
-        // Clamp impulse for stability
-        let max_impulse = 0.1 / dt;
-        let clamped_lambda = lambda.clamp(-max_impulse, max_impulse);
-
         // Track accumulated impulse for warm starting
-        self.lambda += clamped_lambda;
+        self.lambda += lambda;
 
         // Apply velocity corrections (mass-weighted)
-        self.object1.velocity.x -= clamped_lambda * inv_mass1 * nx;
-        self.object1.velocity.y -= clamped_lambda * inv_mass1 * ny;
-        self.object2.velocity.x += clamped_lambda * inv_mass2 * nx;
-        self.object2.velocity.y += clamped_lambda * inv_mass2 * ny;
+        self.object1.velocity.x -= lambda * inv_mass1 * nx;
+        self.object1.velocity.y -= lambda * inv_mass1 * ny;
+        self.object2.velocity.x += lambda * inv_mass2 * nx;
+        self.object2.velocity.y += lambda * inv_mass2 * ny;
 
         // Position correction (mass-weighted)
         let max_correction = 0.1;
@@ -304,8 +304,9 @@ impl Spring2D {
 
     /// Calculates the critical damping coefficient for this spring.
     pub fn critical_damping(&self) -> f64 {
-        let m_reduced = (self.object1.mass * self.object2.mass)
-            / (self.object1.mass + self.object2.mass);
+        // Written in inverse masses so a static (infinite-mass) end reduces to
+        // the other body's mass: m1·m2 / (m1 + m2) is ∞/∞ = NaN there.
+        let m_reduced = 1.0 / (1.0 / self.object1.mass + 1.0 / self.object2.mass);
         2.0 * (self.spring_constant * m_reduced).sqrt()
     }
 
