@@ -47,6 +47,9 @@ pub const SHADOW_ONSET_HZ: f64 = 700.0;
 /// `forward` and `right` must be unit vectors and perpendicular. They are supplied rather
 /// than derived from an angle so a caller with a camera basis can hand it over directly
 /// and nothing has to agree about which way zero points.
+///
+/// Up is taken as `right × forward`, which is up in a right-handed basis (Bevy's). In a
+/// left-handed one it points down and every elevation comes out mirrored.
 #[derive(Debug, Clone, Copy)]
 pub struct Ears {
     pub position: [f64; 3],

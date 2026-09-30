@@ -13,10 +13,13 @@ use crate::utils::PhysicsError;
 ///
 /// # Returns
 /// * `Ok(())` if the value is positive
-/// * `Err(PhysicsError)` if the value is zero or negative
+/// * `Err(PhysicsError)` if the value is zero, negative or NaN
+///
+/// Written as `!(value > 0.0)` rather than `value <= 0.0`: every comparison with NaN
+/// is false, so the second form lets NaN through as if it were positive.
 #[inline]
 pub fn validate_positive(value: f64, name: &str) -> Result<(), PhysicsError> {
-    if value <= 0.0 {
+    if !(value > 0.0) {
         return Err(PhysicsError::CalculationError(
             format!("{} must be positive, got {}", name, value)
         ));
@@ -32,10 +35,10 @@ pub fn validate_positive(value: f64, name: &str) -> Result<(), PhysicsError> {
 ///
 /// # Returns
 /// * `Ok(())` if the value is non-negative
-/// * `Err(PhysicsError)` if the value is negative
+/// * `Err(PhysicsError)` if the value is negative or NaN
 #[inline]
 pub fn validate_non_negative(value: f64, name: &str) -> Result<(), PhysicsError> {
-    if value < 0.0 {
+    if !(value >= 0.0) {
         return Err(PhysicsError::CalculationError(
             format!("{} must be non-negative, got {}", name, value)
         ));

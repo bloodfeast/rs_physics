@@ -328,14 +328,11 @@ impl Shape3D {
                 (radius.powi(2) + (height / 2.0).powi(2)).sqrt()
             },
             Shape3D::Polyhedron(vertices, _) => {
-                // Find the furthest vertex from center
-                let (cx, cy, cz) = self.center_of_mass();
-
+                // Measured from the local origin - the point the body's position
+                // refers to and the frame the support function places vertices in.
                 vertices.iter()
-                    .map(|(x, y, z)| {
-                        ((x - cx).powi(2) + (y - cy).powi(2) + (z - cz).powi(2)).sqrt()
-                    })
-                    .fold(0.0, |max, dist| if dist > max { dist } else { max })
+                    .map(|(x, y, z)| (x * x + y * y + z * z).sqrt())
+                    .fold(0.0, f64::max)
             }
         }
     }

@@ -552,7 +552,9 @@ impl ParticleEffects {
             // not worth an error path through a renderer.
             Backend::Cpu | Backend::Gpu => self.integrate_free_flight(dt),
         }
-        self.policy.record(backend, count, started.elapsed());
+        // Record what actually ran. Only the CPU path exists here, and filing a
+        // fallback under `Gpu` would calibrate the GPU model on CPU timings.
+        self.policy.record(Backend::Cpu, count, started.elapsed());
 
         self.retire_expired();
     }

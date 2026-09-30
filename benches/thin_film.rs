@@ -12,7 +12,7 @@
 //! `newtonian_scalar_loop` is that difference and nothing else — same data, same law,
 //! same answer. Whatever the number says is what goes in the docs.
 //!
-//! **What does a step cost per cell?** The `map` case is Ridgeline's stain buffer at its
+//! **What does a step cost per cell?** The `map` case is a game's stain buffer at its
 //! real size — 1400 × 1000 texels over a 280 × 200 m map — because "it is O(n) and
 //! branch-free" is not a frame budget. It is also the case that says whether visiting
 //! every cell is affordable at all, or whether the caller has to track which tiles are
@@ -127,7 +127,7 @@ fn benchmark(c: &mut Criterion) {
         b.iter(|| small.step(black_box(&newtonian), black_box(dt)))
     });
 
-    // Ridgeline's stain buffer at its real size: 5 texels/m over a 280 x 200 m map.
+    // A game's stain buffer at its real size: 5 texels/m over a 280 x 200 m map.
     let mut map = spill(1400, 1000, 0.2);
     let map_dt = map.max_step(&newtonian) * 0.25;
     group.bench_function("step_1400x1000_map", |b| {

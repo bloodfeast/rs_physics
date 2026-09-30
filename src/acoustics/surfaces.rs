@@ -10,10 +10,17 @@
 //! how loud its echo is, and asking it is both less work and impossible to get
 //! inconsistent with the rest of the physics.
 //!
-//! The consequence is one nobody has to author: concrete rings and rubber does not, and
-//! the reason is that concrete's impedance is enormously mismatched to air's while
-//! rubber's is merely large. That falls out of two numbers that were in the material for
-//! entirely unrelated reasons.
+//! The consequence is one nobody has to author, and it is less dramatic than it sounds:
+//! every solid is enormously mismatched to air. Concrete, steel, ice and timber reflect
+//! more than 99.9% of the pressure that reaches them, and the softest solid presets --
+//! rubber, polyurethane, dry vegetation -- more than 99.7%: a few hundredths of a decibel
+//! per bounce between them. That is right for a thick slab, and it means **no preset here
+//! is acoustically soft**.
+//!
+//! What makes grass, snow, leaf litter or a sofa absorb is not an impedance mismatch at
+//! all. It is air being pumped through pores, which is governed by flow resistivity, and
+//! a [`Material`] carries no such number. Those surfaces are outside this model; see
+//! ACU-1 in `docs/reviews/2026-09-29-acoustics.md`.
 //!
 //! # And a barrier is a path length
 //!
@@ -33,14 +40,21 @@ pub const AIR_IMPEDANCE: f64 = 413.0;
 
 /// Characteristic acoustic impedance of a material, in rayl.
 ///
-/// `Z = ρc`, where the speed of sound in a solid is `sqrt(E/ρ)` — so `Z = sqrt(Eρ)`, and a
-/// material needs to know nothing it did not already know.
+/// `Z = ρc`, where `c` is the speed of a compression wave through the bulk of the solid:
+/// `sqrt(M/ρ)`, with `M = E(1 − ν) / ((1 + ν)(1 − 2ν))` the P-wave modulus. So
+/// `Z = sqrt(Mρ)`, and a material needs to know nothing it did not already know.
 ///
 /// This is the *bulk* longitudinal impedance, which is the right quantity for a thick
-/// slab of something. A thin panel that flexes is a different problem and this will
-/// overstate it.
+/// slab of something. It is not `sqrt(Eρ)`: that is the speed of a thin rod, which is free
+/// to bulge sideways as it is squeezed, and it reads steel 14% low and rubber four times
+/// low. A thin panel that flexes is a different problem again and this will overstate it.
+///
+/// A Poisson's ratio of exactly 0.5 is incompressible, and its impedance is infinite.
 pub fn impedance(material: &Material) -> f64 {
-    (material.youngs_modulus.max(0.0) * material.density.max(0.0)).sqrt()
+    let nu = material.poisson_ratio;
+    let p_wave_modulus =
+        material.youngs_modulus.max(0.0) * (1.0 - nu) / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    (p_wave_modulus.max(0.0) * material.density.max(0.0)).sqrt()
 }
 
 /// Fraction of *pressure* reflected at an air-to-material boundary, 0 to 1.
@@ -52,14 +66,18 @@ pub fn impedance(material: &Material) -> f64 {
 /// distant slope and is left to the caller who knows the geometry.
 pub fn reflection_coefficient(material: &Material) -> f64 {
     let z = impedance(material);
+    if z.is_infinite() {
+        return 1.0;
+    }
     ((z - AIR_IMPEDANCE) / (z + AIR_IMPEDANCE)).abs().clamp(0.0, 1.0)
 }
 
 /// Fraction of *energy* absorbed by a surface, 0 to 1.
 ///
-/// The complement of the reflected energy, and the number room acoustics is usually
-/// written in terms of. A material with a huge impedance absorbs almost nothing — which
-/// is why a concrete room is unbearable and a sofa fixes it.
+/// The complement of the reflected energy, at normal incidence. A material with a huge
+/// impedance absorbs almost nothing, which is why a concrete room is unbearable. A sofa
+/// fixes it by a mechanism this function cannot see: its absorption is porous, and every
+/// solid preset here comes out below 1% (see the module notes).
 pub fn absorption_coefficient(material: &Material) -> f64 {
     let r = reflection_coefficient(material);
     (1.0 - r * r).clamp(0.0, 1.0)
@@ -108,8 +126,9 @@ pub fn absorption_coefficient(material: &Material) -> f64 {
 ///
 /// # Returns
 ///
-/// The insertion loss in decibels, in `0..=BARRIER_CAP_DB`. A non-positive or non-finite
-/// wavelength returns 0.
+/// The insertion loss in decibels, in `0..=BARRIER_CAP_DB`. An infinite wavelength (0 Hz
+/// from [`wavelength`]) is the `N -> 0` limit, [`BARRIER_GRAZING_DB`], from either side. A
+/// non-positive or NaN wavelength, or a NaN path difference, returns 0.
 ///
 /// # Examples
 ///
@@ -130,8 +149,14 @@ pub fn absorption_coefficient(material: &Material) -> f64 {
 /// assert!(barrier_insertion_db(1.0, lambda) > 15.0);
 /// ```
 pub fn barrier_insertion_db(path_difference_m: f64, wavelength_m: f64) -> f64 {
-    if !(wavelength_m > 0.0) || !wavelength_m.is_finite() || path_difference_m.is_nan() {
+    if !(wavelength_m > 0.0) || path_difference_m.is_nan() {
         return 0.0;
+    }
+    if wavelength_m == f64::INFINITY {
+        // 0 Hz: `N = 2 x path / wavelength` is 0 for any finite path, and the grazing
+        // value is where both branches meet, so that is the limit; the division below
+        // would give 0 or NaN instead.
+        return if path_difference_m.is_finite() { BARRIER_GRAZING_DB } else { 0.0 };
     }
     let n = 2.0 * path_difference_m / wavelength_m;
     if n == 0.0 {
@@ -350,7 +375,8 @@ pub const FOLIAGE_MAX_CREDITED_M: f64 = 200.0;
 /// and every mixer wants a gain, and the sign convention is exactly the kind of thing
 /// that gets inverted once and then hidden behind a compensating constant.
 pub fn gain_from_db_loss(db: f64) -> f64 {
-    if db <= 0.0 {
+    // `!(db > 0)` rather than `db <= 0` so a NaN loss is no loss, not a NaN sample.
+    if !(db > 0.0) {
         return 1.0;
     }
     10f64.powf(-db / 20.0)

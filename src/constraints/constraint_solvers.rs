@@ -217,8 +217,9 @@ impl Spring {
     ///
     /// The critical damping coefficient in N·s/m
     pub fn critical_damping(&self) -> f64 {
-        let m_reduced = (self.object1.mass * self.object2.mass)
-            / (self.object1.mass + self.object2.mass);
+        // Written in inverse masses so a static (infinite-mass) end reduces to
+        // the other body's mass: m1·m2 / (m1 + m2) is ∞/∞ = NaN there.
+        let m_reduced = 1.0 / (1.0 / self.object1.mass + 1.0 / self.object2.mass);
         2.0 * (self.spring_constant * m_reduced).sqrt()
     }
 
@@ -296,6 +297,9 @@ impl ConstraintSolver for Joint {
     }
 
     fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
+        if dt <= 0.0 {
+            return Ok(());
+        }
         let dx = self.object2.position - self.object1.position;
         let current_distance = dx.abs();
         let error = current_distance - self.constraint_distance;
@@ -324,11 +328,9 @@ impl ConstraintSolver for Joint {
 
         // Velocity constraint: relative_velocity + bias = 0
         // Impulse magnitude: lambda = -(relative_velocity + bias) / total_inv_mass
+        // No clamp: a bound of `0.1 / dt` has units of 1/s, not N·s, so it
+        // capped heavy bodies to almost nothing and let a hanging mass fall away.
         let lambda = -(relative_velocity + bias) / total_inv_mass;
-
-        // Clamp impulse for stability
-        let max_impulse = 0.1 / dt;
-        let lambda = lambda.clamp(-max_impulse, max_impulse);
 
         // Apply velocity corrections (mass-weighted)
         self.object1.velocity -= lambda * inv_mass1 * direction;
@@ -368,8 +370,8 @@ impl ConstraintSolver for Spring {
         // Calculate damping force
         let damping_force = self.damping_factor * relative_velocity;
 
-        // Total force
-        let total_force = (spring_force + damping_force) * dx.signum();
+        // Total force (damping already acts along the relative velocity in 1D)
+        let total_force = spring_force * dx.signum() + damping_force;
 
         // Apply forces
         let acceleration1 = total_force / self.object1.mass;

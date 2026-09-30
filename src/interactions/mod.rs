@@ -84,3 +84,5 @@ mod shape_collisions_3d_tests;
 mod gjk_collision_3d_tests;
 #[cfg(test)]
 mod continuous_collision_detection_tests;
+#[cfg(test)]
+mod gjk_epa_regression_tests;

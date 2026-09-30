@@ -21,11 +21,24 @@
 //!
 //! # The law
 //!
-//! For a Newtonian liquid on a slope, the volumetric flux per unit width is
+//! For a Newtonian liquid on a bed inclined at θ, the volumetric flux per unit width of
+//! a film of thickness `h_n` measured *normal to the bed* is Nusselt's
 //!
 //! ```text
-//!   q = ρ g sinθ h³ / (3 μ)                      [m²/s]
+//!   q = ρ g sinθ h_n³ / (3 μ)                    [m²/s]
 //! ```
+//!
+//! A heightfield does not hold `h_n`. It holds `h`, liquid volume per unit of
+//! *horizontal* area -- the vertical depth, `h = h_n / cosθ` -- and it differences over
+//! horizontal distance, so the gradient it sees is `tanθ`. The same film in those
+//! variables, which is the law every function here evaluates:
+//!
+//! ```text
+//!   q = ρ g sinθ cos³θ h³ / (3 μ) = (ρ g / 3μ) · tanθ · h³ · cos⁴θ,   cos²θ = 1/(1 + tan²θ)
+//! ```
+//!
+//! The `cos⁴θ` is near 1 on gentle ground and not otherwise: leaving it out overstates the
+//! flux by 2% at a grade of 0.1, 8% at 0.2, 19% at 0.3 and 4× at 45°.
 //!
 //! **The cube is the entire story.** Everything a film does that a diffusion model
 //! does not comes out of that exponent:
@@ -47,15 +60,19 @@
 //!   rather than an asymptote.
 //!
 //! Written for a solver, the driving slope is not the ground's slope but the slope of
-//! the liquid's **free surface**, ground plus depth:
+//! the liquid's **free surface**, ground plus depth, while the inclination is the
+//! ground's alone:
 //!
 //! ```text
-//!   q = -(ρ g h³ / 3μ) ∇(z_bed + h)
+//!   q = -(ρ g h³ / 3μ) · cos⁴θ · ∇(z_bed + h),   cos²θ = 1/(1 + |∇z_bed|²)
 //! ```
 //!
-//! which is the same law and also does the levelling: on flat ground the ∇h term
-//! spreads a pool, and on a slope the ∇z term outruns it. One expression, both
-//! behaviours, no blend factor.
+//! which is the same law and also does the levelling: on flat ground `cos⁴θ = 1`, the
+//! ∇h term spreads a pool, and on a slope the ∇z term outruns it. One expression, both
+//! behaviours, no blend factor. On a grid each face takes `∇z_bed` as the bed's
+//! gradient across it; [`FilmFlow::flux_on_bed`] is this law for one face, and its
+//! docs give the two places it is approximate (the levelling term on a grade, and beds
+//! inclined across the grid axes).
 //!
 //! # Where the yield stress goes
 //!
@@ -66,8 +83,11 @@
 //! known factor:
 //!
 //! ```text
-//!   q = (ρ g sinθ h³ / 3μ) · (1 - 1.5X + 0.5X³),   X = h_y/h,  h_y = τ_y/(ρ g sinθ)
+//!   q = (ρ g sinθ h_n³ / 3μ) · (1 - 1.5X + 0.5X³),   X = τ_y / τ_w,  τ_w = ρ g sinθ h_n
 //! ```
+//!
+//! In the grid's variables the wall stress is `τ_w = ρ g tanθ h cos²θ`, so the yield
+//! test carries one power of `cos²θ` where the flux carries two.
 //!
 //! At `X = 0` the factor is 1 and the law is the Newtonian one. At `X = 1` it is
 //! exactly 0, so the flux is not switched off at a threshold — it *reaches* zero
@@ -80,18 +100,48 @@
 //! criterion, the wave speed and the stability limit are pure functions of scalars
 //! plus a [`FilmFlow`] — three `f64` fields, each a precomputed grouping of the
 //! fluid's constants, none recomputed per cell. Transcribing that into WGSL is a
-//! uniform struct and four lines of arithmetic:
+//! uniform struct and five lines of arithmetic -- [`FilmFlow::flux_on_bed`], term for
+//! term:
 //!
 //! ```wgsl
 //! struct FilmFlow { hydrostatic: f32, mobility: f32, yield_length: f32 };
 //!
-//! fn film_flux(f: FilmFlow, slope: f32, h: f32) -> f32 {
-//!     let drive = abs(slope) * h;
+//! // bed:   the bed's gradient across the face,          (z_i - z_j) / dx
+//! // slope: the free surface's gradient across the face, ((z_i - z_j) + (h_i - h_j)) / dx
+//! // h:     the donor cell's depth
+//! fn film_flux(f: FilmFlow, bed: f32, slope: f32, h: f32) -> f32 {
+//!     let cos2 = 1.0 / (1.0 + bed * bed);
+//!     let drive = abs(slope) * h * cos2;
 //!     let x = f.yield_length / drive;
-//!     let q = f.mobility * slope * h * h * h * (1.0 - 1.5 * x + 0.5 * x * x * x);
+//!     let q = f.mobility * cos2 * cos2 * slope * h * h * h * (1.0 - 1.5 * x + 0.5 * x * x * x);
 //!     return select(0.0, q, drive > f.yield_length);
 //! }
 //! ```
+//!
+//! ## Changed 2026-09-30 (FILM-2): transcriptions of the old law must follow
+//!
+//! **Anything that copied this law before 2026-09-30 now disagrees with it on every
+//! sloped face.** The old law used the grid's
+//! `tanθ` and vertical depth in Nusselt's formula, which is written for `sinθ` and
+//! normal thickness. That overstated the flux by `1/cos⁴θ`: +2% at a grade of 0.1, +8%
+//! at 0.2, +19% at 0.3, 4× at 45°, and without bound towards vertical. Level ground is
+//! unchanged, bit for bit.
+//!
+//! The change a transcription needs, per face, from the bed difference it already
+//! computes:
+//!
+//! ```text
+//!   let cos2 = 1.0 / (1.0 + bed * bed);     // bed = (z_i - z_j) / dx
+//!   drive *= cos2;                          // before the yield test and X
+//!   q     *= cos2 * cos2;                   // the flux itself
+//! ```
+//!
+//! For a Newtonian fluid (`yield_length = 0`) the drive only gates the result and
+//! `cos2 > 0`, so the change is the single multiply `q *= cos2 * cos2`. Everything
+//! derived from the flux moves with it: [`FilmFlow::wave_speed`] gains `cos2` in both
+//! places, [`FilmFlow::shear_rate`] gains one `cos2`, and
+//! [`FilmFlow::arrest_thickness`] becomes `yield_length · (slope + 1/slope)`. The
+//! explicit step limit's diffusive term is unchanged.
 //!
 //! One thing a shader author must copy along with the formula: **difference the ground
 //! and the depth separately.** The free-surface slope is
@@ -117,10 +167,16 @@
 //! not.
 //!
 //! Checked rather than hoped for, since "it should vectorize" is the same class of
-//! claim as "it should be fast". Counted from `--emit=asm`, **stock
-//! `cargo build --release`**, which is the build a consumer actually gets: of the
-//! double-precision arithmetic in `FilmGrid::step`, **66% is packed** (294 `pd` against
-//! 149 `sd`); in [`FilmFlow::flux_batch`], **69%** (68 against 30). The NaN sink is
+//! claim as "it should be fast". Counted from `--emit=asm` of the build a consumer
+//! actually gets -- `cargo build --release` with no target flags. (This repository's own
+//! `.cargo/config.toml` adds `-C target-feature=+avx`, so tests and benches run *inside*
+//! it are not that build; override with an empty `RUSTFLAGS` to reproduce these.)
+//! Counting double-precision add, sub, mul, div, min, max, compare, logic and blend
+//! instructions, `FilmGrid::step` is **62% packed** (197 `pd` against 122 `sd`) and
+//! [`FilmFlow::flux_batch`] **56%** (41 against 32). The inclination divide added on
+//! 2026-09-30 vectorizes with the rest: the same count before it was 64% and 59%. (An
+//! earlier version of this paragraph quoted 66% and 69% from a different count; those
+//! are not comparable with these.) The NaN sink is
 //! emitted as a `cmp`/`blend` pair rather than a branch. Every bounds check LLVM could
 //! not discharge sits in the cold tail, past the last vector instruction, so none is in
 //! a loop body — which is also why the first pass is written a row at a time:
@@ -161,6 +217,15 @@
 //! Measured, `cargo bench --bench thin_film`, release, one Windows x86-64 desktop. The
 //! ratios are the durable part; the absolute figures move with the machine.
 //!
+//! These predate the inclination factor (FILM-2), which adds one divide per face. On
+//! the consumer build it measured within noise everywhere: `step` −2% at 128 × 128 and
+//! +2% on the 1400 × 1000 map, `max_step` −1%, `flux_batch` −5% Newtonian and −4%
+//! Bingham (Linux x86-64). On an `+avx` build -- which includes this repository's own
+//! benches -- the four-wide divide is the bottleneck while the data is in L1/L2: over two
+//! runs `step` was +21–32% at 128 × 128 and `flux_batch` +16–21% Newtonian, +57–58%
+//! Bingham. From 256 × 256 up, and on the map, where the loop waits on memory, `step`
+//! and `max_step` are unchanged.
+//!
 //! | | per call | per element |
 //! |---|---|---|
 //! | `flux_batch`, Newtonian, 100 k faces | 72 µs | **0.72 ns** |
@@ -194,7 +259,7 @@
 //! shape, which is what lets LLVM discharge the bounds checks and vectorize at all. The
 //! prediction going in was that the unswitch was the whole story. It was not.
 //!
-//! **A whole-map sweep is not a frame budget.** 1400 × 1000 is Ridgeline's stain buffer
+//! **A whole-map sweep is not a frame budget.** 1400 × 1000 is a game's stain buffer
 //! at 5 texels per metre over a 280 × 200 m map, and 16.8 ms of it is a frame. That is
 //! the measurement behind [`FilmGrid`] declining to own the sweep: liquid covers a
 //! percent or two of a map, and a caller that visits only the tiles holding any pays a
@@ -253,12 +318,34 @@ fn shape<const N: u32>(h: f64) -> f64 {
     }
 }
 
+/// `sec²θ = 1 + tan²θ` for a bed whose gradient is `bed_slope = tanθ`. Exactly `1.0`
+/// on level ground.
+#[inline(always)]
+fn tilt(bed_slope: f64) -> f64 {
+    1.0 + bed_slope * bed_slope
+}
+
+/// `cos²θ = 1/(1 + tan²θ)` for a bed whose gradient is `bed_slope`. Exactly `1.0` on
+/// level ground, falls to `0.0` as the bed approaches vertical, NaN for a NaN.
+#[inline(always)]
+fn incline(bed_slope: f64) -> f64 {
+    1.0 / tilt(bed_slope)
+}
+
 /// The flux law, as the compiler sees it in an inner loop: total, branch-free, and
 /// free of anything that would stop a loop containing it from vectorizing.
 ///
+/// `tilt` is `sec²θ` of the bed (see [`tilt`]). The flux carries `cos⁴θ` and the wall
+/// stress `cos²θ`; see the module docs for why -- the grid stores vertical depth and
+/// horizontal gradients, and those are the conversions. On level ground `tilt` is
+/// exactly 1, `cos²θ` is exactly 1, and the result is bit-for-bit the uninclined law.
+///
 /// `YIELDS` unswitches the Bingham plug correction, which is a property of the fluid
 /// and therefore loop-invariant. Hoisting it by hand rather than hoping LLVM does it
-/// also removes an unconditional divide from the Newtonian path.
+/// also keeps a second divide out of the Newtonian path. (Taking `cos²θ` and `X` from
+/// one shared reciprocal was tried: it saved about 2%, inside the noise, and broke the
+/// bit-for-bit agreement between the two paths for a zero yield stress, which
+/// [`FilmFlow::flux_batch`] promises.)
 ///
 /// The final `if` is a select, not a jump: `drive > yield_length` is false for a NaN in
 /// either argument, so a NaN is *stopped here* rather than spreading to every cell it
@@ -270,13 +357,17 @@ fn flux_kernel<const N: u32, const YIELDS: bool>(
     mobility: f64,
     yield_length: f64,
     gain: f64,
+    tilt: f64,
     slope: f64,
     thickness: f64,
 ) -> f64 {
-    // `drive` is the wall shear stress over ρg: |slope|·h. Written this way the yield
-    // test needs no division.
-    let drive = slope.abs() * thickness;
-    let base = gain * mobility * slope * shape::<N>(thickness);
+    // `reach` is the wall shear stress over ρg on level ground, |slope|·H. On an incline
+    // the stress is `sinθ · (H cosθ) = reach·cos²θ` for vertical depth H: that is
+    // `drive`, and the yield test on it needs no division.
+    let reach = slope.abs() * thickness;
+    let cos2 = 1.0 / tilt;
+    let drive = reach * cos2;
+    let base = gain * (cos2 * cos2) * mobility * slope * shape::<N>(thickness);
     let q = if YIELDS {
         let x = yield_length / drive;
         base * (1.0 - 1.5 * x + 0.5 * x * x * x)
@@ -411,36 +502,91 @@ impl FilmFlow {
         self.yield_length
     }
 
-    /// Volumetric flux per unit width, m²/s, signed with the slope.
+    /// Volumetric flux per unit width, m²/s, signed with the slope, of a **uniform film on
+    /// a bed of gradient `slope`**.
     ///
     /// ```text
-    ///   q = mobility · slope · h³ · (1 - 1.5X + 0.5X³)
+    ///   q = mobility · cos⁴θ · slope · h³ · (1 - 1.5X + 0.5X³),   cos²θ = 1/(1 + slope²)
     /// ```
     ///
-    /// The scalar form: what the WGSL in the module docs transcribes and what the tests
-    /// are written against. For a whole row or grid use [`Self::flux_batch`], which is
-    /// the same arithmetic in a shape the compiler can put four cells through at a
-    /// time.
+    /// This is Nusselt's inclined film, `ρg sinθ (h cosθ)³ / 3μ`, written in the
+    /// variables a heightfield holds: `h` the *vertical* depth and `slope = tanθ`. It is
+    /// exact on any grade, including past 45°, and tends to zero as the bed tends to
+    /// vertical, where the liquid over a unit of horizontal area has nowhere to be.
+    /// `slope` sets both the inclination and the drive, which is right for a uniform
+    /// film. A solver that has the bed and the free surface separately -- any grid --
+    /// should use [`Self::flux_on_bed`], which is what [`FilmGrid`] evaluates.
+    ///
+    /// For a whole row of uniform-film faces use [`Self::flux_batch`], which is the same
+    /// arithmetic in a shape the compiler can put several faces through at a time.
     ///
     /// # Arguments
     ///
-    /// * `slope` — the free-surface gradient, dimensionless and **signed**: positive
+    /// * `slope` -- the bed gradient `tanθ`, dimensionless and **signed**: positive
     ///   means downhill in the positive coordinate direction, and the flux comes back
-    ///   with the same sign. For a bed of angle θ this is `tanθ`; the difference from
-    ///   the `sinθ` of the derivation is far below the error in knowing the depth.
-    /// * `thickness` — h in metres, non-negative.
+    ///   with the same sign.
+    /// * `thickness` -- h in metres, the vertical depth, non-negative.
     ///
     /// # Behaviour at the edges, which is deliberate
     ///
     /// Total: no `Result`, no panic, no allocation, and it returns exactly `0.0` for a
-    /// zero slope, a zero thickness, a film below the arrest thickness, **and for a NaN
-    /// in either argument**. The inner loop of a solver is the wrong place to raise an
-    /// error, and a NaN that leaked in here would otherwise reach every cell within a
-    /// few steps. It is stopped rather than propagated; the checking that keeps it out
-    /// is at [`Self::new`] and [`FilmGrid`]'s setters.
+    /// zero slope, an infinite one, a zero thickness, a film below the arrest thickness,
+    /// **and for a NaN in either argument**. The inner loop of a solver is the wrong
+    /// place to raise an error, and a NaN that leaked in here would otherwise reach
+    /// every cell within a few steps. It is stopped rather than propagated; the checking
+    /// that keeps it out is at [`Self::new`] and [`FilmGrid`]'s setters.
     #[inline]
     pub fn flux(&self, slope: f64, thickness: f64) -> f64 {
-        flux_kernel::<3, true>(self.mobility, self.yield_length, 1.0, slope, thickness)
+        self.flux_on_bed(slope, slope, thickness)
+    }
+
+    /// Volumetric flux per unit width across one face of a grid, m²/s -- the law
+    /// [`FilmGrid`] evaluates, and the one a shader should transcribe.
+    ///
+    /// ```text
+    ///   q = mobility · cos⁴θ · slope · h³ · (1 - 1.5X + 0.5X³)
+    ///   cos²θ = 1/(1 + bed_slope²),   X = yield_length / (|slope| · h · cos²θ)
+    /// ```
+    ///
+    /// The inclination comes from the bed alone and the drive from the free surface. So
+    /// on level ground `cos⁴θ = 1` exactly, a pool levels under the unmodified law, and
+    /// a film on a grade runs at the inclined-Nusselt rate. [`Self::flux`] is this with
+    /// the two slopes equal.
+    ///
+    /// # Arguments
+    ///
+    /// * `bed_slope` -- the bed's gradient across the face, `(z_i - z_j) / dx`. Its sign
+    ///   does not matter.
+    /// * `slope` -- the free-surface gradient across the face,
+    ///   `((z_i - z_j) + (h_i - h_j)) / dx`, signed as in [`Self::flux`]. Difference the
+    ///   bed and the depth separately; see the module docs.
+    /// * `thickness` -- the donor's vertical depth in metres, non-negative.
+    ///
+    /// # Accuracy
+    ///
+    /// Exact for a uniform film on a planar bed inclined along a grid axis. Two things
+    /// it does not capture, both zero on level ground:
+    ///
+    /// - The levelling term. On an incline the exact lubrication flux weights the depth
+    ///   gradient by a further `cos²θ`, so this overstates levelling on a grade by
+    ///   `1 + bed_slope²` (+4% at 0.2, +9% at 0.3). The downhill term, which dominates on
+    ///   any grade, is exact.
+    /// - A bed inclined across a face. `bed_slope` is the gradient *across* the face, so
+    ///   on a plane inclined at 45° to the grid axes each face sees half of `tan²θ` and
+    ///   the flux is overstated by `((1 + tan²θ)/(1 + tan²θ/2))²`: +4% at a grade of
+    ///   0.2, where the uncorrected law was +8%.
+    ///
+    /// Total, with the same edge behaviour as [`Self::flux`].
+    #[inline]
+    pub fn flux_on_bed(&self, bed_slope: f64, slope: f64, thickness: f64) -> f64 {
+        flux_kernel::<3, true>(
+            self.mobility,
+            self.yield_length,
+            1.0,
+            tilt(bed_slope),
+            slope,
+            thickness,
+        )
     }
 
     /// [`Self::flux`] over contiguous slices — the form a solver should reach for.
@@ -457,7 +603,9 @@ impl FilmFlow {
     ///
     /// # Arguments
     ///
-    /// * `slopes` — free-surface gradients, one per face.
+    /// * `slopes` -- gradients, one per face, each read as in [`Self::flux`]: the bed and
+    ///   the drive at once, which is exact for a uniform film. A caller with the bed and
+    ///   the free surface separately wants [`Self::flux_on_bed`].
     /// * `thickness` — the **donor** depth at each face: the depth on the uphill side.
     ///   Averaging the two sides instead would let a dry cell donate liquid.
     /// * `out` — filled with the flux at each face, m²/s.
@@ -523,18 +671,20 @@ impl FilmFlow {
                 mobility,
                 yield_length,
                 1.0,
+                tilt(slopes[i]),
                 slopes[i],
                 thickness[i],
             );
         }
     }
 
-    /// Depth-averaged velocity of the film, m/s, signed with the slope.
+    /// Depth-averaged velocity of the film across the map, m/s, signed with the slope.
     ///
-    /// `u = q/h`. This is the Nusselt result `ρ g sinθ h² / 3μ` for a Newtonian liquid
-    /// — the speed a trail of spilt liquid visibly runs at, and the quantity to reach
-    /// for when asking "how long before it gets there". Returns `0.0` for zero or
-    /// negative thickness.
+    /// `u = q/h`: for a Newtonian liquid `ρ g sinθ cos³θ h² / 3μ`, which is Nusselt's
+    /// along-slope speed `ρ g sinθ (h cosθ)² / 3μ` projected onto the horizontal -- the
+    /// speed a trail of spilt liquid visibly advances across a map at, and the quantity
+    /// to reach for when asking "how long before it gets there". Returns `0.0` for zero
+    /// or negative thickness.
     #[inline]
     pub fn velocity(&self, slope: f64, thickness: f64) -> f64 {
         if !(thickness > 0.0) {
@@ -543,27 +693,35 @@ impl FilmFlow {
         self.flux(slope, thickness) / thickness
     }
 
-    /// Speed at which a change in depth travels, m/s, always non-negative.
+    /// Speed at which a change in depth travels across the map, m/s, always
+    /// non-negative.
     ///
-    /// `c = dq/dh = 3 · mobility · h · (|slope|·h - yield_length)`, which for a
-    /// Newtonian film is **three times the depth-averaged velocity**. That factor of
-    /// three is not a curiosity: it is why the leading edge of a spill outruns the
-    /// liquid in it, and it is the speed a grid must respect rather than the flow
+    /// `c = dq/dh`, the derivative of [`Self::flux`] at fixed slope:
+    ///
+    /// ```text
+    ///   c = 3 · mobility · cos²θ · h · (|slope|·h·cos²θ - yield_length)
+    /// ```
+    ///
+    /// which for a Newtonian film is **three times the depth-averaged velocity**. That
+    /// factor of three is not a curiosity: it is why the leading edge of a spill outruns
+    /// the liquid in it, and it is the speed a grid must respect rather than the flow
     /// speed. Confusing the two gives a solver that looks stable in a test and
     /// oscillates at three times the timestep in the field.
     #[inline]
     pub fn wave_speed(&self, slope: f64, thickness: f64) -> f64 {
-        let drive = slope.abs() * thickness;
+        let cos2 = incline(slope);
+        let drive = slope.abs() * thickness * cos2;
         if !(drive > self.yield_length) {
             return 0.0;
         }
-        3.0 * self.mobility * thickness * (drive - self.yield_length)
+        3.0 * self.mobility * cos2 * thickness * (drive - self.yield_length)
     }
 
     /// Wall shear rate in the film, s⁻¹, always non-negative.
     ///
-    /// `γ̇ = ρ g |slope| h / μ`, the velocity gradient at the ground, where it is
-    /// steepest. **This is the function that says whether a Newtonian viscosity was a
+    /// `γ̇ = ρ g sinθ (h cosθ) / μ = ρ g |slope| h cos²θ / μ`, the velocity gradient at
+    /// the ground, where it is steepest. **This is the function that says whether a
+    /// Newtonian viscosity was a
     /// defensible choice**: hand it to
     /// [`crate::fluid_dynamics::blood_apparent_viscosity`] and compare the answer with
     /// the viscosity you built the [`FilmFlow`] from. For blood films between half a
@@ -572,14 +730,22 @@ impl FilmFlow {
     /// prose.
     #[inline]
     pub fn shear_rate(&self, slope: f64, thickness: f64) -> f64 {
-        3.0 * self.mobility * slope.abs() * thickness
+        3.0 * self.mobility * incline(slope) * slope.abs() * thickness
     }
 
-    /// The film depth below which this liquid does not move on this slope, metres.
+    /// The vertical film depth below which this liquid does not move on this slope,
+    /// metres.
     ///
-    /// `h = τ_y / (ρ g slope)`. Infinite on level ground, which is the correct answer: a
-    /// yield-stress fluid on the flat never runs downhill, because there is no down.
-    /// Zero for a Newtonian fluid, which never stops.
+    /// The wall stress `ρ g sinθ (h cosθ)` reaches `τ_y` at
+    ///
+    /// ```text
+    ///   h = τ_y / (ρ g sinθ cosθ) = yield_length · (slope + 1/slope)
+    /// ```
+    ///
+    /// Infinite on level ground, which is the correct answer: a yield-stress fluid on the
+    /// flat never runs downhill, because there is no down. It rises again towards a
+    /// vertical bed, where the liquid above a unit of horizontal area is spread over an
+    /// ever larger face. Zero for a Newtonian fluid, which never stops.
     ///
     /// Small. For blood on a one-in-ten slope it is about five micrometres — nowhere
     /// near what holds a visible pool together. If you want the depth a spill *settles*
@@ -587,34 +753,78 @@ impl FilmFlow {
     /// [`crate::fluid_dynamics::puddle_depth`].
     #[inline]
     pub fn arrest_thickness(&self, slope: f64) -> f64 {
+        if !(self.yield_length > 0.0) {
+            return 0.0;
+        }
         let slope = slope.abs();
         if !(slope > 0.0) {
-            return if self.yield_length > 0.0 {
-                f64::INFINITY
-            } else {
-                0.0
-            };
-        }
-        self.yield_length / slope
-    }
-
-    /// The largest timestep a grid of this cell size may take, seconds.
-    ///
-    /// The CFL condition for the kinematic wave, `dt ≤ dx/c`. At exactly this value a
-    /// disturbance crosses one whole cell in one step, which is the boundary of what the
-    /// grid can represent; take a fraction of it. [`f64::INFINITY`] when nothing moves.
-    ///
-    /// Because `c` goes as `h²`, **the deepest cell on the map sets the timestep for all
-    /// of them**, and quadratically: a spill twice as deep needs a step four times
-    /// smaller. That is the number to watch when a film solver mysteriously destabilises
-    /// after a big splash. [`FilmGrid::max_step`] finds it for a whole grid.
-    #[inline]
-    pub fn max_step(&self, slope: f64, thickness: f64, cell_size: f64) -> f64 {
-        let speed = self.wave_speed(slope, thickness);
-        if !(speed > 0.0) {
             return f64::INFINITY;
         }
-        cell_size / speed
+        // `(1 + s²)/s` written as `s + 1/s`, which stays finite until `s` itself is not.
+        self.yield_length * (slope + 1.0 / slope)
+    }
+
+    /// The largest timestep a square grid of this cell size may take across a face with
+    /// this free-surface slope and donor depth, seconds.
+    ///
+    /// The flux law is a wave *and* a diffusion -- `q = -(ρgh³/3μ)·cos⁴θ·∇(z + h)` carries
+    /// the liquid downhill through `∇z` and levels it through `∇h` -- and an explicit step
+    /// has to respect both, so this is the smaller of two limits:
+    ///
+    /// ```text
+    ///   dt ≤ dx / c              the kinematic wave, c = dq/dh (Self::wave_speed)
+    ///   dt ≤ dx² / (2·d·D)       forward Euler on the levelling term, d = 2,
+    ///                            D = ρgh³/3μ ≥ dq/d(slope) = cos⁴θ·(1 - X³)·ρgh³/3μ
+    /// ```
+    ///
+    /// `D` is deliberately the bound rather than the derivative: it holds for every
+    /// inclination and yield stress, and it makes the level-ground limit exact.
+    /// `slope` is read as in [`Self::flux`], as the bed's gradient and the drive at once.
+    ///
+    /// On a steep slope the wave binds. On level or gently sloping ground the diffusion
+    /// does, by orders of magnitude: a 2 mm blood film on the flat with a 1% ripple, at
+    /// 5 cm cells, has a wave limit of about 60 s and a diffusive limit of 0.09 s. Stepping
+    /// past the diffusive limit does not drive a depth negative -- [`FilmGrid::step`]'s
+    /// limiter prevents that -- but it turns a smooth film into a grid-scale checkerboard
+    /// that the limiter then holds in place.
+    ///
+    /// Each face is bounded on its own and a cell has four, so take a fraction of this;
+    /// the tests here use a quarter. [`f64::INFINITY`] when the face is not moving -- a
+    /// zero slope, a dry donor, or a film below the arrest thickness -- since a face that
+    /// carries no flux cannot change either cell beside it this step.
+    ///
+    /// The deepest cell on the map sets the timestep for all of them: as `1/h²` where
+    /// the wave binds and `1/h³` where the diffusion does. That is the number to watch
+    /// when a film solver mysteriously destabilises after a big splash.
+    /// [`FilmGrid::max_step`] finds it for a whole grid.
+    #[inline]
+    pub fn max_step(&self, slope: f64, thickness: f64, cell_size: f64) -> f64 {
+        let rate = self.stability_rate(incline(slope), slope, thickness, 1.0 / cell_size);
+        if !(rate > 0.0) {
+            return f64::INFINITY;
+        }
+        1.0 / rate
+    }
+
+    /// The reciprocal of [`Self::max_step`], in 1/s: the larger of `c/dx` and `4D/dx²`,
+    /// and exactly `0.0` for a face that is not moving (including a NaN in either
+    /// argument). Kept as a rate so that a whole-grid scan can take a maximum and divide
+    /// once, rather than divide per face. `incline` is the bed's `cos²θ`, as in
+    /// [`flux_kernel`], so the wave speed here is the derivative of the flux the grid
+    /// actually moves.
+    #[inline(always)]
+    fn stability_rate(&self, incline: f64, slope: f64, thickness: f64, inv_dx: f64) -> f64 {
+        let drive = slope.abs() * thickness * incline;
+        let speed = 3.0 * self.mobility * incline * thickness * (drive - self.yield_length);
+        // `mobility·h³` bounds `dq/d(slope) = mobility·cos⁴θ·h³·(1 - X³)` for every
+        // inclination and yield stress, and equals it for a Newtonian film on the flat.
+        let diffusivity = self.mobility * thickness * thickness * thickness;
+        let rate = (speed * inv_dx).max(4.0 * diffusivity * inv_dx * inv_dx);
+        if drive > self.yield_length {
+            rate
+        } else {
+            0.0
+        }
     }
 }
 
@@ -858,7 +1068,9 @@ impl FilmGrid {
     /// accordingly: **5.2 ms on a 1400 × 1000 grid**, which is most of a frame to
     /// rediscover something the caller usually already knows. A caller that has just
     /// deposited the deepest liquid on the map should call [`FilmFlow::max_step`] with
-    /// that depth and skip this entirely.
+    /// that depth and skip this entirely -- passing the steepest *free-surface* slope it
+    /// expects, not the bed's. On level ground that is the edge of the fresh pool,
+    /// `depth / cell_size`; the bed's slope of zero would report no limit at all.
     pub fn max_step(&self, flow: &FilmFlow) -> f64 {
         let (w, h) = (self.width, self.height);
         let inv_dx = 1.0 / self.cell_size;
@@ -866,31 +1078,43 @@ impl FilmGrid {
         let ground = &self.ground[..cells];
         let depth = &self.thickness[..cells];
 
-        let mut smallest = f64::INFINITY;
+        // The fastest face, as a rate, so there is one divide per grid rather than one
+        // per face. The same per-face arithmetic as `FilmFlow::max_step`.
+        let mut fastest = 0.0f64;
         for y in 0..h {
             let r = y * w;
             let bed = &ground[r..r + w];
             let film = &depth[r..r + w];
             for x in 0..w - 1 {
-                let slope = ((bed[x] - bed[x + 1]) + (film[x] - film[x + 1])) * inv_dx;
+                let fall = bed[x] - bed[x + 1];
+                let slope = (fall + (film[x] - film[x + 1])) * inv_dx;
                 let donor = if slope > 0.0 { film[x] } else { film[x + 1] };
-                smallest = smallest.min(flow.max_step(slope, donor, self.cell_size));
+                let cos2 = incline(fall * inv_dx);
+                fastest = fastest.max(flow.stability_rate(cos2, slope, donor, inv_dx));
             }
         }
         for i in 0..cells - w {
             let j = i + w;
-            let slope = ((ground[i] - ground[j]) + (depth[i] - depth[j])) * inv_dx;
+            let fall = ground[i] - ground[j];
+            let slope = (fall + (depth[i] - depth[j])) * inv_dx;
             let donor = if slope > 0.0 { depth[i] } else { depth[j] };
-            smallest = smallest.min(flow.max_step(slope, donor, self.cell_size));
+            let cos2 = incline(fall * inv_dx);
+            fastest = fastest.max(flow.stability_rate(cos2, slope, donor, inv_dx));
         }
-        smallest
+        if fastest > 0.0 {
+            1.0 / fastest
+        } else {
+            f64::INFINITY
+        }
     }
 
     /// Advance the film by `dt` seconds.
     ///
     /// Allocates nothing and branches on nothing per cell. See [`Self::max_step`] for
-    /// what `dt` may be; exceeding it costs accuracy, not stability, because the
-    /// positivity limiter holds regardless.
+    /// what `dt` may be. Exceeding it can never drive a depth negative or lose liquid --
+    /// the positivity limiter holds regardless -- but that is all the limiter promises: past
+    /// the diffusive half of the limit, a film on level ground grows a grid-scale
+    /// checkerboard instead of levelling, and the limiter holds it there.
     ///
     /// A `dt` that is zero, negative or not finite is a no-op: the caller gets its grid
     /// back unchanged rather than an error, because this is called from a frame loop
@@ -948,23 +1172,32 @@ impl FilmGrid {
         // discharge, and `flux_x[y * w + x + 1]` against a length of `w * h + 1` is
         // not. The difference is a vectorized loop against one carrying a bounds check
         // per cell.
+        //
+        // The bed's own difference, `fall`, also gives the inclination `cos²θ` that turns
+        // the flux into the inclined-Nusselt one (see the module docs). It is the
+        // arithmetic of `FilmFlow::flux_on_bed`, term for term.
         for y in 0..h {
             let r = y * w;
             let bed = &ground[r..r + w];
             let film = &depth[r..r + w];
             let across = &mut flux_x[r..r + w];
             for x in 0..w - 1 {
-                let slope = ((bed[x] - bed[x + 1]) + (film[x] - film[x + 1])) * inv_dx;
+                let fall = bed[x] - bed[x + 1];
+                let slope = (fall + (film[x] - film[x + 1])) * inv_dx;
                 let donor = if slope > 0.0 { film[x] } else { film[x + 1] };
+                let sec2 = tilt(fall * inv_dx);
                 across[x + 1] =
-                    flux_kernel::<N, YIELDS>(mobility, yield_length, gain, slope, donor);
+                    flux_kernel::<N, YIELDS>(mobility, yield_length, gain, sec2, slope, donor);
             }
         }
         for i in 0..cells - w {
             let j = i + w;
-            let slope = ((ground[i] - ground[j]) + (depth[i] - depth[j])) * inv_dx;
+            let fall = ground[i] - ground[j];
+            let slope = (fall + (depth[i] - depth[j])) * inv_dx;
             let donor = if slope > 0.0 { depth[i] } else { depth[j] };
-            flux_y[j] = flux_kernel::<N, YIELDS>(mobility, yield_length, gain, slope, donor);
+            let sec2 = tilt(fall * inv_dx);
+            flux_y[j] =
+                flux_kernel::<N, YIELDS>(mobility, yield_length, gain, sec2, slope, donor);
         }
 
         // -- Pass 2: no cell may give away more than it has. --------------------------
@@ -1080,12 +1313,17 @@ mod tests {
     }
 
     #[test]
-    fn flux_is_linear_in_slope_and_signed_by_it() {
+    fn flux_follows_the_inclined_film_in_slope_and_is_signed_by_it() {
+        // Not linear in `tanθ`: the inclined film in vertical depth goes as
+        // `sinθ·cos³θ`, which is linear only to first order (FILM-2). The expected ratio
+        // is built from the angles, not from the `1/(1 + s²)` the code uses.
         let flow = blood();
         let depth = 0.002;
         let gentle = flow.flux(0.05, depth);
         let steep = flow.flux(0.15, depth);
-        assert_float_eq(steep / gentle, 3.0, 1e-12, Some("flux is linear in slope"));
+        let film = |s: f64| s.atan().sin() * s.atan().cos().powi(3);
+        assert_float_eq(steep / gentle, film(0.15) / film(0.05), 1e-12, Some("sinθ·cos³θ"));
+        assert!(steep / gentle < 3.0, "a steeper grade gains less than in proportion");
         assert_float_eq(
             flow.flux(-0.05, depth),
             -gentle,

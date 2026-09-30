@@ -8,8 +8,8 @@ mod particle_effects;
 mod particle_simulation;
 #[cfg(feature = "particles")]
 mod particle_interactions_barnes_hut;
-/// Closed-form motion for effect particles and loose pieces (the law the Ridgeline engine's
-/// effect records and gore pieces are evaluated with).
+/// Closed-form motion for effect particles and loose pieces: one law that a renderer's
+/// effect records and thrown pieces can share, evaluated at any instant without integrating.
 #[cfg(feature = "particles")]
 pub mod analytic;
 
@@ -37,3 +37,6 @@ mod particle_simulation_tests;
 #[cfg(test)]
 #[cfg(feature = "particles")]
 mod particle_interactions_barnes_hut_tests;
+#[cfg(test)]
+#[cfg(feature = "particles")]
+mod particle_regression_tests;

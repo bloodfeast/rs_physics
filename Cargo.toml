@@ -2,7 +2,7 @@
 name = "rs_physics"
 authors = ["Brandon White"]
 description = "A simple physics library written in Rust"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -36,7 +36,9 @@ gpu = ["wgpu", "pollster", "bytemuck"]
 rayon = "1.10.0"
 log = "0.4"
 env_logger = "0.11"
-rand = "0.9.0-alpha.2"
+# 0.9.3 is the first release without the RUSTSEC unsoundness in `rand::rng()` under a
+# custom logger, and a released minor rather than an alpha, so a patch can land on its own.
+rand = "0.9.3"
 approx = "0.5.1"
 crossbeam = "0.8"
 
@@ -62,6 +64,20 @@ required-features = ["particles"]
 
 [[bench]]
 name = "sph"
+harness = false
+required-features = ["fluid_simulation"]
+
+[[bench]]
+name = "epa"
+harness = false
+
+[[bench]]
+name = "shallow_water"
+harness = false
+required-features = ["fluid_simulation"]
+
+[[bench]]
+name = "fluid_grid"
 harness = false
 required-features = ["fluid_simulation"]
 
