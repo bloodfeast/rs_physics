@@ -120,8 +120,8 @@
 //!
 //! ## Changed 2026-09-30 (FILM-2): transcriptions of the old law must follow
 //!
-//! **Anything that copied this law before 2026-09-30 — Ridgeline's stain solver among
-//! them — now disagrees with it on every sloped face.** The old law used the grid's
+//! **Anything that copied this law before 2026-09-30 now disagrees with it on every
+//! sloped face.** The old law used the grid's
 //! `tanθ` and vertical depth in Nusselt's formula, which is written for `sinθ` and
 //! normal thickness. That overstated the flux by `1/cos⁴θ`: +2% at a grade of 0.1, +8%
 //! at 0.2, +19% at 0.3, 4× at 45°, and without bound towards vertical. Level ground is

@@ -503,8 +503,10 @@ baseline lacked.
     as `!(x > 0.0)` in this crate.
   - **The film solver is right**: Huppert's t^{1/5} pool and t^{1/3} slope current both
     reproduced (first-order in dx), and the Bingham factor matches an integrated profile
-    to 1e-10. The open questions are the `tanθ` small-slope law (FILM-2) and zero-speed
-    `Err`s in the drag/buoyancy helpers (FLD-2).
+    to 1e-10. FILM-2 (exact inclined law, `cos⁴θ`) and FLD-2 (zero speed is `Ok(0.0)`) were
+    fixed in a second pass. **Ridgeline does not consume `thin_film` or the grid solvers**
+    (owner, on PR #27): its blood, napalm and water run on `SphFluid`, and the stain uses
+    `puddle_depth`. Don't claim downstream breakage from changes to either without checking.
 - 2026-09-30 — Eulerian grid review (`FluidGrid`, `FluidGrid3D`; findings GRID-1..13, tests in
   `src/fluid_dynamics/grid_regression_tests.rs`). Load-bearing facts for the next reviewer:
   - **The grids' unit of length is the domain width on every axis**: `h = 1 / width`, velocities in
@@ -521,6 +523,9 @@ baseline lacked.
     one warm-start field per projection: a step's two projections solve different problems, and
     sharing one guess erased the warm start's benefit (128², tol 1e-5: 111 iterations per step shared, 31
     per-projection). Step cost now varies with the flow; `get_last_pressure_iterations` reports it.
-    `PressureSolver::Relaxation` + Gauss-Seidel reproduces the old solver bit-for-bit.
+    `PressureSolver::Relaxation` + Gauss-Seidel reproduces the old solver bit-for-bit. The
+    default tolerance is **1e-2**, chosen by measurement after review: it is cheaper per step
+    than the old four sweeps and within 0.5% of a converged flow; 1e-4 cost up to 72% more for
+    no visible change. Judge a tolerance by the flow it produces, not by the residual.
   - **Walls are free-slip by default and no-slip on request** (`WallCondition`, GRID-10). Either
     way the grids are closed boxes with no through-flow, so neither is a river solver.

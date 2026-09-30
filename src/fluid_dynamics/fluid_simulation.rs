@@ -985,8 +985,8 @@ impl FluidGrid {
         Ok(())
     }
 
-    // `validate_positive` and `validate_non_negative` both pass NaN, and infinity is
-    // positive; one step with an infinite `dt` or coefficient turns every cell NaN.
+    // Infinity is positive, so the range checks alone let it through, and one step with
+    // an infinite `dt` or coefficient turns every cell NaN.
     fn validate_diffusion(diffusion: f64) -> Result<(), PhysicsError> {
         validate_finite(diffusion, "diffusion")
             .and_then(|_| validate_non_negative(diffusion, "diffusion"))

@@ -87,7 +87,21 @@ pub struct SolverConfig {
     pub pressure_solver: PressureSolver,
 
     /// Relative residual at which the conjugate-gradient pressure solve stops:
-    /// `|b − A·p|₂ ≤ tolerance · |b|₂` (default: 1e-4). Must lie in (0, 1).
+    /// `|b − A·p|₂ ≤ tolerance · |b|₂` (default: 1e-2). Must lie in (0, 1).
+    ///
+    /// The trade, measured at 128² on a forced plume over 2 s against a converged solve,
+    /// and against one cold step of a smooth divergence:
+    ///
+    /// | tolerance | step cost vs the old 4 sweeps | flow after 2 s | divergence energy left |
+    /// |---|---|---|---|
+    /// | 0.3 | −24% | velocity 5% off | 1e-4 |
+    /// | **1e-2 (default)** | −12% | 0.5% off | 2e-9 |
+    /// | 1e-4 | +72% | 0.004% off | 2e-13 |
+    /// | 1e-8 | +440% | converged | rounding |
+    ///
+    /// The old relaxation (`PressureSolver::Relaxation`) left the same plume 91% off and
+    /// 99% of the divergence in place. The default is where the flow stops changing
+    /// visibly and the step is still cheaper than the solver it replaced.
     pub pressure_tolerance: f64,
 
     /// Cap on conjugate-gradient iterations per projection (default: 200); each step
@@ -105,7 +119,7 @@ impl Default for SolverConfig {
             relaxation: 1.9,
             solver_type: SolverType::GaussSeidel,
             pressure_solver: PressureSolver::ConjugateGradient,
-            pressure_tolerance: 1e-4,
+            pressure_tolerance: 1e-2,
             pressure_max_iterations: 200,
             wall: WallCondition::FreeSlip,
         }

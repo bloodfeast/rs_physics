@@ -651,22 +651,29 @@ fn review_invalid_solver_configs_are_rejected_not_panicking() {
 /// `step` promises a divergence-free velocity. With 4 Gauss-Seidel sweeps from zero,
 /// one step at 128² left 99.06% of a smooth gradient field's energy (the
 /// `high_quality` preset, 95.4%). The default is now a warm-started MIC(0)
-/// conjugate gradient to a relative residual of 1e-4.
+/// conjugate gradient to a relative residual of 1e-2, which leaves about 2e-9; a tight
+/// tolerance reaches the collocated scheme's own floor.
 #[test]
 fn review_default_projection_removes_most_of_a_smooth_divergence() {
     let n = 130;
-    let mut g = FluidGrid::new(n, n, 0.0, 0.0, 1e-9).unwrap();
-    set_velocity_2d(&mut g, discrete_gradient_2d(n, n));
-    let before = fluid_speed_sq_2d(&g);
-    g.step();
-    let left = fluid_speed_sq_2d(&g) / before;
+    let left_after = |config: SolverConfig| {
+        let mut g = FluidGrid::with_solver(n, n, 0.0, 0.0, 1e-9, config).unwrap();
+        set_velocity_2d(&mut g, discrete_gradient_2d(n, n));
+        let before = fluid_speed_sq_2d(&g);
+        g.step();
+        fluid_speed_sq_2d(&g) / before
+    };
+    let left = left_after(SolverConfig::default());
     assert!(left < 0.01, "one default step left {:.2}% of a gradient field's energy", 100.0 * left);
+    assert!(left < 1e-6, "one default step left {left:.3e} of a gradient field's energy");
     // The collocated scheme's floor for this mode, which only a converged solve reaches.
-    assert!(left < 10.0 * collocated_residual_2d(n, n) + 1e-12, "left {left:.3e}");
+    let tight = left_after(SolverConfig::default().with_pressure_tolerance(1e-8, 400));
+    assert!(tight < 10.0 * collocated_residual_2d(n, n) + 1e-12, "left {tight:.3e}");
 }
 
-/// Same, 3D: one default step at 34³ removes a gradient field down to the scheme's
-/// floor (the base's 4 sweeps left most of it).
+/// Same, 3D: one default step at 34³ removes all but about 5e-8 of a gradient field
+/// (the base's 4 sweeps left most of it), and a tight tolerance reaches the scheme's
+/// floor.
 #[test]
 fn review_3d_default_projection_removes_most_of_a_smooth_divergence() {
     let n = 34;
@@ -695,15 +702,20 @@ fn review_3d_default_projection_removes_most_of_a_smooth_divergence() {
         }
         s
     };
-    let mut g = FluidGrid3D::new(n, n, n, 0.0, 0.0, 1e-9).unwrap();
-    set_velocity_3d(&mut g, field);
-    let before = energy(&g);
-    g.step();
-    let left = energy(&g) / before;
+    let left_after = |config: SolverConfig| {
+        let mut g = FluidGrid3D::with_solver(n, n, n, 0.0, 0.0, 1e-9, config).unwrap();
+        set_velocity_3d(&mut g, field);
+        let before = energy(&g);
+        g.step();
+        energy(&g) / before
+    };
+    let left = left_after(SolverConfig::default());
+    assert!(left < 1e-6, "one default 3D step left {left:.3e}");
     // (1 - r)^4 for the (1,1,1) mode: the wide and compact Laplacians' ratio.
     let t = PI / (n - 2) as f64;
     let floor = (1.0 - (t.sin().powi(2)) / (4.0 * (t / 2.0).sin().powi(2))).powi(4);
-    assert!(left < 10.0 * floor + 1e-12, "one default 3D step left {left:.3e}; floor {floor:.3e}");
+    let tight = left_after(SolverConfig::default().with_pressure_tolerance(1e-8, 400));
+    assert!(tight < 10.0 * floor + 1e-12, "a converged 3D step left {tight:.3e}; floor {floor:.3e}");
 }
 
 /// Independent reference: the conjugate gradient and 20 000 Gauss-Seidel sweeps
@@ -1008,3 +1020,46 @@ fn review_large_timestep_stays_bounded() {
         energy = now;
     }
 }
+
+
+
+/// Why the default tolerance is 1e-2. A forced plume with a swirl, run for a second at
+/// 60 Hz: the default's velocity field stays within 1% of a converged solve's, while
+/// the old four-sweep relaxation ends up with a different flow altogether. At 130² over
+/// 2 s the same comparison gives 0.5% and 91%; tighter tolerances cost up to 5× more
+/// for no visible change (see `SolverConfig::pressure_tolerance`).
+#[test]
+fn review_default_pressure_tolerance_matches_a_converged_flow() {
+    let n = 66;
+    let run = |config: SolverConfig| {
+        let mut g = FluidGrid::with_solver(n, n, 1e-5, 1e-5, 1.0 / 60.0, config).unwrap();
+        for _ in 0..60 {
+            for i in n / 4..3 * n / 4 {
+                g.add_density(i, n / 2, 1.0).unwrap();
+                g.add_velocity(i, n / 2, 0.0, 0.05).unwrap();
+            }
+            g.add_velocity(n / 3, n / 3, 0.05, 0.0).unwrap();
+            g.add_velocity(2 * n / 3, 2 * n / 3, -0.05, 0.0).unwrap();
+            g.step();
+        }
+        let mut v = Vec::new();
+        for j in 1..n - 1 {
+            for i in 1..n - 1 {
+                let (a, b) = g.get_velocity(i, j).unwrap();
+                v.extend([a, b]);
+            }
+        }
+        v
+    };
+    let converged = run(SolverConfig::default().with_pressure_tolerance(1e-8, 400));
+    let off = |v: &[f64]| {
+        let num: f64 = v.iter().zip(&converged).map(|(a, b)| (a - b).powi(2)).sum();
+        let den: f64 = converged.iter().map(|b| b * b).sum();
+        (num / den).sqrt()
+    };
+    let default = off(&run(SolverConfig::default()));
+    let old = off(&run(SolverConfig::default().with_pressure_solver(PressureSolver::Relaxation)));
+    assert!(default < 0.01, "the default tolerance's flow is {:.2}% off a converged solve", 100.0 * default);
+    assert!(old > 0.1, "the old relaxation's flow is only {:.2}% off", 100.0 * old);
+}
+

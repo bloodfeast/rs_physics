@@ -3,8 +3,8 @@
 //! Fluid mechanics calculations and grid-based fluid simulation.
 //!
 //! This module provides two complementary approaches to fluid mechanics:
-//! analytical calculations (drag, buoyancy, Reynolds number) and Eulerian
-//! grid-based fluid simulation for 2D and 3D incompressible flow.
+//! analytical calculations (drag, buoyancy, Reynolds number) and simulation — Eulerian
+//! grids for 2D and 3D incompressible flow in a box, and particles for splashes.
 //!
 //! ## Features
 //!
@@ -134,8 +134,8 @@
 //! - **Grid units**: length is in domain widths (cell size `1 / width` on every
 //!   axis), not metres; see `FluidGrid`
 //! - **A variable pressure cost**: the pressure is solved by conjugate gradient to a
-//!   relative tolerance (default 1e-4), so a step costs more when it brings more new
-//!   divergence. `PressureSolver::Relaxation` restores the old fixed-cost sweeps, which
+//!   relative tolerance (default 1e-2; see `SolverConfig::pressure_tolerance` for the
+//!   cost of each setting), so a step costs more when it brings more new divergence. `PressureSolver::Relaxation` restores the old fixed-cost sweeps, which
 //!   remove only about 1% of a large-scale divergence per step at 128²
 //! - **Stability is not accuracy**: implicit diffusion and semi-Lagrangian advection
 //!   are stable at any timestep, but a step that moves the flow more than a cell or

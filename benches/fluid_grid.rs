@@ -6,7 +6,7 @@
 //! and a grid left to decay would flatter a warm-started solver.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rs_physics::fluid_dynamics::{FluidGrid, FluidGrid3D, SolverConfig};
+use rs_physics::fluid_dynamics::{FluidGrid, FluidGrid3D, PressureSolver, SolverConfig};
 
 fn source_2d(grid: &mut FluidGrid, n: usize) {
     for i in n / 4..3 * n / 4 {
@@ -64,5 +64,56 @@ fn step_3d(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, step_2d, step_3d);
+/// What the pressure solve's accuracy costs. One step of the same forced grid at each
+/// conjugate-gradient tolerance (a relative residual), beside the old four-sweep
+/// relaxation. On one cold step at 130², a tolerance of 0.3 leaves about 1e-4 of a
+/// smooth divergence's energy in 12 iterations; 1e-2 leaves 2e-9 (54); the default 1e-4
+/// leaves 2e-13 (91); 1e-8 is converged to rounding.
+fn pressure_tolerance(c: &mut Criterion) {
+    let configs = [
+        ("cg_tol_0.3", SolverConfig::default().with_pressure_tolerance(0.3, 200)),
+        ("cg_tol_1e-2", SolverConfig::default().with_pressure_tolerance(1e-2, 200)),
+        ("cg_tol_1e-4_default", SolverConfig::default()),
+        ("cg_tol_1e-8", SolverConfig::default().with_pressure_tolerance(1e-8, 400)),
+        ("relaxation_4_sweeps_old", SolverConfig::default().with_pressure_solver(PressureSolver::Relaxation)),
+    ];
+    let mut group = c.benchmark_group("fluid_grid/pressure_tolerance_2d");
+    group.sample_size(20);
+    for &n in &[128usize, 256] {
+        for (name, config) in &configs {
+            let mut grid = FluidGrid::with_solver(n, n, 1e-5, 1e-5, 1.0 / 60.0, *config).unwrap();
+            for _ in 0..30 {
+                source_2d(&mut grid, n);
+                grid.step();
+            }
+            group.bench_with_input(BenchmarkId::new(*name, n), &n, |b, _| {
+                b.iter(|| {
+                    source_2d(&mut grid, n);
+                    grid.step();
+                });
+            });
+        }
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("fluid_grid/pressure_tolerance_3d");
+    group.sample_size(10);
+    let n = 64;
+    for (name, config) in &configs {
+        let mut grid = FluidGrid3D::with_solver(n, n, n, 1e-5, 1e-5, 1.0 / 60.0, *config).unwrap();
+        for _ in 0..10 {
+            source_3d(&mut grid, n);
+            grid.step();
+        }
+        group.bench_with_input(BenchmarkId::new(*name, n), &n, |b, _| {
+            b.iter(|| {
+                source_3d(&mut grid, n);
+                grid.step();
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, step_2d, step_3d, pressure_tolerance);
 criterion_main!(benches);
