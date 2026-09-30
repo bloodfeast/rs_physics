@@ -491,3 +491,41 @@ baseline lacked.
   - **`barrier_insertion_db` has no lit side.** It steps 0 → 5 dB at the shadow boundary. Fixing it
     needs a signed path difference and a caller change in Ridgeline together (ACU-2).
   - **`impedance` is the P-wave (bulk) impedance** as of this review, not `sqrt(Eρ)`.
+- 2026-09-30 — Analytic fluids + thin-film review (tests in
+  `fluid_dynamics/analytic_regression_tests.rs`, IDs FLD-n / FILM-n).
+  - **The film law is a diffusion as well as a wave, and the step limit only knew about the
+    wave.** `FilmFlow::max_step` / `FilmGrid::max_step` now return `min(dx/c, dx²/(4·ρgh³/3μ))`.
+    On level or gentle ground the old figure was up to ~3000× too large and a ¼-step grew a
+    ±15% checkerboard that the positivity limiter then held; positivity is not stability.
+  - **`validate_positive(NaN)` used to be `Ok`** (`value <= 0.0` is false for NaN). It and
+    `validate_non_negative` now reject NaN, which also tightens `FluidGrid`/`FluidGrid3D`
+    constructors (a NaN `dt`, diffusion or viscosity is now an error). Write range checks
+    as `!(x > 0.0)` in this crate.
+  - **The film solver is right**: Huppert's t^{1/5} pool and t^{1/3} slope current both
+    reproduced (first-order in dx), and the Bingham factor matches an integrated profile
+    to 1e-10. FILM-2 (exact inclined law, `cos⁴θ`) and FLD-2 (zero speed is `Ok(0.0)`) were
+    fixed in a second pass. **Ridgeline does not consume `thin_film` or the grid solvers**
+    (owner, on PR #27): its blood, napalm and water run on `SphFluid`, and the stain uses
+    `puddle_depth`. Don't claim downstream breakage from changes to either without checking.
+- 2026-09-30 — Eulerian grid review (`FluidGrid`, `FluidGrid3D`; findings GRID-1..13, tests in
+  `src/fluid_dynamics/grid_regression_tests.rs`). Load-bearing facts for the next reviewer:
+  - **The grids' unit of length is the domain width on every axis**: `h = 1 / width`, velocities in
+    widths/s, viscosity and diffusion in widths²/s. Anything that uses `height` or `depth` as `1/h`,
+    or the cell count as `1/h²`, is a bug; the 3D solver's viscosity was N× too strong that way.
+  - **The outer ring of cells is a ghost layer**, overwritten every step. The fluid is cells
+    `1..n-1`; reductions must skip the ring, and `add_density`/`add_velocity` refuse it with `Err`
+    (GRID-11; they used to return `Ok` and the write vanished).
+  - **Lexicographic Gauss-Seidel on a 5/7-point stencil gives the same iterates in any loop
+    nesting**, so the grids are x↔y symmetric to rounding, and the storage is now
+    innermost-loop-fastest (column-major in 2D, z-fastest in 3D). Anything that walks the raw
+    `Vec` in index order sees a different order than before; go through `get_index`.
+  - **The pressure is a warm-started MIC(0) conjugate gradient to a relative tolerance** (GRID-9),
+    one warm-start field per projection: a step's two projections solve different problems, and
+    sharing one guess erased the warm start's benefit (128², tol 1e-5: 111 iterations per step shared, 31
+    per-projection). Step cost now varies with the flow; `get_last_pressure_iterations` reports it.
+    `PressureSolver::Relaxation` + Gauss-Seidel reproduces the old solver bit-for-bit. The
+    default tolerance is **1e-2**, chosen by measurement after review: it is cheaper per step
+    than the old four sweeps and within 0.5% of a converged flow; 1e-4 cost up to 72% more for
+    no visible change. Judge a tolerance by the flow it produces, not by the residual.
+  - **Walls are free-slip by default and no-slip on request** (`WallCondition`, GRID-10). Either
+    way the grids are closed boxes with no through-flow, so neither is a river solver.

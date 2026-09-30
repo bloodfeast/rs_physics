@@ -65,6 +65,11 @@ harness = false
 required-features = ["fluid_simulation"]
 
 [[bench]]
+name = "fluid_grid"
+harness = false
+required-features = ["fluid_simulation"]
+
+[[bench]]
 name = "atmosphere"
 harness = false
 

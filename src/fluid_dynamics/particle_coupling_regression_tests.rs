@@ -5,7 +5,7 @@
 //! deliberately left for follow-up work.
 
 use super::*;
-use crate::fluid_dynamics::{SolverConfig, SolverType};
+use crate::fluid_dynamics::{PressureSolver, SolverConfig, SolverType};
 
 fn grid_velocity_sum_2d(g: &FluidGrid) -> (f64, f64) {
     let mut s = (0.0, 0.0);
@@ -35,12 +35,15 @@ fn grid_velocity_sum_3d(g: &FluidGrid3D) -> (f64, f64, f64) {
 }
 
 /// No projection, so a uniform field advects as itself and only advection is being
-/// compared.
+/// compared. (A converged projection would remove a uniform flow in a closed box
+/// entirely; one relaxation sweep, the least a grid runs, barely touches it.)
 fn advection_only() -> SolverConfig {
     SolverConfig {
         iterations: 0,
         relaxation: 1.0,
         solver_type: SolverType::GaussSeidel,
+        pressure_solver: PressureSolver::Relaxation,
+        ..SolverConfig::default()
     }
 }
 
@@ -121,8 +124,9 @@ fn two_way_coupling_uses_one_timestep_3d() {
 #[test]
 fn drag_relaxation_is_stable_for_light_particles() {
     let mut grid = FluidGrid::new(20, 20, 0.0, 0.0, 0.016).unwrap();
-    for i in 0..20 {
-        for j in 0..20 {
+    // Fluid cells only: the grid refuses its boundary ring.
+    for i in 1..19 {
+        for j in 1..19 {
             grid.add_velocity(i, j, 1.0, 0.0).unwrap();
         }
     }
@@ -149,9 +153,9 @@ fn drag_relaxation_is_stable_for_light_particles() {
 #[test]
 fn drag_relaxation_is_stable_for_light_particles_3d() {
     let mut grid = FluidGrid3D::new(10, 10, 10, 0.0, 0.0, 0.016).unwrap();
-    for i in 0..10 {
-        for j in 0..10 {
-            for k in 0..10 {
+    for i in 1..9 {
+        for j in 1..9 {
+            for k in 1..9 {
                 grid.add_velocity(i, j, k, 0.0, 0.0, 1.0).unwrap();
             }
         }
@@ -184,9 +188,10 @@ fn tracer_moves_with_the_grid_advection() {
     let (n, dt, u) = (64usize, 0.01, 0.5);
     let make = || {
         let mut g = FluidGrid::new(n, n, 0.0, 0.0, dt).unwrap();
-        g.set_solver_config(advection_only());
-        for i in 0..n {
-            for j in 0..n {
+        g.set_solver_config(advection_only()).unwrap();
+        // Fluid cells only: the grid refuses its boundary ring, which `step` overwrote.
+        for i in 1..n - 1 {
+            for j in 1..n - 1 {
                 g.add_velocity(i, j, u, 0.0).unwrap();
             }
         }
@@ -226,10 +231,10 @@ fn tracer_moves_with_the_grid_advection_3d() {
     let (n, dt, u) = (16usize, 0.01, 0.5);
     let make = || {
         let mut g = FluidGrid3D::new(n, n, n, 0.0, 0.0, dt).unwrap();
-        g.set_solver_config(advection_only());
-        for i in 0..n {
-            for j in 0..n {
-                for k in 0..n {
+        g.set_solver_config(advection_only()).unwrap();
+        for i in 1..n - 1 {
+            for j in 1..n - 1 {
+                for k in 1..n - 1 {
                     g.add_velocity(i, j, k, u, 0.0, 0.0).unwrap();
                 }
             }
