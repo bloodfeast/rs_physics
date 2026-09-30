@@ -191,6 +191,13 @@ mod fluid_simulation_3d;
 #[cfg(feature = "fluid_simulation")]
 pub use fluid_simulation_3d::*;
 
+// Shallow-water equations on a terrain heightfield: rivers, lakes, floods. Depth-averaged,
+// so its cost scales with the map's area rather than its volume.
+#[cfg(feature = "fluid_simulation")]
+mod shallow_water;
+#[cfg(feature = "fluid_simulation")]
+pub use shallow_water::*;
+
 // Particle-fluid coupling (two-way interaction)
 #[cfg(feature = "fluid_simulation")]
 mod particle_coupling;
