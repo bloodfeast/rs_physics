@@ -82,7 +82,7 @@
 //! | `Fluid::seawater()` | 20 °C | 1025 | 1.08e-3 |
 //! | `Fluid::oil()` | SAE 30, 40 °C | 876 | 0.1 |
 //! | `Fluid::honey()` | 20 °C | 1420 | 10.0 |
-//! | `Fluid::glycerin()` | 20 °C | 1261 | 1.5 |
+//! | `Fluid::glycerin()` | 20 °C | 1261 | 1.412 |
 //! | `Fluid::blood()` | 37 °C, at 300 s⁻¹ | 1060 | 4.0e-3 |
 //! | `Fluid::from_air(&Air::sea_level())` | ICAO, 15 °C | 1.225 | 1.79e-5 |
 //!
@@ -99,7 +99,7 @@
 //!     (Fluid::seawater(), 1025.0, 1.08e-3),
 //!     (Fluid::oil(), 876.0, 0.1),
 //!     (Fluid::honey(), 1420.0, 10.0),
-//!     (Fluid::glycerin(), 1261.0, 1.5),
+//!     (Fluid::glycerin(), 1261.0, 1.412),
 //!     (Fluid::blood(), 1060.0, 4.0e-3),
 //!     (Fluid::from_air(&Air::sea_level()), 1.225, 1.79e-5),
 //! ];

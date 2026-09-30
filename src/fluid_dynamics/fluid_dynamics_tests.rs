@@ -31,7 +31,8 @@ fn test_calculate_reynolds_number() {
 #[test]
 fn test_calculate_reynolds_number_invalid_inputs() {
     let fluid = Fluid::new(1000.0, 0.001).unwrap();
-    assert!(calculate_reynolds_number(&fluid, 0.0, 0.1).is_err(), "Should fail with zero velocity");
+    // Zero speed is still flow at rest, with a Reynolds number of exactly zero (FLD-2).
+    assert_eq!(calculate_reynolds_number(&fluid, 0.0, 0.1).ok(), Some(0.0), "Zero velocity gives Re = 0");
     assert!(calculate_reynolds_number(&fluid, -1.0, 0.1).is_err(), "Should fail with negative velocity");
     assert!(calculate_reynolds_number(&fluid, 1.0, 0.0).is_err(), "Should fail with zero characteristic length");
     assert!(calculate_reynolds_number(&fluid, 1.0, -0.1).is_err(), "Should fail with negative characteristic length");
@@ -48,7 +49,8 @@ fn test_calculate_drag_force() {
 #[test]
 fn test_calculate_drag_force_invalid_inputs() {
     let fluid = Fluid::new(1.225, 0.001).unwrap();
-    assert!(calculate_drag_force(&fluid, 0.0, 1.0, 0.5).is_err(), "Should fail with zero velocity");
+    // A body at rest in still fluid feels no drag, and that is an answer, not an error (FLD-2).
+    assert_eq!(calculate_drag_force(&fluid, 0.0, 1.0, 0.5).ok(), Some(0.0), "Zero velocity gives zero drag");
     assert!(calculate_drag_force(&fluid, -10.0, 1.0, 0.5).is_err(), "Should fail with negative velocity");
     assert!(calculate_drag_force(&fluid, 10.0, 0.0, 0.5).is_err(), "Should fail with zero area");
     assert!(calculate_drag_force(&fluid, 10.0, -1.0, 0.5).is_err(), "Should fail with negative area");
@@ -67,7 +69,8 @@ fn test_calculate_buoyant_force() {
 #[test]
 fn test_calculate_buoyant_force_invalid_inputs() {
     let fluid = Fluid::new(1000.0, 0.001).unwrap();
-    assert!(calculate_buoyant_force(&fluid, 0.0, 9.81).is_err(), "Should fail with zero displaced volume");
+    // An object clear of the fluid displaces none of it and is not buoyed (FLD-2).
+    assert_eq!(calculate_buoyant_force(&fluid, 0.0, 9.81).ok(), Some(0.0), "Zero displaced volume gives zero force");
     assert!(calculate_buoyant_force(&fluid, -0.1, 9.81).is_err(), "Should fail with negative displaced volume");
     assert!(calculate_buoyant_force(&fluid, 0.1, 0.0).is_err(), "Should fail with zero gravity");
     assert!(calculate_buoyant_force(&fluid, 0.1, -9.81).is_err(), "Should fail with negative gravity");
