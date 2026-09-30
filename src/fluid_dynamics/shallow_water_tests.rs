@@ -115,13 +115,14 @@ fn inflow_and_outflow_are_metered_exactly() {
 /// is the serial sweep that small grids use instead of the thread pool.
 #[test]
 fn the_result_does_not_depend_on_the_thread_count() {
-    let run = |threads: usize, threshold: usize| {
+    let run = |threads: usize, threshold: usize, threading: Threading| {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
         pool.install(|| {
             let (nx, nz) = (37, 29);
             let mut water = ShallowWater::new(nx, nz, 1.0, rough_bed(nx, nz))
                 .unwrap()
-                .with_parallel_threshold(threshold);
+                .with_parallel_threshold(threshold)
+                .with_threading(threading);
             water.fill_to_level(0.0).unwrap();
             water.set_boundary(Edge::MinX, 5..20, Boundary::Inflow { discharge: 12.0 }).unwrap();
             water.set_boundary(Edge::MaxZ, 0..nx, Boundary::Open).unwrap();
@@ -131,9 +132,11 @@ fn the_result_does_not_depend_on_the_thread_count() {
             water
         })
     };
-    let one = run(1, 0);
+    let one = run(1, 0, Threading::Auto);
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-    for other in [run(4, 0), run(3, usize::MAX)] {
+    // The pool on four threads, the internal serial path, and the public serial switch
+    // on a grid the pool would otherwise take.
+    for other in [run(4, 0, Threading::Auto), run(3, usize::MAX, Threading::Auto), run(4, 0, Threading::Serial)] {
         assert_eq!(bits(one.depths()), bits(other.depths()));
         assert_eq!(bits(one.discharges_x()), bits(other.discharges_x()));
         assert_eq!(bits(one.discharges_z()), bits(other.discharges_z()));
@@ -634,3 +637,4 @@ fn lowering_the_level_is_metered_as_outflow() {
     assert_eq!(water.volume_out(), 60.0);
     assert_eq!(water.total_volume(), 20.0);
 }
+

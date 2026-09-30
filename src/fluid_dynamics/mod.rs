@@ -4,7 +4,8 @@
 //!
 //! This module provides two complementary approaches to fluid mechanics:
 //! analytical calculations (drag, buoyancy, Reynolds number) and simulation — Eulerian
-//! grids for 2D and 3D incompressible flow in a box, and particles for splashes.
+//! grids for 2D and 3D incompressible flow in a box, particles for splashes, and a
+//! shallow-water heightfield for rivers, lakes and floods.
 //!
 //! ## Features
 //!
@@ -23,6 +24,9 @@
 //!   pressure projection. Every wall blocks normal flow, and is free-slip along it by
 //!   default or no-slip on request (`WallCondition`); there is no inflow, outflow or
 //!   free surface.
+//! - `ShallowWater`: rivers, lakes and floods on a terrain heightfield — a free surface,
+//!   inflow and outflow edges, bed friction, wetting and drying, and exact conservation.
+//!   This is the one to use for water a player walks beside.
 //! - `SphFluid`: particles that are the fluid, for splashes and droplets.
 //! - Particle-fluid coupling for two-way interaction with the grids.
 //!
@@ -130,7 +134,8 @@
 //! - **Incompressible flow only**: No compressibility effects
 //! - **No turbulence modeling**: DNS-style simulation
 //! - **Fixed grid**: No adaptive mesh refinement
-//! - **No multiphase flow**: Single fluid type per simulation; no free surface
+//! - **No multiphase flow**: Single fluid type per simulation; the box grids have no
+//!   free surface (`ShallowWater` does, depth-averaged)
 //! - **Grid units**: length is in domain widths (cell size `1 / width` on every
 //!   axis), not metres; see `FluidGrid`
 //! - **A variable pressure cost**: the pressure is solved by conjugate gradient to a

@@ -123,6 +123,36 @@
 //!   about 15 m deep. Halving the cell size doubles the substeps and quadruples the
 //!   cells, so the cost goes as the inverse cube of the cell size.
 //!
+//! # Budget: what rate, what threads
+//!
+//! **Design point: presentation, on one worker thread, at 20–30 Hz.** A river is
+//! something the player sees and floats things on, not something a fixed-rate
+//! simulation tick should wait for. Run it off the main loop on its own thread, step it
+//! with the real elapsed time (the substepping makes any rate correct), and let the
+//! renderer interpolate between the last two states if it draws faster than that.
+//!
+//! One frame at 30 Hz on **one thread** ([`Threading::Serial`]), 1 m cells, a river in
+//! steady flow wet from edge to edge — the worst case, since dry cells are cheaper.
+//! Measured with `cargo bench --bench shallow_water --features fluid_simulation`:
+//!
+//! | Grid | Per 30 Hz frame | Share of one core |
+//! |---|---:|---:|
+//! | 64 × 64 | 0.51 ms | 1.5% |
+//! | 128 × 128 | 2.1 ms | 6% |
+//! | 256 × 256 | 8.8 ms | 26% |
+//! | 512 × 512 | 35 ms | more than a frame: use 2 m cells, or the pool |
+//!
+//! A real map is mostly dry: the `river_3d` demo's 160 × 120 valley, 12% wet, costs
+//! 2.3 ms a frame on one thread at 30 Hz (two substeps, for its fastest water), about 7%
+//! of a core.
+//!
+//! **Threads.** [`Threading::Auto`], the default, sweeps rows in parallel on rayon's
+//! *current* pool for grids of 2048 cells or more; that is rayon's global pool unless
+//! `step` is called inside `pool.install(..)`, which is how a caller bounds or isolates
+//! the threads so they do not compete with a renderer's own. [`Threading::Serial`] keeps
+//! every sweep on the calling thread. The answer is the same bits either way, and
+//! nothing is allocated after construction.
+//!
 //! References: Audusse, Bouchut, Bristeau, Klein & Perthame, *A fast and stable
 //! well-balanced scheme with hydrostatic reconstruction for shallow water flows*, SIAM J.
 //! Sci. Comput. 25 (2004); Toro, *Shock-Capturing Methods for Free-Surface Shallow
@@ -157,6 +187,19 @@ const STANDARD_GRAVITY: f64 = 9.81;
 /// Grids with at least this many cells sweep their rows on rayon's pool; smaller ones
 /// on the calling thread, where they finish before a hand-off would.
 const PARALLEL_CELLS: usize = 2_048;
+
+/// How [`ShallowWater::step`] uses threads. Either way the answer is the same bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Threading {
+    /// Sweep rows in parallel on rayon's *current* pool when the grid has at least 2048
+    /// cells, and on the calling thread below that. To bound or isolate the threads,
+    /// call `step` inside your own pool: `my_pool.install(|| river.step(dt))`.
+    #[default]
+    Auto,
+    /// Always on the calling thread. For a worker thread that must not compete with a
+    /// renderer's pool, or a caller that runs several rivers on its own threads.
+    Serial,
+}
 
 /// One edge of the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +309,7 @@ pub struct ShallowWater {
     max_substeps: usize,
     /// Grids with at least this many cells sweep their rows in parallel.
     parallel_threshold: usize,
+    threading: Threading,
     bed: Vec<f64>,
     h: Vec<f64>,
     hu: Vec<f64>,
@@ -314,6 +358,7 @@ impl ShallowWater {
             gravity: STANDARD_GRAVITY,
             max_substeps: DEFAULT_MAX_SUBSTEPS,
             parallel_threshold: PARALLEL_CELLS,
+            threading: Threading::Auto,
             bed,
             h: vec![0.0; cells],
             hu: vec![0.0; cells],
@@ -365,6 +410,22 @@ impl ShallowWater {
         }
         self.max_substeps = max_substeps;
         Ok(self)
+    }
+
+    /// How `step` uses threads; see [`Threading`]. The default is [`Threading::Auto`].
+    pub fn with_threading(mut self, threading: Threading) -> ShallowWater {
+        self.threading = threading;
+        self
+    }
+
+    /// Change how `step` uses threads; see [`Threading`].
+    pub fn set_threading(&mut self, threading: Threading) {
+        self.threading = threading;
+    }
+
+    /// How `step` uses threads.
+    pub fn threading(&self) -> Threading {
+        self.threading
     }
 
     /// Force the parallel or the serial sweep, to test that they agree.
@@ -779,7 +840,7 @@ impl ShallowWater {
     /// Below that, the hand-off costs more than the rows do. Both paths run the same
     /// arithmetic on each row, so the choice never changes the answer.
     fn parallel(&self) -> bool {
-        self.h.len() >= self.parallel_threshold
+        self.threading == Threading::Auto && self.h.len() >= self.parallel_threshold
     }
 
     fn index(&self, i: usize, j: usize) -> usize {

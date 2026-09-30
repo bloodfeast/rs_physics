@@ -18,7 +18,7 @@
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_asset::RenderAssetUsages;
-use rs_physics::fluid_dynamics::{Boundary, Edge, ShallowWater};
+use rs_physics::fluid_dynamics::{Boundary, Edge, ShallowWater, Threading};
 use std::f64::consts::PI;
 
 const NX: usize = 160;
@@ -59,7 +59,10 @@ fn build_river() -> ShallowWater {
     let mut river = ShallowWater::new(NX, NZ, DX, bed)
         .expect("valid grid")
         .with_manning(0.035)
-        .expect("valid roughness");
+        .expect("valid roughness")
+        // On the calling thread, as a game would run it off its main loop; the answer is
+        // the same bits as on rayon's pool.
+        .with_threading(Threading::Serial);
     set_inflow(&mut river, INFLOW);
     river
         .set_boundary(Edge::MaxX, 0..NZ, Boundary::Open)
