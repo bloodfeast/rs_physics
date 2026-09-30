@@ -21,8 +21,7 @@
 //! ```
 //!
 //! At `k = 0` the limits are `e1 = t`, `e2 = t^2 / 2`: plain ballistics, which is what a
-//! thrown body part is (its linear drag coefficient is a few per cent a second; see
-//! the Ridgeline corpse module's arithmetic). [`decay_integral`] and [`decay_integral2`]
+//! thrown body part is (its linear drag coefficient is a few per cent a second). [`decay_integral`] and [`decay_integral2`]
 //! take the limits exactly and stay accurate for small `k t` where the textbook form
 //! cancels.
 //!

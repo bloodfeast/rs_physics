@@ -25,16 +25,19 @@ impl Fluid {
     ///
     /// # Errors
     /// Returns an error if:
-    /// * The density is less than or equal to zero.
-    /// * The viscosity is less than or equal to zero.
+    /// * The density is less than or equal to zero, or not finite.
+    /// * The viscosity is less than or equal to zero, or not finite.
     ///
     /// # Examples
     /// ```
     /// use rs_physics::fluid_dynamics::Fluid;
     ///
     /// let water = Fluid::new(1000.0, 0.001).unwrap();
+    /// assert!(Fluid::new(f64::NAN, 0.001).is_err());
     /// ```
     pub fn new(density: f64, viscosity: f64) -> Result<Self, PhysicsError> {
+        validate_finite(density, "density")?;
+        validate_finite(viscosity, "viscosity")?;
         validate_positive(density, "density")?;
         validate_positive(viscosity, "viscosity")?;
         Ok(Self { density, viscosity })
@@ -230,11 +233,18 @@ impl Fluid {
         }
     }
 
-    /// Creates a `Fluid` representing glycerin at 20°C.
+    /// Creates a `Fluid` representing anhydrous glycerin (glycerol) at 20°C.
     ///
     /// Properties:
     /// - Density: 1261 kg/m³
-    /// - Dynamic viscosity: 1.5 Pa·s
+    /// - Dynamic viscosity: 1.412 Pa·s
+    ///
+    /// Viscosity from Segur & Oberstar, *Viscosity of glycerol and its aqueous
+    /// solutions*, Ind. Eng. Chem. 43 (1951) 2117, which the CRC Handbook tabulates;
+    /// Cheng's correlation (Ind. Eng. Chem. Res. 47, 2008) gives 1.414. Until
+    /// 2026-09-30 this returned 1.5 Pa·s, which pure glycerol reaches near 19.4 °C. The
+    /// figure falls steeply with water content -- 99% glycerin is about 1.14 Pa·s by
+    /// Cheng's mixture rule -- and with temperature, about 9% per kelvin here.
     ///
     /// # Examples
     /// ```
@@ -246,7 +256,7 @@ impl Fluid {
     pub fn glycerin() -> Self {
         Self {
             density: 1261.0,
-            viscosity: 1.5,
+            viscosity: 1.412,
         }
     }
 
@@ -435,10 +445,36 @@ pub fn puddle_depth(
     Ok(2.0 * capillary_length * (contact_angle * 0.5).sin())
 }
 
+/// Finite and strictly positive. A bare `x <= 0.0` test lets NaN through, because every
+/// comparison with NaN is false; this is the form every argument check below uses.
+#[inline]
+fn positive_finite(x: f64) -> bool {
+    x > 0.0 && x.is_finite()
+}
+
+/// Finite and zero or more. The same NaN-safe form as [`positive_finite`], for the
+/// arguments whose zero is a real state with a real answer: a speed, a volume.
+#[inline]
+fn non_negative_finite(x: f64) -> bool {
+    x >= 0.0 && x.is_finite()
+}
+
+/// A fluid property the calculation below is about to multiply or divide by.
+///
+/// `Fluid`'s fields are public, so a struct literal can carry a NaN or a negative
+/// density that [`Fluid::new`] never saw. These functions return `Result`, so they
+/// check rather than hand back `Ok(NaN)`.
+#[inline]
+fn check_property(value: f64, name: &str) -> Result<(), PhysicsError> {
+    validate_finite(value, name)?;
+    validate_positive(value, name)
+}
+
 /// Calculates the Reynolds number for a fluid flow.
 /// # Arguments
 /// * `fluid` - A reference to the `Fluid` instance.
-/// * `velocity` - The velocity of the fluid flow in m/s.
+/// * `velocity` - The flow **speed** in m/s: the magnitude of the velocity, zero or
+///   more. Zero is still fluid, and gives exactly `Ok(0.0)`.
 /// * `characteristic_length` - The characteristic length of the flow geometry in m.
 ///
 /// # Return
@@ -447,8 +483,10 @@ pub fn puddle_depth(
 ///
 /// # Errors
 /// Returns an error if:
-/// * The velocity is less than or equal to zero.
-/// * The characteristic length is less than or equal to zero.
+/// * The velocity is negative or not finite.
+/// * The characteristic length is less than or equal to zero, or not finite.
+/// * The fluid's density or viscosity is not finite and strictly positive (possible
+///   only for a `Fluid` built as a struct literal rather than through [`Fluid::new`]).
 ///
 /// # Examples
 /// ```
@@ -458,31 +496,44 @@ pub fn puddle_depth(
 /// let re = calculate_reynolds_number(&water, 1.0, 0.1).unwrap();
 /// ```
 pub fn calculate_reynolds_number(fluid: &Fluid, velocity: f64, characteristic_length: f64) -> Result<f64, PhysicsError> {
-    if velocity <= 0.0 {
+    if !non_negative_finite(velocity) {
         return Err(PhysicsError::InvalidVelocity);
     }
-    if characteristic_length <= 0.0 {
+    if !positive_finite(characteristic_length) {
         return Err(PhysicsError::InvalidArea);
+    }
+    check_property(fluid.density, "density")?;
+    check_property(fluid.viscosity, "viscosity")?;
+    if velocity == 0.0 {
+        // Exactly +0.0, including for a `-0.0` speed.
+        return Ok(0.0);
     }
     Ok((fluid.density * velocity * characteristic_length) / fluid.viscosity)
 }
 
-/// Calculates the drag force on an object in a fluid.
+/// Calculates the drag force on an object in a fluid, `½ρv²·C_d·A`.
 /// # Arguments
 /// * `fluid` - A reference to the `Fluid` instance.
-/// * `velocity` - The relative velocity between the object and the fluid in m/s.
-/// * `area` - The reference area of the object in m².
+/// * `velocity` - The relative **speed** between the object and the fluid in m/s: the
+///   magnitude of the relative velocity, zero or more. A body at rest in still fluid
+///   passes zero and gets exactly `Ok(0.0)`.
+/// * `area` - The reference area of the object in m² -- the area `drag_coefficient` is
+///   defined against, which for a bluff body such as a sphere is the frontal area.
 /// * `drag_coefficient` - The drag coefficient of the object (dimensionless).
 ///
 /// # Return
-/// Returns a `Result` containing the calculated drag force in Newtons (N) if successful,
-/// or a `PhysicsError` if the input parameters are invalid.
+/// Returns a `Result` containing the **magnitude** of the drag force in Newtons (N) if
+/// successful, or a `PhysicsError` if the input parameters are invalid. Drag acts
+/// opposite to the object's velocity relative to the fluid; applying that direction is
+/// the caller's job.
 ///
 /// # Errors
 /// Returns an error if:
-/// * The velocity is less than or equal to zero.
-/// * The area is less than or equal to zero.
-/// * The drag coefficient is less than or equal to zero.
+/// * The velocity is negative or not finite.
+/// * The area is less than or equal to zero, or not finite.
+/// * The drag coefficient is less than or equal to zero, or not finite.
+/// * The fluid's density is not finite and strictly positive (possible only for a
+///   `Fluid` built as a struct literal rather than through [`Fluid::new`]).
 ///
 /// # Examples
 /// ```
@@ -492,14 +543,18 @@ pub fn calculate_reynolds_number(fluid: &Fluid, velocity: f64, characteristic_le
 /// let drag = calculate_drag_force(&air, 10.0, 1.0, 0.5).unwrap();
 /// ```
 pub fn calculate_drag_force(fluid: &Fluid, velocity: f64, area: f64, drag_coefficient: f64) -> Result<f64, PhysicsError> {
-    if velocity <= 0.0 {
+    if !non_negative_finite(velocity) {
         return Err(PhysicsError::InvalidVelocity);
     }
-    if area <= 0.0 {
+    if !positive_finite(area) {
         return Err(PhysicsError::InvalidArea);
     }
-    if drag_coefficient <= 0.0 {
+    if !positive_finite(drag_coefficient) {
         return Err(PhysicsError::InvalidCoefficient);
+    }
+    check_property(fluid.density, "density")?;
+    if velocity == 0.0 {
+        return Ok(0.0);
     }
     Ok(0.5 * fluid.density * velocity * velocity * area * drag_coefficient)
 }
@@ -507,17 +562,21 @@ pub fn calculate_drag_force(fluid: &Fluid, velocity: f64, area: f64, drag_coeffi
 /// Calculates the buoyant force on an object submerged in a fluid.
 /// # Arguments
 /// * `fluid` - A reference to the `Fluid` instance.
-/// * `displaced_volume` - The volume of fluid displaced by the object in m³.
+/// * `displaced_volume` - The volume of fluid displaced by the object in m³, zero or
+///   more. An object entirely out of the fluid displaces none and gets exactly `Ok(0.0)`.
 /// * `gravity` - The acceleration due to gravity in m/s².
 ///
 /// # Return
-/// Returns a `Result` containing the calculated buoyant force in Newtons (N) if successful,
-/// or a `PhysicsError` if the input parameters are invalid.
+/// Returns a `Result` containing the **magnitude** of the buoyant force in Newtons (N) if
+/// successful, or a `PhysicsError` if the input parameters are invalid. It acts opposite
+/// to gravity.
 ///
 /// # Errors
 /// Returns an error if:
-/// * The displaced volume is less than or equal to zero.
-/// * The gravity is less than or equal to zero.
+/// * The displaced volume is negative or not finite.
+/// * The gravity is less than or equal to zero, or not finite.
+/// * The fluid's density is not finite and strictly positive (possible only for a
+///   `Fluid` built as a struct literal rather than through [`Fluid::new`]).
 ///
 /// # Examples
 /// ```
@@ -527,11 +586,15 @@ pub fn calculate_drag_force(fluid: &Fluid, velocity: f64, area: f64, drag_coeffi
 /// let buoyant_force = calculate_buoyant_force(&water, 0.1, 9.81).unwrap();
 /// ```
 pub fn calculate_buoyant_force(fluid: &Fluid, displaced_volume: f64, gravity: f64) -> Result<f64, PhysicsError> {
-    if displaced_volume <= 0.0 {
+    if !non_negative_finite(displaced_volume) {
         return Err(PhysicsError::InvalidArea);
     }
-    if gravity <= 0.0 {
-        return Err(PhysicsError::CalculationError("Gravity must be positive".to_string()));
+    if !positive_finite(gravity) {
+        return Err(PhysicsError::CalculationError("Gravity must be positive and finite".to_string()));
+    }
+    check_property(fluid.density, "density")?;
+    if displaced_volume == 0.0 {
+        return Ok(0.0);
     }
     Ok(fluid.density * displaced_volume * gravity)
 }
@@ -550,9 +613,11 @@ pub fn calculate_buoyant_force(fluid: &Fluid, displaced_volume: f64, gravity: f6
 ///
 /// # Errors
 /// Returns an error if:
-/// * The pipe length or diameter is less than or equal to zero.
-/// * The velocity is less than or equal to zero.
-/// * The friction factor is less than or equal to zero.
+/// * The pipe length or diameter is less than or equal to zero, or not finite.
+/// * The velocity is less than or equal to zero, or not finite.
+/// * The friction factor is less than or equal to zero, or not finite.
+/// * The fluid's density is not finite and strictly positive (possible only for a
+///   `Fluid` built as a struct literal rather than through [`Fluid::new`]).
 ///
 /// # Examples
 /// ```
@@ -562,15 +627,16 @@ pub fn calculate_buoyant_force(fluid: &Fluid, displaced_volume: f64, gravity: f6
 /// let pressure_drop = calculate_pressure_drop(&water, 10.0, 0.05, 2.0, 0.02).unwrap();
 /// ```
 pub fn calculate_pressure_drop(fluid: &Fluid, pipe_length: f64, pipe_diameter: f64, velocity: f64, friction_factor: f64) -> Result<f64, PhysicsError> {
-    if pipe_length <= 0.0 || pipe_diameter <= 0.0 {
+    if !positive_finite(pipe_length) || !positive_finite(pipe_diameter) {
         return Err(PhysicsError::InvalidArea);
     }
-    if velocity <= 0.0 {
+    if !positive_finite(velocity) {
         return Err(PhysicsError::InvalidVelocity);
     }
-    if friction_factor <= 0.0 {
+    if !positive_finite(friction_factor) {
         return Err(PhysicsError::InvalidCoefficient);
     }
+    check_property(fluid.density, "density")?;
     Ok(friction_factor * (pipe_length / pipe_diameter) * 0.5 * fluid.density * velocity * velocity)
 }
 /// Upward acceleration of a parcel of fluid hotter than its surroundings, by the
@@ -596,7 +662,8 @@ pub fn calculate_pressure_drop(fluid: &Fluid, pipe_length: f64, pipe_diameter: f
 ///
 /// # Errors
 ///
-/// Returns an error if either temperature is at or below absolute zero.
+/// Returns an error if either temperature is at or below absolute zero, or if any
+/// argument is not finite.
 ///
 /// # Examples
 ///
@@ -620,11 +687,12 @@ pub fn thermal_buoyancy(
     ambient: f64,
     gravity: f64,
 ) -> Result<f64, PhysicsError> {
-    if temperature <= 0.0 || ambient <= 0.0 {
+    if !positive_finite(temperature) || !positive_finite(ambient) {
         return Err(PhysicsError::CalculationError(
-            "temperatures must be absolute and above zero".to_string(),
+            "temperatures must be absolute, finite and above zero".to_string(),
         ));
     }
+    validate_finite(gravity, "gravity")?;
     Ok(gravity * (temperature - ambient) / ambient)
 }
 

@@ -12,7 +12,8 @@ use super::solver::{Constraint2D, Constraint3D};
 pub struct ContactPoint2D {
     /// Contact position in world space
     pub position: (f64, f64),
-    /// Contact normal (points from object2 to object1)
+    /// Contact normal, unit length, pointing from object1 toward object2.
+    /// The solver pushes object1 along `-normal` and object2 along `+normal`.
     pub normal: (f64, f64),
     /// Penetration depth (positive if penetrating)
     pub penetration: f64,
@@ -23,7 +24,8 @@ pub struct ContactPoint2D {
 pub struct ContactPoint3D {
     /// Contact position in world space
     pub position: (f64, f64, f64),
-    /// Contact normal (points from object2 to object1)
+    /// Contact normal, unit length, pointing from object1 toward object2.
+    /// The solver pushes object1 along `-normal` and object2 along `+normal`.
     pub normal: (f64, f64, f64),
     /// Penetration depth (positive if penetrating)
     pub penetration: f64,
@@ -44,7 +46,7 @@ pub struct ContactPoint3D {
 /// let obj2 = ObjectIn2D::with_shape(1.0, (1.5, 0.0), Default::default());
 /// let contact = ContactPoint2D {
 ///     position: (0.75, 0.0),
-///     normal: (-1.0, 0.0),
+///     normal: (1.0, 0.0), // from obj1 toward obj2
 ///     penetration: 0.5,
 /// };
 /// let constraint = Contact2D::new(obj1, obj2, contact, 0.5, 0.3).expect("Valid contact");
@@ -158,7 +160,7 @@ impl Contact2D {
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
         // Only apply impulses if penetrating
-        if self.contact_point.penetration <= 0.0 {
+        if self.contact_point.penetration <= 0.0 || dt <= 0.0 {
             return Ok(());
         }
 
@@ -192,8 +194,14 @@ impl Contact2D {
             return Ok(());
         }
 
-        // Baumgarte stabilization bias (positive, pushes objects apart)
-        let bias = self.baumgarte * self.contact_point.penetration / dt;
+        // The position projection below removes (penetration - slop), capped;
+        // only what it cannot remove this call may be fed to the velocity bias.
+        // Biasing the full penetration as well launched resting bodies (e = 0).
+        let slop = 0.01; // Allow some penetration to prevent jitter
+        let max_correction = 0.1;
+        let position_correction = (self.contact_point.penetration - slop).max(0.0).min(max_correction);
+        let remaining = (self.contact_point.penetration - slop - position_correction).max(0.0);
+        let bias = self.baumgarte * remaining / dt;
 
         // Calculate target velocity change:
         // We want to change normal_velocity (negative, approaching) to positive (separating)
@@ -242,11 +250,9 @@ impl Contact2D {
             self.object2.velocity.y += friction_impulse * inv_mass2 * ty;
         }
 
-        // Position correction
-        let max_correction = 0.1;
-        let slop = 0.01; // Allow some penetration to prevent jitter
-        let correction_magnitude = (self.contact_point.penetration - slop).max(0.0);
-        let position_correction = correction_magnitude.min(max_correction);
+        // Position correction (computed above); record it so later iterations
+        // do not re-apply it.
+        self.contact_point.penetration -= position_correction;
 
         self.object1.position.x -= position_correction * (inv_mass1 / total_inv_mass) * nx;
         self.object1.position.y -= position_correction * (inv_mass1 / total_inv_mass) * ny;
@@ -299,7 +305,7 @@ impl Constraint2D for Contact2D {
 /// let obj2 = ObjectIn3D::new(1.0, 0.0, 0.0, 0.0, (1.5, 0.0, 0.0));
 /// let contact = ContactPoint3D {
 ///     position: (0.75, 0.0, 0.0),
-///     normal: (-1.0, 0.0, 0.0),
+///     normal: (1.0, 0.0, 0.0), // from obj1 toward obj2
 ///     penetration: 0.5,
 /// };
 /// let constraint = Contact3D::new(obj1, obj2, contact, 0.5, 0.3).expect("Valid contact");
@@ -415,7 +421,7 @@ impl Contact3D {
     /// * `dt` - Timestep in seconds
     pub fn solve(&mut self, dt: f64) -> Result<(), PhysicsError> {
         // Only apply impulses if penetrating
-        if self.contact_point.penetration <= 0.0 {
+        if self.contact_point.penetration <= 0.0 || dt <= 0.0 {
             return Ok(());
         }
 
@@ -451,8 +457,13 @@ impl Contact3D {
             return Ok(());
         }
 
-        // Baumgarte stabilization bias (positive, pushes objects apart)
-        let bias = self.baumgarte * self.contact_point.penetration / dt;
+        // The position projection below removes (penetration - slop), capped;
+        // only what it cannot remove this call may be fed to the velocity bias.
+        let slop = 0.01;
+        let max_correction = 0.1;
+        let position_correction = (self.contact_point.penetration - slop).max(0.0).min(max_correction);
+        let remaining = (self.contact_point.penetration - slop - position_correction).max(0.0);
+        let bias = self.baumgarte * remaining / dt;
 
         // Calculate target velocity change:
         // We want to change normal_velocity (negative, approaching) to positive (separating)
@@ -487,10 +498,11 @@ impl Contact3D {
             let rel_vy = self.object2.velocity.y - self.object1.velocity.y;
             let rel_vz = self.object2.velocity.z - self.object1.velocity.z;
 
-            // Calculate tangent velocity
-            let tangent_vx = rel_vx - normal_velocity * nx;
-            let tangent_vy = rel_vy - normal_velocity * ny;
-            let tangent_vz = rel_vz - normal_velocity * nz;
+            // Calculate tangent velocity from the *post-impulse* relative velocity
+            let vn_now = rel_vx * nx + rel_vy * ny + rel_vz * nz;
+            let tangent_vx = rel_vx - vn_now * nx;
+            let tangent_vy = rel_vy - vn_now * ny;
+            let tangent_vz = rel_vz - vn_now * nz;
             let tangent_speed = (tangent_vx * tangent_vx + tangent_vy * tangent_vy + tangent_vz * tangent_vz).sqrt();
 
             if tangent_speed > 1e-10 {
@@ -513,11 +525,9 @@ impl Contact3D {
             }
         }
 
-        // Position correction
-        let max_correction = 0.1;
-        let slop = 0.01; // Allow some penetration to prevent jitter
-        let correction_magnitude = (self.contact_point.penetration - slop).max(0.0);
-        let position_correction = correction_magnitude.min(max_correction);
+        // Position correction (computed above); record it so later iterations
+        // do not re-apply it.
+        self.contact_point.penetration -= position_correction;
 
         self.object1.position.x -= position_correction * (inv_mass1 / total_inv_mass) * nx;
         self.object1.position.y -= position_correction * (inv_mass1 / total_inv_mass) * ny;
@@ -616,17 +626,17 @@ mod tests {
         let mut obj1 = ObjectIn2D::with_shape(1.0, (0.0, 0.0), Shape2DCollider::Circle(1.0));
         let mut obj2 = ObjectIn2D::with_shape(1.0, (1.5, 0.0), Shape2DCollider::Circle(1.0));
 
-        // Objects moving apart - normal points from obj2 to obj1 (negative x)
+        // Objects moving apart - normal points from obj1 toward obj2 (+x)
         // For separating: rel_velocity dot normal > 0
         // rel_v = obj2.v - obj1.v = (1.0) - (-1.0) = 2.0
-        // normal = (1.0, 0.0) (pointing from obj2 toward obj1)
+        // normal = (1.0, 0.0) (pointing from obj1 toward obj2)
         // 2.0 * 1.0 = 2.0 > 0 = separating
         obj1.velocity.x = -1.0;
         obj2.velocity.x = 1.0;
 
         let contact = ContactPoint2D {
             position: (0.75, 0.0),
-            normal: (1.0, 0.0), // Points from obj2 to obj1
+            normal: (1.0, 0.0), // Points from obj1 to obj2
             penetration: 0.1,
         };
         let constraint = Contact2D::new(obj1, obj2, contact, 0.5, 0.3).unwrap();
@@ -639,7 +649,7 @@ mod tests {
         let mut obj1 = ObjectIn2D::with_shape(1.0, (0.0, 0.0), Shape2DCollider::Circle(1.0));
         let mut obj2 = ObjectIn2D::with_shape(1.0, (1.5, 0.0), Shape2DCollider::Circle(1.0));
 
-        // Objects moving together - normal points from obj2 to obj1
+        // Objects moving together - normal points from obj1 to obj2
         // rel_v = obj2.v - obj1.v = (-1.0) - (1.0) = -2.0
         // normal = (1.0, 0.0)
         // -2.0 * 1.0 = -2.0 < 0 = penetrating
@@ -648,7 +658,7 @@ mod tests {
 
         let contact = ContactPoint2D {
             position: (0.75, 0.0),
-            normal: (1.0, 0.0), // Points from obj2 to obj1
+            normal: (1.0, 0.0), // Points from obj1 to obj2
             penetration: 0.5,
         };
         let mut constraint = Contact2D::new(obj1, obj2, contact, 0.5, 0.3).unwrap();
@@ -724,13 +734,13 @@ mod tests {
 
     #[test]
     fn test_contact_3d_separating_no_impulse() {
-        // Objects moving apart - normal points from obj2 to obj1
+        // Objects moving apart - normal points from obj1 to obj2
         let obj1 = make_3d_object_with_velocity(1.0, (0.0, 0.0, 0.0), (-1.0, 0.0, 0.0));
         let obj2 = make_3d_object_with_velocity(1.0, (1.5, 0.0, 0.0), (1.0, 0.0, 0.0));
 
         let contact = ContactPoint3D {
             position: (0.75, 0.0, 0.0),
-            normal: (1.0, 0.0, 0.0), // Points from obj2 to obj1
+            normal: (1.0, 0.0, 0.0), // Points from obj1 to obj2
             penetration: 0.1,
         };
         let constraint = Contact3D::new(obj1, obj2, contact, 0.5, 0.3).unwrap();
@@ -746,7 +756,7 @@ mod tests {
 
         let contact = ContactPoint3D {
             position: (0.75, 0.0, 0.0),
-            normal: (1.0, 0.0, 0.0), // Points from obj2 to obj1
+            normal: (1.0, 0.0, 0.0), // Points from obj1 to obj2
             penetration: 0.5,
         };
         let mut constraint = Contact3D::new(obj1, obj2, contact, 0.5, 0.3).unwrap();
@@ -768,7 +778,7 @@ mod tests {
 
         let contact = ContactPoint3D {
             position: (0.75, 0.0, 0.0),
-            normal: (1.0, 0.0, 0.0), // Points from obj2 to obj1
+            normal: (1.0, 0.0, 0.0), // Points from obj1 to obj2
             penetration: 0.5,
         };
         let mut constraint = Contact3D::new(obj1, obj2, contact, 0.0, 0.0).unwrap();

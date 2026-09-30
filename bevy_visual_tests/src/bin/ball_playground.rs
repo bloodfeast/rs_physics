@@ -742,7 +742,7 @@ fn setup(
         // widens this once the ball is standing on it.
         .with_limits(0.0, 0.0)
         .with_material(&steel)
-        .with_angular_damping(0.05);
+        .with_angular_damping(12.0); // 1/s: the old 5% per call at 240 Hz
 
     let hinge_id = physics.add_constraint(WorldConstraint::Hinge(hinge)).unwrap();
     let mut hinge_constraint_ids = Vec::new();

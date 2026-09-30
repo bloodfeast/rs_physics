@@ -25,12 +25,24 @@ pub struct WorldConfig {
     /// Physics constants (air density, etc.)
     pub constants: PhysicsConstants,
 
-    /// Enable continuous collision detection (CCD)
+    /// Intended to enable continuous collision detection (CCD).
+    ///
+    /// **Not implemented yet: `PhysicsWorld` does not run CCD, and nothing
+    /// reads this field.** Collision detection in the world is discrete
+    /// only, whatever this is set to, so a body that moves further in one
+    /// tick than the thickness of what it would hit can pass through it.
+    /// `interactions::continuous_collision_detection` exists as a standalone
+    /// module but is not wired into the world.
+    ///
     /// Default: true
     pub enable_ccd: bool,
 
-    /// Velocity threshold for CCD activation
-    /// Objects moving slower than this use discrete detection
+    /// Intended speed threshold, in m/s, above which a body would use CCD
+    /// instead of discrete detection.
+    ///
+    /// **Not implemented yet: nothing reads this field**, because
+    /// `PhysicsWorld` does not run CCD (see [`WorldConfig::enable_ccd`]).
+    ///
     /// Default: 1.0 m/s
     pub ccd_velocity_threshold: f64,
 

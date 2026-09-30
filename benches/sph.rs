@@ -49,8 +49,12 @@ fn step(c: &mut Criterion) {
         let mut fluid = filled(n);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            // Zero gravity. Every iteration steps the same fluid, and under gravity
+            // the cube hit the floor within ~100 steps, so almost every sample
+            // timed a puddle rather than the packed cube this is meant to measure.
+            // At rest spacing and without gravity it stays packed.
             b.iter(|| {
-                fluid.step(std::hint::black_box(1.0 / 240.0), 9.81, |_, _| 0.0);
+                fluid.step(std::hint::black_box(1.0 / 240.0), 0.0, |_, _| 0.0);
             });
         });
     }

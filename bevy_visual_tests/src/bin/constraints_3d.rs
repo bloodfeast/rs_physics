@@ -430,7 +430,7 @@ fn setup_hinge_scenario(sim_state: &mut SimulationState) {
     ).unwrap()
         .with_limits(-0.05, std::f64::consts::FRAC_PI_2 - 0.1)  // Nearly closed to ~80 degrees open
         .with_material(&steel)       // Steel restitution (0.85) for realistic bounce
-        .with_angular_damping(0.02); // Small friction in hinge
+        .with_angular_damping(1.2); // Small friction in hinge, 1/s (was 2% per 60 Hz call)
 
     sim_state.hinges.push(hinge);
 }

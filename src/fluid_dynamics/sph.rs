@@ -127,6 +127,10 @@ pub struct SphParams {
     pub restitution: f64,
     /// Fraction of tangential velocity kept when hitting the ground. Below one, a
     /// splash spreads and then stops rather than sliding forever.
+    ///
+    /// Stated per 1/240 s substep of contact and applied as the equivalent decay
+    /// rate, so how far a drop slides does not depend on the substep it is solved
+    /// at.
     pub friction: f64,
 }
 
@@ -481,10 +485,15 @@ impl SphFluid {
     ///
     /// # Errors
     ///
-    /// * [`PhysicsError::InvalidDistance`] if the smoothing radius is not positive.
-    /// * [`PhysicsError::InvalidMass`] if the particle mass is not positive.
-    /// * [`PhysicsError::CalculationError`] if the rest density is not positive, or if
+    /// * [`PhysicsError::InvalidDistance`] if the smoothing radius is not a positive
+    ///   finite number.
+    /// * [`PhysicsError::InvalidMass`] if the particle mass is not a positive finite
+    ///   number.
+    /// * [`PhysicsError::CalculationError`] if the rest density is not a positive finite
+    ///   number, if the stiffness, viscosity or cohesion is negative or not finite, or if
     ///   `capacity` does not fit the `u32` neighbour indices.
+    /// * [`PhysicsError::InvalidCoefficient`] if the restitution or the friction is
+    ///   outside `0..=1`.
     ///
     /// # Examples
     ///
@@ -499,16 +508,37 @@ impl SphFluid {
     /// assert!(SphFluid::new(bad, 1_000).is_err());
     /// ```
     pub fn new(params: SphParams, capacity: usize) -> Result<SphFluid, PhysicsError> {
-        if params.smoothing_radius <= 0.0 {
+        // Written as "is not a positive finite number" rather than `<= 0.0`, which
+        // NaN passes, and a NaN here turns every particle NaN on the first step.
+        let positive = |v: f64| v > 0.0 && v.is_finite();
+        let non_negative = |v: f64| v >= 0.0 && v.is_finite();
+        let fraction = |v: f64| (0.0..=1.0).contains(&v);
+
+        if !positive(params.smoothing_radius) {
             return Err(PhysicsError::InvalidDistance);
         }
-        if params.particle_mass <= 0.0 {
+        if !positive(params.particle_mass) {
             return Err(PhysicsError::InvalidMass);
         }
-        if params.rest_density <= 0.0 {
+        if !positive(params.rest_density) {
             return Err(PhysicsError::CalculationError(
                 "rest density must be positive".to_string(),
             ));
+        }
+        // Negative stiffness or viscosity feeds energy in instead of taking it out.
+        if !non_negative(params.stiffness)
+            || !non_negative(params.viscosity)
+            || !non_negative(params.cohesion)
+        {
+            return Err(PhysicsError::CalculationError(
+                "stiffness, viscosity and cohesion must be finite and non-negative"
+                    .to_string(),
+            ));
+        }
+        // Fractions of velocity kept at the ground: above one, every contact gains
+        // energy.
+        if !fraction(params.restitution) || !fraction(params.friction) {
+            return Err(PhysicsError::InvalidCoefficient);
         }
         if capacity >= u32::MAX as usize / 2 {
             return Err(PhysicsError::CalculationError(
@@ -919,6 +949,9 @@ impl SphFluid {
     /// the ceiling before spreading emitter speeds across a range, or the spread
     /// collapses to a single value and the emission design stops existing.
     ///
+    /// A non-finite position or velocity is refused too: one NaN particle turns its
+    /// neighbours NaN within a step, through the viscosity term.
+    ///
     /// # Arguments
     ///
     /// * `position` - metres.
@@ -926,7 +959,8 @@ impl SphFluid {
     ///
     /// # Returns
     ///
-    /// `false` if the fluid was full and nothing was added.
+    /// `false` if the fluid was full, or the state was not finite, and nothing was
+    /// added.
     ///
     /// # Examples
     ///
@@ -939,6 +973,9 @@ impl SphFluid {
     /// ```
     pub fn spawn(&mut self, position: [f64; 3], velocity: [f64; 3]) -> bool {
         if self.len() >= self.capacity {
+            return false;
+        }
+        if !position.iter().chain(&velocity).all(|c| c.is_finite()) {
             return false;
         }
         self.px.push(position[0]);
@@ -965,10 +1002,14 @@ impl SphFluid {
     ///
     /// # Arguments
     ///
-    /// * `dt` - the substep, seconds. Zero or less does nothing.
-    /// * `gravity` - downward acceleration, m/s^2.
+    /// * `dt` - the substep, seconds. A `dt` that is not a positive finite number does
+    ///   nothing, rather than step every particle to NaN.
+    /// * `gravity` - downward acceleration, m/s^2. A non-finite value does nothing.
     /// * `ground_height` - terrain height in metres at a world `(x, z)`, sampled per
-    ///   particle, so the fluid follows terrain rather than a flat plane.
+    ///   particle, so the fluid rests on terrain rather than a flat plane. The contact
+    ///   only clamps height and reflects vertical velocity: it has no slope normal, so
+    ///   a drop on an incline does not run downhill on its own (SPH-F5 in
+    ///   `docs/reviews/2026-09-29-correctness-performance.md`).
     ///
     /// # Examples
     ///
@@ -986,7 +1027,7 @@ impl SphFluid {
     where
         F: Fn(f64, f64) -> f64,
     {
-        if dt <= 0.0 || self.is_empty() {
+        if !(dt > 0.0 && dt.is_finite() && gravity.is_finite()) || self.is_empty() {
             return;
         }
         let t0 = Instant::now();
@@ -1180,6 +1221,7 @@ impl SphFluid {
             cz: &self.s_cell_z,
             start: &self.bucket_start,
             mask: self.table_mask,
+            h,
             h2,
         };
 
@@ -1314,7 +1356,7 @@ impl SphFluid {
                     let (mut x, mut y, mut z) =
                         (vx[i] + ax[k] * dt, vy[i] + ay[k] * dt, vz[i] + az[k] * dt);
                     let sq = x * x + y * y + z * z;
-                    let scale = if sq > max_sq { max_speed / sq.sqrt() } else { 1.0 };
+                    let scale = if sq > max_sq { max_speed / speed_of(x, y, z, sq) } else { 1.0 };
                     x *= scale;
                     y *= scale;
                     z *= scale;
@@ -1328,15 +1370,25 @@ impl SphFluid {
             });
 
         // The ground: one call into the caller's closure a particle, so scalar.
-        let (restitution, friction) = (self.params.restitution, self.params.friction);
+        //
+        // Ground friction is a decay *rate*, not a per-step multiplier. A resting or
+        // sliding particle is in contact on every substep, so multiplying by `friction`
+        // each time made the slide distance proportional to `dt`: four times shorter at
+        // 960 Hz than at 240 Hz, and zero in the limit. Implicit decay at a rate
+        // calibrated so that one 240 Hz substep keeps exactly `friction` slides
+        // `v / rate` whatever the substep, in rational arithmetic with no transcendental
+        // in the loop.
+        let restitution = self.params.restitution;
+        let friction_rate = FRICTION_REFERENCE_HZ * (1.0 / self.params.friction - 1.0);
+        let friction_keep = 1.0 / (1.0 + friction_rate * dt);
         for i in 0..n {
             let floor = ground_height(self.px[i], self.pz[i]);
             let mut on_ground = false;
             if self.py[i] < floor {
                 self.py[i] = floor;
                 self.vy[i] = -self.vy[i] * restitution;
-                self.vx[i] *= friction;
-                self.vz[i] *= friction;
+                self.vx[i] *= friction_keep;
+                self.vz[i] *= friction_keep;
                 on_ground = true;
             }
 
@@ -1424,6 +1476,7 @@ struct Grid<'a> {
     cz: &'a [i32],
     start: &'a [u32],
     mask: usize,
+    h: f64,
     h2: f64,
 }
 
@@ -1437,7 +1490,15 @@ struct Runs {
     fresh: bool,
     count: usize,
     slots: [(u32, u32); 18],
+    /// For a run that is exactly one row's three cells, the row, `(dy + 1) + 3 (dz + 1)`;
+    /// [`MIXED_RUN`] for a run merged from several rows or split at the table's end.
+    row: [u8; 18],
+    /// The first bucket of a single-row run: its cells are buckets `first..first + 3`.
+    first: [u32; 18],
 }
+
+/// [`Runs::row`] of a run the walk takes whole, because it is not one row.
+const MIXED_RUN: u8 = u8::MAX;
 
 impl Grid<'_> {
     /// Build `runs` for the cell `(cx, cy, cz)`.
@@ -1450,18 +1511,19 @@ impl Grid<'_> {
     /// the whole membership test: a particle from a colliding far cell simply fails it.
     fn build_runs(&self, cell: [i32; 3], runs: &mut Runs) {
         let table = self.mask + 1;
-        let mut iv = [(0usize, 0usize); 18];
+        let mut iv = [(0usize, 0usize, MIXED_RUN); 18];
         let mut m = 0;
         for dz in -1..=1i32 {
             for dy in -1..=1i32 {
+                let tag = ((dy + 1) + 3 * (dz + 1)) as u8;
                 let row = row_hash(cell[1].wrapping_add(dy), cell[2].wrapping_add(dz));
                 let b0 = bucket(row, cell[0].wrapping_sub(1), self.mask);
                 if b0 + 3 <= table {
-                    iv[m] = (b0, b0 + 3);
+                    iv[m] = (b0, b0 + 3, tag);
                     m += 1;
                 } else {
-                    iv[m] = (b0, table);
-                    iv[m + 1] = (0, b0 + 3 - table);
+                    iv[m] = (b0, table, MIXED_RUN);
+                    iv[m + 1] = (0, b0 + 3 - table, MIXED_RUN);
                     m += 2;
                 }
             }
@@ -1476,22 +1538,25 @@ impl Grid<'_> {
         }
         let mut count = 0;
         let mut cur = iv[0];
-        let mut emit = |from: usize, to: usize, count: &mut usize| {
-            let (s, e) = (self.start[from], self.start[to]);
+        let mut emit = |run: (usize, usize, u8), count: &mut usize| {
+            let (s, e) = (self.start[run.0], self.start[run.1]);
             if s < e {
                 runs.slots[*count] = (s, e);
+                runs.row[*count] = run.2;
+                runs.first[*count] = run.0 as u32;
                 *count += 1;
             }
         };
         for &next in &iv[1..m] {
             if next.0 <= cur.1 {
                 cur.1 = cur.1.max(next.1);
+                cur.2 = MIXED_RUN;
             } else {
-                emit(cur.0, cur.1, &mut count);
+                emit(cur, &mut count);
                 cur = next;
             }
         }
-        emit(cur.0, cur.1, &mut count);
+        emit(cur, &mut count);
         runs.count = count;
         runs.cell = cell;
         runs.fresh = true;
@@ -1512,8 +1577,40 @@ impl Grid<'_> {
         }
         let (x, y, z) = (self.x[k], self.y[k], self.z[k]);
         let h2 = self.h2;
+        // Out-of-reach cells: the squared distance from the particle to the near face of
+        // the cell below, level with and above its own on each axis. A cell whose nearest
+        // point is beyond `h` holds no neighbour, so a single-row run is trimmed to the
+        // cells in reach and skipped when none is (about a quarter of the candidates on a
+        // packed block). What is dropped is what the distance test rejects, so the list,
+        // and its order, is what the whole run gives. Each gap is shortened by a few units
+        // in the last place of the coordinate and the reach lengthened by 1e-12, so
+        // rounding in `floor` at a cell face can keep a cell, never drop one.
+        let h = self.h;
+        let gaps = |p: f64, c: i32| -> [f64; 3] {
+            let slack = (p.abs() + h) * (4.0 * f64::EPSILON);
+            let below = (p - c as f64 * h).clamp(0.0, h);
+            let (b, a) = ((below - slack).max(0.0), (h - below - slack).max(0.0));
+            [b * b, 0.0, a * a]
+        };
+        let (gx, gy, gz) = (gaps(x, cell[0]), gaps(y, cell[1]), gaps(z, cell[2]));
+        let reach = h2 * (1.0 + 1e-12);
         let mut w = len;
-        for &(s, e) in &runs.slots[..runs.count] {
+        for r in 0..runs.count {
+            let (mut s, mut e) = runs.slots[r];
+            let row = runs.row[r];
+            if row != MIXED_RUN {
+                let g = gy[(row % 3) as usize] + gz[(row / 3) as usize];
+                if g > reach {
+                    continue;
+                }
+                let b0 = runs.first[r] as usize;
+                let lo = if g + gx[0] > reach { 1 } else { 0 };
+                let hi = if g + gx[2] > reach { 2 } else { 3 };
+                (s, e) = (self.start[b0 + lo], self.start[b0 + hi]);
+                if s >= e {
+                    continue;
+                }
+            }
             let (s, e) = (s as usize, e as usize);
             if out.len() < w + (e - s) {
                 out.resize(w + (e - s), 0);
@@ -1646,7 +1743,7 @@ impl Sorted<'_> {
     ) {
         let (x, y, z) = (self.x[i], self.y[i], self.z[i]);
         let (vx, vy, vz) = (self.vx[i], self.vy[i], self.vz[i]);
-        let (pi, h) = (self.pressure[i], k.h);
+        let (pi, h, inv_di) = (self.pressure[i], k.h, self.inv_density[i]);
 
         let mut dx = [0.0f64; 4];
         let mut dy = [0.0f64; 4];
@@ -1683,7 +1780,13 @@ impl Sorted<'_> {
             // collapse together nor pull from beyond the kernel.
             let a3r3 = hr * hr * hr * r[l] * r[l] * r[l];
             let spline = if 2.0 * r[l] > h { a3r3 } else { 2.0 * a3r3 - k.cohesion_floor };
-            let cohesion = if r[l] <= h { k.cohesion * spline } else { 0.0 };
+            // Scaled by 2 rho_i / (rho_i + rho_j), written in the inverse densities the
+            // block already holds, so that after the division by rho_i the pair's
+            // accelerations are equal and opposite. Divided by rho_i alone, a surface
+            // particle beside a denser interior one pulled harder than it was pulled, and
+            // a free blob self-propelled. Unchanged wherever the density is uniform.
+            let symmetric = 2.0 * inv_dj[l] / (inv_di + inv_dj[l]);
+            let cohesion = if r[l] <= h { k.cohesion * spline * symmetric } else { 0.0 };
             radial[l] = if live { (pressure - cohesion) * inv_r } else { 0.0 };
             visc[l] = if live { k.viscosity * hr * inv_dj[l] } else { 0.0 };
         }
@@ -1706,6 +1809,21 @@ fn cfl_speed_ceiling(smoothing_radius: f64, dt: f64) -> f64 {
     smoothing_radius / dt.max(1e-6) * CFL_FRACTION
 }
 
+/// The length of `(x, y, z)`, given its square `sq`, safe where the square overflows.
+///
+/// Squaring overflows past about 1.3e154 m/s, and `max / inf` would stop the particle
+/// dead instead of capping it, so there the vector is rescaled by its largest component
+/// first. Only the capped branch calls this, so the common path is one square root.
+#[inline]
+fn speed_of(x: f64, y: f64, z: f64, sq: f64) -> f64 {
+    if sq.is_finite() {
+        return sq.sqrt();
+    }
+    let big = x.abs().max(y.abs()).max(z.abs());
+    let (ux, uy, uz) = (x / big, y / big, z / big);
+    big * (ux * ux + uy * uy + uz * uz).sqrt()
+}
+
 /// How much of a smoothing radius a particle may cross in one step.
 ///
 /// Below one because the neighbour search is built once per step: a particle that
@@ -1713,8 +1831,17 @@ fn cfl_speed_ceiling(smoothing_radius: f64, dt: f64) -> f64 {
 /// for it, so the forces it received were for somewhere it no longer is.
 const CFL_FRACTION: f64 = 0.4;
 
+/// The substep rate `SphParams::friction` is calibrated at: one substep of ground
+/// contact at this rate keeps exactly `friction` of the tangential velocity, and
+/// other rates keep whatever gives the same slide distance.
+const FRICTION_REFERENCE_HZ: f64 = 240.0;
+
 /// Akinci's cohesion spline, normalised over the kernel support. The scalar form the
 /// force pass inlines, kept for the tests that pin its shape.
+///
+/// Zero at both ends and peaked around `h/2`, which is what makes it stable: it
+/// cannot pull particles that are already touching any closer, and it has no reach
+/// beyond the neighbour radius.
 #[cfg(test)]
 fn cohesion_kernel(r: f64, h: f64) -> f64 {
     if r <= 0.0 || r > h {
@@ -1733,9 +1860,15 @@ fn cohesion_kernel(r: f64, h: f64) -> f64 {
 ///
 /// `floor` rather than a cast: casting truncates toward zero, so positions either
 /// side of an axis would share a cell and neighbours would be found asymmetrically.
+///
+/// Clamped one short of the `i32` range, so the neighbour walk's `cell +- 1` can never
+/// overflow. Anything past it (8.6e7 m at blood's spacing) shares the edge cell, where
+/// the distance test still separates what is and is not a neighbour.
 #[inline]
 fn cell_of(p: f64, cell_size: f64) -> i32 {
-    (p / cell_size).floor() as i32
+    const LO: f64 = i32::MIN as f64 + 1.0;
+    const HI: f64 = i32::MAX as f64 - 1.0;
+    (p / cell_size).floor().clamp(LO, HI) as i32
 }
 
 /// Hash of a row of cells (fixed `y`, `z`). Integer arithmetic only, so it produces
@@ -2414,3 +2547,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sph_regression_tests.rs"]
+mod regression_tests;

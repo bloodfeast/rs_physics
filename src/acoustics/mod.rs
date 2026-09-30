@@ -58,6 +58,9 @@ pub mod band;
 pub mod spatial;
 pub mod surfaces;
 
+#[cfg(test)]
+mod regression_tests;
+
 pub use spatial::{Ears, Heard};
 pub use surfaces::{
     barrier_insertion_db, fresnel_radius, impedance, lit_zone_limit, occludes,
@@ -94,8 +97,9 @@ impl Air {
     ///
     /// From the ideal-gas relation `c = sqrt(γ R T / M)`, which for air reduces to
     /// `20.05 * sqrt(T)`. Humidity raises it slightly — water is lighter than the nitrogen
-    /// it displaces — by about 0.3 m/s at full saturation and room temperature, which is
-    /// under a tenth of a per cent and is included because it costs one term.
+    /// it displaces -- by about 1.3 m/s at full saturation and 20 °C, which is under half a
+    /// per cent and agrees with Cramer's (1993) fit to within a few hundredths of a m/s.
+    /// It is included because it costs one term.
     ///
     /// There is no guard on the temperature here any more. [`Air::new`] will not build a
     /// state at or below 0 K, so the square root cannot see a negative and the `max(1.0)`
@@ -130,8 +134,11 @@ impl Air {
     /// distant sound changes with the weather and not just its brightness.
     ///
     /// ISO 9613-1. Returns dB per metre; multiply by path length.
+    ///
+    /// A frequency that is zero, negative or NaN absorbs nothing, so a bad band never
+    /// reaches a mixer as NaN.
     pub fn absorption_db_per_m(&self, frequency_hz: f64) -> f64 {
-        if frequency_hz <= 0.0 {
+        if !(frequency_hz > 0.0) {
             return 0.0;
         }
         let f = frequency_hz;
@@ -181,8 +188,9 @@ pub fn spreading_gain(metres: f64, directivity: f64) -> f64 {
     directivity.max(0.0) * REFERENCE_M / r
 }
 
-/// The largest closing speed [`doppler_ratio`] credits a source with, as a fraction of the
-/// speed of sound. The classical expression diverges at 1; a shell that outruns its own
+/// The largest closing speed [`doppler_ratio`] credits a source with, and the fastest a
+/// receding listener is credited with, as a fraction of the speed of sound. The classical
+/// expression diverges at 1; a shell that outruns its own
 /// report is a different phenomenon than a Doppler shift.
 pub const DOPPLER_MAX_CLOSING: f64 = 0.95;
 
@@ -201,10 +209,14 @@ pub fn delay(metres: f64, air: &Air) -> f64 {
 ///
 /// Clamped below the speed of sound: at or past it the classical expression diverges, and
 /// a shell that outruns its own report is a different phenomenon than a Doppler shift.
+/// The listener is clamped the same way when receding: one that outruns the sound never
+/// hears it, and the unclamped expression goes to zero and then negative there.
 pub fn doppler_ratio(source_toward: f64, listener_toward: f64, air: &Air) -> f64 {
     let c = air.speed_of_sound();
-    let closing = source_toward.clamp(-DOPPLER_MAX_CLOSING * c, DOPPLER_MAX_CLOSING * c);
-    (c + listener_toward) / (c - closing)
+    let limit = DOPPLER_MAX_CLOSING * c;
+    let closing = source_toward.clamp(-limit, limit);
+    let listener = listener_toward.max(-limit);
+    (c + listener) / (c - closing)
 }
 
 #[cfg(test)]
