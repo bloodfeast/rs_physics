@@ -598,23 +598,61 @@ impl FilmFlow {
         self.yield_length / slope
     }
 
-    /// The largest timestep a grid of this cell size may take, seconds.
+    /// The largest timestep a square grid of this cell size may take across a face with
+    /// this free-surface slope and donor depth, seconds.
     ///
-    /// The CFL condition for the kinematic wave, `dt ≤ dx/c`. At exactly this value a
-    /// disturbance crosses one whole cell in one step, which is the boundary of what the
-    /// grid can represent; take a fraction of it. [`f64::INFINITY`] when nothing moves.
+    /// The flux law is a wave *and* a diffusion — `q = -(ρgh³/3μ)∇(z + h)` carries the
+    /// liquid downhill through `∇z` and levels it through `∇h` — and an explicit step has
+    /// to respect both, so this is the smaller of two limits:
     ///
-    /// Because `c` goes as `h²`, **the deepest cell on the map sets the timestep for all
-    /// of them**, and quadratically: a spill twice as deep needs a step four times
-    /// smaller. That is the number to watch when a film solver mysteriously destabilises
-    /// after a big splash. [`FilmGrid::max_step`] finds it for a whole grid.
+    /// ```text
+    ///   dt ≤ dx / c              the kinematic wave, c = dq/dh (Self::wave_speed)
+    ///   dt ≤ dx² / (2·d·D)       forward Euler on the levelling term, d = 2,
+    ///                            D = ρgh³/3μ ≥ dq/d(slope)
+    /// ```
+    ///
+    /// On a steep slope the wave binds. On level or gently sloping ground the diffusion
+    /// does, by orders of magnitude: a 2 mm blood film on the flat with a 1% ripple, at
+    /// 5 cm cells, has a wave limit of about 60 s and a diffusive limit of 0.09 s. Stepping
+    /// past the diffusive limit does not drive a depth negative — [`FilmGrid::step`]'s
+    /// limiter prevents that — but it turns a smooth film into a grid-scale checkerboard
+    /// that the limiter then holds in place.
+    ///
+    /// Each face is bounded on its own and a cell has four, so take a fraction of this;
+    /// the tests here use a quarter. [`f64::INFINITY`] when the face is not moving — a
+    /// zero slope, a dry donor, or a film below the arrest thickness — since a face that
+    /// carries no flux cannot change either cell beside it this step.
+    ///
+    /// The deepest cell on the map sets the timestep for all of them: as `1/h²` where
+    /// the wave binds and `1/h³` where the diffusion does. That is the number to watch
+    /// when a film solver mysteriously destabilises after a big splash.
+    /// [`FilmGrid::max_step`] finds it for a whole grid.
     #[inline]
     pub fn max_step(&self, slope: f64, thickness: f64, cell_size: f64) -> f64 {
-        let speed = self.wave_speed(slope, thickness);
-        if !(speed > 0.0) {
+        let rate = self.stability_rate(slope, thickness, 1.0 / cell_size);
+        if !(rate > 0.0) {
             return f64::INFINITY;
         }
-        cell_size / speed
+        1.0 / rate
+    }
+
+    /// The reciprocal of [`Self::max_step`], in 1/s: the larger of `c/dx` and `4D/dx²`,
+    /// and exactly `0.0` for a face that is not moving (including a NaN in either
+    /// argument). Kept as a rate so that a whole-grid scan can take a maximum and divide
+    /// once, rather than divide per face.
+    #[inline(always)]
+    fn stability_rate(&self, slope: f64, thickness: f64, inv_dx: f64) -> f64 {
+        let drive = slope.abs() * thickness;
+        let speed = 3.0 * self.mobility * thickness * (drive - self.yield_length);
+        // `mobility·h³` is `dq/d(slope)` for a Newtonian film and an upper bound on it
+        // for a Bingham one, whose `1 - X³` factor is at most 1.
+        let diffusivity = self.mobility * thickness * thickness * thickness;
+        let rate = (speed * inv_dx).max(4.0 * diffusivity * inv_dx * inv_dx);
+        if drive > self.yield_length {
+            rate
+        } else {
+            0.0
+        }
     }
 }
 
@@ -858,7 +896,9 @@ impl FilmGrid {
     /// accordingly: **5.2 ms on a 1400 × 1000 grid**, which is most of a frame to
     /// rediscover something the caller usually already knows. A caller that has just
     /// deposited the deepest liquid on the map should call [`FilmFlow::max_step`] with
-    /// that depth and skip this entirely.
+    /// that depth and skip this entirely — passing the steepest *free-surface* slope it
+    /// expects, not the bed's. On level ground that is the edge of the fresh pool,
+    /// `depth / cell_size`; the bed's slope of zero would report no limit at all.
     pub fn max_step(&self, flow: &FilmFlow) -> f64 {
         let (w, h) = (self.width, self.height);
         let inv_dx = 1.0 / self.cell_size;
@@ -866,7 +906,9 @@ impl FilmGrid {
         let ground = &self.ground[..cells];
         let depth = &self.thickness[..cells];
 
-        let mut smallest = f64::INFINITY;
+        // The fastest face, as a rate, so there is one divide per grid rather than one
+        // per face. The same per-face arithmetic as `FilmFlow::max_step`.
+        let mut fastest = 0.0f64;
         for y in 0..h {
             let r = y * w;
             let bed = &ground[r..r + w];
@@ -874,23 +916,29 @@ impl FilmGrid {
             for x in 0..w - 1 {
                 let slope = ((bed[x] - bed[x + 1]) + (film[x] - film[x + 1])) * inv_dx;
                 let donor = if slope > 0.0 { film[x] } else { film[x + 1] };
-                smallest = smallest.min(flow.max_step(slope, donor, self.cell_size));
+                fastest = fastest.max(flow.stability_rate(slope, donor, inv_dx));
             }
         }
         for i in 0..cells - w {
             let j = i + w;
             let slope = ((ground[i] - ground[j]) + (depth[i] - depth[j])) * inv_dx;
             let donor = if slope > 0.0 { depth[i] } else { depth[j] };
-            smallest = smallest.min(flow.max_step(slope, donor, self.cell_size));
+            fastest = fastest.max(flow.stability_rate(slope, donor, inv_dx));
         }
-        smallest
+        if fastest > 0.0 {
+            1.0 / fastest
+        } else {
+            f64::INFINITY
+        }
     }
 
     /// Advance the film by `dt` seconds.
     ///
     /// Allocates nothing and branches on nothing per cell. See [`Self::max_step`] for
-    /// what `dt` may be; exceeding it costs accuracy, not stability, because the
-    /// positivity limiter holds regardless.
+    /// what `dt` may be. Exceeding it can never drive a depth negative or lose liquid —
+    /// the positivity limiter holds regardless — but that is all the limiter promises: past
+    /// the diffusive half of the limit, a film on level ground grows a grid-scale
+    /// checkerboard instead of levelling, and the limiter holds it there.
     ///
     /// A `dt` that is zero, negative or not finite is a no-op: the caller gets its grid
     /// back unchanged rather than an error, because this is called from a frame loop

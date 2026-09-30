@@ -491,3 +491,17 @@ baseline lacked.
   - **`barrier_insertion_db` has no lit side.** It steps 0 → 5 dB at the shadow boundary. Fixing it
     needs a signed path difference and a caller change in Ridgeline together (ACU-2).
   - **`impedance` is the P-wave (bulk) impedance** as of this review, not `sqrt(Eρ)`.
+- 2026-09-30 — Analytic fluids + thin-film review (tests in
+  `fluid_dynamics/analytic_regression_tests.rs`, IDs FLD-n / FILM-n).
+  - **The film law is a diffusion as well as a wave, and the step limit only knew about the
+    wave.** `FilmFlow::max_step` / `FilmGrid::max_step` now return `min(dx/c, dx²/(4·ρgh³/3μ))`.
+    On level or gentle ground the old figure was up to ~3000× too large and a ¼-step grew a
+    ±15% checkerboard that the positivity limiter then held; positivity is not stability.
+  - **`validate_positive(NaN)` used to be `Ok`** (`value <= 0.0` is false for NaN). It and
+    `validate_non_negative` now reject NaN, which also tightens `FluidGrid`/`FluidGrid3D`
+    constructors (a NaN `dt`, diffusion or viscosity is now an error). Write range checks
+    as `!(x > 0.0)` in this crate.
+  - **The film solver is right**: Huppert's t^{1/5} pool and t^{1/3} slope current both
+    reproduced (first-order in dx), and the Bingham factor matches an integrated profile
+    to 1e-10. The open questions are the `tanθ` small-slope law (FILM-2) and zero-speed
+    `Err`s in the drag/buoyancy helpers (FLD-2).

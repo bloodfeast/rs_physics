@@ -9,11 +9,14 @@
 //! ## Features
 //!
 //! ### Analytical (`fluid_dynamics` feature)
-//! - Drag force calculation (sphere, cylinder, flat plate)
-//! - Buoyancy force calculation
-//! - Reynolds number and flow regime classification
-//! - Bernoulli equation applications
-//! - Predefined fluid properties (water, air, oil, etc.)
+//! - Drag force `½ρv²·C_d·A`, from a drag coefficient and reference area you supply
+//!   (there is no built-in `C_d(Re)` correlation)
+//! - Buoyant force `ρ·V·g`, and the thermal (Boussinesq) buoyancy of hot gas
+//! - Reynolds number `ρvL/μ` (no regime classifier; see *Flow Regimes* below)
+//! - Darcy–Weisbach pipe pressure drop
+//! - Fluid presets (water, seawater, oil, honey, glycerin, blood), and air derived from
+//!   an [`crate::atmosphere::Air`] state through `Fluid::from_air`
+//! - Thin-film surface flow — the lubrication approximation (`FilmFlow`, `FilmGrid`)
 //!
 //! ### Simulation (`fluid_simulation` feature)
 //! - 2D/3D incompressible Navier-Stokes solver
@@ -23,20 +26,25 @@
 //!
 //! ## Quick Start - Analytical
 //!
-//! ```rust,ignore
-//! use rs_physics::fluid_dynamics::{Fluid, calculate_drag_force, reynolds_number};
+//! ```rust
+//! # #[cfg(feature = "fluid_dynamics")] {
+//! use rs_physics::fluid_dynamics::{Fluid, calculate_drag_force, calculate_reynolds_number};
 //!
 //! let water = Fluid::water();
-//! let velocity = 2.0;  // m/s
+//! let velocity = 1.0;  // m/s, relative to the water
 //! let diameter = 0.1;  // m
 //!
-//! // Calculate Reynolds number
-//! let re = reynolds_number(water.density, velocity, diameter, water.dynamic_viscosity);
-//! println!("Reynolds number: {:.0}", re);
+//! // Reynolds number on the diameter: about 10^5, where a sphere's C_d is about 0.47.
+//! let re = calculate_reynolds_number(&water, velocity, diameter).unwrap();
+//! assert!(re > 1.0e3 && re < 2.0e5);
 //!
-//! // Calculate drag force on a sphere
-//! let drag = calculate_drag_force(water.density, velocity, std::f64::consts::PI * diameter * diameter / 4.0, 0.47);
-//! println!("Drag force: {:.2} N", drag);
+//! // Drag on a sphere. The area is the *frontal* area, pi d^2 / 4, because that is the
+//! // area the 0.47 is defined against. The result is a magnitude in newtons, acting
+//! // against the relative velocity.
+//! let frontal_area = std::f64::consts::PI * diameter * diameter / 4.0;
+//! let drag = calculate_drag_force(&water, velocity, frontal_area, 0.47).unwrap();
+//! assert!((drag - 0.5 * 998.0 * 1.0 * frontal_area * 0.47).abs() < 1e-9);
+//! # }
 //! ```
 //!
 //! ## Quick Start - Simulation
@@ -59,20 +67,55 @@
 //!
 //! ## Predefined Fluids
 //!
-//! | Fluid | Density (kg/m³) | Viscosity (Pa·s) |
-//! |-------|-----------------|------------------|
-//! | Water | 1000 | 1.0e-3 |
-//! | Air | 1.225 | 1.8e-5 |
-//! | Oil | 900 | 0.1 |
-//! | Honey | 1400 | 2.5 |
+//! What the constructors actually return. The doctest below the table asserts every
+//! row, so the table cannot drift from the code again.
+//!
+//! | Constructor | State | Density (kg/m³) | Viscosity (Pa·s) |
+//! |-------------|-------|-----------------|------------------|
+//! | `Fluid::water()` | 20 °C | 998 | 1.0e-3 |
+//! | `Fluid::seawater()` | 20 °C | 1025 | 1.08e-3 |
+//! | `Fluid::oil()` | SAE 30, 40 °C | 876 | 0.1 |
+//! | `Fluid::honey()` | 20 °C | 1420 | 10.0 |
+//! | `Fluid::glycerin()` | 20 °C | 1261 | 1.5 |
+//! | `Fluid::blood()` | 37 °C, at 300 s⁻¹ | 1060 | 4.0e-3 |
+//! | `Fluid::from_air(&Air::sea_level())` | ICAO, 15 °C | 1.225 | 1.79e-5 |
+//!
+//! There is no `Fluid::air()`: air is a state, not a constant, so it comes from an
+//! [`crate::atmosphere::Air`].
+//!
+//! ```rust
+//! # #[cfg(feature = "fluid_dynamics")] {
+//! use rs_physics::atmosphere::Air;
+//! use rs_physics::fluid_dynamics::Fluid;
+//!
+//! let rows = [
+//!     (Fluid::water(), 998.0, 1.0e-3),
+//!     (Fluid::seawater(), 1025.0, 1.08e-3),
+//!     (Fluid::oil(), 876.0, 0.1),
+//!     (Fluid::honey(), 1420.0, 10.0),
+//!     (Fluid::glycerin(), 1261.0, 1.5),
+//!     (Fluid::blood(), 1060.0, 4.0e-3),
+//!     (Fluid::from_air(&Air::sea_level()), 1.225, 1.79e-5),
+//! ];
+//! for (fluid, density, viscosity) in rows {
+//!     assert!((fluid.density - density).abs() / density < 1e-3);
+//!     assert!((fluid.viscosity - viscosity).abs() / viscosity < 1e-3);
+//! }
+//! # }
+//! ```
 //!
 //! ## Flow Regimes
 //!
-//! Reynolds number determines flow behavior:
-//! - Re < 1: Stokes flow (creeping)
-//! - Re < 2300: Laminar flow
-//! - 2300 < Re < 4000: Transitional
-//! - Re > 4000: Turbulent flow
+//! There is no regime classifier. `calculate_reynolds_number` returns Re, and where
+//! the transitions fall depends on the geometry and on which length you passed:
+//!
+//! - **Pipe flow**, Re on the diameter: laminar below about 2300, turbulent above
+//!   about 4000.
+//! - **Open channels and rivers**, Re on the hydraulic radius: laminar below about
+//!   500, turbulent above a few thousand (Chow, *Open-Channel Hydraulics*, 1959). Using
+//!   the pipe thresholds with a hydraulic radius misplaces the transition by about 4×.
+//! - **A sphere**, Re on the diameter: Stokes drag (`C_d = 24/Re`) only below about
+//!   Re = 1; `C_d ≈ 0.4–0.5` from about 10³ to 2×10⁵.
 //!
 //! ## Limitations
 //!
@@ -149,3 +192,6 @@ mod fluid_dynamics_tests;
 #[cfg(test)]
 #[cfg(feature = "fluid_simulation")]
 mod fluid_simulation_tests;
+#[cfg(test)]
+#[cfg(feature = "fluid_dynamics")]
+mod analytic_regression_tests;
