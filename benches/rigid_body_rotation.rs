@@ -2,7 +2,7 @@
 //! keep.
 //!
 //! The consumer that motivated [`RigidBodyRotation`] integrates hundreds of tumbling
-//! pieces per frame — Ridgeline's debris path runs 520 at once at 240 Hz — so the number
+//! pieces per frame — its debris path runs 520 at once at 240 Hz — so the number
 //! that matters is the whole batch, not one body. `BODIES` is that workload.
 //!
 //! Measured against each other:
@@ -78,7 +78,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rs_physics::rotational_dynamics::{inertia_3d, InertiaTensor, RigidBodyRotation};
 
-/// Ridgeline's measured debris count. Named rather than inlined so the number has one home.
+/// That consumer's measured debris count. Named rather than inlined so the number has one home.
 const BODIES: usize = 520;
 
 /// 240 Hz — the frame rate the caller targets.

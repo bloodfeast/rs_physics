@@ -4,7 +4,7 @@
 
 ## Scope
 
-**The ray tracer itself was not reviewed.** The ray-traced acoustics system lives in Ridgeline (`ridgeline/src/audio.rs` and whatever it calls), and that repository was not available to this session. This review covers everything a ray tracer asks `rs_physics` for:
+**The ray tracer itself was not reviewed.** The ray-traced acoustics system lives in a downstream game repository, which was not available to this session. This review covers everything a ray tracer asks `rs_physics` for:
 
 - the medium: speed of sound, ISO 9613-1 absorption, Doppler
 - what a surface does to sound: impedance, reflection, absorption
