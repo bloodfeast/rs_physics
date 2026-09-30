@@ -505,3 +505,16 @@ baseline lacked.
     reproduced (first-order in dx), and the Bingham factor matches an integrated profile
     to 1e-10. The open questions are the `tanθ` small-slope law (FILM-2) and zero-speed
     `Err`s in the drag/buoyancy helpers (FLD-2).
+- 2026-09-30 — Eulerian grid review (`FluidGrid`, `FluidGrid3D`; findings GRID-1..13, tests in
+  `src/fluid_dynamics/grid_regression_tests.rs`). Load-bearing facts for the next reviewer:
+  - **The grids' unit of length is the domain width on every axis**: `h = 1 / width`, velocities in
+    widths/s, viscosity and diffusion in widths²/s. Anything that uses `height` or `depth` as `1/h`,
+    or the cell count as `1/h²`, is a bug; the 3D solver's viscosity was N× too strong that way.
+  - **The outer ring of cells is a ghost layer**, overwritten every step. The fluid is cells
+    `1..n-1`; reductions must skip the ring, and writes to it (an "inlet" at x = 0) vanish (GRID-11).
+  - **Lexicographic Gauss-Seidel on a 5/7-point stencil gives the same iterates in any loop
+    nesting**, so the grids are x↔y symmetric to rounding, and the storage is now
+    innermost-loop-fastest (column-major in 2D, z-fastest in 3D). Anything that walks the raw
+    `Vec` in index order sees a different order than before; go through `get_index`.
+  - **The walls are free-slip and the pressure solve is far from converged at default settings**
+    (GRID-9/10): neither grid can carry a through-flow, so a river is not a use case for them as-is.

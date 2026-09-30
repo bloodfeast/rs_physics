@@ -21,7 +21,7 @@
 //! ### Simulation (`fluid_simulation` feature)
 //! - 2D/3D incompressible Navier-Stokes solver
 //! - Pressure projection for incompressibility
-//! - Configurable boundary conditions
+//! - A closed box: every wall blocks normal flow (no inflow, outflow or free surface)
 //! - Particle-fluid coupling for two-way interaction
 //!
 //! ## Quick Start - Analytical
@@ -49,20 +49,26 @@
 //!
 //! ## Quick Start - Simulation
 //!
-//! ```rust,ignore
+//! ```rust
+//! # #[cfg(feature = "fluid_simulation")] {
 //! use rs_physics::fluid_dynamics::FluidGrid;
 //!
-//! // Create a 100x100 fluid grid
-//! let mut grid = FluidGrid::new(100, 100, 0.01, 0.001, 1.0e-6)
+//! // A 100x100 grid: 98x98 fluid cells inside a one-cell boundary ring. Length is
+//! // in domain widths, so diffusion and viscosity are in widths²/s and velocity in
+//! // widths/s.
+//! let mut grid = FluidGrid::new(100, 100, 1.0e-5, 1.0e-5, 1.0 / 60.0)
 //!     .expect("Valid grid parameters");
 //!
-//! // Add velocity source
-//! grid.set_velocity(50, 50, 1.0, 0.0);
+//! // A source inside the fluid (row and column 0 and 99 are the boundary ring)
+//! grid.add_density(50, 50, 1.0).unwrap();
+//! grid.add_velocity(50, 50, 0.5, 0.0).unwrap();
 //!
 //! // Simulate
-//! for _ in 0..100 {
+//! for _ in 0..10 {
 //!     grid.step();
 //! }
+//! assert!(grid.validate_state().is_ok());
+//! # }
 //! ```
 //!
 //! ## Predefined Fluids
@@ -122,14 +128,22 @@
 //! - **Incompressible flow only**: No compressibility effects
 //! - **No turbulence modeling**: DNS-style simulation
 //! - **Fixed grid**: No adaptive mesh refinement
-//! - **No multiphase flow**: Single fluid type per simulation
-//! - **Explicit time integration**: Requires small timesteps
+//! - **No multiphase flow**: Single fluid type per simulation; no free surface
+//! - **Grid units**: length is in domain widths (cell size `1 / width` on every
+//!   axis), not metres; see `FluidGrid`
+//! - **Approximate incompressibility**: the pressure solve runs a fixed number of
+//!   Gauss-Seidel sweeps from zero each step, which removes little of a large-scale
+//!   divergence on a big grid (about 1% per step at 128² with the default 4)
+//! - **Stability is not accuracy**: implicit diffusion and semi-Lagrangian advection
+//!   are stable at any timestep, but a step that moves the flow more than a cell or
+//!   so smears it (first-order numerical diffusion)
 //!
 //! ## Performance
 //!
 //! - Grid simulation: O(n) per substep for advection/diffusion
 //! - Pressure solve: O(iterations × n) using Gauss-Seidel
-//! - Memory: ~40 bytes per cell (velocity, pressure, density)
+//! - Memory: 24 bytes per cell in 2D and 32 in 3D (velocity, density), plus about
+//!   ten cell-sized scratch fields allocated for the duration of each `step`
 
 // Shared modules - available when any fluid feature is enabled
 #[cfg(any(feature = "fluid_dynamics", feature = "fluid_simulation"))]
@@ -195,3 +209,6 @@ mod fluid_simulation_tests;
 #[cfg(test)]
 #[cfg(feature = "fluid_dynamics")]
 mod analytic_regression_tests;
+#[cfg(test)]
+#[cfg(feature = "fluid_simulation")]
+mod grid_regression_tests;

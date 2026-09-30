@@ -1,7 +1,7 @@
 // src/fluid_simulation.rs
 
 use crate::utils::PhysicsError;
-use super::validation::{validate_dimensions_2d, validate_non_negative, validate_positive, validate_position_2d};
+use super::validation::{validate_dimensions_2d, validate_finite, validate_non_negative, validate_positive, validate_position_2d};
 use super::solver::{SolverConfig, BoundaryType};
 use std::vec::Vec;
 
@@ -10,6 +10,17 @@ use std::vec::Vec;
 /// This struct implements a stable fluid solver based on Jos Stam's method,
 /// which provides unconditionally stable fluid simulation. The simulation
 /// handles density diffusion, velocity diffusion, and advection in a 2D grid.
+///
+/// # Units
+/// Length is measured in *domain widths*: every cell is `1 / width` on a side, on
+/// both axes, so a grid taller than it is wide is more than one unit tall.
+/// Velocities are in widths per second (a step moves a quantity `dt * width * v`
+/// cells), and `viscosity` and `diffusion` are in widths² per second. To work in
+/// metres for a domain `L` metres wide, divide velocities by `L` and viscosity and
+/// diffusion by `L²` on the way in.
+///
+/// The outermost ring of cells is a boundary layer that each step overwrites;
+/// the fluid is the `(width - 2) × (height - 2)` cells inside it.
 ///
 /// # Fields
 /// * `width` - The width of the simulation grid
@@ -37,11 +48,11 @@ impl FluidGrid {
     /// Creates a new fluid simulation grid with the specified dimensions and properties.
     ///
     /// # Arguments
-    /// * `width` - The width of the simulation grid
-    /// * `height` - The height of the simulation grid
-    /// * `diffusion` - The rate of diffusion (must be non-negative)
-    /// * `viscosity` - The fluid viscosity (must be non-negative)
-    /// * `dt` - The time step for the simulation (must be positive)
+    /// * `width` - The width of the simulation grid, in cells (at least 3)
+    /// * `height` - The height of the simulation grid, in cells (at least 3)
+    /// * `diffusion` - The rate of diffusion, widths²/s (must be finite and non-negative)
+    /// * `viscosity` - The kinematic viscosity, widths²/s (must be finite and non-negative)
+    /// * `dt` - The time step for the simulation, seconds (must be finite and positive)
     ///
     /// # Returns
     /// * `Ok(FluidGrid)` - A new fluid simulation grid if all parameters are valid
@@ -71,12 +82,13 @@ impl FluidGrid {
     /// Creates a new fluid simulation grid with custom solver configuration.
     ///
     /// # Arguments
-    /// * `width` - The width of the simulation grid
-    /// * `height` - The height of the simulation grid
-    /// * `diffusion` - The rate of diffusion (must be non-negative)
-    /// * `viscosity` - The fluid viscosity (must be non-negative)
-    /// * `dt` - The time step for the simulation (must be positive)
-    /// * `solver_config` - Configuration for the iterative solver
+    /// * `width` - The width of the simulation grid, in cells (at least 3)
+    /// * `height` - The height of the simulation grid, in cells (at least 3)
+    /// * `diffusion` - The rate of diffusion, widths²/s (must be finite and non-negative)
+    /// * `viscosity` - The kinematic viscosity, widths²/s (must be finite and non-negative)
+    /// * `dt` - The time step for the simulation, seconds (must be finite and positive)
+    /// * `solver_config` - Configuration for the iterative solver; fewer than 1
+    ///   iteration is raised to 1, as in [`FluidGrid::set_solver_iterations`]
     ///
     /// # Returns
     /// * `Ok(FluidGrid)` - A new fluid simulation grid if all parameters are valid
@@ -99,9 +111,16 @@ impl FluidGrid {
         solver_config: SolverConfig,
     ) -> Result<Self, PhysicsError> {
         validate_dimensions_2d(width, height)?;
-        validate_non_negative(diffusion, "diffusion").map_err(|_| PhysicsError::InvalidCoefficient)?;
-        validate_non_negative(viscosity, "viscosity").map_err(|_| PhysicsError::InvalidCoefficient)?;
-        validate_positive(dt, "dt").map_err(|_| PhysicsError::InvalidTime)?;
+        // The boundary ring takes one cell on each side, and `set_boundaries` indexes
+        // `width - 2`: a grid needs at least one fluid cell on each axis.
+        if width < 3 || height < 3 {
+            return Err(PhysicsError::InvalidArea);
+        }
+        Self::validate_diffusion(diffusion)?;
+        Self::validate_viscosity(viscosity)?;
+        Self::validate_dt(dt)?;
+        let mut solver_config = solver_config;
+        solver_config.iterations = solver_config.iterations.max(1);
 
         let size = width * height;
         Ok(Self {
@@ -126,7 +145,7 @@ impl FluidGrid {
     ///
     /// # Returns
     /// * `Ok(())` - If the density was successfully added
-    /// * `Err(PhysicsError)` - If the position is out of bounds
+    /// * `Err(PhysicsError)` - If the position is out of bounds or `amount` is not finite
     ///
     /// # Examples
     /// ```
@@ -145,6 +164,9 @@ impl FluidGrid {
     /// ```
     pub fn add_density(&mut self, x: usize, y: usize, amount: f64) -> Result<(), PhysicsError> {
         validate_position_2d(x, y, self.width, self.height)?;
+        // One non-finite cell reaches every cell within a few steps through the
+        // pressure solve.
+        validate_finite(amount, "amount")?;
         let idx = self.get_index(x, y);
         self.density[idx] += amount;
         Ok(())
@@ -158,9 +180,11 @@ impl FluidGrid {
     /// * `amount_x` - The amount of velocity to add in the x direction
     /// * `amount_y` - The amount of velocity to add in the y direction
     ///
+    /// Velocities are in domain widths per second (see [`FluidGrid`]'s units).
+    ///
     /// # Returns
     /// * `Ok(())` - If the velocity was successfully added
-    /// * `Err(PhysicsError)` - If the position is out of bounds
+    /// * `Err(PhysicsError)` - If the position is out of bounds or a component is not finite
     ///
     /// # Examples
     /// ```
@@ -179,6 +203,9 @@ impl FluidGrid {
     /// ```
     pub fn add_velocity(&mut self, x: usize, y: usize, amount_x: f64, amount_y: f64) -> Result<(), PhysicsError> {
         validate_position_2d(x, y, self.width, self.height)?;
+        if !amount_x.is_finite() || !amount_y.is_finite() {
+            return Err(PhysicsError::InvalidVelocity);
+        }
         let idx = self.get_index(x, y);
         self.velocity_x[idx] += amount_x;
         self.velocity_y[idx] += amount_y;
@@ -221,9 +248,14 @@ impl FluidGrid {
         velocity_y0.copy_from_slice(&self.velocity_y);
         density0.copy_from_slice(&self.density);
 
+        // Implicit diffusion: `a = dt * nu / h²`, with the cell size `h = 1 / width` on
+        // both axes (the same `h` that `advect` and `project` use). `width * height`
+        // is only equal to `1 / h²` on a square grid.
+        let inv_h_sq = (self.width * self.width) as f64;
+
         // Diffuse velocity
         {
-            let a = self.dt * self.viscosity * (self.width * self.height) as f64;
+            let a = self.dt * self.viscosity * inv_h_sq;
             self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 4.0 * a);
             self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 4.0 * a);
         }
@@ -254,7 +286,7 @@ impl FluidGrid {
 
         // Diffuse density
         {
-            let a = self.dt * self.diffusion * (self.width * self.height) as f64;
+            let a = self.dt * self.diffusion * inv_h_sq;
             self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 4.0 * a);
         }
 
@@ -328,8 +360,15 @@ impl FluidGrid {
     }
 
     /// Converts 2D coordinates to a 1D array index.
+    ///
+    /// Column-major: `y` is the fastest-varying index because every sweep in this
+    /// file loops `x` outside `y`. Row-major storage made the inner loop stride by a
+    /// whole row, which cost 18% of a step at 256² (nothing once the grid fits in
+    /// cache). Swapping the storage rather than the loops keeps the sweep order, and
+    /// so every result, bit-identical.
+    #[inline]
     fn get_index(&self, x: usize, y: usize) -> usize {
-        y * self.width + x
+        x * self.height + y
     }
 
     /// Projects the velocity field to make it mass-conserving.
@@ -368,12 +407,14 @@ impl FluidGrid {
         self.set_boundaries(BoundaryType::Density, &mut p);
         self.lin_solve(BoundaryType::Density, &mut p, &div, 1.0, 4.0);
 
-        // Subtract pressure gradient
+        // Subtract pressure gradient. Both components divide by the same `h = 1 / width`
+        // the divergence above multiplied by; scaling y by `height` instead left a
+        // non-square grid's projection off by `height / width`.
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
                 let idx = self.get_index(i, j);
                 velocity_x[idx] -= 0.5 * (p[self.get_index(i+1, j)] - p[self.get_index(i-1, j)]) * self.width as f64;
-                velocity_y[idx] -= 0.5 * (p[self.get_index(i, j+1)] - p[self.get_index(i, j-1)]) * self.height as f64;
+                velocity_y[idx] -= 0.5 * (p[self.get_index(i, j+1)] - p[self.get_index(i, j-1)]) * self.width as f64;
             }
         }
 
@@ -590,23 +631,23 @@ impl FluidGrid {
     /// Sets the solver configuration.
     ///
     /// # Arguments
-    /// * `config` - The new solver configuration
+    /// * `config` - The new solver configuration; fewer than 1 iteration is raised
+    ///   to 1, as in [`FluidGrid::set_solver_iterations`]
     pub fn set_solver_config(&mut self, config: SolverConfig) {
         self.solver_config = config;
+        self.solver_config.iterations = config.iterations.max(1);
     }
 
     /// Sets the diffusion rate of the fluid.
     ///
     /// # Arguments
-    /// * `diffusion` - The new diffusion coefficient (must be non-negative)
+    /// * `diffusion` - The new diffusion coefficient, widths²/s (must be finite and non-negative)
     ///
     /// # Returns
     /// * `Ok(())` if the diffusion rate was successfully set
-    /// * `Err(PhysicsError)` if the diffusion rate is negative
+    /// * `Err(PhysicsError)` if the diffusion rate is negative or not finite
     pub fn set_diffusion(&mut self, diffusion: f64) -> Result<(), PhysicsError> {
-        if diffusion < 0.0 {
-            return Err(PhysicsError::InvalidCoefficient);
-        }
+        Self::validate_diffusion(diffusion)?;
         self.diffusion = diffusion;
         Ok(())
     }
@@ -614,15 +655,13 @@ impl FluidGrid {
     /// Sets the viscosity of the fluid.
     ///
     /// # Arguments
-    /// * `viscosity` - The new viscosity coefficient (must be non-negative)
+    /// * `viscosity` - The new kinematic viscosity, widths²/s (must be finite and non-negative)
     ///
     /// # Returns
     /// * `Ok(())` if the viscosity was successfully set
-    /// * `Err(PhysicsError)` if the viscosity is negative
+    /// * `Err(PhysicsError)` if the viscosity is negative or not finite
     pub fn set_viscosity(&mut self, viscosity: f64) -> Result<(), PhysicsError> {
-        if viscosity < 0.0 {
-            return Err(PhysicsError::InvalidCoefficient);
-        }
+        Self::validate_viscosity(viscosity)?;
         self.viscosity = viscosity;
         Ok(())
     }
@@ -630,17 +669,35 @@ impl FluidGrid {
     /// Sets the time step of the simulation.
     ///
     /// # Arguments
-    /// * `dt` - The new time step in seconds (must be positive)
+    /// * `dt` - The new time step in seconds (must be finite and positive)
     ///
     /// # Returns
     /// * `Ok(())` if the time step was successfully set
-    /// * `Err(PhysicsError)` if the time step is zero or negative
+    /// * `Err(PhysicsError)` if the time step is zero, negative or not finite
     pub fn set_dt(&mut self, dt: f64) -> Result<(), PhysicsError> {
-        if dt <= 0.0 {
-            return Err(PhysicsError::InvalidTime);
-        }
+        Self::validate_dt(dt)?;
         self.dt = dt;
         Ok(())
+    }
+
+    // `validate_positive` and `validate_non_negative` both pass NaN, and infinity is
+    // positive; one step with an infinite `dt` or coefficient turns every cell NaN.
+    fn validate_diffusion(diffusion: f64) -> Result<(), PhysicsError> {
+        validate_finite(diffusion, "diffusion")
+            .and_then(|_| validate_non_negative(diffusion, "diffusion"))
+            .map_err(|_| PhysicsError::InvalidCoefficient)
+    }
+
+    fn validate_viscosity(viscosity: f64) -> Result<(), PhysicsError> {
+        validate_finite(viscosity, "viscosity")
+            .and_then(|_| validate_non_negative(viscosity, "viscosity"))
+            .map_err(|_| PhysicsError::InvalidCoefficient)
+    }
+
+    fn validate_dt(dt: f64) -> Result<(), PhysicsError> {
+        validate_finite(dt, "dt")
+            .and_then(|_| validate_positive(dt, "dt"))
+            .map_err(|_| PhysicsError::InvalidTime)
     }
 
     /// Resets the simulation to its initial state.
@@ -654,6 +711,10 @@ impl FluidGrid {
     }
 
     /// Calculates the total mass (sum of density) in the simulation.
+    ///
+    /// Only the fluid cells are summed. The boundary ring holds copies of its
+    /// neighbours, so counting it would report mass that is not there (1.5625× the
+    /// true total once a blob has spread across a 10×10 grid).
     ///
     /// # Returns
     /// The total mass in the simulation.
@@ -671,7 +732,13 @@ impl FluidGrid {
     /// assert_eq!(fluid.get_total_mass(), 5.0);
     /// ```
     pub fn get_total_mass(&self) -> f64 {
-        self.density.iter().sum()
+        let mut total = 0.0;
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                total += self.density[self.get_index(i, j)];
+            }
+        }
+        total
     }
 
     /// Calculates the average velocity magnitude in the simulation.
@@ -680,13 +747,22 @@ impl FluidGrid {
     /// The average velocity magnitude across all cells.
     pub fn get_average_velocity(&self) -> f64 {
         let size = self.width * self.height;
-        let total_velocity: f64 = (0..size)
-            .map(|i| (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2)).sqrt())
+        // Row by row, so the sum is taken in the same order as it was before the
+        // storage became column-major and the result is unchanged to the bit.
+        let total_velocity: f64 = (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let i = self.get_index(x, y);
+                (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2)).sqrt()
+            })
             .sum();
         total_velocity / size as f64
     }
 
     /// Calculates the kinetic energy of the fluid.
+    ///
+    /// Sums `0.5 * density * |v|²` over the fluid cells; the boundary ring is not
+    /// fluid (see [`FluidGrid::get_total_mass`]).
     ///
     /// # Returns
     /// The total kinetic energy in the simulation.
@@ -706,13 +782,15 @@ impl FluidGrid {
     /// assert!(energy > 0.0);
     /// ```
     pub fn get_kinetic_energy(&self) -> f64 {
-        let size = self.width * self.height;
-        (0..size)
-            .map(|i| {
-                0.5 * self.density[i] *
-                    (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2))
-            })
-            .sum()
+        let mut energy = 0.0;
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                let idx = self.get_index(i, j);
+                energy += 0.5 * self.density[idx] *
+                    (self.velocity_x[idx].powi(2) + self.velocity_y[idx].powi(2));
+            }
+        }
+        energy
     }
 
     /// Checks if the simulation state is valid.

@@ -4,7 +4,7 @@
 //! implementing Jos Stam's stable fluid solver for volumetric simulations.
 
 use crate::utils::PhysicsError;
-use super::validation::{validate_dimensions_3d, validate_non_negative, validate_positive, validate_position_3d};
+use super::validation::{validate_dimensions_3d, validate_finite, validate_non_negative, validate_positive, validate_position_3d};
 use super::solver::{SolverConfig, BoundaryType};
 
 /// A 3D grid-based fluid simulation using the Eulerian method.
@@ -12,6 +12,14 @@ use super::solver::{SolverConfig, BoundaryType};
 /// This struct implements a stable fluid solver based on Jos Stam's method,
 /// extended to three dimensions. The simulation handles density diffusion,
 /// velocity diffusion, and advection in a 3D grid.
+///
+/// # Units
+/// As in [`FluidGrid`](crate::fluid_dynamics::FluidGrid), length is measured in
+/// domain widths: every cell is `1 / width` on a side, on all three axes.
+/// Velocities are in widths per second and `viscosity` and `diffusion` in widths²
+/// per second. The outermost layer of cells is a boundary layer that each step
+/// overwrites; the fluid is the `(width - 2) × (height - 2) × (depth - 2)` cells
+/// inside it.
 ///
 /// # Examples
 /// ```
@@ -45,12 +53,12 @@ impl FluidGrid3D {
     /// Creates a new 3D fluid simulation grid with the specified dimensions and properties.
     ///
     /// # Arguments
-    /// * `width` - The width of the simulation grid (x-axis)
-    /// * `height` - The height of the simulation grid (y-axis)
-    /// * `depth` - The depth of the simulation grid (z-axis)
-    /// * `diffusion` - The rate of diffusion (must be non-negative)
-    /// * `viscosity` - The fluid viscosity (must be non-negative)
-    /// * `dt` - The time step for the simulation (must be positive)
+    /// * `width` - The width of the simulation grid (x-axis), in cells (at least 3)
+    /// * `height` - The height of the simulation grid (y-axis), in cells (at least 3)
+    /// * `depth` - The depth of the simulation grid (z-axis), in cells (at least 3)
+    /// * `diffusion` - The rate of diffusion, widths²/s (must be finite and non-negative)
+    /// * `viscosity` - The kinematic viscosity, widths²/s (must be finite and non-negative)
+    /// * `dt` - The time step for the simulation, seconds (must be finite and positive)
     ///
     /// # Returns
     /// * `Ok(FluidGrid3D)` - A new fluid simulation grid if all parameters are valid
@@ -67,6 +75,10 @@ impl FluidGrid3D {
     }
 
     /// Creates a new 3D fluid simulation grid with custom solver configuration.
+    ///
+    /// Takes the same arguments as [`FluidGrid3D::new`], plus the solver
+    /// configuration; fewer than 1 iteration is raised to 1, as in
+    /// [`FluidGrid3D::set_solver_iterations`].
     pub fn with_solver(
         width: usize,
         height: usize,
@@ -77,9 +89,16 @@ impl FluidGrid3D {
         solver_config: SolverConfig,
     ) -> Result<Self, PhysicsError> {
         validate_dimensions_3d(width, height, depth)?;
-        validate_non_negative(diffusion, "diffusion").map_err(|_| PhysicsError::InvalidCoefficient)?;
-        validate_non_negative(viscosity, "viscosity").map_err(|_| PhysicsError::InvalidCoefficient)?;
-        validate_positive(dt, "dt").map_err(|_| PhysicsError::InvalidTime)?;
+        // The boundary layer takes one cell on each side, and `set_boundaries`
+        // indexes `n - 2`: a grid needs at least one fluid cell on each axis.
+        if width < 3 || height < 3 || depth < 3 {
+            return Err(PhysicsError::InvalidArea);
+        }
+        Self::validate_diffusion(diffusion)?;
+        Self::validate_viscosity(viscosity)?;
+        Self::validate_dt(dt)?;
+        let mut solver_config = solver_config;
+        solver_config.iterations = solver_config.iterations.max(1);
 
         let size = width * height * depth;
         Ok(Self {
@@ -98,16 +117,24 @@ impl FluidGrid3D {
     }
 
     /// Adds density to the fluid at a specific grid position.
+    ///
+    /// Returns an error if the position is out of bounds or `amount` is not finite.
     pub fn add_density(&mut self, x: usize, y: usize, z: usize, amount: f64) -> Result<(), PhysicsError> {
         validate_position_3d(x, y, z, self.width, self.height, self.depth)?;
+        validate_finite(amount, "amount")?;
         let idx = self.get_index(x, y, z);
         self.density[idx] += amount;
         Ok(())
     }
 
-    /// Adds velocity to the fluid at a specific grid position.
+    /// Adds velocity, in domain widths per second, to the fluid at a specific grid position.
+    ///
+    /// Returns an error if the position is out of bounds or a component is not finite.
     pub fn add_velocity(&mut self, x: usize, y: usize, z: usize, vx: f64, vy: f64, vz: f64) -> Result<(), PhysicsError> {
         validate_position_3d(x, y, z, self.width, self.height, self.depth)?;
+        if !vx.is_finite() || !vy.is_finite() || !vz.is_finite() {
+            return Err(PhysicsError::InvalidVelocity);
+        }
         let idx = self.get_index(x, y, z);
         self.velocity_x[idx] += vx;
         self.velocity_y[idx] += vy;
@@ -129,9 +156,15 @@ impl FluidGrid3D {
         velocity_z0.copy_from_slice(&self.velocity_z);
         density0.copy_from_slice(&self.density);
 
+        // Implicit diffusion: `a = dt * nu / h²`, with the cell size `h = 1 / width` on
+        // every axis (the same `h` that `advect` and `project` use). The cell count
+        // `width * height * depth` made viscosity and diffusion N times too strong
+        // on an N³ grid, and resolution-dependent.
+        let inv_h_sq = (self.width * self.width) as f64;
+
         // Diffuse velocity
         {
-            let a = self.dt * self.viscosity * (self.width * self.height * self.depth) as f64;
+            let a = self.dt * self.viscosity * inv_h_sq;
             self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 6.0 * a);
             self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 6.0 * a);
             self.lin_solve(BoundaryType::VelocityZ, &mut velocity_z0, &self.velocity_z, a, 1.0 + 6.0 * a);
@@ -168,7 +201,7 @@ impl FluidGrid3D {
 
         // Diffuse density
         {
-            let a = self.dt * self.diffusion * (self.width * self.height * self.depth) as f64;
+            let a = self.dt * self.diffusion * inv_h_sq;
             self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 6.0 * a);
         }
 
@@ -194,9 +227,15 @@ impl FluidGrid3D {
     }
 
     /// Converts 3D coordinates to a 1D array index.
+    ///
+    /// `z` is the fastest-varying index because every sweep in this file loops
+    /// `x`, then `y`, then `z` innermost. With `x` fastest, the inner loop strode by
+    /// a whole `width * height` slab (32 KiB at 64³), so every Gauss-Seidel update
+    /// missed cache. Swapping the storage rather than the loops keeps the sweep
+    /// order, and so every result, bit-identical.
     #[inline]
     fn get_index(&self, x: usize, y: usize, z: usize) -> usize {
-        z * self.width * self.height + y * self.width + x
+        (x * self.height + y) * self.depth + z
     }
 
     /// Projects the velocity field to make it mass-conserving (divergence-free).
@@ -443,30 +482,51 @@ impl FluidGrid3D {
         self.solver_config.iterations = iterations.max(1);
     }
 
-    /// Sets the solver configuration.
+    /// Sets the solver configuration. Fewer than 1 iteration is raised to 1.
     pub fn set_solver_config(&mut self, config: SolverConfig) {
         self.solver_config = config;
+        self.solver_config.iterations = config.iterations.max(1);
     }
 
-    /// Sets the diffusion rate of the fluid.
+    /// Sets the diffusion rate of the fluid, widths²/s (must be finite and non-negative).
     pub fn set_diffusion(&mut self, diffusion: f64) -> Result<(), PhysicsError> {
-        validate_non_negative(diffusion, "diffusion").map_err(|_| PhysicsError::InvalidCoefficient)?;
+        Self::validate_diffusion(diffusion)?;
         self.diffusion = diffusion;
         Ok(())
     }
 
-    /// Sets the viscosity of the fluid.
+    /// Sets the kinematic viscosity of the fluid, widths²/s (must be finite and non-negative).
     pub fn set_viscosity(&mut self, viscosity: f64) -> Result<(), PhysicsError> {
-        validate_non_negative(viscosity, "viscosity").map_err(|_| PhysicsError::InvalidCoefficient)?;
+        Self::validate_viscosity(viscosity)?;
         self.viscosity = viscosity;
         Ok(())
     }
 
-    /// Sets the time step of the simulation.
+    /// Sets the time step of the simulation, seconds (must be finite and positive).
     pub fn set_dt(&mut self, dt: f64) -> Result<(), PhysicsError> {
-        validate_positive(dt, "dt").map_err(|_| PhysicsError::InvalidTime)?;
+        Self::validate_dt(dt)?;
         self.dt = dt;
         Ok(())
+    }
+
+    // `validate_positive` and `validate_non_negative` both pass NaN, and infinity is
+    // positive; one step with an infinite `dt` or coefficient turns every cell NaN.
+    fn validate_diffusion(diffusion: f64) -> Result<(), PhysicsError> {
+        validate_finite(diffusion, "diffusion")
+            .and_then(|_| validate_non_negative(diffusion, "diffusion"))
+            .map_err(|_| PhysicsError::InvalidCoefficient)
+    }
+
+    fn validate_viscosity(viscosity: f64) -> Result<(), PhysicsError> {
+        validate_finite(viscosity, "viscosity")
+            .and_then(|_| validate_non_negative(viscosity, "viscosity"))
+            .map_err(|_| PhysicsError::InvalidCoefficient)
+    }
+
+    fn validate_dt(dt: f64) -> Result<(), PhysicsError> {
+        validate_finite(dt, "dt")
+            .and_then(|_| validate_positive(dt, "dt"))
+            .map_err(|_| PhysicsError::InvalidTime)
     }
 
     /// Resets the simulation to its initial state.
@@ -479,28 +539,50 @@ impl FluidGrid3D {
     }
 
     /// Calculates the total mass (sum of density) in the simulation.
+    ///
+    /// Only the fluid cells are summed; the boundary layer holds copies of its
+    /// neighbours and is not mass in the simulation.
     pub fn get_total_mass(&self) -> f64 {
-        self.density.iter().sum()
+        let mut total = 0.0;
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                for k in 1..self.depth-1 {
+                    total += self.density[self.get_index(i, j, k)];
+                }
+            }
+        }
+        total
     }
 
     /// Calculates the average velocity magnitude in the simulation.
     pub fn get_average_velocity(&self) -> f64 {
         let size = self.width * self.height * self.depth;
-        let total_velocity: f64 = (0..size)
-            .map(|i| (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2) + self.velocity_z[i].powi(2)).sqrt())
+        // x fastest, so the sum is taken in the same order as it was before the
+        // storage changed to z-fastest and the result is unchanged to the bit.
+        let total_velocity: f64 = (0..self.depth)
+            .flat_map(|z| (0..self.height).flat_map(move |y| (0..self.width).map(move |x| (x, y, z))))
+            .map(|(x, y, z)| {
+                let i = self.get_index(x, y, z);
+                (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2) + self.velocity_z[i].powi(2)).sqrt()
+            })
             .sum();
         total_velocity / size as f64
     }
 
-    /// Calculates the kinetic energy of the fluid.
+    /// Calculates the kinetic energy of the fluid: `0.5 * density * |v|²` summed
+    /// over the fluid cells (not the boundary layer).
     pub fn get_kinetic_energy(&self) -> f64 {
-        let size = self.width * self.height * self.depth;
-        (0..size)
-            .map(|i| {
-                0.5 * self.density[i] *
-                    (self.velocity_x[i].powi(2) + self.velocity_y[i].powi(2) + self.velocity_z[i].powi(2))
-            })
-            .sum()
+        let mut energy = 0.0;
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                for k in 1..self.depth-1 {
+                    let idx = self.get_index(i, j, k);
+                    energy += 0.5 * self.density[idx] *
+                        (self.velocity_x[idx].powi(2) + self.velocity_y[idx].powi(2) + self.velocity_z[idx].powi(2));
+                }
+            }
+        }
+        energy
     }
 
     /// Checks if the simulation state is valid.
