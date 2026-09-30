@@ -528,4 +528,22 @@ baseline lacked.
     than the old four sweeps and within 0.5% of a converged flow; 1e-4 cost up to 72% more for
     no visible change. Judge a tolerance by the flow it produces, not by the residual.
   - **Walls are free-slip by default and no-slip on request** (`WallCondition`, GRID-10). Either
-    way the grids are closed boxes with no through-flow, so neither is a river solver.
+    way the grids are closed boxes with no through-flow; `ShallowWater` is the river solver.
+- 2026-09-30 — `ShallowWater` (`fluid_dynamics/shallow_water.rs`, `fluid_simulation`) is the river,
+  lake and flood model: depth-averaged Saint-Venant, HLL plus Audusse hydrostatic reconstruction,
+  implicit Manning friction. Report: `docs/reviews/2026-09-30-river-solver.md`.
+  - **Its promises are tested exactly, so keep them:** a lake at rest stays still to 1e-10, volume
+    is conserved to 1e-12 and metered through `volume_in`/`volume_out`, and results are
+    bit-identical across thread counts and the serial path. A change that breaks any of these is a
+    defect, not a tolerance to loosen.
+  - **Boundaries are where river bugs hide.** A copied (zero-gradient) outlet on a sloping bed built
+    an ever-rising backwater, because first-order cell discharges lag face fluxes by about 1% on a
+    slope. Test outlets with Manning's normal depth on a slope, never on flat ground.
+  - **Steep, thin flow is under-driven** where the bed falls more than the depth per cell (10% deep
+    at S = 0.02 on 10 m cells). The cure is finer cells; the test pins first-order convergence.
+  - **Performance is memory-bound at 512²** on its 40-byte face buffers; arithmetic tweaks don't
+    help. The next step is a fused sweep, then a GPU port.
+  - **Its design point is presentation on one worker thread at 20–30 Hz**, not a fixed-rate sim
+    tick (owner, on PR #27: Ridgeline's sim never calls rs_physics). `Threading::Serial` keeps it
+    on the calling thread; `Auto` uses rayon's *current* pool, so `pool.install` bounds it.
+    128² wet costs 2.1 ms per 30 Hz frame on one thread.
