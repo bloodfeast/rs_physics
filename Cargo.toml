@@ -68,6 +68,10 @@ harness = false
 required-features = ["fluid_simulation"]
 
 [[bench]]
+name = "epa"
+harness = false
+
+[[bench]]
 name = "shallow_water"
 harness = false
 required-features = ["fluid_simulation"]
