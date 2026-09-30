@@ -5,7 +5,18 @@
 
 use crate::utils::PhysicsError;
 use super::validation::{validate_dimensions_3d, validate_finite, validate_non_negative, validate_positive, validate_position_3d};
-use super::solver::{SolverConfig, BoundaryType};
+use super::solver::{pcg_solve, BoundaryType, PcgWorkspace, PressureSolver, SolverConfig, SolverType};
+use super::fluid_simulation::{MIC_SIGMA, MIC_TAU};
+
+/// Buffers `step` reuses, so the solvers allocate nothing per call.
+#[derive(Default)]
+struct Workspace {
+    /// Jacobi's second buffer.
+    jacobi: Vec<f64>,
+    /// The projection's right-hand side, zero on the boundary layer.
+    rhs: Vec<f64>,
+    pcg: PcgWorkspace,
+}
 
 /// A 3D grid-based fluid simulation using the Eulerian method.
 ///
@@ -19,7 +30,13 @@ use super::solver::{SolverConfig, BoundaryType};
 /// Velocities are in widths per second and `viscosity` and `diffusion` in widths²
 /// per second. The outermost layer of cells is a boundary layer that each step
 /// overwrites; the fluid is the `(width - 2) × (height - 2) × (depth - 2)` cells
-/// inside it.
+/// inside it, each coordinate in `1..n-1`. [`FluidGrid3D::add_density`] and
+/// [`FluidGrid3D::add_velocity`] refuse the boundary layer; the getters read it.
+///
+/// # Walls
+/// Every wall stops the flow through it. Along it, walls are free-slip by default
+/// and no-slip with [`WallCondition::NoSlip`](super::WallCondition) in the
+/// [`SolverConfig`].
 ///
 /// # Examples
 /// ```
@@ -47,6 +64,16 @@ pub struct FluidGrid3D {
     viscosity: f64,
     dt: f64,
     solver_config: SolverConfig,
+    /// The last conjugate-gradient pressure of each of a step's two projections: the
+    /// starting guess for the same projection next step. The two solve different
+    /// problems (the forced field, then the advected one), so one shared guess would
+    /// start each from the other's answer.
+    pressure: [Vec<f64>; 2],
+    /// MIC(0) preconditioner for the pressure matrix, as inverse pivots `1/e`; it
+    /// depends only on the grid's shape.
+    precon: Vec<f64>,
+    workspace: Workspace,
+    last_pressure_iterations: usize,
 }
 
 impl FluidGrid3D {
@@ -78,7 +105,8 @@ impl FluidGrid3D {
     ///
     /// Takes the same arguments as [`FluidGrid3D::new`], plus the solver
     /// configuration; fewer than 1 iteration is raised to 1, as in
-    /// [`FluidGrid3D::set_solver_iterations`].
+    /// [`FluidGrid3D::set_solver_iterations`]. Returns an error for a configuration
+    /// that [`SolverConfig::validate`] rejects.
     pub fn with_solver(
         width: usize,
         height: usize,
@@ -97,11 +125,10 @@ impl FluidGrid3D {
         Self::validate_diffusion(diffusion)?;
         Self::validate_viscosity(viscosity)?;
         Self::validate_dt(dt)?;
-        let mut solver_config = solver_config;
-        solver_config.iterations = solver_config.iterations.max(1);
+        let solver_config = solver_config.checked()?;
 
         let size = width * height * depth;
-        Ok(Self {
+        let mut grid = Self {
             width,
             height,
             depth,
@@ -113,25 +140,53 @@ impl FluidGrid3D {
             viscosity,
             dt,
             solver_config,
-        })
+            pressure: [vec![0.0; size], vec![0.0; size]],
+            precon: vec![0.0; size],
+            workspace: Workspace::default(),
+            last_pressure_iterations: 0,
+        };
+        grid.build_preconditioner();
+        Ok(grid)
     }
 
-    /// Adds density to the fluid at a specific grid position.
-    ///
-    /// Returns an error if the position is out of bounds or `amount` is not finite.
-    pub fn add_density(&mut self, x: usize, y: usize, z: usize, amount: f64) -> Result<(), PhysicsError> {
+    /// Refuses a position outside the fluid: off the grid, or in the boundary
+    /// layer, which every step overwrites.
+    fn validate_fluid_cell(&self, x: usize, y: usize, z: usize) -> Result<(), PhysicsError> {
         validate_position_3d(x, y, z, self.width, self.height, self.depth)?;
+        if x == 0 || y == 0 || z == 0
+            || x == self.width - 1 || y == self.height - 1 || z == self.depth - 1
+        {
+            return Err(PhysicsError::CalculationError(format!(
+                "({x}, {y}, {z}) is in the boundary layer, which every step overwrites; \
+                 the fluid is x in 1..={}, y in 1..={}, z in 1..={}",
+                self.width - 2,
+                self.height - 2,
+                self.depth - 2
+            )));
+        }
+        Ok(())
+    }
+
+    /// Adds density to the fluid at a specific grid position, a fluid cell (each
+    /// coordinate in `1..n-1`).
+    ///
+    /// Returns an error if the position is out of bounds or in the boundary layer
+    /// (which the next step would overwrite), or `amount` is not finite.
+    pub fn add_density(&mut self, x: usize, y: usize, z: usize, amount: f64) -> Result<(), PhysicsError> {
+        self.validate_fluid_cell(x, y, z)?;
         validate_finite(amount, "amount")?;
         let idx = self.get_index(x, y, z);
         self.density[idx] += amount;
         Ok(())
     }
 
-    /// Adds velocity, in domain widths per second, to the fluid at a specific grid position.
+    /// Adds velocity, in domain widths per second, to the fluid at a specific grid
+    /// position, a fluid cell (each coordinate in `1..n-1`).
     ///
-    /// Returns an error if the position is out of bounds or a component is not finite.
+    /// Returns an error if the position is out of bounds or in the boundary layer,
+    /// or a component is not finite.
     pub fn add_velocity(&mut self, x: usize, y: usize, z: usize, vx: f64, vy: f64, vz: f64) -> Result<(), PhysicsError> {
-        validate_position_3d(x, y, z, self.width, self.height, self.depth)?;
+        self.validate_fluid_cell(x, y, z)?;
         if !vx.is_finite() || !vy.is_finite() || !vz.is_finite() {
             return Err(PhysicsError::InvalidVelocity);
         }
@@ -143,7 +198,15 @@ impl FluidGrid3D {
     }
 
     /// Advances the fluid simulation by one time step.
+    ///
+    /// The order is that of [`FluidGrid::step`](crate::fluid_dynamics::FluidGrid::step):
+    /// diffuse and project the velocity, advect and project it again, then diffuse
+    /// and advect the density. With the default [`PressureSolver::ConjugateGradient`]
+    /// each projection solves the pressure to the configured relative tolerance (or
+    /// iteration cap); see [`FluidGrid3D::get_last_pressure_iterations`].
     pub fn step(&mut self) {
+        let mut ws = std::mem::take(&mut self.workspace);
+        let [mut pressure, mut pressure_after_advection] = std::mem::take(&mut self.pressure);
         let size = self.width * self.height * self.depth;
         let mut velocity_x0 = vec![0.0; size];
         let mut velocity_y0 = vec![0.0; size];
@@ -165,13 +228,14 @@ impl FluidGrid3D {
         // Diffuse velocity
         {
             let a = self.dt * self.viscosity * inv_h_sq;
-            self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 6.0 * a);
-            self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 6.0 * a);
-            self.lin_solve(BoundaryType::VelocityZ, &mut velocity_z0, &self.velocity_z, a, 1.0 + 6.0 * a);
+            self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 6.0 * a, &mut ws.jacobi);
+            self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 6.0 * a, &mut ws.jacobi);
+            self.lin_solve(BoundaryType::VelocityZ, &mut velocity_z0, &self.velocity_z, a, 1.0 + 6.0 * a, &mut ws.jacobi);
         }
 
         // Project velocity
-        self.project(&mut velocity_x0, &mut velocity_y0, &mut velocity_z0);
+        let mut pressure_iterations =
+            self.project(&mut velocity_x0, &mut velocity_y0, &mut velocity_z0, &mut pressure, &mut ws);
 
         // Advect velocity
         {
@@ -193,7 +257,8 @@ impl FluidGrid3D {
             let mut next_velocity_x = self.velocity_x.clone();
             let mut next_velocity_y = self.velocity_y.clone();
             let mut next_velocity_z = self.velocity_z.clone();
-            self.project(&mut next_velocity_x, &mut next_velocity_y, &mut next_velocity_z);
+            pressure_iterations +=
+                self.project(&mut next_velocity_x, &mut next_velocity_y, &mut next_velocity_z, &mut pressure_after_advection, &mut ws);
             self.velocity_x = next_velocity_x;
             self.velocity_y = next_velocity_y;
             self.velocity_z = next_velocity_z;
@@ -202,7 +267,7 @@ impl FluidGrid3D {
         // Diffuse density
         {
             let a = self.dt * self.diffusion * inv_h_sq;
-            self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 6.0 * a);
+            self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 6.0 * a, &mut ws.jacobi);
         }
 
         // Advect density
@@ -211,6 +276,18 @@ impl FluidGrid3D {
             self.advect(BoundaryType::Density, &mut next_density, &density0, &self.velocity_x, &self.velocity_y, &self.velocity_z);
             self.density = next_density;
         }
+
+        self.pressure = [pressure, pressure_after_advection];
+        self.workspace = ws;
+        self.last_pressure_iterations = pressure_iterations;
+    }
+
+    /// Gets the number of pressure-solve iterations the last [`FluidGrid3D::step`]
+    /// ran, summed over its two projections: conjugate-gradient iterations, or
+    /// relaxation sweeps under [`PressureSolver::Relaxation`]. A count of twice
+    /// [`SolverConfig::pressure_max_iterations`] means the tolerance was not reached.
+    pub fn get_last_pressure_iterations(&self) -> usize {
+        self.last_pressure_iterations
     }
 
     /// Gets the density value at a specific grid position.
@@ -239,14 +316,64 @@ impl FluidGrid3D {
     }
 
     /// Projects the velocity field to make it mass-conserving (divergence-free).
-    fn project(&self, velocity_x: &mut Vec<f64>, velocity_y: &mut Vec<f64>, velocity_z: &mut Vec<f64>) {
-        let size = self.width * self.height * self.depth;
-        let mut p = vec![0.0; size];
-        let mut div = vec![0.0; size];
+    ///
+    /// The pressure solves `6p - Σ neighbours = -h/2 · (central divergence)`, a wall
+    /// neighbour standing in as a copy of the cell itself. Returns the iterations the
+    /// pressure solve ran.
+    fn project(
+        &self,
+        velocity_x: &mut Vec<f64>,
+        velocity_y: &mut Vec<f64>,
+        velocity_z: &mut Vec<f64>,
+        pressure: &mut Vec<f64>,
+        ws: &mut Workspace,
+    ) -> usize {
+        match self.solver_config.pressure_solver {
+            PressureSolver::Relaxation => {
+                // Exactly the pre-conjugate-gradient projection: sweeps from zero.
+                let size = self.width * self.height * self.depth;
+                let mut p = vec![0.0; size];
+                let mut div = vec![0.0; size];
+                self.divergence(velocity_x, velocity_y, velocity_z, &mut div);
+                self.set_boundaries(BoundaryType::Density, &mut div);
+                self.set_boundaries(BoundaryType::Density, &mut p);
+                self.lin_solve(BoundaryType::Density, &mut p, &div, 1.0, 6.0, &mut ws.jacobi);
+                self.subtract_pressure_gradient(velocity_x, velocity_y, velocity_z, &p);
+                self.solver_config.iterations
+            }
+            PressureSolver::ConjugateGradient => {
+                let size = self.width * self.height * self.depth;
+                if ws.rhs.len() != size {
+                    // Zero-filled once: the boundary layer is never written.
+                    ws.rhs = vec![0.0; size];
+                }
+                self.divergence(velocity_x, velocity_y, velocity_z, &mut ws.rhs);
+                // The closed box's pressure matrix is singular (constants are its null
+                // space); remove the rounding that would leave the system inconsistent.
+                let mean = self.fluid_mean(&ws.rhs);
+                self.for_each_fluid_cell(|idx| ws.rhs[idx] -= mean);
 
+                let iterations = pcg_solve(
+                    pressure,
+                    &ws.rhs,
+                    &mut ws.pcg,
+                    self.solver_config.pressure_tolerance,
+                    self.solver_config.pressure_max_iterations,
+                    |x, out| self.apply_pressure_matrix(x, out),
+                    |r, z| self.apply_preconditioner(r, z),
+                );
+                let mean = self.fluid_mean(pressure);
+                self.for_each_fluid_cell(|idx| pressure[idx] -= mean);
+                self.set_boundaries(BoundaryType::Density, pressure);
+                self.subtract_pressure_gradient(velocity_x, velocity_y, velocity_z, pressure);
+                iterations
+            }
+        }
+    }
+
+    /// Writes `-h/2 · (central-difference divergence)` into the fluid cells of `div`.
+    fn divergence(&self, velocity_x: &[f64], velocity_y: &[f64], velocity_z: &[f64], div: &mut [f64]) {
         let h = 1.0 / self.width as f64;
-
-        // Calculate divergence
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
                 for k in 1..self.depth-1 {
@@ -256,16 +383,13 @@ impl FluidGrid3D {
                         velocity_y[self.get_index(i, j+1, k)] - velocity_y[self.get_index(i, j-1, k)] +
                         velocity_z[self.get_index(i, j, k+1)] - velocity_z[self.get_index(i, j, k-1)]
                     );
-                    p[idx] = 0.0;
                 }
             }
         }
+    }
 
-        self.set_boundaries(BoundaryType::Density, &mut div);
-        self.set_boundaries(BoundaryType::Density, &mut p);
-        self.lin_solve(BoundaryType::Density, &mut p, &div, 1.0, 6.0);
-
-        // Subtract pressure gradient
+    fn subtract_pressure_gradient(&self, velocity_x: &mut Vec<f64>, velocity_y: &mut Vec<f64>, velocity_z: &mut Vec<f64>, p: &[f64]) {
+        let h = 1.0 / self.width as f64;
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
                 for k in 1..self.depth-1 {
@@ -282,19 +406,149 @@ impl FluidGrid3D {
         self.set_boundaries(BoundaryType::VelocityZ, velocity_z);
     }
 
+    fn for_each_fluid_cell(&self, mut f: impl FnMut(usize)) {
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                for k in 1..self.depth-1 {
+                    f(self.get_index(i, j, k));
+                }
+            }
+        }
+    }
+
+    fn fluid_mean(&self, field: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        self.for_each_fluid_cell(|idx| sum += field[idx]);
+        sum / ((self.width - 2) * (self.height - 2) * (self.depth - 2)) as f64
+    }
+
+    /// `out = A·x` for the pressure matrix on the fluid cells: `6x` minus the six
+    /// neighbours, a wall neighbour standing in as a copy of the cell.
+    fn apply_pressure_matrix(&self, x: &[f64], out: &mut [f64]) {
+        let (w, h, d) = (self.width, self.height, self.depth);
+        let (si, sj) = (h * d, d);
+        for i in 1..w-1 {
+            for j in 1..h-1 {
+                let row = self.get_index(i, j, 0);
+                // A missing neighbour row at a wall is the row itself: decided once
+                // per row rather than per cell.
+                let xm = if i > 1 { row - si } else { row };
+                let xp = if i < w - 2 { row + si } else { row };
+                let ym = if j > 1 { row - sj } else { row };
+                let yp = if j < h - 2 { row + sj } else { row };
+                for k in 1..d-1 {
+                    let idx = row + k;
+                    let c = x[idx];
+                    let zm = if k > 1 { x[idx - 1] } else { c };
+                    let zp = if k < d - 2 { x[idx + 1] } else { c };
+                    out[idx] = 6.0 * c - (x[xm + k] + x[xp + k] + x[ym + k] + x[yp + k] + zm + zp);
+                }
+            }
+        }
+    }
+
+    /// Builds the MIC(0) preconditioner (Bridson §5.4) for the pressure matrix, as
+    /// inverse pivots `1/e` (see the 2D grid's `build_preconditioner`).
+    fn build_preconditioner(&mut self) {
+        let (w, h, d) = (self.width, self.height, self.depth);
+        let (si, sj) = (h * d, d);
+        let mut inv = std::mem::take(&mut self.precon);
+        let has = |b: bool| if b { 1.0 } else { 0.0 };
+        for i in 1..w-1 {
+            for j in 1..h-1 {
+                for k in 1..d-1 {
+                    let idx = self.get_index(i, j, k);
+                    let diag = has(i > 1) + has(i < w - 2) + has(j > 1) + has(j < h - 2) + has(k > 1) + has(k < d - 2);
+                    let mut e = diag;
+                    if i > 1 {
+                        let q = inv[idx - si];
+                        e -= q + MIC_TAU * q * (has(j < h - 2) + has(k < d - 2));
+                    }
+                    if j > 1 {
+                        let q = inv[idx - sj];
+                        e -= q + MIC_TAU * q * (has(i < w - 2) + has(k < d - 2));
+                    }
+                    if k > 1 {
+                        let q = inv[idx - 1];
+                        e -= q + MIC_TAU * q * (has(i < w - 2) + has(j < h - 2));
+                    }
+                    if e < MIC_SIGMA * diag {
+                        e = diag;
+                    }
+                    inv[idx] = if e > 0.0 { 1.0 / e } else { 0.0 };
+                }
+            }
+        }
+        self.precon = inv;
+    }
+
+    /// `z = M⁻¹·r` for the MIC(0) preconditioner, in place in `z`, fluid cells only,
+    /// written in terms of the inverse pivots as in the 2D grid.
+    fn apply_preconditioner(&self, r: &[f64], z: &mut [f64]) {
+        let (w, h, d) = (self.width, self.height, self.depth);
+        let (si, sj) = (h * d, d);
+        let inv = &self.precon;
+        for i in 1..w-1 {
+            for j in 1..h-1 {
+                for k in 1..d-1 {
+                    let idx = self.get_index(i, j, k);
+                    let mut t = r[idx];
+                    if i > 1 {
+                        t += z[idx - si];
+                    }
+                    if j > 1 {
+                        t += z[idx - sj];
+                    }
+                    if k > 1 {
+                        t += z[idx - 1];
+                    }
+                    z[idx] = inv[idx] * t;
+                }
+            }
+        }
+        for i in (1..w-1).rev() {
+            for j in (1..h-1).rev() {
+                for k in (1..d-1).rev() {
+                    let idx = self.get_index(i, j, k);
+                    let mut t = z[idx];
+                    if i < w - 2 {
+                        t += inv[idx] * z[idx + si];
+                    }
+                    if j < h - 2 {
+                        t += inv[idx] * z[idx + sj];
+                    }
+                    if k < d - 2 {
+                        t += inv[idx] * z[idx + 1];
+                    }
+                    z[idx] = t;
+                }
+            }
+        }
+    }
+
     /// Sets the boundary conditions for the 3D fluid simulation.
+    ///
+    /// Each velocity component is negated at the pair of walls it crosses, so no
+    /// fluid passes through a wall. At the other four walls it is copied under
+    /// free-slip and negated under no-slip ([`SolverConfig::wall`]). Density and
+    /// pressure are copied (no flux).
     fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut Vec<f64>) {
+        let wall = self.solver_config.wall;
+        let flip_front_back = boundary_type.flips_at_wall(BoundaryType::VelocityZ, wall);
+        let flip_top_bottom = boundary_type.flips_at_wall(BoundaryType::VelocityY, wall);
+        let flip_left_right = boundary_type.flips_at_wall(BoundaryType::VelocityX, wall);
+
         // Handle faces (6 faces)
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
                 // Front face (k=0)
-                x[self.get_index(i, j, 0)] = if boundary_type == BoundaryType::VelocityZ {
+                x[self.get_index(i, j, 0)] = if flip_front_back {
                     -x[self.get_index(i, j, 1)]
                 } else {
                     x[self.get_index(i, j, 1)]
                 };
                 // Back face (k=depth-1)
-                x[self.get_index(i, j, self.depth-1)] = if boundary_type == BoundaryType::VelocityZ {
+                x[self.get_index(i, j, self.depth-1)] = if flip_front_back {
                     -x[self.get_index(i, j, self.depth-2)]
                 } else {
                     x[self.get_index(i, j, self.depth-2)]
@@ -305,13 +559,13 @@ impl FluidGrid3D {
         for i in 1..self.width-1 {
             for k in 1..self.depth-1 {
                 // Bottom face (j=0)
-                x[self.get_index(i, 0, k)] = if boundary_type == BoundaryType::VelocityY {
+                x[self.get_index(i, 0, k)] = if flip_top_bottom {
                     -x[self.get_index(i, 1, k)]
                 } else {
                     x[self.get_index(i, 1, k)]
                 };
                 // Top face (j=height-1)
-                x[self.get_index(i, self.height-1, k)] = if boundary_type == BoundaryType::VelocityY {
+                x[self.get_index(i, self.height-1, k)] = if flip_top_bottom {
                     -x[self.get_index(i, self.height-2, k)]
                 } else {
                     x[self.get_index(i, self.height-2, k)]
@@ -322,13 +576,13 @@ impl FluidGrid3D {
         for j in 1..self.height-1 {
             for k in 1..self.depth-1 {
                 // Left face (i=0)
-                x[self.get_index(0, j, k)] = if boundary_type == BoundaryType::VelocityX {
+                x[self.get_index(0, j, k)] = if flip_left_right {
                     -x[self.get_index(1, j, k)]
                 } else {
                     x[self.get_index(1, j, k)]
                 };
                 // Right face (i=width-1)
-                x[self.get_index(self.width-1, j, k)] = if boundary_type == BoundaryType::VelocityX {
+                x[self.get_index(self.width-1, j, k)] = if flip_left_right {
                     -x[self.get_index(self.width-2, j, k)]
                 } else {
                     x[self.get_index(self.width-2, j, k)]
@@ -385,22 +639,71 @@ impl FluidGrid3D {
         ) / 3.0;
     }
 
-    /// Solves a linear system using Gauss-Seidel relaxation in 3D.
-    fn lin_solve(&self, boundary_type: BoundaryType, x: &mut Vec<f64>, x0: &Vec<f64>, a: f64, c: f64) {
-        for _ in 0..self.solver_config.iterations {
-            for i in 1..self.width-1 {
-                for j in 1..self.height-1 {
-                    for k in 1..self.depth-1 {
-                        let idx = self.get_index(i, j, k);
-                        x[idx] = (x0[idx] + a * (
-                            x[self.get_index(i+1, j, k)] + x[self.get_index(i-1, j, k)] +
-                            x[self.get_index(i, j+1, k)] + x[self.get_index(i, j-1, k)] +
-                            x[self.get_index(i, j, k+1)] + x[self.get_index(i, j, k-1)]
-                        )) / c;
+    /// Solves a linear system by relaxation in 3D: Gauss-Seidel, SOR or Jacobi, per
+    /// [`SolverConfig::solver_type`], `iterations` sweeps from the guess in `x`.
+    /// `scratch` is Jacobi's second buffer.
+    fn lin_solve(&self, boundary_type: BoundaryType, x: &mut Vec<f64>, x0: &[f64], a: f64, c: f64, scratch: &mut Vec<f64>) {
+        match self.solver_config.solver_type {
+            SolverType::GaussSeidel => {
+                for _ in 0..self.solver_config.iterations {
+                    for i in 1..self.width-1 {
+                        for j in 1..self.height-1 {
+                            for k in 1..self.depth-1 {
+                                let idx = self.get_index(i, j, k);
+                                x[idx] = (x0[idx] + a * (
+                                    x[self.get_index(i+1, j, k)] + x[self.get_index(i-1, j, k)] +
+                                    x[self.get_index(i, j+1, k)] + x[self.get_index(i, j-1, k)] +
+                                    x[self.get_index(i, j, k+1)] + x[self.get_index(i, j, k-1)]
+                                )) / c;
+                            }
+                        }
                     }
+                    self.set_boundaries(boundary_type, x);
                 }
             }
-            self.set_boundaries(boundary_type, x);
+            SolverType::SOR => {
+                let omega = self.solver_config.relaxation;
+                for _ in 0..self.solver_config.iterations {
+                    for i in 1..self.width-1 {
+                        for j in 1..self.height-1 {
+                            for k in 1..self.depth-1 {
+                                let idx = self.get_index(i, j, k);
+                                let gauss_seidel = (x0[idx] + a * (
+                                    x[self.get_index(i+1, j, k)] + x[self.get_index(i-1, j, k)] +
+                                    x[self.get_index(i, j+1, k)] + x[self.get_index(i, j-1, k)] +
+                                    x[self.get_index(i, j, k+1)] + x[self.get_index(i, j, k-1)]
+                                )) / c;
+                                x[idx] = (1.0 - omega) * x[idx] + omega * gauss_seidel;
+                            }
+                        }
+                    }
+                    self.set_boundaries(boundary_type, x);
+                }
+            }
+            SolverType::Jacobi => {
+                if scratch.len() != x.len() {
+                    scratch.clear();
+                    scratch.resize(x.len(), 0.0);
+                }
+                for _ in 0..self.solver_config.iterations {
+                    for i in 1..self.width-1 {
+                        for j in 1..self.height-1 {
+                            for k in 1..self.depth-1 {
+                                let idx = self.get_index(i, j, k);
+                                scratch[idx] = (x0[idx] + a * (
+                                    x[self.get_index(i+1, j, k)] + x[self.get_index(i-1, j, k)] +
+                                    x[self.get_index(i, j+1, k)] + x[self.get_index(i, j-1, k)] +
+                                    x[self.get_index(i, j, k+1)] + x[self.get_index(i, j, k-1)]
+                                )) / c;
+                            }
+                        }
+                    }
+                    // The new sweep becomes `x`; `set_boundaries` rewrites its whole
+                    // (stale) boundary layer from the fluid cells.
+                    std::mem::swap(x, scratch);
+                    self.set_boundaries(boundary_type, x);
+                }
+            }
         }
     }
 
@@ -483,9 +786,12 @@ impl FluidGrid3D {
     }
 
     /// Sets the solver configuration. Fewer than 1 iteration is raised to 1.
-    pub fn set_solver_config(&mut self, config: SolverConfig) {
-        self.solver_config = config;
-        self.solver_config.iterations = config.iterations.max(1);
+    ///
+    /// Returns an error, keeping the previous configuration, if
+    /// [`SolverConfig::validate`] rejects `config`.
+    pub fn set_solver_config(&mut self, config: SolverConfig) -> Result<(), PhysicsError> {
+        self.solver_config = config.checked()?;
+        Ok(())
     }
 
     /// Sets the diffusion rate of the fluid, widths²/s (must be finite and non-negative).
@@ -536,6 +842,8 @@ impl FluidGrid3D {
         self.velocity_x = vec![0.0; size];
         self.velocity_y = vec![0.0; size];
         self.velocity_z = vec![0.0; size];
+        self.pressure = [vec![0.0; size], vec![0.0; size]];
+        self.last_pressure_iterations = 0;
     }
 
     /// Calculates the total mass (sum of density) in the simulation.

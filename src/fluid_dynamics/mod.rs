@@ -19,10 +19,12 @@
 //! - Thin-film surface flow — the lubrication approximation (`FilmFlow`, `FilmGrid`)
 //!
 //! ### Simulation (`fluid_simulation` feature)
-//! - 2D/3D incompressible Navier-Stokes solver
-//! - Pressure projection for incompressibility
-//! - A closed box: every wall blocks normal flow (no inflow, outflow or free surface)
-//! - Particle-fluid coupling for two-way interaction
+//! - `FluidGrid` / `FluidGrid3D`: incompressible Navier-Stokes in a closed box, with
+//!   pressure projection. Every wall blocks normal flow, and is free-slip along it by
+//!   default or no-slip on request (`WallCondition`); there is no inflow, outflow or
+//!   free surface.
+//! - `SphFluid`: particles that are the fluid, for splashes and droplets.
+//! - Particle-fluid coupling for two-way interaction with the grids.
 //!
 //! ## Quick Start - Analytical
 //!
@@ -131,9 +133,10 @@
 //! - **No multiphase flow**: Single fluid type per simulation; no free surface
 //! - **Grid units**: length is in domain widths (cell size `1 / width` on every
 //!   axis), not metres; see `FluidGrid`
-//! - **Approximate incompressibility**: the pressure solve runs a fixed number of
-//!   Gauss-Seidel sweeps from zero each step, which removes little of a large-scale
-//!   divergence on a big grid (about 1% per step at 128² with the default 4)
+//! - **A variable pressure cost**: the pressure is solved by conjugate gradient to a
+//!   relative tolerance (default 1e-4), so a step costs more when it brings more new
+//!   divergence. `PressureSolver::Relaxation` restores the old fixed-cost sweeps, which
+//!   remove only about 1% of a large-scale divergence per step at 128²
 //! - **Stability is not accuracy**: implicit diffusion and semi-Lagrangian advection
 //!   are stable at any timestep, but a step that moves the flow more than a cell or
 //!   so smears it (first-order numerical diffusion)
@@ -141,9 +144,12 @@
 //! ## Performance
 //!
 //! - Grid simulation: O(n) per substep for advection/diffusion
-//! - Pressure solve: O(iterations × n) using Gauss-Seidel
-//! - Memory: 24 bytes per cell in 2D and 32 in 3D (velocity, density), plus about
-//!   ten cell-sized scratch fields allocated for the duration of each `step`
+//! - Pressure solve: MIC(0)-preconditioned conjugate gradient, warm-started from the
+//!   last step. With a steady source, about 13/19/29 iterations per step at 64²/128²/256²
+//!   and 15/17 at 32³/64³ (default tolerance)
+//! - Memory: 88 bytes per cell in 2D and 96 in 3D kept between steps (velocity,
+//!   density, two warm-start pressures, the preconditioner and the solver's work
+//!   vectors), plus about ten cell-sized fields allocated for the duration of `step`
 
 // Shared modules - available when any fluid feature is enabled
 #[cfg(any(feature = "fluid_dynamics", feature = "fluid_simulation"))]

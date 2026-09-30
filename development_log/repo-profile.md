@@ -511,10 +511,16 @@ baseline lacked.
     widths/s, viscosity and diffusion in widths²/s. Anything that uses `height` or `depth` as `1/h`,
     or the cell count as `1/h²`, is a bug; the 3D solver's viscosity was N× too strong that way.
   - **The outer ring of cells is a ghost layer**, overwritten every step. The fluid is cells
-    `1..n-1`; reductions must skip the ring, and writes to it (an "inlet" at x = 0) vanish (GRID-11).
+    `1..n-1`; reductions must skip the ring, and `add_density`/`add_velocity` refuse it with `Err`
+    (GRID-11; they used to return `Ok` and the write vanished).
   - **Lexicographic Gauss-Seidel on a 5/7-point stencil gives the same iterates in any loop
     nesting**, so the grids are x↔y symmetric to rounding, and the storage is now
     innermost-loop-fastest (column-major in 2D, z-fastest in 3D). Anything that walks the raw
     `Vec` in index order sees a different order than before; go through `get_index`.
-  - **The walls are free-slip and the pressure solve is far from converged at default settings**
-    (GRID-9/10): neither grid can carry a through-flow, so a river is not a use case for them as-is.
+  - **The pressure is a warm-started MIC(0) conjugate gradient to a relative tolerance** (GRID-9),
+    one warm-start field per projection: a step's two projections solve different problems, and
+    sharing one guess erased the warm start's benefit (128², tol 1e-5: 111 iterations per step shared, 31
+    per-projection). Step cost now varies with the flow; `get_last_pressure_iterations` reports it.
+    `PressureSolver::Relaxation` + Gauss-Seidel reproduces the old solver bit-for-bit.
+  - **Walls are free-slip by default and no-slip on request** (`WallCondition`, GRID-10). Either
+    way the grids are closed boxes with no through-flow, so neither is a river solver.
