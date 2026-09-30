@@ -259,7 +259,7 @@
 //! shape, which is what lets LLVM discharge the bounds checks and vectorize at all. The
 //! prediction going in was that the unswitch was the whole story. It was not.
 //!
-//! **A whole-map sweep is not a frame budget.** 1400 × 1000 is Ridgeline's stain buffer
+//! **A whole-map sweep is not a frame budget.** 1400 × 1000 is a game's stain buffer
 //! at 5 texels per metre over a 280 × 200 m map, and 16.8 ms of it is a frame. That is
 //! the measurement behind [`FilmGrid`] declining to own the sweep: liquid covers a
 //! percent or two of a map, and a caller that visits only the tiles holding any pays a
