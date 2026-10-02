@@ -420,3 +420,82 @@ fn a_solid_and_a_bin_cost_the_declared_bytes() {
     assert_eq!(size_of::<[u32; 2]>(), 8);
     assert_eq!(2 * size_of::<u32>() + size_of::<u32>(), 12);
 }
+
+/// With the slope normal, a drop driven up an incline at `friction = 1.0` pays for the
+/// height it gains: the clamp no longer lifts it for free (the energy half of SPH-F5).
+#[test]
+fn climbing_a_slope_with_the_normal_costs_kinetic_energy() {
+    let grade = 30f64.to_radians().tan();
+    let ground = move |x: f64, _z: f64| grade * x; // uphill is +x
+    let mut p = SphParams::water();
+    p.friction = 1.0;
+    let mut f = SphFluid::new(p, 4).unwrap();
+    f.spawn([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    let none = SphSolids::new();
+    let e0 = 0.5 * 1.0f64.powi(2);
+    for _ in 0..480 {
+        f.step_with_solids(DT, 9.81, ground, &none);
+    }
+    let v = f.velocity(0);
+    let e1 = 0.5 * dot(v, v) + 9.81 * f.position(0)[1];
+    assert!(
+        e1 <= e0 * 1.01,
+        "specific mechanical energy went {e0:.3} -> {e1:.3} J/kg"
+    );
+}
+
+/// A top-down picture of a pool a shin has waded halfway through: one character a
+/// particle column, `.` empty, digits the particles stacked there, `#` the shin.
+#[test]
+#[ignore = "diagnostic picture: run with --ignored --nocapture"]
+fn picture_of_a_waded_pool() {
+    let mut f = pool();
+    let (radius, z) = (0.04, 0.15);
+    let mut solids = SphSolids::new();
+    let mut x = 0.0;
+    for s in 0..72 {
+        x = -0.08 + DT * (s + 1) as f64;
+        solids.clear();
+        solids.push_capsule(
+            [x, -0.02, z],
+            [x, 0.3, z],
+            radius,
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        );
+        f.step_with_solids(DT, 9.81, flat, &solids);
+    }
+    let cell = 0.01;
+    let (nx, nz) = (60usize, 34usize);
+    let mut count = vec![0u32; nx * nz];
+    for i in 0..f.len() {
+        let p = f.position(i);
+        let (cx, cz) = (
+            ((p[0] + 0.05) / cell).floor(),
+            ((p[2] + 0.01) / cell).floor(),
+        );
+        if cx >= 0.0 && cz >= 0.0 && (cx as usize) < nx && (cz as usize) < nz {
+            count[cz as usize * nx + cx as usize] += 1;
+        }
+    }
+    let mut out = format!("pool after a 1 m/s shin waded to x = {x:.3} m (top down, 1 cm cells)\n");
+    for row in 0..nz {
+        for col in 0..nx {
+            let (px, pz) = (
+                col as f64 * cell - 0.05 + 0.005,
+                row as f64 * cell - 0.01 + 0.005,
+            );
+            let shin = ((px - x).powi(2) + (pz - z).powi(2)).sqrt() < radius;
+            let c = count[row * nx + col];
+            out.push(if shin {
+                '#'
+            } else if c == 0 {
+                '.'
+            } else {
+                char::from_digit(c.min(9), 10).unwrap()
+            });
+        }
+        out.push('\n');
+    }
+    eprintln!("{out}");
+}
