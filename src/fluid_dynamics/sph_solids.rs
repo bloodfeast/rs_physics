@@ -493,8 +493,9 @@ impl SphFluid {
         let reach = (CFL_FRACTION * h + self.contact_radius()) * (1.0 + 1e-6);
 
         // The cells the fluid occupies: a serial min and max an axis over the integer
-        // cells, which vectorises and costs about a microsecond at 4,096 particles. A rayon
-        // reduction here measured 53 us at 4,096, all of it waking the pool.
+        // cells, which vectorises: the whole binning of 28 solids out of reach measured
+        // 4.8 us at 4,096 particles with it. A rayon reduction here measured 53 us,
+        // nearly all of it waking the pool.
         let span = |c: &[i32]| {
             let lo = c.iter().fold(i32::MAX, |m, &v| m.min(v));
             let hi = c.iter().fold(i32::MIN, |m, &v| m.max(v));
