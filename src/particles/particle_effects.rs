@@ -703,38 +703,38 @@ impl ParticleEffects {
             }
             let (ax, ay, az) = (&air_x[..len], &air_y[..len], &air_z[..len]);
 
-        for i in 0..len {
-            let c = (class[i] as usize) & (MAX_CLASSES - 1);
-            let d = damping[c];
-            let u = [ax[i], ay[i], az[i]];
-            let t = take[c];
+            for i in 0..len {
+                let c = (class[i] as usize) & (MAX_CLASSES - 1);
+                let d = damping[c];
+                let u = [ax[i], ay[i], az[i]];
+                let t = take[c];
 
-            let mut x = vx[i] * d;
-            let mut y = (vy[i] - gravity[c]) * d;
-            let mut z = vz[i] * d;
-            // `x + t u`, written `x - (-(t u))` with the subtrahend masked to +0 for a
-            // class that ignores the air: `x - (+0)` is `x` to the bit (even -0),
-            // where adding a zero weight's `+0` would turn a -0 into +0. A mask rather
-            // than a branch, so the loop still vectorises.
-            let mask = sees_air[c];
-            let pull = |v: f32, a: f32| v - f32::from_bits((-(t * a)).to_bits() & mask);
-            x = pull(x, u[0]);
-            y = pull(y, u[1]);
-            z = pull(z, u[2]);
+                let mut x = vx[i] * d;
+                let mut y = (vy[i] - gravity[c]) * d;
+                let mut z = vz[i] * d;
+                // `x + t u`, written `x - (-(t u))` with the subtrahend masked to +0 for a
+                // class that ignores the air: `x - (+0)` is `x` to the bit (even -0),
+                // where adding a zero weight's `+0` would turn a -0 into +0. A mask rather
+                // than a branch, so the loop still vectorises.
+                let mask = sees_air[c];
+                let pull = |v: f32, a: f32| v - f32::from_bits((-(t * a)).to_bits() & mask);
+                x = pull(x, u[0]);
+                y = pull(y, u[1]);
+                z = pull(z, u[2]);
 
-            let (sx, sy, sz) = (x * dt, y * dt, z * dt);
-            x = if sx.abs() < resolution(px[i]) { 0.0 } else { x };
-            y = if sy.abs() < resolution(py[i]) * decays_y[c] { 0.0 } else { y };
-            z = if sz.abs() < resolution(pz[i]) { 0.0 } else { z };
+                let (sx, sy, sz) = (x * dt, y * dt, z * dt);
+                x = if sx.abs() < resolution(px[i]) { 0.0 } else { x };
+                y = if sy.abs() < resolution(py[i]) * decays_y[c] { 0.0 } else { y };
+                z = if sz.abs() < resolution(pz[i]) { 0.0 } else { z };
 
-            vx[i] = x;
-            vy[i] = y;
-            vz[i] = z;
-            px[i] += x * dt;
-            py[i] += y * dt;
-            pz[i] += z * dt;
-            remaining[i] -= dt;
-        }
+                vx[i] = x;
+                vy[i] = y;
+                vz[i] = z;
+                px[i] += x * dt;
+                py[i] += y * dt;
+                pz[i] += z * dt;
+                remaining[i] -= dt;
+            }
             start = end;
         }
     }

@@ -361,6 +361,45 @@ fn plume(rounds: usize) {
     }
 }
 
+/// What the diffusion sweeps cost a plume that has no viscosity: the plume's grid
+/// (both options, inviscid) at 4 sweeps and at 1, interleaved. The sweeps run even at a
+/// coefficient of zero, so the difference over three is one sweep of every field.
+fn sweeps(rounds: usize) {
+    println!("inviscid FluidGrid3D, both options: ms a step at 4 diffusion sweeps and at 1");
+    for &n in &[34usize, 66] {
+        let config = SolverConfig::default()
+            .with_advection(AdvectionScheme::MacCormack)
+            .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation);
+        let mut grids: Vec<FluidGrid3D> = [4usize, 1]
+            .iter()
+            .map(|&it| {
+                let mut c = config;
+                c.iterations = it;
+                let mut g = FluidGrid3D::with_solver(n, n, n, 0.0, 0.0, 0.05, c).unwrap();
+                for _ in 0..5 {
+                    source_3d(&mut g, n);
+                    g.step();
+                }
+                g
+            })
+            .collect();
+        let mut times = vec![Vec::new(); 2];
+        for _ in 0..rounds {
+            for (c, g) in grids.iter_mut().enumerate() {
+                let started = Instant::now();
+                source_3d(g, n);
+                g.step();
+                times[c].push(started.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let (four, one) = (median(times[0].clone()), median(times[1].clone()));
+        println!(
+            "  {n}^3: 4 sweeps {four:.2} ms, 1 sweep {one:.2} ms; the sweeps at a zero coefficient are {:.0}% of the step",
+            100.0 * (four - one) * 4.0 / 3.0 / four
+        );
+    }
+}
+
 fn main() {
     let rounds: usize = std::env::args()
         .nth(1)
@@ -378,5 +417,8 @@ fn main() {
     }
     if which == "all" || which == "plume" {
         plume(rounds);
+    }
+    if which == "sweeps" {
+        sweeps(rounds);
     }
 }
