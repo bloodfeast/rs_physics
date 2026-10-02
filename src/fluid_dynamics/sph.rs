@@ -78,6 +78,62 @@
 //! solver is deterministic on one machine; across machines it is as deterministic as
 //! `f64` `sqrt` and division, which IEEE 754 fixes.
 //!
+//! # Solids
+//!
+//! [`SphFluid::step`] knows one solid, the ground. [`SphFluid::step_with_solids`] adds a
+//! [`SphSolids`] set the caller fills each frame: capsules (a limb, a boot, a blade, with
+//! a surface velocity at each end, blended along the axis) and boxes yawed about +y
+//! (debris, a crate, a corpse's bounds, with one velocity).
+//!
+//! **One way.** Solids push the liquid; the liquid never pushes a solid. The set is
+//! borrowed read-only for the step and nothing is written back, so no fluid state can
+//! reach anything a lockstep simulation reads.
+//!
+//! **Binning.** After the particle grid is built, each solid's bounds, grown by the
+//! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
+//! contact radius, `h / 4`), are binned into the hash buckets of the cells they cover,
+//! clipped to the cells the fluid occupies and skipping buckets that hold no particle.
+//! Serial, in solid order, O(solids x cells covered) after one serial min and max over
+//! the particle cells (O(n) integer work that vectorises), into reused buffers: a
+//! counting sort over only the buckets touched, which are zeroed again after the step,
+//! so the table is never cleared whole. Any particle that can meet a solid starts the
+//! substep within that reach, so it finds the solid in its own cell's bin, one bucket
+//! read: the bins are the cells the ray can cross, gathered on the solid's side.
+//!
+//! **Contact.** In the move, after the velocity update and before the ground, a particle
+//! whose bin is not empty casts a ray from where it was to where it is going, extended
+//! by the contact radius. Closed form, no iteration: a capsule is the nearest of its
+//! cylinder side and its two end spheres (three square roots), a box is the slab test in
+//! its own frame (three divisions; its yaw's sine and cosine are taken once, when it is
+//! pushed). At the nearest hit the particle is set on the surface a contact radius out
+//! along the normal; a particle that starts inside a solid (the solid moved onto it) is
+//! pushed out along the nearest normal instead. Its velocity relative to the surface
+//! keeps `restitution` of an approaching normal part, decays its tangential part at the
+//! ground's `friction` rate, and takes on the surface velocity: the ground's response,
+//! with no new coefficient. Swept rather than a point test, so a droplet at the speed
+//! ceiling cannot pass through a box one spacing thick or a blade. One contact a
+//! substep: a particle pushed from one solid into another meets the second next substep.
+//!
+//! **The slope.** With solids the ground has a normal too: a particle in ground contact
+//! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
+//! only in contact, so a particle in flight pays nothing) and meets the ground along
+//! that slope's normal, so a drop on an incline runs downhill (SPH-F5). Where both
+//! differences are zero the level response runs unchanged, so on level ground with no
+//! solid in reach `step_with_solids` is bit-identical to `step`.
+//!
+//! **Cost.** A solid covers about `(L / h + 2.3)` cells along each axis of length `L`
+//! (its extent plus `1.3 h` of reach); a 0.4 m limb of radius 6 cm in blood (`h` = 4 cm)
+//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. Each covered cell is one
+//! hash and one bucket read, and writes an entry only where particles are. A particle
+//! pays one bucket read when no solid is near it, and the contact test against each
+//! solid in its bin when one is. Solids that reach no particle write no entry, and then
+//! the move is the plain one: the binning is the whole price.
+//!
+//! **Memory.** A capsule is 144 bytes and a box 88 in [`SphSolids`]. The fluid's bins
+//! are 8 bytes a bucket (two to four buckets a particle, allocated on the first step with
+//! solids) plus 12 bytes an entry and 4 a touched bucket, all kept at their high-water
+//! marks.
+//!
 //! # Examples
 //!
 //! ```
@@ -101,6 +157,10 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use crate::utils::PhysicsError;
+
+#[path = "sph_solids.rs"]
+mod solids;
+pub use solids::{SphSolidStats, SphSolids};
 
 /// Fluid behaviour. The four numbers that separate water from blood from honey.
 #[derive(Debug, Clone, Copy)]
@@ -452,6 +512,10 @@ pub struct SphFluid {
     /// Bucket count, always a power of two so the hash reduces with a mask.
     table_mask: usize,
     times: SphPhaseTimes,
+    /// The solids of the current `step_with_solids`, binned by bucket. Empty, and owning
+    /// no memory, until the first step with solids.
+    solid_bins: solids::SolidBins,
+    solid_stats: SphSolidStats,
 }
 
 /// Below this speed, and touching ground, a particle is considered to have landed.
@@ -589,6 +653,8 @@ impl SphFluid {
             lists: vec![NeighbourList::default(); capacity.div_ceil(SPH_CHUNK)],
             table_mask: 0,
             times: SphPhaseTimes::default(),
+            solid_bins: solids::SolidBins::default(),
+            solid_stats: SphSolidStats::default(),
         })
     }
 
@@ -1009,7 +1075,8 @@ impl SphFluid {
     ///   particle, so the fluid rests on terrain rather than a flat plane. The contact
     ///   only clamps height and reflects vertical velocity: it has no slope normal, so
     ///   a drop on an incline does not run downhill on its own (SPH-F5 in
-    ///   `docs/reviews/2026-09-29-correctness-performance.md`).
+    ///   `docs/reviews/2026-09-29-correctness-performance.md`);
+    ///   [`Self::step_with_solids`] gives it one.
     ///
     /// # Examples
     ///
@@ -1027,6 +1094,83 @@ impl SphFluid {
     where
         F: Fn(f64, f64) -> f64,
     {
+        self.step_inner(dt, gravity, &ground_height, None);
+    }
+
+    /// Advance the fluid one substep against a set of solids: capsules and yawed boxes
+    /// that push the liquid, and a ground that has a slope.
+    ///
+    /// Everything [`Self::step`] does, and two things more (the module documentation's
+    /// "Solids" section has the design and the cost):
+    ///
+    /// - **The solids.** Each particle casts a short ray along its substep, from where it
+    ///   was to where it is going, reaching [`Self::contact_radius`] further, against the
+    ///   solids binned in its cell. The nearest surface it meets stops it a contact
+    ///   radius out; a particle a solid moved onto is pushed out along the nearest
+    ///   normal. Either way its velocity relative to the surface keeps `restitution` of
+    ///   its approaching normal part and decays its tangential part at the ground's
+    ///   `friction` rate, then takes on the surface's velocity: a boot displaces a pool,
+    ///   a falling corpse throws a splash. Swept, so a droplet at the speed ceiling
+    ///   cannot pass through a blade.
+    /// - **The slope.** A particle in ground contact samples `ground_height` twice more,
+    ///   a rest spacing along +x and along +z, and meets the ground along that slope's
+    ///   normal with the same response, so a drop on an incline runs downhill (SPH-F5).
+    ///   A particle in flight samples nothing extra, and a level ground gives exactly
+    ///   what [`Self::step`] gives.
+    ///
+    /// One way: the solids are read and never written, and the liquid exerts nothing on
+    /// them. With an empty set, on level ground, the result is bit-identical to
+    /// [`Self::step`]; on a slope it differs by exactly the slope normal. Bit-identical
+    /// at any thread count, like [`Self::step`]. Allocates nothing once the bins have
+    /// reached their high-water mark.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` - the substep, seconds. A `dt` that is not a positive finite number does
+    ///   nothing.
+    /// * `gravity` - downward acceleration, m/s^2. A non-finite value does nothing.
+    /// * `ground_height` - terrain height in metres at a world `(x, z)`, as for
+    ///   [`Self::step`].
+    /// * `solids` - the solids this substep, at their poses for it. Read only.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams, SphSolids};
+    ///
+    /// // A drop falls onto a crate and stays on its lid.
+    /// let mut fluid = SphFluid::new(SphParams::water(), 8).unwrap();
+    /// fluid.spawn([0.0, 0.8, 0.0], [0.0; 3]);
+    /// let mut solids = SphSolids::new();
+    /// solids.push_box([0.0, 0.25, 0.0], [0.25; 3], 0.0, [0.0; 3]);
+    /// for _ in 0..240 {
+    ///     fluid.step_with_solids(1.0 / 240.0, 9.81, |_, _| 0.0, &solids);
+    /// }
+    /// let lid = 0.5 + fluid.contact_radius();
+    /// assert!((fluid.position(0)[1] - lid).abs() < 1e-3);
+    /// ```
+    pub fn step_with_solids<F>(
+        &mut self,
+        dt: f64,
+        gravity: f64,
+        ground_height: F,
+        solids: &SphSolids,
+    ) where
+        F: Fn(f64, f64) -> f64,
+    {
+        self.step_inner(dt, gravity, &ground_height, Some(solids));
+    }
+
+    /// The step, with or without solids.
+    fn step_inner<F>(
+        &mut self,
+        dt: f64,
+        gravity: f64,
+        ground_height: &F,
+        solids: Option<&SphSolids>,
+    ) where
+        F: Fn(f64, f64) -> f64,
+    {
         if !(dt > 0.0 && dt.is_finite() && gravity.is_finite()) || self.is_empty() {
             return;
         }
@@ -1039,12 +1183,18 @@ impl SphFluid {
         self.ppz.copy_from_slice(&self.pz);
 
         self.build_grid();
+        let mut binning = Duration::ZERO;
+        if let Some(solids) = solids {
+            let tb = Instant::now();
+            self.bin_solids(solids);
+            binning = tb.elapsed();
+        }
         let t1 = Instant::now();
         self.compute_density_and_pressure();
         let t2 = Instant::now();
         self.apply_forces(gravity);
         let t3 = Instant::now();
-        self.integrate(dt, &ground_height);
+        let (ray_tested, contacts) = self.integrate(dt, ground_height, solids);
         let t4 = Instant::now();
 
         self.times = SphPhaseTimes {
@@ -1053,6 +1203,16 @@ impl SphFluid {
             forces: t3 - t2,
             integrate: t4 - t3,
         };
+        self.solid_stats = SphSolidStats {
+            solids: solids.map_or(0, SphSolids::len),
+            bin_entries: self.solid_bins.len(),
+            ray_tested,
+            contacts,
+            binning,
+        };
+        if solids.is_some() {
+            self.solid_bins.reset();
+        }
     }
 
     // -- Neighbour search -----------------------------------------------------
@@ -1321,7 +1481,14 @@ impl SphFluid {
             });
     }
 
-    fn integrate<F>(&mut self, dt: f64, ground_height: &F)
+    /// The speed cap, the move, the solids (when given) and the ground. Returns how many
+    /// particles ran the solid contact test and how many a solid moved.
+    fn integrate<F>(
+        &mut self,
+        dt: f64,
+        ground_height: &F,
+        solids: Option<&SphSolids>,
+    ) -> (usize, usize)
     where
         F: Fn(f64, f64) -> f64,
     {
@@ -1334,12 +1501,78 @@ impl SphFluid {
         // callers can query through `speed_ceiling` rather than being written twice.
         let max_speed = cfl_speed_ceiling(self.params.smoothing_radius, dt);
         let max_sq = max_speed * max_speed;
-        let n = self.len();
 
         // The acceleration (read through `slot_of`, a gather), the cap and the move:
         // independent a particle, so parallel, and branch-free. Scaling by exactly 1.0
         // leaves an uncapped velocity bit for bit.
         let (ax, ay, az) = (&self.ax, &self.ay, &self.az);
+        let restitution = self.params.restitution;
+        let friction_rate = FRICTION_REFERENCE_HZ * (1.0 / self.params.friction - 1.0);
+        let friction_keep = 1.0 / (1.0 + friction_rate * dt);
+
+        // With solids binned where the fluid is, the move meets them: still one particle
+        // at a time, reading only the frozen bins, so still parallel and independent of
+        // the schedule. The velocity update is the plain pass's arithmetic, operation for
+        // operation. With nothing binned the plain pass runs, so solids no particle can
+        // reach cost the binning and nothing here.
+        if let Some(solids) = solids.filter(|_| self.solid_bins.len() > 0) {
+            let contact = solids::Contact::new(
+                &self.solid_bins,
+                solids,
+                self.contact_radius(),
+                restitution,
+                friction_keep,
+            );
+            let counts = (
+                self.vx.par_chunks_mut(STREAM_CHUNK),
+                self.vy.par_chunks_mut(STREAM_CHUNK),
+                self.vz.par_chunks_mut(STREAM_CHUNK),
+                self.px.par_chunks_mut(STREAM_CHUNK),
+                self.py.par_chunks_mut(STREAM_CHUNK),
+                self.pz.par_chunks_mut(STREAM_CHUNK),
+                self.slot_of.par_chunks(STREAM_CHUNK),
+                self.bucket_of.par_chunks(STREAM_CHUNK),
+            )
+                .into_par_iter()
+                .map(|(vx, vy, vz, px, py, pz, slots, buckets)| {
+                    let (mut tested, mut moved) = (0usize, 0usize);
+                    for i in 0..slots.len() {
+                        let k = slots[i] as usize;
+                        let (mut x, mut y, mut z) =
+                            (vx[i] + ax[k] * dt, vy[i] + ay[k] * dt, vz[i] + az[k] * dt);
+                        let sq = x * x + y * y + z * z;
+                        let scale = if sq > max_sq {
+                            max_speed / speed_of(x, y, z, sq)
+                        } else {
+                            1.0
+                        };
+                        x *= scale;
+                        y *= scale;
+                        z *= scale;
+                        let p0 = [px[i], py[i], pz[i]];
+                        let mut p = [p0[0] + x * dt, p0[1] + y * dt, p0[2] + z * dt];
+                        let mut v = [x, y, z];
+                        // The particle's bucket is its cell at the start of the substep,
+                        // where its ray starts.
+                        let ids = contact.binned(buckets[i]);
+                        if !ids.is_empty() {
+                            tested += 1;
+                            moved += contact.resolve(ids, p0, &mut p, &mut v) as usize;
+                        }
+                        vx[i] = v[0];
+                        vy[i] = v[1];
+                        vz[i] = v[2];
+                        px[i] = p[0];
+                        py[i] = p[1];
+                        pz[i] = p[2];
+                    }
+                    (tested, moved)
+                })
+                .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+            self.ground(dt, ground_height, true, restitution, friction_keep);
+            return counts;
+        }
+
         (
             self.vx.par_chunks_mut(STREAM_CHUNK),
             self.vy.par_chunks_mut(STREAM_CHUNK),
@@ -1368,27 +1601,68 @@ impl SphFluid {
                     pz[i] += z * dt;
                 }
             });
+        let slope = solids.is_some();
+        self.ground(dt, ground_height, slope, restitution, friction_keep);
+        (0, 0)
+    }
 
-        // The ground: one call into the caller's closure a particle, so scalar.
-        //
-        // Ground friction is a decay *rate*, not a per-step multiplier. A resting or
-        // sliding particle is in contact on every substep, so multiplying by `friction`
-        // each time made the slide distance proportional to `dt`: four times shorter at
-        // 960 Hz than at 240 Hz, and zero in the limit. Implicit decay at a rate
-        // calibrated so that one 240 Hz substep keeps exactly `friction` slides
-        // `v / rate` whatever the substep, in rational arithmetic with no transcendental
-        // in the loop.
-        let restitution = self.params.restitution;
-        let friction_rate = FRICTION_REFERENCE_HZ * (1.0 / self.params.friction - 1.0);
-        let friction_keep = 1.0 / (1.0 + friction_rate * dt);
+    /// The ground: one call into the caller's closure a particle, so scalar.
+    ///
+    /// Ground friction is a decay *rate*, not a per-step multiplier. A resting or
+    /// sliding particle is in contact on every substep, so multiplying by `friction`
+    /// each time made the slide distance proportional to `dt`: four times shorter at
+    /// 960 Hz than at 240 Hz, and zero in the limit. Implicit decay at a rate
+    /// calibrated so that one 240 Hz substep keeps exactly `friction` slides
+    /// `v / rate` whatever the substep, in rational arithmetic with no transcendental
+    /// in the loop. The solids decay at the same rate.
+    ///
+    /// With `slope`, a particle in contact samples the ground twice more, a rest spacing
+    /// along +x and along +z, and the response runs along that slope's normal. A
+    /// particle not in contact samples nothing extra, and where both differences are
+    /// exactly zero the level response below runs unchanged, so level ground is
+    /// bit-identical either way.
+    fn ground<F>(
+        &mut self,
+        dt: f64,
+        ground_height: &F,
+        slope: bool,
+        restitution: f64,
+        friction_keep: f64,
+    ) where
+        F: Fn(f64, f64) -> f64,
+    {
+        let n = self.len();
+        let spacing = self.params.smoothing_radius * 0.5;
         for i in 0..n {
             let floor = ground_height(self.px[i], self.pz[i]);
             let mut on_ground = false;
             if self.py[i] < floor {
                 self.py[i] = floor;
-                self.vy[i] = -self.vy[i] * restitution;
-                self.vx[i] *= friction_keep;
-                self.vz[i] *= friction_keep;
+                let (gx, gz) = if slope {
+                    (
+                        (ground_height(self.px[i] + spacing, self.pz[i]) - floor) / spacing,
+                        (ground_height(self.px[i], self.pz[i] + spacing) - floor) / spacing,
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                if gx == 0.0 && gz == 0.0 {
+                    self.vy[i] = -self.vy[i] * restitution;
+                    self.vx[i] *= friction_keep;
+                    self.vz[i] *= friction_keep;
+                } else {
+                    // The same response along the normal `(-gx, 1, -gz)`, normalised:
+                    // the normal part reflected with `restitution`, the tangential part
+                    // decayed, exactly as the level branch does to `vy` and `(vx, vz)`.
+                    let inv = 1.0 / (1.0 + gx * gx + gz * gz).sqrt();
+                    let nrm = [-gx * inv, inv, -gz * inv];
+                    let v = [self.vx[i], self.vy[i], self.vz[i]];
+                    let vn = v[0] * nrm[0] + v[1] * nrm[1] + v[2] * nrm[2];
+                    let kept = -vn * restitution;
+                    self.vx[i] = (v[0] - vn * nrm[0]) * friction_keep + kept * nrm[0];
+                    self.vy[i] = (v[1] - vn * nrm[1]) * friction_keep + kept * nrm[1];
+                    self.vz[i] = (v[2] - vn * nrm[2]) * friction_keep + kept * nrm[2];
+                }
                 on_ground = true;
             }
 
@@ -2462,21 +2736,55 @@ mod tests {
     /// The parallel passes write each particle's sums only into its own slot, in an
     /// order fixed by the data, so the thread count must not change a single bit.
     /// A splash large enough for dozens of chunks, stepped through a fall, an impact
-    /// and a settle, on pools of 1, 3 and 8 threads.
+    /// and a settle, on pools of 1, 3 and 8 threads; and again with solids, a shin
+    /// wading through the splash and a crate dropping into it, on its sloped ground.
     #[test]
     fn parallel_steps_are_bit_identical_at_any_thread_count() {
-        fn run() -> Vec<u64> {
+        parallel_bit_identity(false);
+        parallel_bit_identity(true);
+    }
+
+    fn parallel_bit_identity(with_solids: bool) {
+        let run = move || -> Vec<u64> {
+            let mut solids = SphSolids::new();
+            let mut contacts = 0usize;
             let mut fluid = SphFluid::new(SphParams::blood(), 4096).unwrap();
             let spacing = fluid.params().smoothing_radius * 0.5;
             for i in 0..3000usize {
                 let (x, y, z) = (i % 15, (i / 15) % 15, i / 225);
                 fluid.spawn(
-                    [x as f64 * spacing, 0.3 + y as f64 * spacing, z as f64 * spacing],
+                    [
+                        x as f64 * spacing,
+                        0.3 + y as f64 * spacing,
+                        z as f64 * spacing,
+                    ],
                     [0.4 * (i % 7) as f64 - 1.2, -1.0, 0.3 * (i % 5) as f64 - 0.6],
                 );
             }
             for step in 0..90 {
-                fluid.step(1.0 / 240.0, 9.81, |x, z| 0.05 * (x - z));
+                let ground = |x: f64, z: f64| 0.05 * (x - z);
+                if with_solids {
+                    let t = (step + 1) as f64 / 240.0;
+                    let x = -0.1 + 1.0 * t;
+                    solids.clear();
+                    solids.push_capsule(
+                        [x, -0.05, 0.12],
+                        [x + 0.05, 0.45, 0.12],
+                        0.04,
+                        [1.0, 0.0, 0.0],
+                        [1.5, 0.0, 0.0],
+                    );
+                    solids.push_box(
+                        [0.15, 0.6 - 2.0 * t, 0.15],
+                        [0.06, 0.04, 0.05],
+                        0.4,
+                        [0.0, -2.0, 0.0],
+                    );
+                    fluid.step_with_solids(1.0 / 240.0, 9.81, ground, &solids);
+                    contacts += fluid.solid_stats().contacts;
+                } else {
+                    fluid.step(1.0 / 240.0, 9.81, ground);
+                }
                 if step % 30 == 29 {
                     fluid.drain_settled(|_| {});
                 }
@@ -2487,17 +2795,27 @@ mod tests {
                 bits.extend(p.iter().chain(v.iter()).map(|c| c.to_bits()));
                 bits.push(fluid.density(i).to_bits());
             }
+            assert!(
+                !with_solids || contacts > 1000,
+                "the solids met the splash only {contacts} times"
+            );
             bits
-        }
+        };
 
         let answers: Vec<Vec<u64>> = [1usize, 3, 8]
             .iter()
             .map(|&t| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(t).build().unwrap();
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(t)
+                    .build()
+                    .unwrap();
                 pool.install(run)
             })
             .collect();
-        assert!(answers[0].len() > 1000, "the splash drained before it was compared");
+        assert!(
+            answers[0].len() > 1000,
+            "the splash drained before it was compared"
+        );
         for (t, other) in [3, 8].iter().zip(&answers[1..]) {
             assert!(
                 answers[0] == *other,
@@ -2551,3 +2869,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sph_regression_tests.rs"]
 mod regression_tests;
+
+#[cfg(test)]
+#[path = "sph_solids_tests.rs"]
+mod solids_tests;

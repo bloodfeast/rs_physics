@@ -3,6 +3,29 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## 0.3.1 (2026-10-02)
+
+Liquids react to actors and debris. Additive: `step` is unchanged and bit-identical.
+
+### Added
+
+- `SphSolids`: capsules (two end points, a radius, a surface velocity at each end) and
+  boxes yawed about +y (one velocity), filled by the caller each frame.
+- `SphFluid::step_with_solids`: each particle casts a short ray along its substep,
+  extended by `SphFluid::contact_radius` (half the rest spacing), against the solids
+  binned in its cell, and stops on the nearest surface; a particle a solid moved onto is
+  pushed out along the nearest normal. The response reuses `restitution` and `friction`
+  and adds the surface velocity. Swept, so a droplet at the speed ceiling cannot tunnel
+  through a blade. One way: the liquid never pushes a solid. Bit-identical at any thread
+  count.
+- The same opt-in gives the ground a slope normal from two extra `ground_height` samples
+  for particles in contact, so a drop on an incline runs downhill (SPH-F5). Level ground
+  is bit-identical to `step`.
+- `SphFluid::solid_stats` (`SphSolidStats`): solids, bin entries, particles tested,
+  contacts and the binning time of the last step.
+- `benches/sph.rs`: `sph/solids`, solids out of reach and a shin wading a pool, each
+  beside its plain-step twin in the same run, with phase medians.
+
 ## 0.3.0 (2026-09-30)
 
 Master's correctness and performance reviews (GJK/EPA, CCD, joints, particles, SPH, acoustics,

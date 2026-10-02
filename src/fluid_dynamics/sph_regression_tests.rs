@@ -656,7 +656,7 @@ fn perf_phase_breakdown() {
                 v.fill(0.0);
             }
             let t = Instant::now();
-            f.integrate(1.0 / 240.0, &flat);
+            f.integrate(1.0 / 240.0, &flat, None);
             ti += t.elapsed().as_secs_f64();
         }
         let r = reps as f64 * 1e-6;
