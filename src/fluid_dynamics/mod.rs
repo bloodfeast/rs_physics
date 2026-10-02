@@ -132,7 +132,22 @@
 //! ## Limitations
 //!
 //! - **Incompressible flow only**: No compressibility effects
-//! - **No turbulence modeling**: DNS-style simulation
+//! - **Turbulence: what the grids resolve, and two options for keeping it.** The grids
+//!   solve the flow they can resolve and model nothing below a cell. Two options in
+//!   `SolverConfig` keep more of what they resolve: `AdvectionScheme::MacCormack`
+//!   (second-order, clamped advection that keeps a plume's edges and its eddies'
+//!   strength) and `VorticityConfinement::MatchNumericalDissipation` (a force that puts
+//!   back the rotation first-order advection removes, with its strength derived from
+//!   that advection's numerical viscosity, so there is no constant to tune). Both are
+//!   off by default. There is no sub-grid stress model, deliberately: at these
+//!   resolutions first-order advection already removes more than a Smagorinsky model
+//!   would (its numerical viscosity `h² a(1 - a) / (2 dt)` is of order `|u| h / 2` at a
+//!   Courant number below one, against Smagorinsky's `(0.17 h)² |S|`, about
+//!   `0.03 |u| h` for a shear of `|u| / h`), so adding one would only smooth further
+//! - **Confinement on a collocated grid**: the projection cannot remove a divergence
+//!   at the grid scale, and confinement feeds that scale, so a confined flow keeps a
+//!   grid-scale divergence (rms 4% of the vorticity on a confined Taylor-Green array;
+//!   the total over the box is still zero)
 //! - **Fixed grid**: No adaptive mesh refinement
 //! - **No multiphase flow**: Single fluid type per simulation; the box grids have no
 //!   free surface (`ShallowWater` does, depth-averaged)
@@ -152,9 +167,13 @@
 //! - Pressure solve: MIC(0)-preconditioned conjugate gradient, warm-started from the
 //!   last step. With a steady source, about 13/19/29 iterations per step at 64²/128²/256²
 //!   and 15/17 at 32³/64³ (default tolerance)
-//! - Memory: 88 bytes per cell in 2D and 96 in 3D kept between steps (velocity,
-//!   density, two warm-start pressures, the preconditioner and the solver's work
-//!   vectors), plus about ten cell-sized fields allocated for the duration of `step`
+//! - Memory, all of it kept between steps so a step allocates nothing: 112 bytes per
+//!   cell in 2D and 128 in 3D (velocity, density, two warm-start pressures, the
+//!   preconditioner, the solver's work vectors and the step's copies of the diffused
+//!   state). `SolverType::Jacobi` adds 8 and `PressureSolver::Relaxation` 16;
+//!   `AdvectionScheme::MacCormack` adds 24 in either dimension (a reverse pass and the
+//!   forward pass's bounds); `VorticityConfinement::MatchNumericalDissipation` adds 8
+//!   in 2D and 32 in 3D (the curl and its magnitude)
 
 // Shared modules - available when any fluid feature is enabled
 #[cfg(any(feature = "fluid_dynamics", feature = "fluid_simulation"))]
@@ -230,3 +249,6 @@ mod analytic_regression_tests;
 #[cfg(test)]
 #[cfg(feature = "fluid_simulation")]
 mod grid_regression_tests;
+#[cfg(test)]
+#[cfg(feature = "fluid_simulation")]
+mod turbulence_tests;

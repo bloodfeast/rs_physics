@@ -6,7 +6,9 @@
 //! and a grid left to decay would flatter a warm-started solver.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rs_physics::fluid_dynamics::{FluidGrid, FluidGrid3D, PressureSolver, SolverConfig};
+use rs_physics::fluid_dynamics::{
+    AdvectionScheme, FluidGrid, FluidGrid3D, PressureSolver, SolverConfig, VorticityConfinement,
+};
 
 fn source_2d(grid: &mut FluidGrid, n: usize) {
     for i in n / 4..3 * n / 4 {
@@ -115,5 +117,65 @@ fn pressure_tolerance(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, step_2d, step_3d, pressure_tolerance);
+/// The turbulence options, each on and off, on the same forced source at every size, in
+/// one run so the figures share the machine's state. The pressure iterations a step
+/// ran are printed beside each, from the last settling step, so a change in the
+/// projection's cost shows apart from the option's own passes.
+fn options(c: &mut Criterion) {
+    let configs = [
+        ("off", SolverConfig::default()),
+        ("maccormack", SolverConfig::default().with_advection(AdvectionScheme::MacCormack)),
+        (
+            "confinement",
+            SolverConfig::default().with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        ),
+        (
+            "both",
+            SolverConfig::default()
+                .with_advection(AdvectionScheme::MacCormack)
+                .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        ),
+    ];
+    let mut group = c.benchmark_group("fluid_grid/options_2d");
+    group.sample_size(20);
+    for &n in &[64usize, 128, 256] {
+        for (name, config) in &configs {
+            let mut grid = FluidGrid::with_solver(n, n, 1e-5, 1e-5, 1.0 / 60.0, *config).unwrap();
+            for _ in 0..30 {
+                source_2d(&mut grid, n);
+                grid.step();
+            }
+            eprintln!("options_2d {name}/{n}: {} pressure iterations a step", grid.get_last_pressure_iterations());
+            group.bench_with_input(BenchmarkId::new(*name, n), &n, |b, _| {
+                b.iter(|| {
+                    source_2d(&mut grid, n);
+                    grid.step();
+                });
+            });
+        }
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("fluid_grid/options_3d");
+    group.sample_size(10);
+    for &n in &[32usize, 64] {
+        for (name, config) in &configs {
+            let mut grid = FluidGrid3D::with_solver(n, n, n, 1e-5, 1e-5, 1.0 / 60.0, *config).unwrap();
+            for _ in 0..10 {
+                source_3d(&mut grid, n);
+                grid.step();
+            }
+            eprintln!("options_3d {name}/{n}: {} pressure iterations a step", grid.get_last_pressure_iterations());
+            group.bench_with_input(BenchmarkId::new(*name, n), &n, |b, _| {
+                b.iter(|| {
+                    source_3d(&mut grid, n);
+                    grid.step();
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, step_2d, step_3d, pressure_tolerance, options);
 criterion_main!(benches);

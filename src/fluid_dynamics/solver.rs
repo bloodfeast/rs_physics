@@ -65,6 +65,108 @@ pub enum WallCondition {
     NoSlip,
 }
 
+/// How the grids carry velocity and density along the flow each step.
+///
+/// # Examples
+/// ```
+/// use rs_physics::fluid_dynamics::{AdvectionScheme, FluidGrid, SolverConfig};
+///
+/// let config = SolverConfig::default().with_advection(AdvectionScheme::MacCormack);
+/// let mut grid = FluidGrid::with_solver(32, 32, 0.0, 0.0, 1.0 / 60.0, config).unwrap();
+/// grid.add_density(16, 16, 1.0).unwrap();
+/// grid.add_velocity(16, 16, 0.3, 0.1).unwrap();
+/// grid.step();
+/// assert!(grid.validate_state().is_ok());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdvectionScheme {
+    /// First-order semi-Lagrangian advection (Stam 1999): trace each cell back along
+    /// the velocity for one step and interpolate linearly where it lands. Stable at any
+    /// step, and diffusive: linear interpolation at a fractional cell offset `a` acts
+    /// as a viscosity `h² a(1 - a) / (2 dt)` per axis, which is what smooths a plume's
+    /// edges and spins its eddies down. The default, and bit-identical to every grid
+    /// before 2026-10-02.
+    #[default]
+    SemiLagrangian,
+
+    /// MacCormack advection (Selle, Fedkiw, Kim, Liu and Rossignac, "An Unconditionally
+    /// Stable MacCormack Method", J. Sci. Comput. 2008), a BFECC-class scheme: a forward
+    /// semi-Lagrangian step `f = A(q)`, a backward one from its result
+    /// `b = A_reverse(f)`, and the corrected value `f + (q - b) / 2`, which cancels the
+    /// forward step's leading error and makes the scheme second order in smooth flow.
+    /// The correction can overshoot at a sharp edge, so each cell is clamped to the
+    /// range of the source cells its forward interpolation read; that clamp is what
+    /// keeps it stable at any step, and it falls back towards first order exactly
+    /// where the field has an extremum. Costs a second interpolation pass and a
+    /// combine pass for every advected field.
+    MacCormack,
+}
+
+/// Vorticity confinement (Fedkiw, Stam and Jensen, "Visual Simulation of Smoke",
+/// SIGGRAPH 2001): a body force that puts back the small-scale rotation the
+/// advection's numerical dissipation takes out.
+///
+/// With `omega = curl u` and `N = grad|omega| / |grad|omega||` (the unit vector
+/// towards stronger rotation), the force is `f = epsilon h (N x omega)`, with `h` the
+/// cell size, exactly as the paper writes it, added to the velocity before the
+/// projection that follows advection. The paper leaves `epsilon` free: "used to
+/// control the amount of small scale detail added back into the flow field", with no
+/// range given. Here it is derived instead, so there is no number to tune.
+///
+/// # The derivation
+///
+/// For `omega > 0`, `f` is `-epsilon h (|omega| / |grad|omega||) (z x grad omega)`,
+/// and a viscous force is `nu (z x grad omega)`: confinement is a negative viscosity
+/// `nu_c = epsilon h l`, with `l = |omega| / |grad|omega||` the length over which the
+/// rotation changes. The structures confinement exists to keep are the ones at the
+/// grid scale, `l = h`, so `nu_c = epsilon h²`.
+///
+/// What first-order semi-Lagrangian advection removes is also a viscosity. Linear
+/// interpolation at a fractional offset `a` of a cell has the modified equation
+/// `q_t + u q_x = nu_num q_xx` with `nu_num = h² a (1 - a) / (2 dt)`, per axis; at a
+/// Courant number below one, `a` is the Courant number itself and this is first-order
+/// upwind's familiar `|u| h (1 - a) / 2`. Setting `nu_c = nu_num` gives
+///
+/// `epsilon = a (1 - a) / (2 dt)`, averaged over the axes,
+///
+/// in 1/s, so the velocity a step adds is `dt f = h e (N x omega)` with the
+/// dimensionless `e = mean over axes of a (1 - a) / 2`: between 0 (a step that moves
+/// the flow a whole number of cells, which semi-Lagrangian advection does exactly) and
+/// 1/8 (half a cell, the most diffusive), and 1/12 on average over offsets. Each cell
+/// uses the offsets of its own departure point this step, so confinement is strong
+/// where the advection was diffusive and absent where it was exact.
+///
+/// The match is made at the grid scale, as the method intends: a structure much
+/// larger than a cell is confined more than its numerical dissipation (the force does
+/// not shrink with `l`), which is the method's known character, not this derivation's.
+/// Under [`AdvectionScheme::MacCormack`] the advection dissipates less than the
+/// first-order rate this uses, so the two together put back more than was lost; see
+/// the tests for what that does to a decaying vortex.
+///
+/// # Examples
+/// ```
+/// use rs_physics::fluid_dynamics::{FluidGrid3D, SolverConfig, VorticityConfinement};
+///
+/// let config = SolverConfig::default()
+///     .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation);
+/// let mut grid = FluidGrid3D::with_solver(16, 16, 16, 0.0, 0.0, 1.0 / 60.0, config).unwrap();
+/// grid.add_velocity(8, 8, 8, 0.2, 0.0, 0.1).unwrap();
+/// grid.step();
+/// assert!(grid.validate_state().is_ok());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VorticityConfinement {
+    /// No confinement force. The default, and bit-identical to every grid before
+    /// 2026-10-02.
+    #[default]
+    Off,
+
+    /// Confinement with `epsilon` matched, cell by cell, to the numerical viscosity of
+    /// first-order semi-Lagrangian advection at that cell's offsets this step (see the
+    /// type's documentation). Costs a curl, a gradient and a force pass per step.
+    MatchNumericalDissipation,
+}
+
 /// Configuration for the iterative solver
 #[derive(Debug, Clone, Copy)]
 pub struct SolverConfig {
@@ -110,6 +212,14 @@ pub struct SolverConfig {
 
     /// What walls do to the tangential velocity (default: [`WallCondition::FreeSlip`])
     pub wall: WallCondition,
+
+    /// How velocity and density are advected (default:
+    /// [`AdvectionScheme::SemiLagrangian`])
+    pub advection: AdvectionScheme,
+
+    /// Whether a vorticity-confinement force is added before the second projection
+    /// (default: [`VorticityConfinement::Off`])
+    pub vorticity_confinement: VorticityConfinement,
 }
 
 impl Default for SolverConfig {
@@ -122,6 +232,8 @@ impl Default for SolverConfig {
             pressure_tolerance: 1e-2,
             pressure_max_iterations: 200,
             wall: WallCondition::FreeSlip,
+            advection: AdvectionScheme::SemiLagrangian,
+            vorticity_confinement: VorticityConfinement::Off,
         }
     }
 }
@@ -198,6 +310,46 @@ impl SolverConfig {
     /// Returns this configuration with walls under `wall`.
     pub fn with_wall_condition(mut self, wall: WallCondition) -> Self {
         self.wall = wall;
+        self
+    }
+
+    /// Returns this configuration with velocity and density advected by `scheme`.
+    ///
+    /// # Arguments
+    /// * `scheme` - the advection scheme; see [`AdvectionScheme`] for what each costs
+    ///
+    /// # Returns
+    /// The updated configuration.
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::{AdvectionScheme, SolverConfig};
+    /// let config = SolverConfig::default().with_advection(AdvectionScheme::MacCormack);
+    /// assert_eq!(config.advection, AdvectionScheme::MacCormack);
+    /// ```
+    pub fn with_advection(mut self, scheme: AdvectionScheme) -> Self {
+        self.advection = scheme;
+        self
+    }
+
+    /// Returns this configuration with vorticity confinement set to `confinement`.
+    ///
+    /// # Arguments
+    /// * `confinement` - off, or matched to the advection's numerical dissipation; see
+    ///   [`VorticityConfinement`] for the derivation
+    ///
+    /// # Returns
+    /// The updated configuration.
+    ///
+    /// # Examples
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SolverConfig, VorticityConfinement};
+    /// let config = SolverConfig::default()
+    ///     .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation);
+    /// assert_eq!(config.vorticity_confinement, VorticityConfinement::MatchNumericalDissipation);
+    /// ```
+    pub fn with_vorticity_confinement(mut self, confinement: VorticityConfinement) -> Self {
+        self.vorticity_confinement = confinement;
         self
     }
 
