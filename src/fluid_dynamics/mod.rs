@@ -237,6 +237,14 @@ mod sph;
 #[cfg(feature = "fluid_simulation")]
 pub use sph::*;
 
+// A plume's air for effect particles: a Navier-Stokes grid and a curl-noise swirl
+// summed into one velocity grid, stepped on a worker thread. Needs the particle side's
+// `VelocityGrid` and `SwirlField`, so both features.
+#[cfg(all(feature = "fluid_simulation", feature = "particles"))]
+mod plume_field;
+#[cfg(all(feature = "fluid_simulation", feature = "particles"))]
+pub use plume_field::*;
+
 #[cfg(test)]
 #[cfg(feature = "fluid_dynamics")]
 mod fluid_dynamics_tests;
@@ -252,3 +260,6 @@ mod grid_regression_tests;
 #[cfg(test)]
 #[cfg(feature = "fluid_simulation")]
 mod turbulence_tests;
+#[cfg(test)]
+#[cfg(all(feature = "fluid_simulation", feature = "particles"))]
+mod plume_field_tests;

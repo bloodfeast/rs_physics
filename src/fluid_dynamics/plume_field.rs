@@ -692,6 +692,14 @@ impl PlumeField {
     }
 }
 
+impl PlumeField {
+    /// The swirl, for tests that take the sum apart.
+    #[cfg(test)]
+    pub(crate) fn swirl_for_tests(&self) -> &SwirlField {
+        &self.swirl
+    }
+}
+
 impl Writer {
     fn back_frame_bytes(&self) -> usize {
         // SAFETY: `back` is this writer's own slot; see `Slots`.

@@ -29,7 +29,7 @@
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects};
+use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive};
 
 /// Populations spanning "a few sparks from one hit" to "a debris field".
 const SCALES: [usize; 5] = [1_000, 10_000, 100_000, 500_000, 1_000_000];
@@ -48,18 +48,34 @@ struct Live {
 
 impl Live {
     fn new(count: usize) -> Live {
+        Live::in_air(count, None)
+    }
+
+    /// The same pool, with both classes on the air (`swirl` 1, the physical coupling)
+    /// when `air` is given, warmed up in it so the population has the spread the
+    /// swirl gives it. The field is advanced at 10 Hz during the warm-up.
+    fn in_air(count: usize, mut air: Option<&mut SwirlField>) -> Live {
+        let swirl = if air.is_some() { 1.0 } else { 0.0 };
         let mut fx = ParticleEffects::with_capacity(count + count / 4);
-        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
-        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
+        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl });
+        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl });
         // Two classes interleaved, because a single-class pool would let the class
         // lookup fold away entirely and flatter the result. Steady state: population
         // is the emission rate times the mean lifetime.
         let half = count as f32 / 2.0;
         let rate = [half / 0.35, half / 30.0];
         let mut live = Live { fx, rng: EffectRng::new(0xC0FFEE), owed: [0.0; 2], rate };
-        for _ in 0..(45.0 / DT) as usize {
+        for step in 0..(45.0 / DT) as usize {
             live.feed();
-            live.fx.integrate(DT);
+            match air.as_deref_mut() {
+                Some(field) => {
+                    if step % 6 == 0 {
+                        field.advance(6.0 * DT);
+                    }
+                    live.fx.integrate_in_air(DT, field.velocity());
+                }
+                None => live.fx.integrate(DT),
+            }
         }
         live
     }
@@ -125,5 +141,63 @@ fn collide(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, integrate, collide);
+/// The swirl the field-on case integrates through: 32^3 cells of 2 m over the 64 m
+/// around the emitter, driven by a 3 m/s plume 12 m wide (octaves of 4 and 8 m).
+fn swirl_field() -> SwirlField {
+    let drive = TurbulenceDrive::new(3.0, 12.0).unwrap();
+    SwirlField::new([-32.0, 8.0, -32.0], [32, 32, 32], 2.0, drive, 0x5EED).unwrap()
+}
+
+/// The gate for the swirl: `integrate_in_air` with both classes on the air against
+/// `integrate` on the same live population, adjacent in one run at every scale. The
+/// field-on cost a particle must stay under twice the field-off cost.
+fn air(c: &mut Criterion) {
+    let mut group = c.benchmark_group("particle_effects/air");
+    for &n in &SCALES {
+        let mut off = Live::new(n);
+        let mut field = swirl_field();
+        let mut on = Live::in_air(n, Some(&mut field));
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("off", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    off.feed();
+                    let started = Instant::now();
+                    off.fx.integrate(std::hint::black_box(DT));
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("on", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    on.feed();
+                    let started = Instant::now();
+                    on.fx.integrate_in_air(std::hint::black_box(DT), field.velocity());
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+    }
+    group.finish();
+
+    // What a swirl update costs, on whichever thread calls it.
+    let mut group = c.benchmark_group("particle_effects/swirl_advance");
+    group.sample_size(20);
+    for &n in &[32usize, 64] {
+        let drive = TurbulenceDrive::new(3.0, 40.0).unwrap();
+        let mut field = SwirlField::new([0.0; 3], [n, n, n], 2.0, drive, 1).unwrap();
+        eprintln!("swirl {n}^3: {} bytes", field.bytes());
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| field.advance(std::hint::black_box(0.1)));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, integrate, collide, air);
 criterion_main!(benches);
