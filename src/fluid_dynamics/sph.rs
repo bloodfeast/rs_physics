@@ -93,8 +93,8 @@
 //! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
 //! contact radius, `h / 4`), are binned into the hash buckets of the cells they cover,
 //! clipped to the cells the fluid occupies and skipping buckets that hold no particle.
-//! Serial, in solid order, O(solids x cells covered) after one parallel min and max over
-//! the particle cells (O(n), exact, so its order cannot matter), into reused buffers: a
+//! Serial, in solid order, O(solids x cells covered) after one serial min and max over
+//! the particle cells (O(n) integer work that vectorises), into reused buffers: a
 //! counting sort over only the buckets touched, which are zeroed again after the step,
 //! so the table is never cleared whole. Any particle that can meet a solid starts the
 //! substep within that reach, so it finds the solid in its own cell's bin, one bucket

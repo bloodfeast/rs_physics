@@ -7,9 +7,7 @@
 
 use std::time::Duration;
 
-use rayon::prelude::*;
-
-use super::{bucket, cell_of, row_hash, SphFluid, CFL_FRACTION, STREAM_CHUNK};
+use super::{bucket, cell_of, row_hash, SphFluid, CFL_FRACTION};
 
 /// A capsule as the contact reads it: the caller's numbers plus the axis terms every ray
 /// test needs, folded once when it is pushed.
@@ -494,35 +492,16 @@ impl SphFluid {
         // dt is) plus the contact radius, with room for rounding in the cap.
         let reach = (CFL_FRACTION * h + self.contact_radius()) * (1.0 + 1e-6);
 
-        // The cells the fluid occupies. Min and max are exact, so the reduction order
-        // cannot change them.
-        let (lo, hi) = (
-            self.cell_x.par_chunks(STREAM_CHUNK),
-            self.cell_y.par_chunks(STREAM_CHUNK),
-            self.cell_z.par_chunks(STREAM_CHUNK),
-        )
-            .into_par_iter()
-            .map(|(cx, cy, cz)| {
-                let mut lo = [i32::MAX; 3];
-                let mut hi = [i32::MIN; 3];
-                for i in 0..cx.len() {
-                    let c = [cx[i], cy[i], cz[i]];
-                    for a in 0..3 {
-                        lo[a] = lo[a].min(c[a]);
-                        hi[a] = hi[a].max(c[a]);
-                    }
-                }
-                (lo, hi)
-            })
-            .reduce(
-                || ([i32::MAX; 3], [i32::MIN; 3]),
-                |(la, ha), (lb, hb)| {
-                    (
-                        [la[0].min(lb[0]), la[1].min(lb[1]), la[2].min(lb[2])],
-                        [ha[0].max(hb[0]), ha[1].max(hb[1]), ha[2].max(hb[2])],
-                    )
-                },
-            );
+        // The cells the fluid occupies: a serial min and max an axis over the integer
+        // cells, which vectorises and costs about a microsecond at 4,096 particles. A rayon
+        // reduction here measured 53 us at 4,096, all of it waking the pool.
+        let span = |c: &[i32]| {
+            let lo = c.iter().fold(i32::MAX, |m, &v| m.min(v));
+            let hi = c.iter().fold(i32::MIN, |m, &v| m.max(v));
+            (lo, hi)
+        };
+        let (x, y, z) = (span(&self.cell_x), span(&self.cell_y), span(&self.cell_z));
+        let (lo, hi) = ([x.0, y.0, z.0], [x.1, y.1, z.1]);
 
         let mask = self.table_mask;
         let start = &self.bucket_start;
