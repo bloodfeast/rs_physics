@@ -54,7 +54,7 @@ use crate::utils::PhysicsError;
 /// writes it) reads as still air everywhere outside.
 ///
 /// The cells are stored as four `f32`s (`x`, `y`, `z` and a zero pad), `z` fastest,
-/// so each of a fetch's eight taps is one aligned 16-byte load. Memory: 16 bytes per
+/// so each of a fetch's eight taps is one 16-byte load. Memory: 16 bytes per
 /// cell, 512 KiB for 32³.
 #[derive(Debug, Clone)]
 pub struct VelocityGrid {
@@ -323,6 +323,7 @@ impl VelocityGrid {
 
     /// The central-difference divergence at cell `(i, j, k)`, 1/s, for checking a field
     /// that should have none. Needs a neighbour on each side.
+    #[cfg(test)]
     pub(crate) fn divergence_at(&self, i: usize, j: usize, k: usize) -> f32 {
         let d = |a: [f32; 3], b: [f32; 3], axis: usize| b[axis] - a[axis];
         (d(self.get(i - 1, j, k), self.get(i + 1, j, k), 0)
@@ -611,9 +612,11 @@ pub struct SwirlField {
     rng: EffectRng,
     /// The potential at the cell centres, one array per channel.
     potential: [Vec<f32>; 3],
-    /// Pyramid scratch: a level's lattice, and the two half-subdivided stages.
+    /// Pyramid scratch: a level's lattice, the two half-subdivided stages, and a
+    /// strided line's coarse and fine copies.
     level: Vec<f32>,
     stage: [Vec<f32>; 2],
+    lines: [Vec<f32>; 2],
     velocity: VelocityGrid,
 }
 
@@ -699,6 +702,7 @@ impl SwirlField {
             potential: std::array::from_fn(|_| vec![0.0; cells]),
             level: Vec::new(),
             stage: [Vec::new(), Vec::new()],
+            lines: [Vec::new(), Vec::new()],
             velocity,
         };
         field.rebuild();
@@ -779,7 +783,7 @@ impl SwirlField {
         let floats = |v: &Vec<f32>| v.capacity() * 4;
         let mut total = self.velocity.bytes();
         total += self.potential.iter().map(floats).sum::<usize>();
-        total += floats(&self.level) + self.stage.iter().map(floats).sum::<usize>();
+        total += floats(&self.level) + self.stage.iter().chain(self.lines.iter()).map(floats).sum::<usize>();
         for o in &self.octaves {
             total += o.current.iter().chain(o.next.iter()).map(floats).sum::<usize>();
         }
@@ -854,14 +858,14 @@ impl SwirlField {
             // Down the pyramid: subdivide, then add the next finer octave's lattice.
             for finer in (0..coarsest).rev() {
                 let target = self.octaves[finer].dims;
-                subdivide_3d(&self.level, dims, target, &mut self.stage);
+                subdivide_3d(&self.level, dims, target, &mut self.stage, &mut self.lines);
                 dims = target;
                 std::mem::swap(&mut self.level, &mut self.stage[1]);
                 add_faded(&self.octaves[finer], channel, &mut self.level);
             }
             // The last subdivision lands on the cells, two points in from the margin.
             let cells_dims = n.map(|c| c + 4);
-            subdivide_3d(&self.level, dims, cells_dims, &mut self.stage);
+            subdivide_3d(&self.level, dims, cells_dims, &mut self.stage, &mut self.lines);
             let fine = &self.stage[1];
             let out = &mut self.potential[channel];
             for i in 0..n[0] {
@@ -953,8 +957,9 @@ fn add_faded(o: &Octave, channel: usize, level: &mut [f32]) {
 }
 
 /// Subdivides a 3D lattice of `from` points per axis to `to`, one axis at a time; the
-/// result lands in `stage[1]`.
-fn subdivide_3d(src: &[f32], from: [usize; 3], to: [usize; 3], stage: &mut [Vec<f32>; 2]) {
+/// result lands in `stage[1]`. Every buffer keeps its capacity, so once the first
+/// rebuild has sized them nothing allocates.
+fn subdivide_3d(src: &[f32], from: [usize; 3], to: [usize; 3], stage: &mut [Vec<f32>; 2], lines: &mut [Vec<f32>; 2]) {
     let [s0, s1] = stage;
     // Along z: (from0, from1, to2).
     s0.clear();
@@ -965,14 +970,17 @@ fn subdivide_3d(src: &[f32], from: [usize; 3], to: [usize; 3], stage: &mut [Vec<
     // Along y: (from0, to1, to2), a strided line per (x, z).
     s1.clear();
     s1.resize(from[0] * to[1] * to[2], 0.0);
-    let mut coarse = vec![0.0f32; from[1]];
-    let mut fine = vec![0.0f32; to[1]];
+    let [coarse, fine] = lines;
+    coarse.clear();
+    coarse.resize(from[1], 0.0);
+    fine.clear();
+    fine.resize(to[1], 0.0);
     for x in 0..from[0] {
         for z in 0..to[2] {
             for (y, c) in coarse.iter_mut().enumerate() {
                 *c = s0[(x * from[1] + y) * to[2] + z];
             }
-            subdivide_1d(&coarse, &mut fine);
+            subdivide_1d(coarse, fine);
             for (y, f) in fine.iter().enumerate() {
                 s1[(x * to[1] + y) * to[2] + z] = *f;
             }

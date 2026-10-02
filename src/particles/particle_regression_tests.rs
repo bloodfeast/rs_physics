@@ -494,7 +494,7 @@ fn review_gravity_sign_disagrees_within_particles_module() {
     sim.step().unwrap();
 
     let mut fx = ParticleEffects::with_capacity(1);
-    fx.set_class(0, ParticleClass { gravity: c.gravity as f32, drag: 0.0, restitution: 0.0 });
+    fx.set_class(0, ParticleClass { gravity: c.gravity as f32, drag: 0.0, restitution: 0.0, swirl: 0.0 });
     fx.emit_one([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 10.0, 1.0, 0);
     fx.integrate(0.1);
     println!("Simulation y after one step: {:+e}; ParticleEffects y: {:+e}", sim.positions_y[0], fx.position(0)[1]);
@@ -511,7 +511,7 @@ fn review_gravity_sign_disagrees_within_particles_module() {
 #[test]
 fn review_effects_retire_keeps_exactly_the_live_particles() {
     let mut fx = ParticleEffects::with_capacity(64);
-    fx.set_class(0, ParticleClass { gravity: 0.0, drag: 0.0, restitution: 0.0 });
+    fx.set_class(0, ParticleClass { gravity: 0.0, drag: 0.0, restitution: 0.0, swirl: 0.0 });
     let dt = 0.1;
     let mut expect_alive = Vec::new();
     for k in 0..40u32 {
@@ -535,7 +535,7 @@ fn review_effects_retire_keeps_exactly_the_live_particles() {
 fn review_effects_record_cpu_timings_as_gpu_samples() {
     let n = 200_000;
     let mut fx = ParticleEffects::with_capacity(n);
-    fx.set_class(0, ParticleClass { gravity: 9.8, drag: 0.5, restitution: 0.0 });
+    fx.set_class(0, ParticleClass { gravity: 9.8, drag: 0.5, restitution: 0.0, swirl: 0.0 });
     for _ in 0..n {
         fx.emit_one([0.0; 3], [1.0, 2.0, 3.0], 1e6, 1.0, 0);
     }
@@ -861,7 +861,7 @@ fn review_perf_simulation_speed_direction_representation() {
 #[test]
 fn review_effects_resting_debris_velocity_parks_on_a_subnormal() {
     let mut fx = ParticleEffects::with_capacity(4);
-    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
+    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
     fx.emit_one([0.0, 0.0, 0.0], [5.0, 0.0, 3.0], 1e6, 1.0, 0);
     for _ in 0..2_000 {
         fx.integrate(1.0 / 60.0);
@@ -880,8 +880,8 @@ fn review_effects_resting_debris_velocity_parks_on_a_subnormal() {
 fn review_perf_effects_subnormal_velocities() {
     let n = 10_000;
     let mut fx = ParticleEffects::with_capacity(n);
-    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
-    fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
+    fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
     let mut rng = crate::particles::EffectRng::new(0xC0FFEE);
     for class in [0u8, 1] {
         fx.emit(
@@ -913,8 +913,8 @@ fn review_perf_effects_integrate_fresh() {
         let mut samples = Vec::new();
         for rep in 0..5 {
             let mut fx = ParticleEffects::with_capacity(n);
-            fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
-            fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+            fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
+            fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
             let mut rng = crate::particles::EffectRng::new(0xC0FFEE + rep);
             for class in [0u8, 1] {
                 fx.emit(

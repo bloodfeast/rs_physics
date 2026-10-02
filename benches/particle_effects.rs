@@ -49,8 +49,8 @@ struct Live {
 impl Live {
     fn new(count: usize) -> Live {
         let mut fx = ParticleEffects::with_capacity(count + count / 4);
-        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
-        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
+        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
         // Two classes interleaved, because a single-class pool would let the class
         // lookup fold away entirely and flatter the result. Steady state: population
         // is the emission rate times the mean lifetime.

@@ -28,8 +28,8 @@ use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects};
 const DT: f32 = 1.0 / 60.0;
 
 fn classes(fx: &mut ParticleEffects) {
-    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
-    fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+    fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
+    fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
 }
 
 fn burst(class: u8, count: u32, lifetime: core::ops::Range<f32>) -> Burst {

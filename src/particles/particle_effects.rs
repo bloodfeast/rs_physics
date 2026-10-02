@@ -48,7 +48,7 @@
 //! use rs_physics::particles::{Burst, ParticleClass, ParticleEffects, EffectRng};
 //!
 //! let mut fx = ParticleEffects::with_capacity(4096);
-//! fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
+//! fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 });
 //!
 //! let mut rng = EffectRng::new(0xC0FFEE);
 //! fx.emit(&Burst {
@@ -74,6 +74,7 @@ use core::ops::Range;
 use std::time::Instant;
 
 use crate::particles::particle_backend::{Backend, BackendPolicy};
+use crate::particles::swirl::VelocityGrid;
 
 /// How many distinct behaviours a single [`ParticleEffects`] pool can hold.
 ///
@@ -87,7 +88,7 @@ pub const MAX_CLASSES: usize = 8;
 /// Per-class physical behaviour.
 ///
 /// Deliberately not per-particle. Every particle of a class shares these, so the
-/// integration loop loads three floats once instead of three per particle -- and
+/// integration loop loads four floats once instead of four per particle -- and
 /// "all the sparks behave like sparks" is what an artist wants anyway.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParticleClass {
@@ -99,6 +100,19 @@ pub struct ParticleClass {
     pub drag: f32,
     /// Fraction of vertical speed retained when bouncing off ground.
     pub restitution: f32,
+    /// How much of the moving air the class's drag acts against, 0 to 1 (values
+    /// outside are clamped). Read only by [`ParticleEffects::integrate_in_air`].
+    ///
+    /// Drag is the air's grip on the particle: it pulls the particle's velocity
+    /// towards the air's at the rate `drag`, per second. Without an air field the air
+    /// is still and drag only slows. With one, a particle of `swirl` 1 relaxes towards
+    /// the local air velocity at exactly its drag rate, which is the physics and adds
+    /// no number: smoke and dust (high drag) ride the air within a fraction of a
+    /// second, sparks and debris (low drag) barely notice it. A `swirl` below 1 is a
+    /// response rate of `swirl * drag` towards the air, for a class that should take
+    /// less of the field than its drag would; 0, the default, ignores the field and
+    /// integrates bit-identically to [`ParticleEffects::integrate`].
+    pub swirl: f32,
 }
 
 impl Default for ParticleClass {
@@ -107,6 +121,7 @@ impl Default for ParticleClass {
             gravity: 9.80665,
             drag: 0.0,
             restitution: 0.0,
+            swirl: 0.0,
         }
     }
 }
@@ -283,7 +298,7 @@ impl ParticleEffects {
     /// ```
     /// use rs_physics::particles::{ParticleClass, ParticleEffects};
     /// let mut fx = ParticleEffects::with_capacity(8);
-    /// fx.set_class(2, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+    /// fx.set_class(2, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: 0.0 });
     /// assert_eq!(fx.class(2).drag, 3.4);
     /// ```
     pub fn set_class(&mut self, index: u8, class: ParticleClass) {
@@ -530,7 +545,7 @@ impl ParticleEffects {
     /// ```
     /// use rs_physics::particles::{ParticleClass, ParticleEffects};
     /// let mut fx = ParticleEffects::with_capacity(8);
-    /// fx.set_class(0, ParticleClass { gravity: 0.0, drag: 2.0, restitution: 0.0 });
+    /// fx.set_class(0, ParticleClass { gravity: 0.0, drag: 2.0, restitution: 0.0, swirl: 0.0 });
     /// fx.emit_one([10.0, 5.0, 0.0], [1.0, 0.0, 0.0], 1_000.0, 1.0, 0);
     /// // Drag alone never reaches zero; the flush does, once the velocity moves nothing.
     /// for _ in 0..3_000 { fx.integrate(1.0 / 60.0); }
@@ -557,6 +572,138 @@ impl ParticleEffects {
         self.policy.record(Backend::Cpu, count, started.elapsed());
 
         self.retire_expired();
+    }
+
+    /// Advance every particle through moving air, and retire the expired ones.
+    ///
+    /// As [`Self::integrate`], with the air's velocity read from `air` at each particle:
+    /// a class's drag pulls its velocity towards the air's instead of towards zero,
+    /// at the rate `swirl * drag` (see [`ParticleClass::swirl`]). The per-step update
+    /// for a class is `v' = (v - g dt) (1 - k) + swirl k u(x)` with `k = min(drag dt,
+    /// 1)` and `u(x)` one trilinear fetch of `air` at the particle's position; `swirl`
+    /// 1 is exact relaxation towards the air at the drag rate. The air can be a
+    /// [`SwirlField`](crate::particles::SwirlField)'s, a fluid solver's, or anything a
+    /// caller writes into a [`VelocityGrid`].
+    ///
+    /// When no class has a `swirl` above zero this is [`Self::integrate`], to the bit,
+    /// and costs nothing more. Otherwise every particle pays the one fetch (the classes
+    /// are interleaved in the pool, so a per-particle branch to skip it would cost a
+    /// misprediction instead), and a class with `swirl` 0 still integrates
+    /// bit-identically to [`Self::integrate`]: its update selects the plain result.
+    ///
+    /// The flush of velocities too small to move a particle applies here too. For a
+    /// class that sees the air it is no longer exact (the air can add to a component
+    /// later), but a flushed component is below a quarter of a position's resolution,
+    /// so the particle it belongs to cannot be seen to differ.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` - the step, seconds. A step of zero or less does nothing.
+    /// * `air` - the air velocity, m/s, over the region the particles move in; outside
+    ///   it the outermost cells are read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::{ParticleClass, ParticleEffects, VelocityGrid};
+    /// let mut air = VelocityGrid::new([-10.0, 0.0, -10.0], 1.0, [20, 20, 20]).unwrap();
+    /// air.fill([2.0, 0.0, 0.0]); // a 2 m/s breeze along x
+    ///
+    /// let mut fx = ParticleEffects::with_capacity(8);
+    /// fx.set_class(0, ParticleClass { gravity: 0.0, drag: 3.0, restitution: 0.0, swirl: 1.0 });
+    /// fx.set_class(1, ParticleClass { gravity: 0.0, drag: 3.0, restitution: 0.0, swirl: 0.0 });
+    /// fx.emit_one([0.0, 5.0, 0.0], [0.0; 3], 100.0, 1.0, 0);
+    /// fx.emit_one([0.0, 5.0, 0.0], [0.0; 3], 100.0, 1.0, 1);
+    /// for _ in 0..300 {
+    ///     fx.integrate_in_air(1.0 / 60.0, &air);
+    /// }
+    /// // Smoke that sees the air is carried at the breeze's speed; the class that
+    /// // ignores it stays put.
+    /// assert!((fx.velocity(0)[0] - 2.0).abs() < 1e-3);
+    /// assert_eq!(fx.velocity(1)[0], 0.0);
+    /// ```
+    pub fn integrate_in_air(&mut self, dt: f32, air: &VelocityGrid) {
+        if dt <= 0.0 || self.is_empty() {
+            return;
+        }
+        // The branch per class, outside the loop: no class sees the air, no fetch.
+        if self.classes.iter().all(|c| !(c.swirl > 0.0)) {
+            self.integrate(dt);
+            return;
+        }
+
+        let count = self.len();
+        let started = Instant::now();
+        self.integrate_through_air(dt, air);
+        self.policy.record(Backend::Cpu, count, started.elapsed());
+        self.retire_expired();
+    }
+
+    /// [`Self::integrate_free_flight`] with the air: the same arithmetic, operation for
+    /// operation, plus the relaxation towards `air` selected per class.
+    fn integrate_through_air(&mut self, dt: f32, air: &VelocityGrid) {
+        const ROUNDS_AWAY: f32 = f32::EPSILON * 0.25;
+        const EXPONENT: u32 = 0x7f80_0000;
+
+        let mut gravity = [0.0f32; MAX_CLASSES];
+        let mut damping = [0.0f32; MAX_CLASSES];
+        let mut decays_y = [0.0f32; MAX_CLASSES];
+        // The share of the air's velocity a step hands over, `swirl * min(drag dt, 1)`,
+        // and whether the class takes any.
+        let mut take = [0.0f32; MAX_CLASSES];
+        let mut sees_air = [false; MAX_CLASSES];
+        for c in 0..MAX_CLASSES {
+            let class = self.classes[c];
+            gravity[c] = class.gravity * dt;
+            let k = (class.drag * dt).min(1.0);
+            damping[c] = 1.0 - k;
+            decays_y[c] = if class.gravity == 0.0 { 1.0 } else { 0.0 };
+            // `max` then `min`, so a NaN coupling is off rather than poisonous.
+            let swirl = class.swirl.max(0.0).min(1.0);
+            take[c] = swirl * k.max(0.0);
+            sees_air[c] = take[c] > 0.0;
+        }
+
+        let resolution = |p: f32| {
+            (f32::from_bits(p.to_bits() & EXPONENT) * ROUNDS_AWAY).max(f32::MIN_POSITIVE)
+        };
+
+        let n = self.len();
+        let (px, py, pz) = (&mut self.pos_x[..n], &mut self.pos_y[..n], &mut self.pos_z[..n]);
+        let (vx, vy, vz) = (&mut self.vel_x[..n], &mut self.vel_y[..n], &mut self.vel_z[..n]);
+        let remaining = &mut self.remaining[..n];
+        let class = &self.class[..n];
+
+        for i in 0..n {
+            let c = (class[i] as usize) & (MAX_CLASSES - 1);
+            let d = damping[c];
+            let u = air.sample([px[i], py[i], pz[i]]);
+            let t = take[c];
+
+            let mut x = vx[i] * d;
+            let mut y = (vy[i] - gravity[c]) * d;
+            let mut z = vz[i] * d;
+            // Selected, not added with a zero weight: `-0 + 0` is `+0`, and a class
+            // that ignores the air must keep every bit.
+            if sees_air[c] {
+                x += t * u[0];
+                y += t * u[1];
+                z += t * u[2];
+            }
+
+            let (sx, sy, sz) = (x * dt, y * dt, z * dt);
+            x = if sx.abs() < resolution(px[i]) { 0.0 } else { x };
+            y = if sy.abs() < resolution(py[i]) * decays_y[c] { 0.0 } else { y };
+            z = if sz.abs() < resolution(pz[i]) { 0.0 } else { z };
+
+            vx[i] = x;
+            vy[i] = y;
+            vz[i] = z;
+            px[i] += x * dt;
+            py[i] += y * dt;
+            pz[i] += z * dt;
+            remaining[i] -= dt;
+        }
     }
 
 
@@ -1083,6 +1230,7 @@ mod tests {
                 gravity: 26.0,
                 drag: 1.4,
                 restitution: 0.32,
+                swirl: 0.0,
             },
         );
         fx
@@ -1163,6 +1311,7 @@ mod tests {
                 gravity: 0.0,
                 drag: 400.0,
                 restitution: 0.0,
+                swirl: 0.0,
             },
         );
         fx.emit_one([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 5.0, 1.0, 0);
@@ -1219,7 +1368,7 @@ mod tests {
     #[test]
     fn a_particle_that_never_touches_down_is_never_reported() {
         let mut fx = ParticleEffects::with_capacity(8);
-        fx.set_class(0, ParticleClass { gravity: 0.0, drag: 0.0, restitution: 0.0 });
+        fx.set_class(0, ParticleClass { gravity: 0.0, drag: 0.0, restitution: 0.0, swirl: 0.0 });
         fx.emit_one([0.0, 10.0, 0.0], [1.0, 0.0, 0.0], 100.0, 1.0, 0);
 
         let mut count = 0;
@@ -1269,8 +1418,8 @@ mod tests {
     #[test]
     fn the_drag_flush_moves_nothing_and_leaves_no_subnormal() {
         let mut fx = ParticleEffects::with_capacity(512);
-        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.3 });
-        fx.set_class(1, ParticleClass { gravity: 0.0, drag: 3.4, restitution: 0.0 });
+        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.3, swirl: 0.0 });
+        fx.set_class(1, ParticleClass { gravity: 0.0, drag: 3.4, restitution: 0.0, swirl: 0.0 });
         let mut rng = EffectRng::new(21);
         for class in [0u8, 1] {
             let mut b = burst(256);
