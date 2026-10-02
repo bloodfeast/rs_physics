@@ -79,18 +79,6 @@ pub(crate) fn confinement_scale(loss: f64, along: f64, spread: f64) -> f64 {
     root.clamp(0.0, 1.0)
 }
 
-/// Half the sum of `|u|^2` over a grid's fluid cells: kinetic energy per unit density
-/// and cell volume, in the grid's units.
-pub(crate) fn fluid_energy(fields: &[&[f64]], cells: impl Iterator<Item = usize>) -> f64 {
-    let mut energy = 0.0;
-    for idx in cells {
-        for f in fields {
-            energy += 0.5 * f[idx] * f[idx];
-        }
-    }
-    energy
-}
-
 /// The fractional part of a step's displacement, in cells: the offset `a` at which
 /// semi-Lagrangian advection interpolates, and so its numerical viscosity
 /// `h^2 a(1 - a) / (2 dt)` (see [`VorticityConfinement`]).
@@ -1078,9 +1066,9 @@ impl FluidGrid {
         for v in confine.iter_mut() {
             fit(v, w * hgt);
         }
-        let fluid = || (1..w - 1).flat_map(move |i| (i * hgt + 1..i * hgt + hgt - 1));
-        let loss = fluid_energy(&[advecting_x, advecting_y], fluid())
-            - fluid_energy(&[&velocity_x[..], &velocity_y[..]], fluid());
+        // The kinetic energy after advection, summed in the curl pass, and before it,
+        // in the force pass: each pass reads that velocity at every fluid cell anyway.
+        let (mut after, mut before) = (0.0, 0.0);
         let width = w as f64;
         let h = 1.0 / width;
         let inv_2h = 0.5 * width;
@@ -1089,6 +1077,7 @@ impl FluidGrid {
                 let idx = self.get_index(i, j);
                 omega[idx] = ((velocity_y[idx + hgt] - velocity_y[idx - hgt])
                     - (velocity_x[idx + 1] - velocity_x[idx - 1])) * inv_2h;
+                after += 0.5 * (velocity_x[idx] * velocity_x[idx] + velocity_y[idx] * velocity_y[idx]);
             }
         }
         // A wall's ghost copies its neighbour, so |omega| has no gradient through it.
@@ -1100,6 +1089,7 @@ impl FluidGrid {
         for i in 1..w-1 {
             for j in 1..hgt-1 {
                 let idx = self.get_index(i, j);
+                before += 0.5 * (advecting_x[idx] * advecting_x[idx] + advecting_y[idx] * advecting_y[idx]);
                 let gx = (omega[idx + hgt].abs() - omega[idx - hgt].abs()) * inv_2h;
                 let gy = (omega[idx + 1].abs() - omega[idx - 1].abs()) * inv_2h;
                 let length = (gx * gx + gy * gy).sqrt();
@@ -1120,11 +1110,14 @@ impl FluidGrid {
                 spread += 0.5 * (cx * cx + cy * cy);
             }
         }
-        let scale = confinement_scale(loss, along, spread);
+        let scale = confinement_scale(before - after, along, spread);
         if scale > 0.0 {
-            for idx in fluid() {
-                velocity_x[idx] += scale * dx[idx];
-                velocity_y[idx] += scale * dy[idx];
+            for i in 1..w-1 {
+                let column = self.get_index(i, 0);
+                for idx in column + 1..column + hgt - 1 {
+                    velocity_x[idx] += scale * dx[idx];
+                    velocity_y[idx] += scale * dy[idx];
+                }
             }
         }
         self.set_boundaries(BoundaryType::VelocityX, velocity_x);

@@ -8,9 +8,7 @@ use super::validation::{validate_dimensions_3d, validate_finite, validate_non_ne
 use super::solver::{
     pcg_solve, AdvectionScheme, BoundaryType, PressureSolver, SolverConfig, SolverType, VorticityConfinement,
 };
-use super::fluid_simulation::{
-    cell_offset, confinement_scale, fit, fluid_energy, SolveScratch, MIC_SIGMA, MIC_TAU,
-};
+use super::fluid_simulation::{cell_offset, confinement_scale, fit, SolveScratch, MIC_SIGMA, MIC_TAU};
 
 /// Buffers `step` reuses, so a step allocates nothing once the first has sized them.
 /// The option buffers are sized the first time their option runs.
@@ -928,17 +926,10 @@ impl FluidGrid3D {
         let h = 1.0 / width;
         let inv_2h = 0.5 * width;
         let [velocity_x, velocity_y, velocity_z] = velocity;
-        let fluid = || {
-            (1..w - 1).flat_map(move |i| {
-                (1..hgt - 1).flat_map(move |j| {
-                    let row = (i * hgt + j) * dep;
-                    row + 1..row + dep - 1
-                })
-            })
-        };
         let [ax, ay, az] = advecting;
-        let loss = fluid_energy(&[&ax[..], &ay[..], &az[..]], fluid())
-            - fluid_energy(&[&velocity_x[..], &velocity_y[..], &velocity_z[..]], fluid());
+        // The kinetic energy after advection, summed in the curl pass, and before it,
+        // in the force pass: each pass reads that velocity at every fluid cell anyway.
+        let (mut after, mut before) = (0.0, 0.0);
         {
             let [ox, oy, oz, magnitude] = &mut *omega;
             for i in 1..w-1 {
@@ -952,6 +943,8 @@ impl FluidGrid3D {
                         let dv_dx = velocity_y[idx + si] - velocity_y[idx - si];
                         let du_dy = velocity_x[idx + sj] - velocity_x[idx - sj];
                         let (x, y, z) = ((dw_dy - dv_dz) * inv_2h, (du_dz - dw_dx) * inv_2h, (dv_dx - du_dy) * inv_2h);
+                        let (p, q, r) = (velocity_x[idx], velocity_y[idx], velocity_z[idx]);
+                        after += 0.5 * (p * p + q * q + r * r);
                         ox[idx] = x;
                         oy[idx] = y;
                         oz[idx] = z;
@@ -970,6 +963,8 @@ impl FluidGrid3D {
             for j in 1..hgt-1 {
                 for k in 1..dep-1 {
                     let idx = self.get_index(i, j, k);
+                    let (p, q, r) = (ax[idx], ay[idx], az[idx]);
+                    before += 0.5 * (p * p + q * q + r * r);
                     let gx = (magnitude[idx + si] - magnitude[idx - si]) * inv_2h;
                     let gy = (magnitude[idx + sj] - magnitude[idx - sj]) * inv_2h;
                     let gz = (magnitude[idx + 1] - magnitude[idx - 1]) * inv_2h;
@@ -994,12 +989,17 @@ impl FluidGrid3D {
                 }
             }
         }
-        let scale = confinement_scale(loss, along, spread);
+        let scale = confinement_scale(before - after, along, spread);
         if scale > 0.0 {
-            for idx in fluid() {
-                velocity_x[idx] += scale * ox[idx];
-                velocity_y[idx] += scale * oy[idx];
-                velocity_z[idx] += scale * oz[idx];
+            for i in 1..w-1 {
+                for j in 1..hgt-1 {
+                    let row = self.get_index(i, j, 0);
+                    for idx in row + 1..row + dep - 1 {
+                        velocity_x[idx] += scale * ox[idx];
+                        velocity_y[idx] += scale * oy[idx];
+                        velocity_z[idx] += scale * oz[idx];
+                    }
+                }
             }
         }
         self.set_boundaries(BoundaryType::VelocityX, velocity_x);
