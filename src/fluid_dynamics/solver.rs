@@ -170,7 +170,8 @@ pub enum VorticityConfinement {
     /// Confinement with `epsilon` matched, cell by cell, to the numerical viscosity of
     /// first-order semi-Lagrangian advection at that cell's offsets this step (see the
     /// type's documentation), capped at the energy the step's advection removed.
-    /// Costs a curl pass, a force pass, two energy sums and an apply pass per step.
+    /// Costs a curl pass, a force pass (the cap's two energy sums ride in them) and a
+    /// pass that applies the capped force: 13 to 14% of a 3D step.
     MatchNumericalDissipation,
 }
 

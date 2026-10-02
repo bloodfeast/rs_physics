@@ -3,6 +3,43 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## 0.3.2 (2026-10-02)
+
+Turbulence options on the grid fluids (package TURB, first half). Additive: with the new
+options at their defaults every grid is bit-identical (`examples/grid_checksum.rs` on
+every solver type, pressure solver and wall condition, at a diffusion and viscosity of
+1e-4 and of zero).
+
+### Added
+
+- `AdvectionScheme::MacCormack` for `FluidGrid` and `FluidGrid3D` (Selle et al. 2008):
+  forward and reverse semi-Lagrangian passes, half the round trip's error added back,
+  clamped to the forward pass's source cells. On an inviscid 4 x 4 Taylor-Green array at
+  64^2 it keeps 0.80 of the enstrophy over 2 s where first-order advection keeps 0.36.
+  Adds 41 to 50% to a 3D step and 24 bytes a cell.
+- `VorticityConfinement::MatchNumericalDissipation` (Fedkiw, Stam and Jensen 2001):
+  `epsilon h (N x omega)` before the second projection, with `epsilon` derived cell by
+  cell from first-order advection's numerical viscosity `h^2 a(1 - a) / (2 dt)` at the
+  grid scale, and each step's force capped so it adds no more kinetic energy than that
+  step's advection removed. No constant to tune. On the inviscid 2 x 2 array over 2 s:
+  enstrophy 0.98 of the start (0.73 without), energy 0.94. Adds 13 to 14% to a 3D step,
+  24 bytes a cell in 2D and 32 in 3D.
+- `SolverConfig::advection` and `SolverConfig::vorticity_confinement`, with
+  `with_advection` and `with_vorticity_confinement`. (`SolverConfig` literals already
+  need `..Default::default()`, since 0.3.0.)
+- `examples/grid_checksum.rs` (bit checksums for comparing two commits) and
+  `examples/grid_options.rs` (interleaved medians of the options).
+
+### Changed
+
+- `FluidGrid::step` and `FluidGrid3D::step` allocate nothing: the step's copies and the
+  relaxation projection's buffers moved into the workspace (112 bytes a cell kept in 2D,
+  128 in 3D). Bit-identical.
+- A Gauss-Seidel or Jacobi diffusion solve at a zero coefficient writes its answer once
+  instead of sweeping (an inviscid grid's diffusion sweeps were about a quarter of its
+  step). Bit-identical in the checksum scenarios; in principle a `-0.0` the sweeps turned
+  into `+0.0` now stays `-0.0`.
+
 ## 0.3.1 (2026-10-02)
 
 Liquids react to actors and debris. Additive: `step` is unchanged and bit-identical.
