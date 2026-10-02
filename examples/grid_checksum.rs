@@ -33,14 +33,20 @@ fn configs() -> Vec<(&'static str, SolverConfig)> {
         ("default", SolverConfig::default()),
         ("jacobi", SolverConfig::jacobi(6)),
         ("sor", SolverConfig::sor(6, 1.5)),
-        ("relaxation", SolverConfig::default().with_pressure_solver(PressureSolver::Relaxation)),
-        ("no_slip", SolverConfig::default().with_wall_condition(WallCondition::NoSlip)),
+        (
+            "relaxation",
+            SolverConfig::default().with_pressure_solver(PressureSolver::Relaxation),
+        ),
+        (
+            "no_slip",
+            SolverConfig::default().with_wall_condition(WallCondition::NoSlip),
+        ),
     ]
 }
 
-fn grid_2d(name: &str, config: SolverConfig) {
+fn grid_2d(name: &str, config: SolverConfig, coefficient: f64) {
     let n = 48;
-    let mut g = FluidGrid::with_solver(n, n + 8, 1e-4, 1e-4, 1.0 / 60.0, config).unwrap();
+    let mut g = FluidGrid::with_solver(n, n + 8, coefficient, coefficient, 1.0 / 60.0, config).unwrap();
     let mut iterations = 0;
     for step in 0..60 {
         for i in n / 4..3 * n / 4 {
@@ -60,18 +66,22 @@ fn grid_2d(name: &str, config: SolverConfig) {
             h.add(vy.to_bits());
         }
     }
-    println!("grid2d {name:<12} {:016x} pressure_iterations {iterations}", h.0);
+    println!(
+        "grid2d {name:<12} {:016x} pressure_iterations {iterations}",
+        h.0
+    );
 }
 
-fn grid_3d(name: &str, config: SolverConfig) {
+fn grid_3d(name: &str, config: SolverConfig, coefficient: f64) {
     let n = 20;
-    let mut g = FluidGrid3D::with_solver(n, n + 4, n - 2, 1e-4, 1e-4, 1.0 / 60.0, config).unwrap();
+    let mut g = FluidGrid3D::with_solver(n, n + 4, n - 2, coefficient, coefficient, 1.0 / 60.0, config).unwrap();
     let mut iterations = 0;
     for step in 0..30 {
         for i in n / 4..3 * n / 4 {
             g.add_density(i, n / 3, n / 2, 1.0).unwrap();
             let swirl = ((step + i) as f64 * 0.37).sin();
-            g.add_velocity(i, n / 3, n / 2, 0.3 * swirl, 0.4, -0.2 * swirl).unwrap();
+            g.add_velocity(i, n / 3, n / 2, 0.3 * swirl, 0.4, -0.2 * swirl)
+                .unwrap();
         }
         g.step();
         iterations += g.get_last_pressure_iterations();
@@ -88,16 +98,43 @@ fn grid_3d(name: &str, config: SolverConfig) {
             }
         }
     }
-    println!("grid3d {name:<12} {:016x} pressure_iterations {iterations}", h.0);
+    println!(
+        "grid3d {name:<12} {:016x} pressure_iterations {iterations}",
+        h.0
+    );
 }
 
 fn particles() {
     let mut fx = ParticleEffects::with_capacity(20_000);
     #[allow(clippy::needless_update)]
     {
-        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, ..Default::default() });
-        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, ..Default::default() });
-        fx.set_class(2, ParticleClass { gravity: 0.0, drag: 400.0, restitution: 0.5, ..Default::default() });
+        fx.set_class(
+            0,
+            ParticleClass {
+                gravity: 26.0,
+                drag: 1.4,
+                restitution: 0.32,
+                ..Default::default()
+            },
+        );
+        fx.set_class(
+            1,
+            ParticleClass {
+                gravity: 1.6,
+                drag: 3.4,
+                restitution: 0.0,
+                ..Default::default()
+            },
+        );
+        fx.set_class(
+            2,
+            ParticleClass {
+                gravity: 0.0,
+                drag: 400.0,
+                restitution: 0.5,
+                ..Default::default()
+            },
+        );
     }
     let mut rng = EffectRng::new(0xC0FFEE);
     let mut h = Hash::new();
@@ -127,12 +164,17 @@ fn particles() {
     println!("particles {:016x} live {}", h.0, fx.len());
 }
 
+/// Every scenario at a diffusion and viscosity of 1e-4 widths^2/s, then again at zero,
+/// where the diffusion solve has nothing to do.
 fn main() {
-    for (name, config) in configs() {
-        grid_2d(name, config);
-    }
-    for (name, config) in configs() {
-        grid_3d(name, config);
+    for coefficient in [1e-4, 0.0] {
+        println!("diffusion and viscosity {coefficient:e}");
+        for (name, config) in configs() {
+            grid_2d(name, config, coefficient);
+        }
+        for (name, config) in configs() {
+            grid_3d(name, config, coefficient);
+        }
     }
     particles();
 }

@@ -18,7 +18,10 @@ fn taylor_green(n: usize, m: f64, amp: f64) -> impl Fn(usize, usize) -> (f64, f6
     let k = m * std::f64::consts::PI / length;
     move |i, j| {
         let (x, y) = ((i as f64 - 0.5) * h, (j as f64 - 0.5) * h);
-        (amp * (k * x).sin() * (k * y).cos(), -amp * (k * x).cos() * (k * y).sin())
+        (
+            amp * (k * x).sin() * (k * y).cos(),
+            -amp * (k * x).cos() * (k * y).sin(),
+        )
     }
 }
 
@@ -43,7 +46,9 @@ fn curl_and_divergence_2d(g: &FluidGrid) -> (Vec<f64>, Vec<f64>) {
     for i in 1..w - 1 {
         for j in 1..h - 1 {
             if i > 1 && j > 1 && i < w - 2 && j < h - 2 {
-                curl.push(((v(i + 1, j).1 - v(i - 1, j).1) - (v(i, j + 1).0 - v(i, j - 1).0)) * inv_2h);
+                curl.push(
+                    ((v(i + 1, j).1 - v(i - 1, j).1) - (v(i, j + 1).0 - v(i, j - 1).0)) * inv_2h,
+                );
             }
             div.push(((v(i + 1, j).0 - v(i - 1, j).0) + (v(i, j + 1).1 - v(i, j - 1).1)) * inv_2h);
         }
@@ -102,7 +107,7 @@ fn g_energy(g: &FluidGrid) -> f64 {
 
 /// MacCormack keeps more of an inviscid vortex than first-order advection.
 ///
-/// A 4 x 4 Taylor-Green array (eddies 15 cells across) at 64², 120 steps (2 s).
+/// A 4 x 4 Taylor-Green array (eddies 15 cells across) at 64^2, 120 steps (2 s).
 /// Measured 2026-10-02: the first-order scheme keeps 0.68 of the peak vorticity and
 /// 0.36 of the enstrophy; MacCormack keeps 0.82 and 0.80. On a 2 x 2 array the gap
 /// is 0.73 against 0.94 in enstrophy, and on 8 x 8 (eddies of 7 cells) 0.07 against
@@ -111,7 +116,12 @@ fn g_energy(g: &FluidGrid) -> f64 {
 #[test]
 fn maccormack_keeps_more_of_an_inviscid_vortex_2d() {
     let first = run_2d(SolverConfig::default(), 64, 4.0, 120);
-    let second = run_2d(SolverConfig::default().with_advection(AdvectionScheme::MacCormack), 64, 4.0, 120);
+    let second = run_2d(
+        SolverConfig::default().with_advection(AdvectionScheme::MacCormack),
+        64,
+        4.0,
+        120,
+    );
     let kept_first = first.peak[1] / first.peak[0];
     let kept_second = second.peak[1] / second.peak[0];
     let z_first = first.enstrophy[1] / first.enstrophy[0];
@@ -119,10 +129,16 @@ fn maccormack_keeps_more_of_an_inviscid_vortex_2d() {
     println!(
         "2D peak vorticity kept: first order {kept_first:.3}, MacCormack {kept_second:.3}; enstrophy {z_first:.3}, {z_second:.3}"
     );
-    assert!(kept_second > kept_first, "MacCormack {kept_second} vs first order {kept_first}");
+    assert!(
+        kept_second > kept_first,
+        "MacCormack {kept_second} vs first order {kept_first}"
+    );
     // The steady solution loses nothing; MacCormack loses less than half of what the
     // first-order scheme loses.
-    assert!(1.0 - z_second < 0.5 * (1.0 - z_first), "{z_second} vs {z_first}");
+    assert!(
+        1.0 - z_second < 0.5 * (1.0 - z_first),
+        "{z_second} vs {z_first}"
+    );
 }
 
 /// The same in 3D, on a Taylor-Green cell uniform in z.
@@ -146,8 +162,10 @@ fn maccormack_keeps_more_of_an_inviscid_vortex_3d() {
             let mut m = 0.0f64;
             for i in 2..n - 2 {
                 for j in 2..n - 2 {
-                    let dv = g.get_velocity(i + 1, j, 3).unwrap().1 - g.get_velocity(i - 1, j, 3).unwrap().1;
-                    let du = g.get_velocity(i, j + 1, 3).unwrap().0 - g.get_velocity(i, j - 1, 3).unwrap().0;
+                    let dv = g.get_velocity(i + 1, j, 3).unwrap().1
+                        - g.get_velocity(i - 1, j, 3).unwrap().1;
+                    let du = g.get_velocity(i, j + 1, 3).unwrap().0
+                        - g.get_velocity(i, j - 1, 3).unwrap().0;
                     m = m.max(((dv - du) * inv_2h).abs());
                 }
             }
@@ -163,7 +181,10 @@ fn maccormack_keeps_more_of_an_inviscid_vortex_3d() {
     let kept_first = run(SolverConfig::default());
     let kept_second = run(SolverConfig::default().with_advection(AdvectionScheme::MacCormack));
     println!("3D peak vorticity kept: first order {kept_first:.3}, MacCormack {kept_second:.3}");
-    assert!(kept_second > kept_first, "MacCormack {kept_second} vs first order {kept_first}");
+    assert!(
+        kept_second > kept_first,
+        "MacCormack {kept_second} vs first order {kept_first}"
+    );
     assert!(kept_second <= 1.0 + 1e-9);
 }
 
@@ -172,7 +193,7 @@ fn maccormack_keeps_more_of_an_inviscid_vortex_3d() {
 /// It also adds energy to a vortex this smooth: the force is matched to the numerical
 /// dissipation at the grid scale, and a structure many cells across is confined more
 /// than its own dissipation (see [`VorticityConfinement`]). Measured 2026-10-02 on this
-/// 2 x 2 Taylor-Green array at 64²: enstrophy 2.45 and energy 1.39 times the start
+/// 2 x 2 Taylor-Green array at 64^2: enstrophy 2.45 and energy 1.39 times the start
 /// after 2 s, against 0.73 and 0.73 without; after 10 s the energy is 0.93 of the
 /// start with the vorticity gathered into cells of grid size (peak 9.7 times).
 /// The force goes in before the projection, so the total divergence after the step is
@@ -187,7 +208,12 @@ fn confinement_raises_enstrophy_and_stays_projected() {
     // A converged pressure solve, so the divergence left is the collocated scheme's.
     let base = SolverConfig::default().with_pressure_tolerance(1e-10, 2000);
     let off = run_2d(base, 64, 2.0, 120);
-    let on = run_2d(base.with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation), 64, 2.0, 120);
+    let on = run_2d(
+        base.with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        64,
+        2.0,
+        120,
+    );
 
     let kept_off = off.enstrophy[1] / off.enstrophy[0];
     let kept_on = on.enstrophy[1] / on.enstrophy[0];
@@ -202,8 +228,14 @@ fn confinement_raises_enstrophy_and_stays_projected() {
     let (div_on, div_off) = (rms(&on.divergence), rms(&off.divergence));
     println!("rms divergence: off {div_off:e}, confined {div_on:e}");
     let curl_scale = (on.enstrophy[1] / on.divergence.len() as f64).sqrt();
-    assert!(div_off <= 1e-3 * curl_scale, "unconfined divergence {div_off} against curl {curl_scale}");
-    assert!(div_on <= 0.1 * curl_scale, "confined divergence {div_on} against curl {curl_scale}");
+    assert!(
+        div_off <= 1e-3 * curl_scale,
+        "unconfined divergence {div_off} against curl {curl_scale}"
+    );
+    assert!(
+        div_on <= 0.1 * curl_scale,
+        "confined divergence {div_on} against curl {curl_scale}"
+    );
 }
 
 /// The same force in 3D raises enstrophy on a z-uniform Taylor-Green cell.
@@ -226,8 +258,10 @@ fn confinement_raises_enstrophy_3d() {
             let (mut enstrophy, mut energy) = (0.0, 0.0);
             for i in 2..n - 2 {
                 for j in 2..n - 2 {
-                    let dv = g.get_velocity(i + 1, j, 3).unwrap().1 - g.get_velocity(i - 1, j, 3).unwrap().1;
-                    let du = g.get_velocity(i, j + 1, 3).unwrap().0 - g.get_velocity(i, j - 1, 3).unwrap().0;
+                    let dv = g.get_velocity(i + 1, j, 3).unwrap().1
+                        - g.get_velocity(i - 1, j, 3).unwrap().1;
+                    let du = g.get_velocity(i, j + 1, 3).unwrap().0
+                        - g.get_velocity(i, j - 1, 3).unwrap().0;
                     enstrophy += ((dv - du) * inv_2h).powi(2);
                     let (u, v, w) = g.get_velocity(i, j, 3).unwrap();
                     energy += 0.5 * (u * u + v * v + w * w);
@@ -244,9 +278,11 @@ fn confinement_raises_enstrophy_3d() {
         (z1 / z0, e1 / e0)
     };
     let (z_off, _) = run(SolverConfig::default());
-    let (z_on, e_on) =
-        run(SolverConfig::default().with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation));
-    println!("3D enstrophy kept: off {z_off:.3}, confined {z_on:.3}; energy kept confined {e_on:.3}");
+    let (z_on, e_on) = run(SolverConfig::default()
+        .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation));
+    println!(
+        "3D enstrophy kept: off {z_off:.3}, confined {z_on:.3}; energy kept confined {e_on:.3}"
+    );
     assert!(z_on > z_off, "confined {z_on} vs off {z_off}");
 }
 
@@ -279,6 +315,9 @@ fn both_options_stay_bounded_on_a_forced_plume() {
         g.step();
     }
     assert!(g.validate_state().is_ok());
-    assert!(g.get_average_velocity() < 1.0, "{}", g.get_average_velocity());
+    assert!(
+        g.get_average_velocity() < 1.0,
+        "{}",
+        g.get_average_velocity()
+    );
 }
-

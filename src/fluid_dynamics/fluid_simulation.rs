@@ -62,7 +62,7 @@ pub(crate) fn fit(v: &mut Vec<f64>, len: usize) {
 
 /// The fractional part of a step's displacement, in cells: the offset `a` at which
 /// semi-Lagrangian advection interpolates, and so its numerical viscosity
-/// `h² a(1 - a) / (2 dt)` (see [`VorticityConfinement`]).
+/// `h^2 a(1 - a) / (2 dt)` (see [`VorticityConfinement`]).
 #[inline]
 pub(crate) fn cell_offset(displacement_cells: f64) -> f64 {
     let d = displacement_cells.abs();
