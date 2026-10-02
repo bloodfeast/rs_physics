@@ -5,17 +5,29 @@
 
 use crate::utils::PhysicsError;
 use super::validation::{validate_dimensions_3d, validate_finite, validate_non_negative, validate_positive, validate_position_3d};
-use super::solver::{pcg_solve, BoundaryType, PcgWorkspace, PressureSolver, SolverConfig, SolverType};
-use super::fluid_simulation::{MIC_SIGMA, MIC_TAU};
+use super::solver::{
+    pcg_solve, AdvectionScheme, BoundaryType, PressureSolver, SolverConfig, SolverType, VorticityConfinement,
+};
+use super::fluid_simulation::{cell_offset, confinement_scale, fit, SolveScratch, MIC_SIGMA, MIC_TAU};
 
-/// Buffers `step` reuses, so the solvers allocate nothing per call.
+/// Buffers `step` reuses, so a step allocates nothing once the first has sized them.
+/// The option buffers are sized the first time their option runs.
 #[derive(Default)]
 struct Workspace {
-    /// Jacobi's second buffer.
-    jacobi: Vec<f64>,
-    /// The projection's right-hand side, zero on the boundary layer.
-    rhs: Vec<f64>,
-    pcg: PcgWorkspace,
+    solve: SolveScratch,
+    /// The velocity and density as diffused, before advection.
+    velocity_x0: Vec<f64>,
+    velocity_y0: Vec<f64>,
+    velocity_z0: Vec<f64>,
+    density0: Vec<f64>,
+    /// [`AdvectionScheme::MacCormack`]: the backward pass, and the range of the source
+    /// cells the forward pass read for each cell.
+    back: Vec<f64>,
+    low: Vec<f64>,
+    high: Vec<f64>,
+    /// [`VorticityConfinement::MatchNumericalDissipation`]: the curl's three
+    /// components and its magnitude.
+    omega: [Vec<f64>; 4],
 }
 
 /// A 3D grid-based fluid simulation using the Eulerian method.
@@ -207,17 +219,23 @@ impl FluidGrid3D {
     pub fn step(&mut self) {
         let mut ws = std::mem::take(&mut self.workspace);
         let [mut pressure, mut pressure_after_advection] = std::mem::take(&mut self.pressure);
+        // The state is taken out for the step and each buffer reused in place, so a
+        // step allocates nothing; as in the 2D grid, every buffer a pass writes is
+        // overwritten whole, so the results are bit-identical to the allocating version.
+        let mut velocity_x = std::mem::take(&mut self.velocity_x);
+        let mut velocity_y = std::mem::take(&mut self.velocity_y);
+        let mut velocity_z = std::mem::take(&mut self.velocity_z);
+        let mut density = std::mem::take(&mut self.density);
         let size = self.width * self.height * self.depth;
-        let mut velocity_x0 = vec![0.0; size];
-        let mut velocity_y0 = vec![0.0; size];
-        let mut velocity_z0 = vec![0.0; size];
-        let mut density0 = vec![0.0; size];
+        for v in [&mut ws.velocity_x0, &mut ws.velocity_y0, &mut ws.velocity_z0, &mut ws.density0] {
+            fit(v, size);
+        }
 
         // Clone the current state
-        velocity_x0.copy_from_slice(&self.velocity_x);
-        velocity_y0.copy_from_slice(&self.velocity_y);
-        velocity_z0.copy_from_slice(&self.velocity_z);
-        density0.copy_from_slice(&self.density);
+        ws.velocity_x0.copy_from_slice(&velocity_x);
+        ws.velocity_y0.copy_from_slice(&velocity_y);
+        ws.velocity_z0.copy_from_slice(&velocity_z);
+        ws.density0.copy_from_slice(&density);
 
         // Implicit diffusion: `a = dt * nu / h²`, with the cell size `h = 1 / width` on
         // every axis (the same `h` that `advect` and `project` use). The cell count
@@ -228,55 +246,77 @@ impl FluidGrid3D {
         // Diffuse velocity
         {
             let a = self.dt * self.viscosity * inv_h_sq;
-            self.lin_solve(BoundaryType::VelocityX, &mut velocity_x0, &self.velocity_x, a, 1.0 + 6.0 * a, &mut ws.jacobi);
-            self.lin_solve(BoundaryType::VelocityY, &mut velocity_y0, &self.velocity_y, a, 1.0 + 6.0 * a, &mut ws.jacobi);
-            self.lin_solve(BoundaryType::VelocityZ, &mut velocity_z0, &self.velocity_z, a, 1.0 + 6.0 * a, &mut ws.jacobi);
+            self.lin_solve(BoundaryType::VelocityX, &mut ws.velocity_x0, &velocity_x, a, 1.0 + 6.0 * a, &mut ws.solve.jacobi);
+            self.lin_solve(BoundaryType::VelocityY, &mut ws.velocity_y0, &velocity_y, a, 1.0 + 6.0 * a, &mut ws.solve.jacobi);
+            self.lin_solve(BoundaryType::VelocityZ, &mut ws.velocity_z0, &velocity_z, a, 1.0 + 6.0 * a, &mut ws.solve.jacobi);
         }
 
         // Project velocity
         let mut pressure_iterations =
-            self.project(&mut velocity_x0, &mut velocity_y0, &mut velocity_z0, &mut pressure, &mut ws);
+            self.project(&mut ws.velocity_x0, &mut ws.velocity_y0, &mut ws.velocity_z0, &mut pressure, &mut ws.solve);
 
-        // Advect velocity
-        {
-            let mut next_velocity_x = vec![0.0; size];
-            let mut next_velocity_y = vec![0.0; size];
-            let mut next_velocity_z = vec![0.0; size];
+        // Advect velocity, into the buffers the old velocity held
+        match self.solver_config.advection {
+            AdvectionScheme::SemiLagrangian => {
+                let (u, v, w) = (&ws.velocity_x0, &ws.velocity_y0, &ws.velocity_z0);
+                self.advect(BoundaryType::VelocityX, &mut velocity_x, u, u, v, w);
+                self.advect(BoundaryType::VelocityY, &mut velocity_y, v, u, v, w);
+                self.advect(BoundaryType::VelocityZ, &mut velocity_z, w, u, v, w);
+            }
+            AdvectionScheme::MacCormack => {
+                let Workspace { velocity_x0: u, velocity_y0: v, velocity_z0: w, back, low, high, .. } = &mut ws;
+                let (u, v, w): (&[f64], &[f64], &[f64]) = (u, v, w);
+                for (bt, out, source) in [
+                    (BoundaryType::VelocityX, &mut velocity_x, u),
+                    (BoundaryType::VelocityY, &mut velocity_y, v),
+                    (BoundaryType::VelocityZ, &mut velocity_z, w),
+                ] {
+                    self.advect_maccormack(bt, out, source, [u, v, w], back, low, high);
+                }
+            }
+        }
 
-            self.advect(BoundaryType::VelocityX, &mut next_velocity_x, &velocity_x0, &velocity_x0, &velocity_y0, &velocity_z0);
-            self.advect(BoundaryType::VelocityY, &mut next_velocity_y, &velocity_y0, &velocity_x0, &velocity_y0, &velocity_z0);
-            self.advect(BoundaryType::VelocityZ, &mut next_velocity_z, &velocity_z0, &velocity_x0, &velocity_y0, &velocity_z0);
-
-            self.velocity_x = next_velocity_x;
-            self.velocity_y = next_velocity_y;
-            self.velocity_z = next_velocity_z;
+        if self.solver_config.vorticity_confinement == VorticityConfinement::MatchNumericalDissipation {
+            self.confine_vorticity(
+                [&mut velocity_x, &mut velocity_y, &mut velocity_z],
+                [&ws.velocity_x0, &ws.velocity_y0, &ws.velocity_z0],
+                &mut ws.omega,
+            );
         }
 
         // Project again
-        {
-            let mut next_velocity_x = self.velocity_x.clone();
-            let mut next_velocity_y = self.velocity_y.clone();
-            let mut next_velocity_z = self.velocity_z.clone();
-            pressure_iterations +=
-                self.project(&mut next_velocity_x, &mut next_velocity_y, &mut next_velocity_z, &mut pressure_after_advection, &mut ws);
-            self.velocity_x = next_velocity_x;
-            self.velocity_y = next_velocity_y;
-            self.velocity_z = next_velocity_z;
-        }
+        pressure_iterations +=
+            self.project(&mut velocity_x, &mut velocity_y, &mut velocity_z, &mut pressure_after_advection, &mut ws.solve);
 
         // Diffuse density
         {
             let a = self.dt * self.diffusion * inv_h_sq;
-            self.lin_solve(BoundaryType::Density, &mut density0, &self.density, a, 1.0 + 6.0 * a, &mut ws.jacobi);
+            self.lin_solve(BoundaryType::Density, &mut ws.density0, &density, a, 1.0 + 6.0 * a, &mut ws.solve.jacobi);
         }
 
         // Advect density
-        {
-            let mut next_density = vec![0.0; size];
-            self.advect(BoundaryType::Density, &mut next_density, &density0, &self.velocity_x, &self.velocity_y, &self.velocity_z);
-            self.density = next_density;
+        match self.solver_config.advection {
+            AdvectionScheme::SemiLagrangian => {
+                self.advect(BoundaryType::Density, &mut density, &ws.density0, &velocity_x, &velocity_y, &velocity_z);
+            }
+            AdvectionScheme::MacCormack => {
+                let Workspace { density0, back, low, high, .. } = &mut ws;
+                self.advect_maccormack(
+                    BoundaryType::Density,
+                    &mut density,
+                    density0,
+                    [&velocity_x, &velocity_y, &velocity_z],
+                    back,
+                    low,
+                    high,
+                );
+            }
         }
 
+        self.velocity_x = velocity_x;
+        self.velocity_y = velocity_y;
+        self.velocity_z = velocity_z;
+        self.density = density;
         self.pressure = [pressure, pressure_after_advection];
         self.workspace = ws;
         self.last_pressure_iterations = pressure_iterations;
@@ -326,19 +366,22 @@ impl FluidGrid3D {
         velocity_y: &mut Vec<f64>,
         velocity_z: &mut Vec<f64>,
         pressure: &mut Vec<f64>,
-        ws: &mut Workspace,
+        ws: &mut SolveScratch,
     ) -> usize {
         match self.solver_config.pressure_solver {
             PressureSolver::Relaxation => {
-                // Exactly the pre-conjugate-gradient projection: sweeps from zero.
+                // Exactly the pre-conjugate-gradient projection: sweeps from zero. The
+                // divergence is written whole before it is read; the pressure is cleared.
                 let size = self.width * self.height * self.depth;
-                let mut p = vec![0.0; size];
-                let mut div = vec![0.0; size];
-                self.divergence(velocity_x, velocity_y, velocity_z, &mut div);
-                self.set_boundaries(BoundaryType::Density, &mut div);
-                self.set_boundaries(BoundaryType::Density, &mut p);
-                self.lin_solve(BoundaryType::Density, &mut p, &div, 1.0, 6.0, &mut ws.jacobi);
-                self.subtract_pressure_gradient(velocity_x, velocity_y, velocity_z, &p);
+                fit(&mut ws.relax_pressure, size);
+                fit(&mut ws.relax_divergence, size);
+                let (p, div) = (&mut ws.relax_pressure, &mut ws.relax_divergence);
+                p.fill(0.0);
+                self.divergence(velocity_x, velocity_y, velocity_z, div);
+                self.set_boundaries(BoundaryType::Density, div);
+                self.set_boundaries(BoundaryType::Density, p);
+                self.lin_solve(BoundaryType::Density, p, div, 1.0, 6.0, &mut ws.jacobi);
+                self.subtract_pressure_gradient(velocity_x, velocity_y, velocity_z, p);
                 self.solver_config.iterations
             }
             PressureSolver::ConjugateGradient => {
@@ -643,6 +686,23 @@ impl FluidGrid3D {
     /// [`SolverConfig::solver_type`], `iterations` sweeps from the guess in `x`.
     /// `scratch` is Jacobi's second buffer.
     fn lin_solve(&self, boundary_type: BoundaryType, x: &mut Vec<f64>, x0: &[f64], a: f64, c: f64, scratch: &mut Vec<f64>) {
+        // With no coupling every Gauss-Seidel or Jacobi sweep computes `x0 / c` (the
+        // neighbours are multiplied by zero), so the sweeps are skipped and the answer
+        // written once: the same values, except that `-0 + 0 * neighbours` was `+0`
+        // and is now `-0`. An inviscid grid's two diffusion solves were about a
+        // quarter of its step. SOR is left alone: its update mixes in the old `x`.
+        if a == 0.0 && matches!(self.solver_config.solver_type, SolverType::GaussSeidel | SolverType::Jacobi) {
+            for i in 1..self.width-1 {
+                for j in 1..self.height-1 {
+                    for k in 1..self.depth-1 {
+                        let idx = self.get_index(i, j, k);
+                        x[idx] = x0[idx] / c;
+                    }
+                }
+            }
+            self.set_boundaries(boundary_type, x);
+            return;
+        }
         match self.solver_config.solver_type {
             SolverType::GaussSeidel => {
                 for _ in 0..self.solver_config.iterations {
@@ -752,6 +812,199 @@ impl FluidGrid3D {
         }
 
         self.set_boundaries(boundary_type, d);
+    }
+
+    /// One semi-Lagrangian pass, along `+velocity` when `sign` is `-1` (the usual
+    /// back-trace) or `-velocity` when it is `+1` (MacCormack's reverse step), writing
+    /// the fluid cells of `d`. When `bounds` is given it also records, per cell, the
+    /// smallest and largest of the eight source cells the interpolation read.
+    ///
+    /// The arithmetic of the `sign = -1` pass is [`FluidGrid3D::advect`]'s, operation
+    /// for operation, so MacCormack's forward value is the first-order value exactly.
+    fn trace_pass(
+        &self,
+        d: &mut [f64],
+        d0: &[f64],
+        velocity: [&[f64]; 3],
+        sign: f64,
+        mut bounds: Option<(&mut [f64], &mut [f64])>,
+    ) {
+        let dt0 = self.dt * self.width as f64;
+        let [velocity_x, velocity_y, velocity_z] = velocity;
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                for k in 1..self.depth-1 {
+                    let idx = self.get_index(i, j, k);
+                    let x = (i as f64 + sign * dt0 * velocity_x[idx]).clamp(0.5, self.width as f64 - 1.5);
+                    let y = (j as f64 + sign * dt0 * velocity_y[idx]).clamp(0.5, self.height as f64 - 1.5);
+                    let z = (k as f64 + sign * dt0 * velocity_z[idx]).clamp(0.5, self.depth as f64 - 1.5);
+
+                    let i0 = x.floor() as usize;
+                    let i1 = i0 + 1;
+                    let j0 = y.floor() as usize;
+                    let j1 = j0 + 1;
+                    let k0 = z.floor() as usize;
+                    let k1 = k0 + 1;
+
+                    let s1 = x - i0 as f64;
+                    let s0 = 1.0 - s1;
+                    let t1 = y - j0 as f64;
+                    let t0 = 1.0 - t1;
+                    let u1 = z - k0 as f64;
+                    let u0 = 1.0 - u1;
+
+                    let c = [
+                        d0[self.get_index(i0, j0, k0)],
+                        d0[self.get_index(i0, j0, k1)],
+                        d0[self.get_index(i0, j1, k0)],
+                        d0[self.get_index(i0, j1, k1)],
+                        d0[self.get_index(i1, j0, k0)],
+                        d0[self.get_index(i1, j0, k1)],
+                        d0[self.get_index(i1, j1, k0)],
+                        d0[self.get_index(i1, j1, k1)],
+                    ];
+                    d[idx] = s0 * (t0 * (u0 * c[0] + u1 * c[1]) + t1 * (u0 * c[2] + u1 * c[3]))
+                        + s1 * (t0 * (u0 * c[4] + u1 * c[5]) + t1 * (u0 * c[6] + u1 * c[7]));
+                    if let Some((low, high)) = bounds.as_mut() {
+                        low[idx] = c[0].min(c[1]).min(c[2].min(c[3])).min(c[4].min(c[5]).min(c[6].min(c[7])));
+                        high[idx] = c[0].max(c[1]).max(c[2].max(c[3])).max(c[4].max(c[5]).max(c[6].max(c[7])));
+                    }
+                }
+            }
+        }
+    }
+
+    /// MacCormack advection of `d0` into `d` ([`AdvectionScheme::MacCormack`]); see
+    /// the 2D grid's `advect_maccormack`. `back`, `low` and `high` are scratch.
+    #[allow(clippy::too_many_arguments)]
+    fn advect_maccormack(
+        &self,
+        boundary_type: BoundaryType,
+        d: &mut Vec<f64>,
+        d0: &[f64],
+        velocity: [&[f64]; 3],
+        back: &mut Vec<f64>,
+        low: &mut Vec<f64>,
+        high: &mut Vec<f64>,
+    ) {
+        let size = self.width * self.height * self.depth;
+        fit(back, size);
+        fit(low, size);
+        fit(high, size);
+        self.trace_pass(d, d0, velocity, -1.0, Some((low, high)));
+        // The reverse pass interpolates the forward result, boundary layer included.
+        self.set_boundaries(boundary_type, d);
+        self.trace_pass(back, d, velocity, 1.0, None);
+        for i in 1..self.width-1 {
+            for j in 1..self.height-1 {
+                let row = self.get_index(i, j, 0);
+                for idx in row + 1..row + self.depth - 1 {
+                    let corrected = d[idx] + 0.5 * (d0[idx] - back[idx]);
+                    d[idx] = corrected.clamp(low[idx], high[idx]);
+                }
+            }
+        }
+        self.set_boundaries(boundary_type, d);
+    }
+
+    /// Adds the vorticity-confinement velocity
+    /// ([`VorticityConfinement::MatchNumericalDissipation`]) to the fluid cells of
+    /// `velocity`: `h e (N x omega)` with `e = mean over axes of a(1 - a) / 2`, `a` the
+    /// fractional cell offset of each cell's departure point this step, from the
+    /// velocity it was advected by, which is also the velocity before this step's
+    /// advection. The whole is scaled down, if need be, so it adds no more kinetic
+    /// energy than the advection took out (see [`VorticityConfinement`]). `omega` is
+    /// scratch: the curl and its magnitude, and then the uncapped confinement velocity
+    /// in the curl's place (a cell's curl is read only at that cell).
+    fn confine_vorticity(&self, velocity: [&mut Vec<f64>; 3], advecting: [&Vec<f64>; 3], omega: &mut [Vec<f64>; 4]) {
+        let (w, hgt, dep) = (self.width, self.height, self.depth);
+        let (si, sj) = (hgt * dep, dep);
+        for v in omega.iter_mut() {
+            fit(v, w * hgt * dep);
+        }
+        let width = w as f64;
+        let h = 1.0 / width;
+        let inv_2h = 0.5 * width;
+        let [velocity_x, velocity_y, velocity_z] = velocity;
+        let [ax, ay, az] = advecting;
+        // The kinetic energy after advection, summed in the curl pass, and before it,
+        // in the force pass: each pass reads that velocity at every fluid cell anyway.
+        let (mut after, mut before) = (0.0, 0.0);
+        {
+            let [ox, oy, oz, magnitude] = &mut *omega;
+            for i in 1..w-1 {
+                for j in 1..hgt-1 {
+                    for k in 1..dep-1 {
+                        let idx = self.get_index(i, j, k);
+                        let dw_dy = velocity_z[idx + sj] - velocity_z[idx - sj];
+                        let dv_dz = velocity_y[idx + 1] - velocity_y[idx - 1];
+                        let du_dz = velocity_x[idx + 1] - velocity_x[idx - 1];
+                        let dw_dx = velocity_z[idx + si] - velocity_z[idx - si];
+                        let dv_dx = velocity_y[idx + si] - velocity_y[idx - si];
+                        let du_dy = velocity_x[idx + sj] - velocity_x[idx - sj];
+                        let (x, y, z) = ((dw_dy - dv_dz) * inv_2h, (du_dz - dw_dx) * inv_2h, (dv_dx - du_dy) * inv_2h);
+                        let (p, q, r) = (velocity_x[idx], velocity_y[idx], velocity_z[idx]);
+                        after += 0.5 * (p * p + q * q + r * r);
+                        ox[idx] = x;
+                        oy[idx] = y;
+                        oz[idx] = z;
+                        magnitude[idx] = (x * x + y * y + z * z).sqrt();
+                    }
+                }
+            }
+            // A wall's ghost copies its neighbour, so |omega| has no gradient through it.
+            self.set_boundaries(BoundaryType::Density, magnitude);
+        }
+
+        let [ox, oy, oz, magnitude] = &mut *omega;
+        let cells_per_velocity = self.dt * width;
+        let (mut along, mut spread) = (0.0, 0.0);
+        for i in 1..w-1 {
+            for j in 1..hgt-1 {
+                for k in 1..dep-1 {
+                    let idx = self.get_index(i, j, k);
+                    let (p, q, r) = (ax[idx], ay[idx], az[idx]);
+                    before += 0.5 * (p * p + q * q + r * r);
+                    let gx = (magnitude[idx + si] - magnitude[idx - si]) * inv_2h;
+                    let gy = (magnitude[idx + sj] - magnitude[idx - sj]) * inv_2h;
+                    let gz = (magnitude[idx + 1] - magnitude[idx - 1]) * inv_2h;
+                    let length = (gx * gx + gy * gy + gz * gz).sqrt();
+                    if !(length > 0.0) {
+                        ox[idx] = 0.0;
+                        oy[idx] = 0.0;
+                        oz[idx] = 0.0;
+                        continue;
+                    }
+                    let a = [ax[idx], ay[idx], az[idx]].map(|u| cell_offset(u * cells_per_velocity));
+                    let e = (a[0] * (1.0 - a[0]) + a[1] * (1.0 - a[1]) + a[2] * (1.0 - a[2])) / 6.0;
+                    let s = h * e / length;
+                    let (wx, wy, wz) = (ox[idx], oy[idx], oz[idx]);
+                    // N x omega, with N = g / |g| folded into `s`.
+                    let c = [s * (gy * wz - gz * wy), s * (gz * wx - gx * wz), s * (gx * wy - gy * wx)];
+                    ox[idx] = c[0];
+                    oy[idx] = c[1];
+                    oz[idx] = c[2];
+                    along += velocity_x[idx] * c[0] + velocity_y[idx] * c[1] + velocity_z[idx] * c[2];
+                    spread += 0.5 * (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+                }
+            }
+        }
+        let scale = confinement_scale(before - after, along, spread);
+        if scale > 0.0 {
+            for i in 1..w-1 {
+                for j in 1..hgt-1 {
+                    let row = self.get_index(i, j, 0);
+                    for idx in row + 1..row + dep - 1 {
+                        velocity_x[idx] += scale * ox[idx];
+                        velocity_y[idx] += scale * oy[idx];
+                        velocity_z[idx] += scale * oz[idx];
+                    }
+                }
+            }
+        }
+        self.set_boundaries(BoundaryType::VelocityX, velocity_x);
+        self.set_boundaries(BoundaryType::VelocityY, velocity_y);
+        self.set_boundaries(BoundaryType::VelocityZ, velocity_z);
     }
 
     // --- Accessor methods ---

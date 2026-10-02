@@ -2,7 +2,7 @@
 name = "rs_physics"
 authors = ["Brandon White"]
 description = "A simple physics library written in Rust"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -109,4 +109,12 @@ required-features = ["particles", "fluid_simulation"]
 
 [[example]]
 name = "r2_phases"
+required-features = ["fluid_simulation"]
+
+[[example]]
+name = "grid_checksum"
+required-features = ["particles", "fluid_simulation"]
+
+[[example]]
+name = "grid_options"
 required-features = ["fluid_simulation"]
