@@ -46,8 +46,10 @@ struct Workspace {
     back: Vec<f64>,
     low: Vec<f64>,
     high: Vec<f64>,
-    /// [`VorticityConfinement::MatchNumericalDissipation`]: the curl.
+    /// [`VorticityConfinement::MatchNumericalDissipation`]: the curl, and the
+    /// confinement velocity before it is capped.
     omega: Vec<f64>,
+    confine: [Vec<f64>; 2],
 }
 
 /// Sizes `v` to `len`, allocating only when the length changes. The contents are
@@ -58,6 +60,35 @@ pub(crate) fn fit(v: &mut Vec<f64>, len: usize) {
         v.clear();
         v.resize(len, 0.0);
     }
+}
+
+/// The largest `s` in `[0, 1]` for which adding `s * du` to a velocity field adds at
+/// most `loss` kinetic energy, where adding all of it would add
+/// `s * along + s^2 * spread`: `along` is the sum of `u . du` and `spread` the sum of
+/// `|du|^2 / 2`, both over the fluid cells. Zero when there is no loss to put back.
+pub(crate) fn confinement_scale(loss: f64, along: f64, spread: f64) -> f64 {
+    if !(loss > 0.0) {
+        return 0.0;
+    }
+    if !(spread > 0.0) {
+        return if along > loss { loss / along } else { 1.0 };
+    }
+    // The positive root of spread s^2 + along s - loss = 0, which exists since
+    // loss > 0 and spread > 0.
+    let root = (-along + (along * along + 4.0 * spread * loss).sqrt()) / (2.0 * spread);
+    root.clamp(0.0, 1.0)
+}
+
+/// Half the sum of `|u|^2` over a grid's fluid cells: kinetic energy per unit density
+/// and cell volume, in the grid's units.
+pub(crate) fn fluid_energy(fields: &[&[f64]], cells: impl Iterator<Item = usize>) -> f64 {
+    let mut energy = 0.0;
+    for idx in cells {
+        for f in fields {
+            energy += 0.5 * f[idx] * f[idx];
+        }
+    }
+    energy
 }
 
 /// The fractional part of a step's displacement, in cells: the offset `a` at which
@@ -403,7 +434,14 @@ impl FluidGrid {
         }
 
         if self.solver_config.vorticity_confinement == VorticityConfinement::MatchNumericalDissipation {
-            self.confine_vorticity(&mut velocity_x, &mut velocity_y, &ws.velocity_x0, &ws.velocity_y0, &mut ws.omega);
+            self.confine_vorticity(
+                &mut velocity_x,
+                &mut velocity_y,
+                &ws.velocity_x0,
+                &ws.velocity_y0,
+                &mut ws.omega,
+                &mut ws.confine,
+            );
         }
 
         // Project again
@@ -818,6 +856,21 @@ impl FluidGrid {
     /// uses each new value as soon as it is computed; SOR moves each Gauss-Seidel update
     /// `relaxation` times as far; Jacobi computes a whole sweep from the previous one.
     fn lin_solve(&self, boundary_type: BoundaryType, x: &mut Vec<f64>, x0: &[f64], a: f64, c: f64, scratch: &mut Vec<f64>) {
+        // With no coupling every Gauss-Seidel or Jacobi sweep computes `x0 / c` (the
+        // neighbours are multiplied by zero), so the sweeps are skipped and the answer
+        // written once: the same values, except that `-0 + 0 * neighbours` was `+0`
+        // and is now `-0`. An inviscid grid's two diffusion solves were about a
+        // quarter of its step. SOR is left alone: its update mixes in the old `x`.
+        if a == 0.0 && matches!(self.solver_config.solver_type, SolverType::GaussSeidel | SolverType::Jacobi) {
+            for i in 1..self.width-1 {
+                for j in 1..self.height-1 {
+                    let idx = self.get_index(i, j);
+                    x[idx] = x0[idx] / c;
+                }
+            }
+            self.set_boundaries(boundary_type, x);
+            return;
+        }
         match self.solver_config.solver_type {
             SolverType::GaussSeidel => {
                 for _ in 0..self.solver_config.iterations {
@@ -1007,7 +1060,10 @@ impl FluidGrid {
     /// ([`VorticityConfinement::MatchNumericalDissipation`]) to the fluid cells of
     /// `velocity`: `h e (N x omega)` with `e = mean over axes of a(1 - a) / 2`, `a` the
     /// fractional cell offset of each cell's departure point this step, from the
-    /// velocity it was advected by (`advecting_x`, `advecting_y`). `omega` is scratch.
+    /// velocity it was advected by (`advecting_x`, `advecting_y`), which is also the
+    /// velocity before this step's advection. The whole is scaled down, if need be, so
+    /// it adds no more kinetic energy than the advection took out (see
+    /// [`VorticityConfinement`]). `omega` and `confine` are scratch.
     fn confine_vorticity(
         &self,
         velocity_x: &mut Vec<f64>,
@@ -1015,9 +1071,16 @@ impl FluidGrid {
         advecting_x: &[f64],
         advecting_y: &[f64],
         omega: &mut Vec<f64>,
+        confine: &mut [Vec<f64>; 2],
     ) {
         let (w, hgt) = (self.width, self.height);
         fit(omega, w * hgt);
+        for v in confine.iter_mut() {
+            fit(v, w * hgt);
+        }
+        let fluid = || (1..w - 1).flat_map(move |i| (i * hgt + 1..i * hgt + hgt - 1));
+        let loss = fluid_energy(&[advecting_x, advecting_y], fluid())
+            - fluid_energy(&[&velocity_x[..], &velocity_y[..]], fluid());
         let width = w as f64;
         let h = 1.0 / width;
         let inv_2h = 0.5 * width;
@@ -1032,6 +1095,8 @@ impl FluidGrid {
         self.set_boundaries(BoundaryType::Density, omega);
 
         let cells_per_velocity = self.dt * width;
+        let [dx, dy] = confine;
+        let (mut along, mut spread) = (0.0, 0.0);
         for i in 1..w-1 {
             for j in 1..hgt-1 {
                 let idx = self.get_index(i, j);
@@ -1039,6 +1104,8 @@ impl FluidGrid {
                 let gy = (omega[idx + 1].abs() - omega[idx - 1].abs()) * inv_2h;
                 let length = (gx * gx + gy * gy).sqrt();
                 if !(length > 0.0) {
+                    dx[idx] = 0.0;
+                    dy[idx] = 0.0;
                     continue;
                 }
                 let ax = cell_offset(advecting_x[idx] * cells_per_velocity);
@@ -1046,8 +1113,18 @@ impl FluidGrid {
                 let e = 0.25 * (ax * (1.0 - ax) + ay * (1.0 - ay));
                 // N x (omega z) = (N_y omega, -N_x omega).
                 let s = h * e * omega[idx] / length;
-                velocity_x[idx] += s * gy;
-                velocity_y[idx] -= s * gx;
+                let (cx, cy) = (s * gy, -s * gx);
+                dx[idx] = cx;
+                dy[idx] = cy;
+                along += velocity_x[idx] * cx + velocity_y[idx] * cy;
+                spread += 0.5 * (cx * cx + cy * cy);
+            }
+        }
+        let scale = confinement_scale(loss, along, spread);
+        if scale > 0.0 {
+            for idx in fluid() {
+                velocity_x[idx] += scale * dx[idx];
+                velocity_y[idx] += scale * dy[idx];
             }
         }
         self.set_boundaries(BoundaryType::VelocityX, velocity_x);

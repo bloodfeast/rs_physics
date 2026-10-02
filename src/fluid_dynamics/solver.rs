@@ -136,12 +136,18 @@ pub enum AdvectionScheme {
 /// uses the offsets of its own departure point this step, so confinement is strong
 /// where the advection was diffusive and absent where it was exact.
 ///
-/// The match is made at the grid scale, as the method intends: a structure much
-/// larger than a cell is confined more than its numerical dissipation (the force does
-/// not shrink with `l`), which is the method's known character, not this derivation's.
-/// Under [`AdvectionScheme::MacCormack`] the advection dissipates less than the
-/// first-order rate this uses, so the two together put back more than was lost; see
-/// the tests for what that does to a decaying vortex.
+/// # The cap
+///
+/// The match is made at the grid scale, as the method intends, so a structure much
+/// larger than a cell is confined more than it dissipates (the force does not shrink
+/// with `l`): uncapped, a smooth inviscid vortex gained energy, 1.39 times its start
+/// after 2 s. So each step's confinement is scaled down, when it has to be, until the
+/// kinetic energy it adds is at most what that step's advection removed: the energy of
+/// the velocity before advection less the energy after it, summed over the fluid cells.
+/// That is the bound the method's own purpose sets (it exists to put back what
+/// advection lost), so it adds no number. With it the same vortex keeps 0.94 of its
+/// energy. It also makes confinement and [`AdvectionScheme::MacCormack`] compose: the
+/// second-order scheme loses little, so there is little to put back.
 ///
 /// # Examples
 /// ```
@@ -163,7 +169,8 @@ pub enum VorticityConfinement {
 
     /// Confinement with `epsilon` matched, cell by cell, to the numerical viscosity of
     /// first-order semi-Lagrangian advection at that cell's offsets this step (see the
-    /// type's documentation). Costs a curl, a gradient and a force pass per step.
+    /// type's documentation), capped at the energy the step's advection removed.
+    /// Costs a curl pass, a force pass, two energy sums and an apply pass per step.
     MatchNumericalDissipation,
 }
 

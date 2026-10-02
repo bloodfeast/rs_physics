@@ -188,21 +188,24 @@ fn maccormack_keeps_more_of_an_inviscid_vortex_3d() {
     assert!(kept_second <= 1.0 + 1e-9);
 }
 
-/// Confinement puts rotation back: a decaying vortex keeps more enstrophy with it on.
+/// Confinement puts rotation back: a decaying vortex keeps more enstrophy with it on,
+/// and never more energy than it started with, because each step's confinement is
+/// capped at the kinetic energy that step's advection removed.
 ///
-/// It also adds energy to a vortex this smooth: the force is matched to the numerical
-/// dissipation at the grid scale, and a structure many cells across is confined more
-/// than its own dissipation (see [`VorticityConfinement`]). Measured 2026-10-02 on this
-/// 2 x 2 Taylor-Green array at 64^2: enstrophy 2.45 and energy 1.39 times the start
-/// after 2 s, against 0.73 and 0.73 without; after 10 s the energy is 0.93 of the
-/// start with the vorticity gathered into cells of grid size (peak 9.7 times).
+/// Uncapped, matched to the numerical dissipation at the grid scale, it added energy to
+/// a vortex this smooth (1.39 times the start after 2 s on this 2 x 2 array), because a
+/// structure many cells across is confined more than it dissipates. Capped, measured
+/// 2026-10-02: enstrophy 0.980 and energy 0.936 of the start after 2 s, against 0.732
+/// and 0.731 without confinement.
+///
 /// The force goes in before the projection, so the total divergence after the step is
-/// still zero (the walls' ghost cells make the sum telescope). Cell by cell it is not
-/// at the unconfined floor: the grids are collocated, so the projection cannot remove
-/// a divergence at the grid scale (the wide Laplacian `D G` and the compact one the
+/// still zero (the walls' ghost cells make the sum telescope). Cell by cell it is not at
+/// the unconfined floor: the grids are collocated, so the projection cannot remove a
+/// divergence at the grid scale (the wide Laplacian `D G` and the compact one the
 /// pressure solve inverts differ there), and confinement feeds exactly that scale.
-/// Measured 2026-10-02 with a converged pressure solve: rms central divergence 5.3e-4
-/// without confinement and 0.118 with it, against an rms vorticity of 3.0.
+/// Measured with a converged pressure solve: rms central divergence 5.3e-4 without
+/// confinement and 1.7e-3 with it capped (0.118 uncapped), against an rms vorticity of
+/// about 3.
 #[test]
 fn confinement_raises_enstrophy_and_stays_projected() {
     // A converged pressure solve, so the divergence left is the collocated scheme's.
@@ -220,6 +223,10 @@ fn confinement_raises_enstrophy_and_stays_projected() {
     let energy_on = on.energy[1] / on.energy[0];
     println!("enstrophy kept: off {kept_off:.3}, confined {kept_on:.3}; energy kept confined {energy_on:.3}");
     assert!(kept_on > kept_off, "confined {kept_on} vs off {kept_off}");
+    assert!(
+        energy_on <= 1.0 + 1e-9,
+        "confinement grew the energy to {energy_on}"
+    );
 
     let total: f64 = on.divergence.iter().sum();
     let scale = peak(&on.divergence).max(1e-300) * on.divergence.len() as f64;
@@ -238,7 +245,8 @@ fn confinement_raises_enstrophy_and_stays_projected() {
     );
 }
 
-/// The same force in 3D raises enstrophy on a z-uniform Taylor-Green cell.
+/// The same force in 3D raises enstrophy on a z-uniform Taylor-Green cell, and the cap
+/// keeps the energy at or below where it started.
 #[test]
 fn confinement_raises_enstrophy_3d() {
     let run = |config: SolverConfig| {
@@ -263,8 +271,15 @@ fn confinement_raises_enstrophy_3d() {
                     let du = g.get_velocity(i, j + 1, 3).unwrap().0
                         - g.get_velocity(i, j - 1, 3).unwrap().0;
                     enstrophy += ((dv - du) * inv_2h).powi(2);
-                    let (u, v, w) = g.get_velocity(i, j, 3).unwrap();
-                    energy += 0.5 * (u * u + v * v + w * w);
+                }
+            }
+            // The energy over every fluid cell: the cap bounds the whole box's.
+            for i in 1..n - 1 {
+                for j in 1..n - 1 {
+                    for k in 1..5 {
+                        let (u, v, w) = g.get_velocity(i, j, k).unwrap();
+                        energy += 0.5 * (u * u + v * v + w * w);
+                    }
                 }
             }
             (enstrophy, energy)
@@ -284,6 +299,7 @@ fn confinement_raises_enstrophy_3d() {
         "3D enstrophy kept: off {z_off:.3}, confined {z_on:.3}; energy kept confined {e_on:.3}"
     );
     assert!(z_on > z_off, "confined {z_on} vs off {z_off}");
+    assert!(e_on <= 1.0 + 1e-9, "confinement grew the energy to {e_on}");
 }
 
 /// The derived strength's offset: zero where a step moves the flow a whole number of
@@ -320,4 +336,98 @@ fn both_options_stay_bounded_on_a_forced_plume() {
         "{}",
         g.get_average_velocity()
     );
+}
+
+/// What each combination keeps of the 2 x 2 and 4 x 4 inviscid Taylor-Green arrays at
+/// 64^2 over 2 s, printed for the record; the assertions are in the tests above.
+#[test]
+#[ignore = "a table of figures, run by hand"]
+fn table_of_what_each_option_keeps() {
+    let configs = [
+        ("first order", SolverConfig::default()),
+        (
+            "MacCormack",
+            SolverConfig::default().with_advection(AdvectionScheme::MacCormack),
+        ),
+        (
+            "confinement",
+            SolverConfig::default()
+                .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        ),
+        (
+            "both",
+            SolverConfig::default()
+                .with_advection(AdvectionScheme::MacCormack)
+                .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        ),
+    ];
+    for cells in [2.0, 4.0] {
+        for (name, config) in configs {
+            let r = run_2d(config, 64, cells, 120);
+            println!(
+                "{cells} x {cells} {name:<12}: peak {:.3} enstrophy {:.3} energy {:.3}",
+                r.peak[1] / r.peak[0],
+                r.enstrophy[1] / r.enstrophy[0],
+                r.energy[1] / r.energy[0]
+            );
+        }
+    }
+}
+
+/// The cap's scale: the largest fraction of the confinement velocity whose added energy,
+/// `s along + s^2 spread`, stays within the loss.
+#[test]
+fn the_cap_adds_exactly_the_loss_or_all_of_the_force() {
+    use super::fluid_simulation::confinement_scale;
+    // Nothing lost, nothing added.
+    assert_eq!(confinement_scale(0.0, 1.0, 1.0), 0.0);
+    assert_eq!(confinement_scale(-1.0, 1.0, 1.0), 0.0);
+    // More loss than the whole force adds: all of it.
+    assert_eq!(confinement_scale(10.0, 1.0, 1.0), 1.0);
+    // A force that takes energy out is never cut.
+    assert_eq!(confinement_scale(0.1, -5.0, 1.0), 1.0);
+    // Otherwise the energy added is the loss, to rounding.
+    for (loss, along, spread) in [
+        (0.5, 1.0, 1.0),
+        (1e-6, 0.3, 2.0),
+        (0.2, 0.0, 4.0),
+        (0.3, 1.0, 0.0),
+    ] {
+        let s = confinement_scale(loss, along, spread);
+        let added = s * along + s * s * spread;
+        assert!(
+            (added - loss).abs() <= 1e-12 * loss.max(1.0),
+            "{loss} {along} {spread}: {s} adds {added}"
+        );
+    }
+}
+
+/// MacCormack and capped confinement together: MacCormack removes so little that the
+/// cap leaves confinement almost nothing to put back. Measured 2026-10-02 on the 4 x 4
+/// array at 64^2 over 2 s: enstrophy 0.804 of the start with both, 0.800 with MacCormack
+/// alone; on the 2 x 2 array, 0.941 either way.
+#[test]
+fn maccormack_with_capped_confinement_keeps_at_least_maccormack() {
+    let alone = run_2d(
+        SolverConfig::default().with_advection(AdvectionScheme::MacCormack),
+        64,
+        4.0,
+        120,
+    );
+    let both = run_2d(
+        SolverConfig::default()
+            .with_advection(AdvectionScheme::MacCormack)
+            .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        64,
+        4.0,
+        120,
+    );
+    let (z_alone, z_both) = (
+        alone.enstrophy[1] / alone.enstrophy[0],
+        both.enstrophy[1] / both.enstrophy[0],
+    );
+    let e_both = both.energy[1] / both.energy[0];
+    println!("MacCormack enstrophy {z_alone:.3}; with capped confinement {z_both:.3}, energy {e_both:.3}");
+    assert!(z_both >= z_alone - 1e-9, "{z_both} vs {z_alone}");
+    assert!(e_both <= 1.0 + 1e-9, "{e_both}");
 }

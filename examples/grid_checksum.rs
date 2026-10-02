@@ -46,7 +46,8 @@ fn configs() -> Vec<(&'static str, SolverConfig)> {
 
 fn grid_2d(name: &str, config: SolverConfig, coefficient: f64) {
     let n = 48;
-    let mut g = FluidGrid::with_solver(n, n + 8, coefficient, coefficient, 1.0 / 60.0, config).unwrap();
+    let mut g =
+        FluidGrid::with_solver(n, n + 8, coefficient, coefficient, 1.0 / 60.0, config).unwrap();
     let mut iterations = 0;
     for step in 0..60 {
         for i in n / 4..3 * n / 4 {
@@ -74,7 +75,16 @@ fn grid_2d(name: &str, config: SolverConfig, coefficient: f64) {
 
 fn grid_3d(name: &str, config: SolverConfig, coefficient: f64) {
     let n = 20;
-    let mut g = FluidGrid3D::with_solver(n, n + 4, n - 2, coefficient, coefficient, 1.0 / 60.0, config).unwrap();
+    let mut g = FluidGrid3D::with_solver(
+        n,
+        n + 4,
+        n - 2,
+        coefficient,
+        coefficient,
+        1.0 / 60.0,
+        config,
+    )
+    .unwrap();
     let mut iterations = 0;
     for step in 0..30 {
         for i in n / 4..3 * n / 4 {

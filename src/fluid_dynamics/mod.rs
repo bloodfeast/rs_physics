@@ -146,8 +146,8 @@
 //!   `0.03 |u| h` for a shear of `|u| / h`), so adding one would only smooth further
 //! - **Confinement on a collocated grid**: the projection cannot remove a divergence
 //!   at the grid scale, and confinement feeds that scale, so a confined flow keeps a
-//!   grid-scale divergence (rms 4% of the vorticity on a confined Taylor-Green array;
-//!   the total over the box is still zero)
+//!   grid-scale divergence (rms 0.06% of the vorticity on a confined Taylor-Green
+//!   array with the energy cap, 4% without it; the total over the box is still zero)
 //! - **Fixed grid**: No adaptive mesh refinement
 //! - **No multiphase flow**: Single fluid type per simulation; the box grids have no
 //!   free surface (`ShallowWater` does, depth-averaged)
@@ -172,8 +172,8 @@
 //!   preconditioner, the solver's work vectors and the step's copies of the diffused
 //!   state). `SolverType::Jacobi` adds 8 and `PressureSolver::Relaxation` 16;
 //!   `AdvectionScheme::MacCormack` adds 24 in either dimension (a reverse pass and the
-//!   forward pass's bounds); `VorticityConfinement::MatchNumericalDissipation` adds 8
-//!   in 2D and 32 in 3D (the curl and its magnitude)
+//!   forward pass's bounds); `VorticityConfinement::MatchNumericalDissipation` adds 24
+//!   in 2D and 32 in 3D (the curl, its magnitude and the uncapped force)
 
 // Shared modules - available when any fluid feature is enabled
 #[cfg(any(feature = "fluid_dynamics", feature = "fluid_simulation"))]
