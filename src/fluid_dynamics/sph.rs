@@ -78,6 +78,62 @@
 //! solver is deterministic on one machine; across machines it is as deterministic as
 //! `f64` `sqrt` and division, which IEEE 754 fixes.
 //!
+//! # Solids
+//!
+//! [`SphFluid::step`] knows one solid, the ground. [`SphFluid::step_with_solids`] adds a
+//! [`SphSolids`] set the caller fills each frame: capsules (a limb, a boot, a blade, with
+//! a surface velocity at each end, blended along the axis) and boxes yawed about +y
+//! (debris, a crate, a corpse's bounds, with one velocity).
+//!
+//! **One way.** Solids push the liquid; the liquid never pushes a solid. The set is
+//! borrowed read-only for the step and nothing is written back, so no fluid state can
+//! reach anything a lockstep simulation reads.
+//!
+//! **Binning.** After the particle grid is built, each solid's bounds, grown by the
+//! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
+//! contact radius, `h / 4`), are binned into the hash buckets of the cells they cover,
+//! clipped to the cells the fluid occupies and skipping buckets that hold no particle.
+//! Serial, in solid order, O(solids x cells covered) after one parallel min and max over
+//! the particle cells (O(n), exact, so its order cannot matter), into reused buffers: a
+//! counting sort over only the buckets touched, which are zeroed again after the step,
+//! so the table is never cleared whole. Any particle that can meet a solid starts the
+//! substep within that reach, so it finds the solid in its own cell's bin, one bucket
+//! read: the bins are the cells the ray can cross, gathered on the solid's side.
+//!
+//! **Contact.** In the move, after the velocity update and before the ground, a particle
+//! whose bin is not empty casts a ray from where it was to where it is going, extended
+//! by the contact radius. Closed form, no iteration: a capsule is the nearest of its
+//! cylinder side and its two end spheres (three square roots), a box is the slab test in
+//! its own frame (three divisions; its yaw's sine and cosine are taken once, when it is
+//! pushed). At the nearest hit the particle is set on the surface a contact radius out
+//! along the normal; a particle that starts inside a solid (the solid moved onto it) is
+//! pushed out along the nearest normal instead. Its velocity relative to the surface
+//! keeps `restitution` of an approaching normal part, decays its tangential part at the
+//! ground's `friction` rate, and takes on the surface velocity: the ground's response,
+//! with no new coefficient. Swept rather than a point test, so a droplet at the speed
+//! ceiling cannot pass through a box one spacing thick or a blade. One contact a
+//! substep: a particle pushed from one solid into another meets the second next substep.
+//!
+//! **The slope.** With solids the ground has a normal too: a particle in ground contact
+//! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
+//! only in contact, so a particle in flight pays nothing) and meets the ground along
+//! that slope's normal, so a drop on an incline runs downhill (SPH-F5). Where both
+//! differences are zero the level response runs unchanged, so on level ground with no
+//! solid in reach `step_with_solids` is bit-identical to `step`.
+//!
+//! **Cost.** A solid covers about `(L / h + 2.3)` cells along each axis of length `L`
+//! (its extent plus `1.3 h` of reach); a 0.4 m limb of radius 6 cm in blood (`h` = 4 cm)
+//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. Each covered cell is one
+//! hash and one bucket read, and writes an entry only where particles are. A particle
+//! pays one bucket read when no solid is near it, and the contact test against each
+//! solid in its bin when one is. Solids that reach no particle write no entry, and then
+//! the move is the plain one: the binning is the whole price.
+//!
+//! **Memory.** A capsule is 144 bytes and a box 88 in [`SphSolids`]. The fluid's bins
+//! are 8 bytes a bucket (two to four buckets a particle, allocated on the first step with
+//! solids) plus 12 bytes an entry and 4 a touched bucket, all kept at their high-water
+//! marks.
+//!
 //! # Examples
 //!
 //! ```
@@ -1485,8 +1541,11 @@ impl SphFluid {
                         let (mut x, mut y, mut z) =
                             (vx[i] + ax[k] * dt, vy[i] + ay[k] * dt, vz[i] + az[k] * dt);
                         let sq = x * x + y * y + z * z;
-                        let scale =
-                            if sq > max_sq { max_speed / speed_of(x, y, z, sq) } else { 1.0 };
+                        let scale = if sq > max_sq {
+                            max_speed / speed_of(x, y, z, sq)
+                        } else {
+                            1.0
+                        };
                         x *= scale;
                         y *= scale;
                         z *= scale;
@@ -2677,21 +2736,55 @@ mod tests {
     /// The parallel passes write each particle's sums only into its own slot, in an
     /// order fixed by the data, so the thread count must not change a single bit.
     /// A splash large enough for dozens of chunks, stepped through a fall, an impact
-    /// and a settle, on pools of 1, 3 and 8 threads.
+    /// and a settle, on pools of 1, 3 and 8 threads; and again with solids, a shin
+    /// wading through the splash and a crate dropping into it, on its sloped ground.
     #[test]
     fn parallel_steps_are_bit_identical_at_any_thread_count() {
-        fn run() -> Vec<u64> {
+        parallel_bit_identity(false);
+        parallel_bit_identity(true);
+    }
+
+    fn parallel_bit_identity(with_solids: bool) {
+        let run = move || -> Vec<u64> {
+            let mut solids = SphSolids::new();
+            let mut contacts = 0usize;
             let mut fluid = SphFluid::new(SphParams::blood(), 4096).unwrap();
             let spacing = fluid.params().smoothing_radius * 0.5;
             for i in 0..3000usize {
                 let (x, y, z) = (i % 15, (i / 15) % 15, i / 225);
                 fluid.spawn(
-                    [x as f64 * spacing, 0.3 + y as f64 * spacing, z as f64 * spacing],
+                    [
+                        x as f64 * spacing,
+                        0.3 + y as f64 * spacing,
+                        z as f64 * spacing,
+                    ],
                     [0.4 * (i % 7) as f64 - 1.2, -1.0, 0.3 * (i % 5) as f64 - 0.6],
                 );
             }
             for step in 0..90 {
-                fluid.step(1.0 / 240.0, 9.81, |x, z| 0.05 * (x - z));
+                let ground = |x: f64, z: f64| 0.05 * (x - z);
+                if with_solids {
+                    let t = (step + 1) as f64 / 240.0;
+                    let x = -0.1 + 1.0 * t;
+                    solids.clear();
+                    solids.push_capsule(
+                        [x, -0.05, 0.12],
+                        [x + 0.05, 0.45, 0.12],
+                        0.04,
+                        [1.0, 0.0, 0.0],
+                        [1.5, 0.0, 0.0],
+                    );
+                    solids.push_box(
+                        [0.15, 0.6 - 2.0 * t, 0.15],
+                        [0.06, 0.04, 0.05],
+                        0.4,
+                        [0.0, -2.0, 0.0],
+                    );
+                    fluid.step_with_solids(1.0 / 240.0, 9.81, ground, &solids);
+                    contacts += fluid.solid_stats().contacts;
+                } else {
+                    fluid.step(1.0 / 240.0, 9.81, ground);
+                }
                 if step % 30 == 29 {
                     fluid.drain_settled(|_| {});
                 }
@@ -2702,17 +2795,27 @@ mod tests {
                 bits.extend(p.iter().chain(v.iter()).map(|c| c.to_bits()));
                 bits.push(fluid.density(i).to_bits());
             }
+            assert!(
+                !with_solids || contacts > 1000,
+                "the solids met the splash only {contacts} times"
+            );
             bits
-        }
+        };
 
         let answers: Vec<Vec<u64>> = [1usize, 3, 8]
             .iter()
             .map(|&t| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(t).build().unwrap();
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(t)
+                    .build()
+                    .unwrap();
                 pool.install(run)
             })
             .collect();
-        assert!(answers[0].len() > 1000, "the splash drained before it was compared");
+        assert!(
+            answers[0].len() > 1000,
+            "the splash drained before it was compared"
+        );
         for (t, other) in [3, 8].iter().zip(&answers[1..]) {
             assert!(
                 answers[0] == *other,
@@ -2766,3 +2869,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sph_regression_tests.rs"]
 mod regression_tests;
+
+#[cfg(test)]
+#[path = "sph_solids_tests.rs"]
+mod solids_tests;

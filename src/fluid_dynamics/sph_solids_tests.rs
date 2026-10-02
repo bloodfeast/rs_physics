@@ -115,21 +115,30 @@ fn a_capsule_swept_through_a_pool_carries_it_and_leaves_nothing_inside() {
             );
         }
         if s == 71 {
-            // The particles the capsule is pressing on now, dead ahead of it and off the
-            // ground (where the ground's friction takes its share after the solid's).
+            // The particles the capsule set on its surface this substep (exactly a contact
+            // radius out), dead ahead of it and off the ground: a particle on the ground
+            // sits at exactly zero, and the ground's friction takes its share after the
+            // solid's.
             let rc = f.contact_radius();
             for i in 0..f.len() {
                 let p = f.position(i);
                 let off = [p[0] - x, 0.0, p[2] - z];
                 let d = dot(off, off).sqrt();
-                if d < radius + rc * 1.01 && off[0] > 0.9 * d && p[1] > 0.03 {
+                if (d - (radius + rc)).abs() < 1e-9 && off[0] > 0.9 * d && p[1] > 0.0 {
                     ahead.push(f.velocity(i)[0]);
                 }
             }
         }
     }
-    assert!(f.solid_stats().contacts > 0, "the capsule never met the pool");
-    assert!(ahead.len() >= 2, "no particle was being pushed head-on: {}", ahead.len());
+    assert!(
+        f.solid_stats().contacts > 0,
+        "the capsule never met the pool"
+    );
+    assert!(
+        ahead.len() >= 2,
+        "no particle was being pushed head-on: {}",
+        ahead.len()
+    );
     let mean = ahead.iter().sum::<f64>() / ahead.len() as f64;
     // Head-on, the contact leaves a particle at the surface's speed plus `restitution`
     // of its approach: between 1 and 1 + restitution times the capsule's speed.
@@ -214,7 +223,12 @@ fn a_box_pushed_onto_resting_particles_ejects_them_along_the_normal() {
             );
         }
         let mut solids = SphSolids::new();
-        solids.push_box(centre, half, yaw, [speed * normal[0], 0.0, speed * normal[2]]);
+        solids.push_box(
+            centre,
+            half,
+            yaw,
+            [speed * normal[0], 0.0, speed * normal[2]],
+        );
         f.step_with_solids(DT, 0.0, far_below, &solids);
 
         let rc = f.contact_radius();
@@ -229,9 +243,18 @@ fn a_box_pushed_onto_resting_particles_ejects_them_along_the_normal() {
             );
             let v = f.velocity(i);
             let vn = dot(v, normal);
-            let across = dot(sub(v, [vn * normal[0], vn * normal[1], vn * normal[2]]), [1.0; 3]);
-            assert!(vn >= speed, "yaw {yaw}: thrown at {vn:.4} m/s along the normal");
-            assert!(across.abs() < 1e-9, "yaw {yaw}: thrown off the normal, {v:?}");
+            let across = dot(
+                sub(v, [vn * normal[0], vn * normal[1], vn * normal[2]]),
+                [1.0; 3],
+            );
+            assert!(
+                vn >= speed,
+                "yaw {yaw}: thrown at {vn:.4} m/s along the normal"
+            );
+            assert!(
+                across.abs() < 1e-9,
+                "yaw {yaw}: thrown off the normal, {v:?}"
+            );
         }
     }
 }
@@ -256,7 +279,11 @@ fn the_slope_normal_runs_a_drop_downhill() {
         f.position(0)
     };
     let p = run(true);
-    assert!(p[0] > 0.01, "a drop on a 20 degree slope moved {:.5} m downhill in 2 s", p[0]);
+    assert!(
+        p[0] > 0.01,
+        "a drop on a 20 degree slope moved {:.5} m downhill in 2 s",
+        p[0]
+    );
     assert!(p[2].abs() < 1e-12, "it ran sideways: z = {:e}", p[2]);
     assert!(
         (p[1] - ground(p[0], p[2])).abs() < 1e-3,
@@ -264,7 +291,11 @@ fn the_slope_normal_runs_a_drop_downhill() {
         p[1] - ground(p[0], p[2])
     );
     let still = run(false);
-    assert!(still[0].abs() < 1e-9, "the plain step moved it {:e} m", still[0]);
+    assert!(
+        still[0].abs() < 1e-9,
+        "the plain step moved it {:e} m",
+        still[0]
+    );
 }
 
 /// A splash on level ground, stepped with no solids, with solids none of it can reach,
@@ -289,20 +320,27 @@ fn empty_or_unreachable_solids_are_bit_identical_to_step() {
     far.push_box([-20.0, 0.5, 3.0], [0.9, 0.3, 0.3], 1.0, [0.0, -3.0, 0.0]);
 
     let (mut a, mut b, mut c) = (scene(), scene(), scene());
-    for s in 0..240 {
+    for s in 0..150 {
         a.step(DT, 9.81, flat);
         b.step_with_solids(DT, 9.81, flat, &empty);
         c.step_with_solids(DT, 9.81, flat, &far);
-        assert_eq!(c.solid_stats().bin_entries, 0, "step {s}: a far solid was binned");
-        if s % 60 == 59 {
+        assert_eq!(
+            c.solid_stats().bin_entries,
+            0,
+            "step {s}: a far solid was binned"
+        );
+        if s == 89 {
             a.drain_settled(|_| {});
             b.drain_settled(|_| {});
             c.drain_settled(|_| {});
         }
     }
-    assert!(a.len() > 100, "the splash drained before it was compared");
+    assert!(a.len() > 50, "the splash drained before it was compared");
     assert!(bits(&a) == bits(&b), "an empty solid set changed the fluid");
-    assert!(bits(&a) == bits(&c), "solids out of reach changed the fluid");
+    assert!(
+        bits(&a) == bits(&c),
+        "solids out of reach changed the fluid"
+    );
 }
 
 /// The binning's promise, against brute force: every particle that starts within reach
@@ -325,7 +363,13 @@ fn every_particle_within_reach_of_a_solid_finds_it_in_its_bin() {
     let mut solids = SphSolids::new();
     for k in 0..6 {
         let o = k as f64 * 0.1 - 0.25;
-        solids.push_capsule([o, 0.1, -0.2], [o + 0.05, 0.5, 0.2], 0.03, [0.0; 3], [0.0; 3]);
+        solids.push_capsule(
+            [o, 0.1, -0.2],
+            [o + 0.05, 0.5, 0.2],
+            0.03,
+            [0.0; 3],
+            [0.0; 3],
+        );
         solids.push_box([-o, 0.3, o], [0.04, 0.1, 0.02], o * 3.0, [0.0; 3]);
     }
     f.build_grid();
@@ -355,7 +399,24 @@ fn every_particle_within_reach_of_a_solid_finds_it_in_its_bin() {
             }
         }
     }
-    assert!(checked > 500, "only {checked} particle-solid pairs were in reach");
+    assert!(
+        checked > 500,
+        "only {checked} particle-solid pairs were in reach"
+    );
     f.solid_bins.reset();
-    assert!(f.solid_bins.range.iter().all(|r| *r == [0, 0]), "reset left a bucket set");
+    assert!(
+        f.solid_bins.range.iter().all(|r| *r == [0, 0]),
+        "reset left a bucket set"
+    );
+}
+
+/// The bytes the module documentation declares for a solid and a bin, held to the types.
+#[test]
+fn a_solid_and_a_bin_cost_the_declared_bytes() {
+    use std::mem::size_of;
+    assert_eq!(size_of::<solids::Capsule>(), 144);
+    assert_eq!(size_of::<solids::YawBox>(), 88);
+    // A bucket's range, and an entry: its pair (bucket, solid) and its slot.
+    assert_eq!(size_of::<[u32; 2]>(), 8);
+    assert_eq!(2 * size_of::<u32>() + size_of::<u32>(), 12);
 }

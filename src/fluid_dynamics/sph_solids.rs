@@ -14,7 +14,7 @@ use super::{bucket, cell_of, row_hash, SphFluid, CFL_FRACTION, STREAM_CHUNK};
 /// A capsule as the contact reads it: the caller's numbers plus the axis terms every ray
 /// test needs, folded once when it is pushed.
 #[derive(Debug, Clone, Copy)]
-struct Capsule {
+pub(super) struct Capsule {
     a: [f64; 3],
     b: [f64; 3],
     velocity_a: [f64; 3],
@@ -31,7 +31,7 @@ struct Capsule {
 
 /// A box yawed about +y, with its yaw's sine and cosine taken once when it is pushed.
 #[derive(Debug, Clone, Copy)]
-struct YawBox {
+pub(super) struct YawBox {
     centre: [f64; 3],
     half: [f64; 3],
     sin: f64,
@@ -47,7 +47,7 @@ struct YawBox {
 /// refills the set each frame from wherever its actors, corpses and props are; the step
 /// reads it and never writes it.
 ///
-/// Storage is two `Vec`s of whole records (a capsule is 136 bytes, a box 88), because the
+/// Storage is two `Vec`s of whole records (a capsule is 144 bytes, a box 88), because the
 /// contact reads every field of the one solid it is testing; cleared rather than freed,
 /// so a set refilled every frame stops allocating once it has held its largest frame.
 ///
@@ -263,7 +263,11 @@ impl SphSolids {
         if !axis_len2.is_finite() {
             return false;
         }
-        let inv_axis_len2 = if axis_len2 > 0.0 { 1.0 / axis_len2 } else { 0.0 };
+        let inv_axis_len2 = if axis_len2 > 0.0 {
+            1.0 / axis_len2
+        } else {
+            0.0
+        };
         self.capsules.push(Capsule {
             a,
             b,
@@ -338,7 +342,7 @@ impl SphSolids {
 
     /// The world-space bounds of solid `id`: capsules are ids `0..capsule_count`, boxes
     /// follow.
-    fn bounds(&self, id: usize) -> ([f64; 3], [f64; 3]) {
+    pub(super) fn bounds(&self, id: usize) -> ([f64; 3], [f64; 3]) {
         if id < self.capsules.len() {
             let c = &self.capsules[id];
             let r = c.radius;
@@ -394,7 +398,7 @@ pub struct SphSolidStats {
 /// step pays for the buckets solids reach, never for the whole table.
 #[derive(Debug, Clone, Default)]
 pub(super) struct SolidBins {
-    range: Vec<[u32; 2]>,
+    pub(super) range: Vec<[u32; 2]>,
     pair_bucket: Vec<u32>,
     pair_solid: Vec<u32>,
     entries: Vec<u32>,
@@ -819,13 +823,21 @@ fn capsule_ray(c: &Capsule, o: [f64; 3], rd: [f64; 3]) -> f64 {
 /// World vector `w` in box `b`'s frame.
 #[inline]
 fn to_box(b: &YawBox, w: [f64; 3]) -> [f64; 3] {
-    [b.cos * w[0] - b.sin * w[2], w[1], b.sin * w[0] + b.cos * w[2]]
+    [
+        b.cos * w[0] - b.sin * w[2],
+        w[1],
+        b.sin * w[0] + b.cos * w[2],
+    ]
 }
 
 /// Box `b`'s local vector `l` in the world.
 #[inline]
 fn from_box(b: &YawBox, l: [f64; 3]) -> [f64; 3] {
-    [b.cos * l[0] + b.sin * l[2], l[1], -b.sin * l[0] + b.cos * l[2]]
+    [
+        b.cos * l[0] + b.sin * l[2],
+        l[1],
+        -b.sin * l[0] + b.cos * l[2],
+    ]
 }
 
 /// The contact on face `axis` of box `b` (outward along `sign`) nearest local point `l`.
