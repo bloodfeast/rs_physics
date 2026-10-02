@@ -5,7 +5,9 @@
 //! [`TurbulenceDrive`], the cross-fade's definition, and the plain
 //! [`ParticleEffects::integrate`] for a class that ignores the air.
 
-use super::{Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive, VelocityGrid};
+use super::{
+    Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive, VelocityGrid,
+};
 
 fn rms_speed(grid: &VelocityGrid, margin: usize) -> f64 {
     let n = grid.dims();
@@ -46,11 +48,14 @@ fn the_swirl_is_divergence_free_to_float_precision() {
         worst = worst.max(grid.divergence_at(i, j, k).abs());
     }
     println!("worst divergence {worst:e} against a velocity gradient scale {scale:e}");
-    assert!(worst <= 16.0 * f32::EPSILON * scale, "divergence {worst} against {scale}");
+    assert!(
+        worst <= 16.0 * f32::EPSILON * scale,
+        "divergence {worst} against {scale}"
+    );
 }
 
 /// Each octave's rms speed is Kolmogorov's eddy velocity at its size, measured on a
-/// 64³ field one octave at a time.
+/// 64^3 field one octave at a time.
 #[test]
 fn each_octave_moves_at_its_kolmogorov_eddy_velocity() {
     let (u, l, h) = (4.0f32, 80.0f32, 1.5f32);
@@ -75,7 +80,10 @@ fn each_octave_moves_at_its_kolmogorov_eddy_velocity() {
             law = speed as f64;
         }
         let error = measured / law - 1.0;
-        println!("octave {octave}: rms {measured:.4} m/s against the law's {law:.4} ({:+.1}%)", 100.0 * error);
+        println!(
+            "octave {octave}: rms {measured:.4} m/s against the law's {law:.4} ({:+.1}%)",
+            100.0 * error
+        );
         // A realisation scatters about its expectation by about one over the square
         // root of its lattice points: 1% for the finest octave, 10% for the coarsest.
         let tolerance = [0.03, 0.06, 0.12][octave];
@@ -119,9 +127,19 @@ fn an_octave_changes_over_its_turnover_time() {
     // has moved on too.
     let mut a = SwirlField::new([0.0; 3], [32, 32, 32], 2.0, drive, 9).unwrap();
     a.isolate_octave(0);
-    let before: Vec<f32> = a.velocity().cells().iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let before: Vec<f32> = a
+        .velocity()
+        .cells()
+        .iter()
+        .flat_map(|c| [c[0], c[1], c[2]])
+        .collect();
     a.advance(tau);
-    let after: Vec<f32> = a.velocity().cells().iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let after: Vec<f32> = a
+        .velocity()
+        .cells()
+        .iter()
+        .flat_map(|c| [c[0], c[1], c[2]])
+        .collect();
     let got = correlation(&before, &after);
     println!("velocity correlation after a turnover: {got:.4}");
     assert!(got.abs() < 0.05, "{got}");
@@ -142,7 +160,13 @@ fn no_octave_fits_below_the_grid() {
 #[test]
 fn a_fetch_is_trilinear_and_clamped() {
     let mut grid = VelocityGrid::new([10.0, 0.0, -4.0], 2.0, [4, 3, 5]).unwrap();
-    let f = |i: usize, j: usize, k: usize| [i as f32 + 0.5 * j as f32 - k as f32, 2.0 * j as f32, 0.25 * k as f32];
+    let f = |i: usize, j: usize, k: usize| {
+        [
+            i as f32 + 0.5 * j as f32 - k as f32,
+            2.0 * j as f32,
+            0.25 * k as f32,
+        ]
+    };
     for i in 0..4 {
         for j in 0..3 {
             for k in 0..5 {
@@ -150,10 +174,20 @@ fn a_fetch_is_trilinear_and_clamped() {
             }
         }
     }
-    let centre = |i: usize, j: usize, k: usize| [10.0 + 2.0 * i as f32 + 1.0, 2.0 * j as f32 + 1.0, -4.0 + 2.0 * k as f32 + 1.0];
+    let centre = |i: usize, j: usize, k: usize| {
+        [
+            10.0 + 2.0 * i as f32 + 1.0,
+            2.0 * j as f32 + 1.0,
+            -4.0 + 2.0 * k as f32 + 1.0,
+        ]
+    };
     assert_eq!(grid.sample(centre(2, 1, 3)), f(2, 1, 3));
     // The field is linear in the indices, so trilinear interpolation reproduces it.
-    let p = [10.0 + 1.0 + 2.0 * 1.25, 1.0 + 2.0 * 0.5, -4.0 + 1.0 + 2.0 * 2.75];
+    let p = [
+        10.0 + 1.0 + 2.0 * 1.25,
+        1.0 + 2.0 * 0.5,
+        -4.0 + 1.0 + 2.0 * 2.75,
+    ];
     let want = [1.25 + 0.25 - 2.75, 1.0, 0.25 * 2.75];
     let got = grid.sample(p);
     for a in 0..3 {
@@ -173,10 +207,25 @@ fn a_class_that_ignores_the_air_is_bit_identical_to_integrate() {
     let mut swirl = SwirlField::new([-16.0, 0.0, -16.0], [16, 16, 16], 2.0, drive, 3).unwrap();
     let classes = |swirl_on: f32| {
         [
-            ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl: 0.0 },
-            ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl: swirl_on },
+            ParticleClass {
+                gravity: 26.0,
+                drag: 1.4,
+                restitution: 0.32,
+                swirl: 0.0,
+            },
+            ParticleClass {
+                gravity: 1.6,
+                drag: 3.4,
+                restitution: 0.0,
+                swirl: swirl_on,
+            },
             // drag * dt above one: the damping clamp's case, where -0.0 can appear.
-            ParticleClass { gravity: 4.0, drag: 400.0, restitution: 0.0, swirl: 0.0 },
+            ParticleClass {
+                gravity: 4.0,
+                drag: 400.0,
+                restitution: 0.0,
+                swirl: 0.0,
+            },
         ]
     };
     let mut with_air = ParticleEffects::with_capacity(4096);
@@ -221,8 +270,16 @@ fn a_class_that_ignores_the_air_is_bit_identical_to_integrate() {
             let (a, b) = (with_air.position(i), plain.position(i));
             let (va, vb) = (with_air.velocity(i), plain.velocity(i));
             for k in 0..3 {
-                assert_eq!(a[k].to_bits(), b[k].to_bits(), "step {step} particle {i} position axis {k}");
-                assert_eq!(va[k].to_bits(), vb[k].to_bits(), "step {step} particle {i} velocity axis {k}");
+                assert_eq!(
+                    a[k].to_bits(),
+                    b[k].to_bits(),
+                    "step {step} particle {i} position axis {k}"
+                );
+                assert_eq!(
+                    va[k].to_bits(),
+                    vb[k].to_bits(),
+                    "step {step} particle {i} velocity axis {k}"
+                );
             }
             compared += 1;
         }
@@ -240,7 +297,12 @@ fn no_class_on_the_air_is_integrate() {
     };
     let mut a = ParticleEffects::with_capacity(64);
     let mut b = ParticleEffects::with_capacity(64);
-    let class = ParticleClass { gravity: 9.0, drag: 2.0, restitution: 0.0, swirl: 0.0 };
+    let class = ParticleClass {
+        gravity: 9.0,
+        drag: 2.0,
+        restitution: 0.0,
+        swirl: 0.0,
+    };
     a.set_class(0, class);
     b.set_class(0, class);
     for i in 0..32 {
@@ -265,11 +327,55 @@ fn full_coupling_relaxes_to_the_air_at_the_drag_rate() {
     air.fill([0.0, 0.0, 4.0]);
     let mut fx = ParticleEffects::with_capacity(4);
     let (drag, dt) = (2.5f32, 1.0f32 / 60.0);
-    fx.set_class(0, ParticleClass { gravity: 0.0, drag, restitution: 0.0, swirl: 1.0 });
+    fx.set_class(
+        0,
+        ParticleClass {
+            gravity: 0.0,
+            drag,
+            restitution: 0.0,
+            swirl: 1.0,
+        },
+    );
     fx.emit_one([0.0; 3], [0.0; 3], 10.0, 1.0, 0);
     for step in 1..=30 {
         fx.integrate_in_air(dt, &air);
         let want = 4.0 * (1.0 - (1.0 - drag * dt).powi(step));
-        assert!((fx.velocity(0)[2] - want).abs() < 1e-5, "step {step}: {} vs {want}", fx.velocity(0)[2]);
+        assert!(
+            (fx.velocity(0)[2] - want).abs() < 1e-5,
+            "step {step}: {} vs {want}",
+            fx.velocity(0)[2]
+        );
+    }
+}
+
+/// The fast fetch is the portable one to the bit, inside the grid, outside it, and at
+/// non-finite positions.
+#[test]
+fn the_fast_fetch_matches_the_portable_one() {
+    let drive = TurbulenceDrive::new(4.0, 30.0).unwrap();
+    let mut swirl = SwirlField::new([-10.0, 2.0, -7.0], [12, 9, 15], 1.5, drive, 21).unwrap();
+    swirl.advance(0.3);
+    let grid = swirl.velocity();
+    let mut rng = EffectRng::new(8);
+    let mut points: Vec<[f32; 3]> = (0..20_000)
+        .map(|_| {
+            [
+                rng.range(-14.0, 12.0),
+                rng.range(-2.0, 20.0),
+                rng.range(-11.0, 20.0),
+            ]
+        })
+        .collect();
+    points.push([f32::NAN, 3.0, 1.0]);
+    points.push([f32::INFINITY, f32::NEG_INFINITY, 0.0]);
+    for p in points {
+        let (fast, reference) = (grid.sample(p), grid.sample_reference(p));
+        for a in 0..3 {
+            assert_eq!(
+                fast[a].to_bits(),
+                reference[a].to_bits(),
+                "{p:?}: {fast:?} vs {reference:?}"
+            );
+        }
     }
 }

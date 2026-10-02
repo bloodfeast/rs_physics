@@ -141,8 +141,8 @@
 //!   that advection's numerical viscosity, so there is no constant to tune). Both are
 //!   off by default. There is no sub-grid stress model, deliberately: at these
 //!   resolutions first-order advection already removes more than a Smagorinsky model
-//!   would (its numerical viscosity `h² a(1 - a) / (2 dt)` is of order `|u| h / 2` at a
-//!   Courant number below one, against Smagorinsky's `(0.17 h)² |S|`, about
+//!   would (its numerical viscosity `h^2 a(1 - a) / (2 dt)` is of order `|u| h / 2` at a
+//!   Courant number below one, against Smagorinsky's `(0.17 h)^2 |S|`, about
 //!   `0.03 |u| h` for a shear of `|u| / h`), so adding one would only smooth further
 //! - **Confinement on a collocated grid**: the projection cannot remove a divergence
 //!   at the grid scale, and confinement feeds that scale, so a confined flow keeps a

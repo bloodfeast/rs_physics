@@ -67,7 +67,7 @@ pub struct PlumeRegion {
     /// The low corner of the region, metres.
     pub origin: [f32; 3],
     /// Fluid cells along `x`, `y` and `z`; at least 3 each. About 32 is the design
-    /// point: 32³ cells of 1 to 2 m cover a 32 to 64 m plume.
+    /// point: 32^3 cells of 1 to 2 m cover a 32 to 64 m plume.
     pub cells: [usize; 3],
     /// The cell size, metres.
     pub cell_size: f32,
@@ -108,7 +108,21 @@ impl PlumeFrame {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// plume.step_now(0.1);
+    /// let frame = air.latest();
+    /// // The wind is what the outer layer reads.
+    /// assert_eq!(frame.velocity().get(0, 0, 0), [1.0, 0.0, 0.0]);
+    /// ```
     pub fn velocity(&self) -> &VelocityGrid {
         &self.velocity
     }
@@ -122,7 +136,20 @@ impl PlumeFrame {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// assert_eq!(air.latest().step(), 0);
+    /// plume.step_now(0.1);
+    /// assert_eq!(air.latest().step(), 1);
+    /// ```
     pub fn step(&self) -> u64 {
         self.step
     }
@@ -135,7 +162,20 @@ impl PlumeFrame {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// plume.step_now(0.1);
+    /// plume.step_now(0.1);
+    /// assert!((air.latest().time() - 0.2).abs() < 1e-6);
+    /// ```
     pub fn time(&self) -> f64 {
         self.time
     }
@@ -149,7 +189,19 @@ impl PlumeFrame {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// plume.step_now(0.1);
+    /// assert!(air.latest().step_cost() > std::time::Duration::ZERO);
+    /// ```
     pub fn step_cost(&self) -> Duration {
         self.step_cost
     }
@@ -217,7 +269,22 @@ impl PlumeReader {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// let first = air.latest().step();
+    /// plume.step_now(0.1);
+    /// assert_eq!(air.latest().step(), first + 1);
+    /// // Nothing new published: the same frame again.
+    /// assert_eq!(air.latest().step(), first + 1);
+    /// ```
     pub fn latest(&mut self) -> &PlumeFrame {
         if self.slots.middle.load(Ordering::Acquire) & FRESH != 0 {
             let previous = self.slots.middle.swap(self.front, Ordering::AcqRel);
@@ -230,14 +297,46 @@ impl PlumeReader {
 
 /// A plume's air: a Navier-Stokes grid over the source's region for the plume's
 /// large-scale motion, a [`SwirlField`] for its eddies, and the triple buffer the
-/// sum is published through. See the [module documentation](self).
+/// sum is published through.
+///
+/// # Example
+///
+/// ```
+/// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+/// use rs_physics::particles::{ParticleClass, ParticleEffects, TurbulenceDrive};
+///
+/// // A fire 4 m wide whose smoke rises at 3 m/s, in a 16 m cube of 1 m cells, with a
+/// // 2 m/s wind along x.
+/// let region = PlumeRegion { origin: [-8.0, 0.0, -8.0], cells: [16, 16, 16], cell_size: 1.0 };
+/// let source = PlumeSource {
+///     position: [0.0, 0.5, 0.0],
+///     drive: TurbulenceDrive::new(3.0, 4.0).unwrap(),
+///     smoke_rate: 1.0,
+/// };
+/// let (mut plume, mut air) = PlumeField::new(region, source, [2.0, 0.0, 0.0], 7).unwrap();
+/// // One step on this thread; `spawn` runs it on a worker instead.
+/// plume.step_now(0.05);
+///
+/// let mut fx = ParticleEffects::with_capacity(64);
+/// fx.set_class(0, ParticleClass { gravity: 0.3, drag: 2.0, restitution: 0.0, swirl: 1.0 });
+/// for i in 0..16 {
+///     fx.emit_one([0.0, 1.0 + i as f32 * 0.5, 0.0], [0.0; 3], 10.0, 1.0, 0);
+/// }
+/// let frame = air.latest();
+/// assert_eq!(frame.step(), 1);
+/// for _ in 0..30 {
+///     fx.integrate_in_air(1.0 / 60.0, frame.velocity());
+/// }
+/// // The wind has the smoke moving downwind.
+/// assert!((0..fx.len()).all(|i| fx.velocity(i)[0] > 0.0));
+/// ```
 ///
 /// # The grid
 ///
 /// A [`FluidGrid3D`] of the region's cells plus a ghost layer, with
 /// [`AdvectionScheme::MacCormack`] and
 /// [`VorticityConfinement::MatchNumericalDissipation`] on and the conjugate-gradient
-/// pressure solve at its default tolerance. Air's viscosity (1.5e-5 m²/s) is far below
+/// pressure solve at its default tolerance. Air's viscosity (1.5e-5 m^2/s) is far below
 /// what the grid's own numerics add at metre cells, so the grid runs inviscid, and the
 /// smoke is not diffused beyond what advection does.
 ///
@@ -251,9 +350,15 @@ impl PlumeReader {
 ///
 /// # Memory
 ///
-/// [`PlumeField::bytes`] reports it. For a 32³ region (34³ cells with the ghost layer):
-/// the grid's 184 bytes a cell with both options (7.2 MB), the swirl (about 1.4 MB) and
-/// three published frames of 16 bytes a cell (1.9 MB), about 10.5 MB in all.
+/// [`PlumeField::bytes`] reports it. For a 32^3 region (34^3 cells with the ghost layer):
+/// the grid's 184 bytes a cell with both options (7.2 MB), the swirl (about 2 MB) and
+/// three published frames of 16 bytes a cell (1.9 MB): 11.0 MB measured. At 64^3, 79 MB.
+///
+/// # Cost
+///
+/// Measured 2026-10-02 on one core beside another build (`examples/turb_bench.rs`,
+/// `plume`): a step at 32^3 is 15.8 ms, 32% of a 20 Hz period; at 64^3 it is 131 ms,
+/// which does not fit one.
 pub struct PlumeField {
     grid: FluidGrid3D,
     swirl: SwirlField,
@@ -295,7 +400,19 @@ impl PlumeField {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// assert_eq!(air.latest().velocity().dims(), [10, 10, 10]);
+    /// plume.step_now(0.1);
+    /// ```
     pub fn new(
         region: PlumeRegion,
         source: PlumeSource,
@@ -307,7 +424,11 @@ impl PlumeField {
         }
         let h = region.cell_size;
         if !(h.is_finite() && h > 0.0)
-            || region.origin.iter().chain(source.position.iter()).any(|c| !c.is_finite())
+            || region
+                .origin
+                .iter()
+                .chain(source.position.iter())
+                .any(|c| !c.is_finite())
             || !source.smoke_rate.is_finite()
         {
             return Err(PhysicsError::InvalidDistance);
@@ -331,8 +452,14 @@ impl PlumeField {
                 step_cost: Duration::ZERO,
             }))
         };
-        let slots = Arc::new(Slots { frames: [frame()?, frame()?, frame()?], middle: AtomicUsize::new(2) });
-        let reader = PlumeReader { slots: Arc::clone(&slots), front: 1 };
+        let slots = Arc::new(Slots {
+            frames: [frame()?, frame()?, frame()?],
+            middle: AtomicUsize::new(2),
+        });
+        let reader = PlumeReader {
+            slots: Arc::clone(&slots),
+            front: 1,
+        };
         let mut plume = PlumeField {
             grid,
             swirl,
@@ -367,7 +494,8 @@ impl PlumeField {
 
     fn apply_wind(&mut self) {
         let w = self.wind_in_grid_units();
-        self.grid.set_far_field(if w == [0.0; 3] { None } else { Some(w) });
+        self.grid
+            .set_far_field(if w == [0.0; 3] { None } else { Some(w) });
     }
 
     /// The fluid cells of the source's disc: centres within `L / 2` of its position
@@ -544,7 +672,20 @@ impl PlumeField {
     ///
     /// # Examples
     ///
-    /// See the [module documentation](self).
+    /// ```
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (mut plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// plume.step_now(0.05);
+    /// assert_eq!(air.latest().step(), 1);
+    /// assert!(plume.fluid().get_total_mass() > 0.0);
+    /// ```
     pub fn step_now(&mut self, dt: f32) {
         if !(dt.is_finite() && dt > 0.0) {
             return;
@@ -687,8 +828,14 @@ impl PlumeField {
                 }
                 plume
             })
-            .map_err(|e| PhysicsError::CalculationError(format!("plume worker did not start: {e}")))?;
-        Ok(PlumeWorker { handle: Some(handle), stop, controls })
+            .map_err(|e| {
+                PhysicsError::CalculationError(format!("plume worker did not start: {e}"))
+            })?;
+        Ok(PlumeWorker {
+            handle: Some(handle),
+            stop,
+            controls,
+        })
     }
 }
 
@@ -827,8 +974,14 @@ pub(crate) mod test_access {
                 step_cost: Duration::ZERO,
             })
         };
-        let slots = Arc::new(Slots { frames: [frame(), frame(), frame()], middle: AtomicUsize::new(2) });
-        let reader = PlumeReader { slots: Arc::clone(&slots), front: 1 };
+        let slots = Arc::new(Slots {
+            frames: [frame(), frame(), frame()],
+            middle: AtomicUsize::new(2),
+        });
+        let reader = PlumeReader {
+            slots: Arc::clone(&slots),
+            front: 1,
+        };
         let mut writer = Writer { slots, back: 0 };
         let write = move |value: f32, step: u64| {
             let frame = writer.back_mut();

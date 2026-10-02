@@ -3,6 +3,64 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## 0.4.0 (2026-10-02)
+
+Turbulence (package TURB): two options on the grid fluids, a curl-noise swirl for the
+particle pool, and a plume field that runs a grid on a worker thread. With every new
+option off, every existing path is bit-identical (`examples/grid_checksum.rs` on every
+solver type, pressure solver and wall condition, and the particle pool).
+
+### Breaking
+
+- `ParticleClass` has a new public field, `swirl` (0 to 1, default 0): struct literals
+  need it or `..Default::default()`.
+- `SolverConfig` has two new public fields, `advection` and `vorticity_confinement`:
+  struct literals need `..Default::default()`.
+
+### Added
+
+- `AdvectionScheme::MacCormack` for `FluidGrid` and `FluidGrid3D` (Selle et al. 2008):
+  forward and reverse semi-Lagrangian passes, half the round trip's error added back,
+  clamped to the forward pass's source cells. On an inviscid 4 x 4 Taylor-Green array at
+  64^2 it keeps 0.80 of the enstrophy over 2 s where first-order advection keeps 0.36.
+  Adds 40 to 48% to a 3D step (a reverse pass and a combine pass per advected field) and
+  24 bytes a cell.
+- `VorticityConfinement::MatchNumericalDissipation` (Fedkiw, Stam and Jensen 2001):
+  `epsilon h (N x omega)` before the second projection, with `epsilon` derived cell by
+  cell from first-order advection's numerical viscosity `h^2 a(1 - a) / (2 dt)` at the
+  grid scale, so there is no constant. Adds 8 to 9% to a 3D step, 8 bytes a cell in 2D
+  and 32 in 3D. On a smooth vortex it adds energy (the method confines structures larger
+  than a cell more than they dissipate), and on these collocated grids it leaves a
+  grid-scale divergence the projection cannot remove; both measured in
+  `turbulence_tests.rs`.
+- `VelocityGrid` (air velocity a particle reads with one trilinear fetch), `SwirlField`
+  (curl noise in three octaves at 2h, 4h and 8h, each octave's rms speed set exactly to
+  Kolmogorov's `U (l / L)^(1/3)` and cross-faded over its turnover time `l / u_l`) and
+  `TurbulenceDrive` (the plume's `U` and `L`).
+- `ParticleEffects::integrate_in_air`: drag relaxes a class towards the local air
+  velocity at `swirl * drag`. A class with `swirl` 0 integrates bit-identically to
+  `integrate`; with no class on the air it is `integrate`.
+- `PlumeField`, `PlumeRegion`, `PlumeSource`, `PlumeFrame`, `PlumeReader` and
+  `PlumeWorker` (features `fluid_simulation` and `particles`): a `FluidGrid3D` with both
+  options over a source's region, the source held rising at `U` across its width, a
+  far-field wind, and the swirl, summed into one `VelocityGrid` and published through a
+  lock-free triple buffer from a worker thread (`spawn`) or the calling one
+  (`step_now`). A step at 32^3 costs 15.8 ms (32% of a 20 Hz period); at 64^3, 131 ms.
+- `examples/grid_checksum.rs` (bit checksums for comparing branches) and
+  `examples/turb_bench.rs` (interleaved on/off medians).
+
+### Not met
+
+- The brief's gate for the swirl: `integrate_in_air` under twice `integrate`'s cost a
+  particle. Measured 4.5 to 5.4 times, with and without the plume worker stepping beside
+  it. The trilinear fetch is about 50 instructions against a vectorised handful.
+
+### Changed
+
+- `FluidGrid::step` and `FluidGrid3D::step` allocate nothing: the step's copies and the
+  relaxation projection's buffers moved into the workspace (memory kept between steps
+  is now 112 bytes a cell in 2D and 128 in 3D). Bit-identical.
+
 ## 0.3.1 (2026-10-02)
 
 Liquids react to actors and debris. Additive: `step` is unchanged and bit-identical.

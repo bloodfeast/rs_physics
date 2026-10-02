@@ -6,7 +6,11 @@ use super::{PlumeField, PlumeRegion, PlumeSource};
 use crate::particles::{TurbulenceDrive, VelocityGrid};
 
 fn source_at(position: [f32; 3]) -> PlumeSource {
-    PlumeSource { position, drive: TurbulenceDrive::new(3.0, 4.0).unwrap(), smoke_rate: 1.0 }
+    PlumeSource {
+        position,
+        drive: TurbulenceDrive::new(3.0, 4.0).unwrap(),
+        smoke_rate: 1.0,
+    }
 }
 
 fn checksum(grid: &VelocityGrid) -> u64 {
@@ -26,8 +30,13 @@ fn checksum(grid: &VelocityGrid) -> u64 {
 /// swirl's, which is zero to `f32` rounding: summing adds nothing to it.
 #[test]
 fn the_summed_field_is_as_divergence_free_as_the_grid() {
-    let region = PlumeRegion { origin: [-8.0, 0.0, -8.0], cells: [16, 16, 16], cell_size: 1.0 };
-    let (mut plume, mut air) = PlumeField::new(region, source_at([0.0, 0.5, 0.0]), [1.5, 0.0, 0.5], 3).unwrap();
+    let region = PlumeRegion {
+        origin: [-8.0, 0.0, -8.0],
+        cells: [16, 16, 16],
+        cell_size: 1.0,
+    };
+    let (mut plume, mut air) =
+        PlumeField::new(region, source_at([0.0, 0.5, 0.0]), [1.5, 0.0, 0.5], 3).unwrap();
     for _ in 0..20 {
         plume.step_now(0.05);
     }
@@ -42,7 +51,12 @@ fn the_summed_field_is_as_divergence_free_as_the_grid() {
         for j in 0..dims[1] {
             for k in 0..dims[2] {
                 let (u, v, w) = plume.fluid().get_velocity(i, j, k).unwrap();
-                flow.set(i, j, k, [(u * scale) as f32, (v * scale) as f32, (w * scale) as f32]);
+                flow.set(
+                    i,
+                    j,
+                    k,
+                    [(u * scale) as f32, (v * scale) as f32, (w * scale) as f32],
+                );
             }
         }
     }
@@ -53,22 +67,40 @@ fn the_summed_field_is_as_divergence_free_as_the_grid() {
     for i in 2..dims[0] - 2 {
         for j in 2..dims[1] - 2 {
             for k in 2..dims[2] - 2 {
-                let (s, f, w) = (summed.divergence_at(i, j, k), flow.divergence_at(i, j, k), swirl.divergence_at(i, j, k));
+                let (s, f, w) = (
+                    summed.divergence_at(i, j, k),
+                    flow.divergence_at(i, j, k),
+                    swirl.divergence_at(i, j, k),
+                );
                 rms_summed += (s as f64).powi(2);
                 rms_flow += (f as f64).powi(2);
                 worst_gap = worst_gap.max((s - f).abs()).max(w.abs());
-                peak = peak.max(summed.get(i, j, k).iter().fold(0.0f32, |m, c| m.max(c.abs())));
+                peak = peak.max(
+                    summed
+                        .get(i, j, k)
+                        .iter()
+                        .fold(0.0f32, |m, c| m.max(c.abs())),
+                );
                 count += 1;
             }
         }
     }
-    let (rms_summed, rms_flow) = ((rms_summed / count as f64).sqrt(), (rms_flow / count as f64).sqrt());
+    let (rms_summed, rms_flow) = (
+        (rms_summed / count as f64).sqrt(),
+        (rms_flow / count as f64).sqrt(),
+    );
     println!("rms divergence: summed {rms_summed:e}, grid alone {rms_flow:e}; worst swirl contribution {worst_gap:e} (peak speed {peak})");
     // A cell's velocities are rounded to f32 and differenced: a few epsilons of the
     // peak speed over a cell.
     let rounding = 32.0 * f32::EPSILON * peak / region.cell_size;
-    assert!(worst_gap <= rounding, "the swirl added divergence {worst_gap} (rounding {rounding})");
-    assert!(rms_summed <= rms_flow + rounding as f64, "{rms_summed} vs {rms_flow}");
+    assert!(
+        worst_gap <= rounding,
+        "the swirl added divergence {worst_gap} (rounding {rounding})"
+    );
+    assert!(
+        rms_summed <= rms_flow + rounding as f64,
+        "{rms_summed} vs {rms_flow}"
+    );
 }
 
 /// A buoyant column in a side wind leans downwind: the smoke's centroid at height
@@ -76,8 +108,13 @@ fn the_summed_field_is_as_divergence_free_as_the_grid() {
 #[test]
 fn a_plume_leans_downwind() {
     let centroid_at_height = |wind: f32| {
-        let region = PlumeRegion { origin: [-10.0, 0.0, -10.0], cells: [20, 22, 20], cell_size: 1.0 };
-        let (mut plume, _air) = PlumeField::new(region, source_at([0.0, 0.5, 0.0]), [wind, 0.0, 0.0], 5).unwrap();
+        let region = PlumeRegion {
+            origin: [-10.0, 0.0, -10.0],
+            cells: [20, 22, 20],
+            cell_size: 1.0,
+        };
+        let (mut plume, _air) =
+            PlumeField::new(region, source_at([0.0, 0.5, 0.0]), [wind, 0.0, 0.0], 5).unwrap();
         for _ in 0..80 {
             plume.step_now(0.05);
         }
@@ -125,7 +162,10 @@ fn the_triple_buffer_never_tears() {
             distinct += 1;
         }
         let want = [step as f32, -(step as f32), step as f32, 0.0];
-        assert!(frame.velocity().cells().iter().all(|c| *c == want), "frame {step} is torn");
+        assert!(
+            frame.velocity().cells().iter().all(|c| *c == want),
+            "frame {step} is torn"
+        );
         previous = step;
         seen += 1;
     }
@@ -138,12 +178,17 @@ fn the_triple_buffer_never_tears() {
 /// state a synchronous run reaches at that step number.
 #[test]
 fn every_frame_read_while_the_worker_steps_is_a_finished_step() {
-    let region = PlumeRegion { origin: [-6.0, 0.0, -6.0], cells: [12, 12, 12], cell_size: 1.0 };
+    let region = PlumeRegion {
+        origin: [-6.0, 0.0, -6.0],
+        cells: [12, 12, 12],
+        cell_size: 1.0,
+    };
     let wind = [1.0, 0.0, -0.5];
     let rate = 500.0f32;
     let steps = 12u64;
 
-    let (mut replica, mut replica_air) = PlumeField::new(region, source_at([0.0, 0.5, 0.0]), wind, 9).unwrap();
+    let (mut replica, mut replica_air) =
+        PlumeField::new(region, source_at([0.0, 0.5, 0.0]), wind, 9).unwrap();
     let mut expected = vec![checksum(replica_air.latest().velocity())];
     for _ in 0..steps {
         replica.step_now(1.0 / rate);
@@ -159,7 +204,11 @@ fn every_frame_read_while_the_worker_steps_is_a_finished_step() {
         if step > steps {
             break;
         }
-        assert_eq!(checksum(frame.velocity()), expected[step as usize], "frame {step} is not a finished step");
+        assert_eq!(
+            checksum(frame.velocity()),
+            expected[step as usize],
+            "frame {step} is not a finished step"
+        );
         reads += 1;
         std::thread::yield_now();
     }

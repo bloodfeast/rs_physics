@@ -199,5 +199,65 @@ fn air(c: &mut Criterion) {
     group.finish();
 }
 
+/// The plume gate: `integrate_in_air` reading a `PlumeField` whose worker steps at
+/// 20 Hz on its own thread beside the bench, against `integrate` on the same live
+/// population in the same run. The timed span is the frame thread's whole cost: taking
+/// the newest frame and integrating through it.
+#[cfg(feature = "fluid_simulation")]
+fn air_with_plume_worker(c: &mut Criterion) {
+    use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    let region = PlumeRegion { origin: [-32.0, 8.0, -32.0], cells: [32, 32, 32], cell_size: 2.0 };
+    let source = PlumeSource {
+        position: [0.0, 9.0, 0.0],
+        drive: TurbulenceDrive::new(3.0, 12.0).unwrap(),
+        smoke_rate: 1.0,
+    };
+    let mut group = c.benchmark_group("particle_effects/air_with_plume_worker");
+    for &n in &[100_000usize, 1_000_000] {
+        let mut off = Live::new(n);
+        let mut field = swirl_field();
+        let mut on = Live::in_air(n, Some(&mut field));
+        let (plume, mut air) = PlumeField::new(region, source, [2.0, 0.0, 0.5], 0x5EED).unwrap();
+        let worker = plume.spawn(20.0).unwrap();
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("off", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    off.feed();
+                    let started = Instant::now();
+                    off.fx.integrate(std::hint::black_box(DT));
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("on", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    on.feed();
+                    let started = Instant::now();
+                    let frame = air.latest();
+                    on.fx.integrate_in_air(std::hint::black_box(DT), frame.velocity());
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        let frame = air.latest();
+        eprintln!(
+            "plume worker at step {}, last step cost {:.2} ms",
+            frame.step(),
+            frame.step_cost().as_secs_f64() * 1e3
+        );
+        drop(worker);
+    }
+    group.finish();
+}
+
+#[cfg(feature = "fluid_simulation")]
+criterion_group!(benches, integrate, collide, air, air_with_plume_worker);
+#[cfg(not(feature = "fluid_simulation"))]
 criterion_group!(benches, integrate, collide, air);
 criterion_main!(benches);

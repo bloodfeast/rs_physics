@@ -55,7 +55,7 @@ use crate::utils::PhysicsError;
 ///
 /// The cells are stored as four `f32`s (`x`, `y`, `z` and a zero pad), `z` fastest,
 /// so each of a fetch's eight taps is one 16-byte load. Memory: 16 bytes per
-/// cell, 512 KiB for 32³.
+/// cell, 512 KiB for 32^3.
 #[derive(Debug, Clone)]
 pub struct VelocityGrid {
     origin: [f32; 3],
@@ -66,6 +66,8 @@ pub struct VelocityGrid {
     inv_h: f32,
     /// `dims - 1` per axis, the largest sample coordinate.
     last: [f32; 3],
+    /// `dims - 2` per axis, the largest base cell of a fetch.
+    last_base: [f32; 3],
     cells: Vec<[f32; 4]>,
 }
 
@@ -114,6 +116,7 @@ impl VelocityGrid {
             first_centre: origin.map(|o| o + 0.5 * h),
             inv_h: 1.0 / h,
             last: dims.map(|n| (n - 1) as f32),
+            last_base: dims.map(|n| (n - 2) as f32),
             cells: vec![[0.0; 4]; cells],
         })
     }
@@ -211,7 +214,10 @@ impl VelocityGrid {
     /// assert_eq!(grid.get(1, 2, 3), [1.0, 0.0, -1.0]);
     /// ```
     pub fn get(&self, i: usize, j: usize, k: usize) -> [f32; 3] {
-        assert!(i < self.dims[0] && j < self.dims[1] && k < self.dims[2], "cell outside the grid");
+        assert!(
+            i < self.dims[0] && j < self.dims[1] && k < self.dims[2],
+            "cell outside the grid"
+        );
         let c = self.cells[self.index(i, j, k)];
         [c[0], c[1], c[2]]
     }
@@ -238,7 +244,10 @@ impl VelocityGrid {
     /// assert_eq!(grid.get(0, 0, 0), [0.0, 2.0, 0.0]);
     /// ```
     pub fn set(&mut self, i: usize, j: usize, k: usize, velocity: [f32; 3]) {
-        assert!(i < self.dims[0] && j < self.dims[1] && k < self.dims[2], "cell outside the grid");
+        assert!(
+            i < self.dims[0] && j < self.dims[1] && k < self.dims[2],
+            "cell outside the grid"
+        );
         let idx = self.index(i, j, k);
         let v = velocity.map(|c| if c.is_finite() { c } else { 0.0 });
         self.cells[idx] = [v[0], v[1], v[2], 0.0];
@@ -296,14 +305,85 @@ impl VelocityGrid {
     /// ```
     #[inline(always)]
     pub fn sample(&self, p: [f32; 3]) -> [f32; 3] {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.sample_sse(p)
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.sample_portable(p)
+        }
+    }
+
+    /// [`Self::sample`] with SSE2, which every x86-64 has: the three axes' clamp, floor
+    /// and fraction in one register, each tap one 16-byte load, and the seven lerps on
+    /// all three components at once. The result is the portable version's to the bit
+    /// (the same operations in the same order, lane by lane), which a test checks.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn sample_sse(&self, p: [f32; 3]) -> [f32; 3] {
+        use std::arch::x86_64::*;
+        let [fc, last, last_base] =
+            [self.first_centre, self.last, self.last_base].map(|v| [v[0], v[1], v[2], 0.0f32]);
+        let sy = self.dims[2];
+        let sx = self.dims[1] * sy;
+        // SAFETY: SSE2 is part of the x86-64 baseline. Every load is inside `cells`:
+        // the base cell's index on each axis is at most `dims - 2` (the clamp to
+        // `last_base` happens before the conversion, and `max` sends NaN to 0), so the
+        // farthest tap, `base + sx + sy + 1`, is the last cell at most. Each tap reads
+        // the four `f32`s of one `[f32; 4]`.
+        unsafe {
+            let g = _mm_mul_ps(
+                _mm_sub_ps(_mm_set_ps(0.0, p[2], p[1], p[0]), _mm_loadu_ps(fc.as_ptr())),
+                _mm_set1_ps(self.inv_h),
+            );
+            // `max(g, 0)` returns its second operand when `g` is NaN.
+            let g = _mm_min_ps(_mm_max_ps(g, _mm_setzero_ps()), _mm_loadu_ps(last.as_ptr()));
+            let base = _mm_cvttps_epi32(_mm_min_ps(g, _mm_loadu_ps(last_base.as_ptr())));
+            let f = _mm_sub_ps(g, _mm_cvtepi32_ps(base));
+            let i = _mm_cvtsi128_si32(base) as usize;
+            let j = _mm_cvtsi128_si32(_mm_shuffle_epi32(base, 0x55)) as usize;
+            let k = _mm_cvtsi128_si32(_mm_shuffle_epi32(base, 0xAA)) as usize;
+            let tap = self.cells.as_ptr().add(i * sx + j * sy + k) as *const f32;
+            let load = |offset: usize| _mm_loadu_ps(tap.add(4 * offset));
+            let lerp =
+                |a: __m128, b: __m128, t: __m128| _mm_add_ps(a, _mm_mul_ps(_mm_sub_ps(b, a), t));
+            let (fx, fy, fz) = (
+                _mm_shuffle_ps(f, f, 0x00),
+                _mm_shuffle_ps(f, f, 0x55),
+                _mm_shuffle_ps(f, f, 0xAA),
+            );
+            let x0 = lerp(
+                lerp(load(0), load(1), fz),
+                lerp(load(sy), load(sy + 1), fz),
+                fy,
+            );
+            let x1 = lerp(
+                lerp(load(sx), load(sx + 1), fz),
+                lerp(load(sx + sy), load(sx + sy + 1), fz),
+                fy,
+            );
+            let mut out = [0.0f32; 4];
+            _mm_storeu_ps(out.as_mut_ptr(), lerp(x0, x1, fx));
+            [out[0], out[1], out[2]]
+        }
+    }
+
+    /// [`Self::sample`] in plain Rust, for targets without SSE2 and as the reference
+    /// the SSE version is tested against.
+    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code))]
+    #[inline(always)]
+    fn sample_portable(&self, p: [f32; 3]) -> [f32; 3] {
         let mut base = [0usize; 3];
         let mut f = [0.0f32; 3];
         for a in 0..3 {
             // `max` then `min` rather than `clamp`, so NaN lands on 0 instead of passing.
-            let g = ((p[a] - self.first_centre[a]) * self.inv_h).max(0.0).min(self.last[a]);
+            let g = ((p[a] - self.first_centre[a]) * self.inv_h)
+                .max(0.0)
+                .min(self.last[a]);
             // Truncation is the floor here, `g` being non-negative; the last centre
             // belongs to the cell pair below it.
-            let i = (g as usize).min(self.dims[a] - 2);
+            let i = g.min(self.last_base[a]) as usize;
             base[a] = i;
             f[a] = g - i as f32;
         }
@@ -313,12 +393,27 @@ impl VelocityGrid {
         // Every tap is inside: each base is at most `dims - 2`.
         let c = &self.cells[b..b + sx + sy + 2];
         let lerp = |a: [f32; 4], b: [f32; 4], t: f32| -> [f32; 4] {
-            [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 0.0]
+            [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+                0.0,
+            ]
         };
         let x0 = lerp(lerp(c[0], c[1], f[2]), lerp(c[sy], c[sy + 1], f[2]), f[1]);
-        let x1 = lerp(lerp(c[sx], c[sx + 1], f[2]), lerp(c[sx + sy], c[sx + sy + 1], f[2]), f[1]);
+        let x1 = lerp(
+            lerp(c[sx], c[sx + 1], f[2]),
+            lerp(c[sx + sy], c[sx + sy + 1], f[2]),
+            f[1],
+        );
         let v = lerp(x0, x1, f[0]);
         [v[0], v[1], v[2]]
+    }
+
+    /// The portable fetch, for checking the SSE one against.
+    #[cfg(test)]
+    pub(crate) fn sample_reference(&self, p: [f32; 3]) -> [f32; 3] {
+        self.sample_portable(p)
     }
 
     /// The central-difference divergence at cell `(i, j, k)`, 1/s, for checking a field
@@ -524,7 +619,7 @@ fn lattice_points(n: usize, s: usize) -> usize {
 /// with `S` the mean square of the composite weights and `D` the mean square of their
 /// central difference (half the two-sided step), both per lattice point. A field of
 /// unit-variance lattice values then has variance `S` per axis it is smooth along and
-/// a central-difference gradient variance `D` (per cell²) along the axis it is
+/// a central-difference gradient variance `D` (per cell^2) along the axis it is
 /// differenced on.
 fn octave_statistics(levels: u32) -> (f64, f64) {
     // A single lattice value, subdivided `levels` times with no trimming.
@@ -575,10 +670,10 @@ fn octave_statistics(levels: u32) -> (f64, f64) {
 /// is set from that exactly, not tuned: the lattice values have variance 1/3, the
 /// subdivision that smooths them is linear with weights known in closed form, and the
 /// curl by central differences is linear too, so the expected squared speed of an
-/// octave of amplitude `a` is `6 (a² / 3) S² D / h²` with `S` and `D` sums of the
-/// composite weights (computed once at construction). Setting that to `u_l²` gives
+/// octave of amplitude `a` is `6 (a^2 / 3) S^2 D / h^2` with `S` and `D` sums of the
+/// composite weights (computed once at construction). Setting that to `u_l^2` gives
 /// `a`. A single realisation scatters about the expectation, more for the coarse
-/// octaves on a small grid (fewer lattice points); the test measures it on 64³.
+/// octaves on a small grid (fewer lattice points); the test measures it on 64^3.
 ///
 /// # Rate, derived
 ///
@@ -600,9 +695,11 @@ fn octave_statistics(levels: u32) -> (f64, f64) {
 /// # Cost
 ///
 /// [`SwirlField::advance`] rebuilds the potential (a subdivision pyramid, finest pass
-/// once for all octaves) and its curl: about 1 ms at 32³ on one core (see the bench).
-/// Memory at 32³: 512 KiB for the velocity grid, 384 KiB for the potential and about
-/// 300 KiB of pyramid scratch and lattices; [`SwirlField::bytes`] reports the total.
+/// once for all octaves) and its curl: measured 2026-10-02 at 0.67 ms for 32^3 and
+/// 4.5 ms for 64^3 on one core, beside another build (`benches/particle_effects.rs`,
+/// `swirl_advance`). Memory, as [`SwirlField::bytes`] reports it: 1.69 MB at 32^3
+/// (512 KiB of velocity grid, 384 KiB of potential, the rest pyramid scratch and
+/// lattices) and 12.0 MB at 64^3.
 #[derive(Debug, Clone)]
 pub struct SwirlField {
     drive: TurbulenceDrive,
@@ -628,7 +725,7 @@ impl SwirlField {
     ///
     /// * `origin` - the box's low corner, metres.
     /// * `dims` - cells per axis; at least 3 each (the outer layer is still air).
-    /// * `h` - the cell size, metres. A 32³ field of 2 m cells covers a 64 m region.
+    /// * `h` - the cell size, metres. A 32^3 field of 2 m cells covers a 64 m region.
     /// * `drive` - the plume's speed and width, from which the swirl's amplitude and
     ///   rate follow.
     /// * `seed` - the noise's random stream; the same seed gives the same swirl.
@@ -672,12 +769,19 @@ impl SwirlField {
             }
             let speed = drive.eddy_velocity(scale);
             let (s, d) = octave_statistics(o + 1);
-            // E|u|² = 6 (a² sigma²) S² D / h², solved for a with E|u|² = speed².
-            let amplitude =
-                (speed as f64 * h as f64 / (S_D_FACTOR * LATTICE_VARIANCE * s * s * d).sqrt()) as f32;
+            // E|u|^2 = 6 (a^2 sigma^2) S^2 D / h^2, solved for a with E|u|^2 = speed^2.
+            let amplitude = (speed as f64 * h as f64
+                / (S_D_FACTOR * LATTICE_VARIANCE * s * s * d).sqrt())
+                as f32;
             let lattice_dims = dims.map(|n| lattice_points(n, spacing));
             let points = lattice_dims.iter().product::<usize>();
-            let mut draw = || std::array::from_fn(|_| (0..points).map(|_| rng.range(-1.0, 1.0)).collect::<Vec<f32>>());
+            let mut draw = || {
+                std::array::from_fn(|_| {
+                    (0..points)
+                        .map(|_| rng.range(-1.0, 1.0))
+                        .collect::<Vec<f32>>()
+                })
+            };
             let current = draw();
             let next = draw();
             octaves.push(Octave {
@@ -783,9 +887,20 @@ impl SwirlField {
         let floats = |v: &Vec<f32>| v.capacity() * 4;
         let mut total = self.velocity.bytes();
         total += self.potential.iter().map(floats).sum::<usize>();
-        total += floats(&self.level) + self.stage.iter().chain(self.lines.iter()).map(floats).sum::<usize>();
+        total += floats(&self.level)
+            + self
+                .stage
+                .iter()
+                .chain(self.lines.iter())
+                .map(floats)
+                .sum::<usize>();
         for o in &self.octaves {
-            total += o.current.iter().chain(o.next.iter()).map(floats).sum::<usize>();
+            total += o
+                .current
+                .iter()
+                .chain(o.next.iter())
+                .map(floats)
+                .sum::<usize>();
         }
         total
     }
@@ -865,7 +980,13 @@ impl SwirlField {
             }
             // The last subdivision lands on the cells, two points in from the margin.
             let cells_dims = n.map(|c| c + 4);
-            subdivide_3d(&self.level, dims, cells_dims, &mut self.stage, &mut self.lines);
+            subdivide_3d(
+                &self.level,
+                dims,
+                cells_dims,
+                &mut self.stage,
+                &mut self.lines,
+            );
             let fine = &self.stage[1];
             let out = &mut self.potential[channel];
             for i in 0..n[0] {
@@ -933,7 +1054,7 @@ impl SwirlField {
     }
 }
 
-/// `6` in `E|u|² = 6 sigma² a² S² D / h²`: three velocity components, each the
+/// `6` in `E|u|^2 = 6 sigma^2 a^2 S^2 D / h^2`: three velocity components, each the
 /// difference of two independent potential derivatives.
 const S_D_FACTOR: f64 = 6.0;
 
@@ -943,7 +1064,12 @@ fn fade_into(o: &Octave, channel: usize, out: &mut Vec<f32>) {
     let (s, c) = t.sin_cos();
     let (wc, wn) = (c * o.amplitude, s * o.amplitude);
     out.clear();
-    out.extend(o.current[channel].iter().zip(&o.next[channel]).map(|(a, b)| wc * a + wn * b));
+    out.extend(
+        o.current[channel]
+            .iter()
+            .zip(&o.next[channel])
+            .map(|(a, b)| wc * a + wn * b),
+    );
 }
 
 /// Adds the octave's faded lattice to `level`.
@@ -951,7 +1077,11 @@ fn add_faded(o: &Octave, channel: usize, level: &mut [f32]) {
     let t = o.phase * core::f32::consts::FRAC_PI_2;
     let (s, c) = t.sin_cos();
     let (wc, wn) = (c * o.amplitude, s * o.amplitude);
-    for ((v, a), b) in level.iter_mut().zip(&o.current[channel]).zip(&o.next[channel]) {
+    for ((v, a), b) in level
+        .iter_mut()
+        .zip(&o.current[channel])
+        .zip(&o.next[channel])
+    {
         *v += wc * a + wn * b;
     }
 }
@@ -959,13 +1089,22 @@ fn add_faded(o: &Octave, channel: usize, level: &mut [f32]) {
 /// Subdivides a 3D lattice of `from` points per axis to `to`, one axis at a time; the
 /// result lands in `stage[1]`. Every buffer keeps its capacity, so once the first
 /// rebuild has sized them nothing allocates.
-fn subdivide_3d(src: &[f32], from: [usize; 3], to: [usize; 3], stage: &mut [Vec<f32>; 2], lines: &mut [Vec<f32>; 2]) {
+fn subdivide_3d(
+    src: &[f32],
+    from: [usize; 3],
+    to: [usize; 3],
+    stage: &mut [Vec<f32>; 2],
+    lines: &mut [Vec<f32>; 2],
+) {
     let [s0, s1] = stage;
     // Along z: (from0, from1, to2).
     s0.clear();
     s0.resize(from[0] * from[1] * to[2], 0.0);
     for line in 0..from[0] * from[1] {
-        subdivide_1d(&src[line * from[2]..(line + 1) * from[2]], &mut s0[line * to[2]..(line + 1) * to[2]]);
+        subdivide_1d(
+            &src[line * from[2]..(line + 1) * from[2]],
+            &mut s0[line * to[2]..(line + 1) * to[2]],
+        );
     }
     // Along y: (from0, to1, to2), a strided line per (x, z).
     s1.clear();
@@ -995,12 +1134,19 @@ fn subdivide_3d(src: &[f32], from: [usize; 3], to: [usize; 3], stage: &mut [Vec<
         let m = full / 2;
         let out = &mut s0[q * plane..(q + 1) * plane];
         if full % 2 == 0 {
-            let (a, b, c) = (&s1[(m - 1) * plane..m * plane], &s1[m * plane..(m + 1) * plane], &s1[(m + 1) * plane..(m + 2) * plane]);
+            let (a, b, c) = (
+                &s1[(m - 1) * plane..m * plane],
+                &s1[m * plane..(m + 1) * plane],
+                &s1[(m + 1) * plane..(m + 2) * plane],
+            );
             for p in 0..plane {
                 out[p] = (a[p] + 6.0 * b[p] + c[p]) * 0.125;
             }
         } else {
-            let (a, b) = (&s1[m * plane..(m + 1) * plane], &s1[(m + 1) * plane..(m + 2) * plane]);
+            let (a, b) = (
+                &s1[m * plane..(m + 1) * plane],
+                &s1[(m + 1) * plane..(m + 2) * plane],
+            );
             for p in 0..plane {
                 out[p] = (a[p] + b[p]) * 0.5;
             }

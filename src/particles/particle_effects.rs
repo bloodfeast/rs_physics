@@ -596,6 +596,15 @@ impl ParticleEffects {
     /// later), but a flushed component is below a quarter of a position's resolution,
     /// so the particle it belongs to cannot be seen to differ.
     ///
+    /// # Cost
+    ///
+    /// The fetch is most of it: about 50 instructions against a handful for the rest
+    /// of a particle's update, which vectorises eight particles at a time where the
+    /// fetch cannot. Measured 2026-10-02 beside another build on the live sparks-and-dust
+    /// pool of `benches/particle_effects.rs` (`particle_effects/air`, off and on in one
+    /// run): 16 ns a particle against 3.0 for `integrate` at 100k (5.4 times), 19.6
+    /// against 4.3 at 1M (4.5 times).
+    ///
     /// # Arguments
     ///
     /// * `dt` - the step, seconds. A step of zero or less does nothing.
@@ -651,7 +660,7 @@ impl ParticleEffects {
         // The share of the air's velocity a step hands over, `swirl * min(drag dt, 1)`,
         // and whether the class takes any.
         let mut take = [0.0f32; MAX_CLASSES];
-        let mut sees_air = [false; MAX_CLASSES];
+        let mut sees_air = [0u32; MAX_CLASSES];
         for c in 0..MAX_CLASSES {
             let class = self.classes[c];
             gravity[c] = class.gravity * dt;
@@ -661,35 +670,57 @@ impl ParticleEffects {
             // `max` then `min`, so a NaN coupling is off rather than poisonous.
             let swirl = class.swirl.max(0.0).min(1.0);
             take[c] = swirl * k.max(0.0);
-            sees_air[c] = take[c] > 0.0;
+            sees_air[c] = if take[c] > 0.0 { u32::MAX } else { 0 };
         }
 
         let resolution = |p: f32| {
             (f32::from_bits(p.to_bits() & EXPONENT) * ROUNDS_AWAY).max(f32::MIN_POSITIVE)
         };
 
-        let n = self.len();
-        let (px, py, pz) = (&mut self.pos_x[..n], &mut self.pos_y[..n], &mut self.pos_z[..n]);
-        let (vx, vy, vz) = (&mut self.vel_x[..n], &mut self.vel_y[..n], &mut self.vel_z[..n]);
-        let remaining = &mut self.remaining[..n];
-        let class = &self.class[..n];
+        // In chunks: the fetches for a chunk first, into a buffer on the stack, then
+        // the arithmetic over the chunk, which vectorises across particles as
+        // `integrate_free_flight` does. One fused loop would run the whole update a
+        // particle at a time, around the fetch.
+        const CHUNK: usize = 64;
+        let mut air_x = [0.0f32; CHUNK];
+        let mut air_y = [0.0f32; CHUNK];
+        let mut air_z = [0.0f32; CHUNK];
 
-        for i in 0..n {
+        let n = self.len();
+        let mut start = 0;
+        while start < n {
+            let end = (start + CHUNK).min(n);
+            let len = end - start;
+            let (px, py, pz) = (&mut self.pos_x[start..end], &mut self.pos_y[start..end], &mut self.pos_z[start..end]);
+            let (vx, vy, vz) = (&mut self.vel_x[start..end], &mut self.vel_y[start..end], &mut self.vel_z[start..end]);
+            let remaining = &mut self.remaining[start..end];
+            let class = &self.class[start..end];
+            for i in 0..len {
+                let u = air.sample([px[i], py[i], pz[i]]);
+                air_x[i] = u[0];
+                air_y[i] = u[1];
+                air_z[i] = u[2];
+            }
+            let (ax, ay, az) = (&air_x[..len], &air_y[..len], &air_z[..len]);
+
+        for i in 0..len {
             let c = (class[i] as usize) & (MAX_CLASSES - 1);
             let d = damping[c];
-            let u = air.sample([px[i], py[i], pz[i]]);
+            let u = [ax[i], ay[i], az[i]];
             let t = take[c];
 
             let mut x = vx[i] * d;
             let mut y = (vy[i] - gravity[c]) * d;
             let mut z = vz[i] * d;
-            // Selected, not added with a zero weight: `-0 + 0` is `+0`, and a class
-            // that ignores the air must keep every bit.
-            if sees_air[c] {
-                x += t * u[0];
-                y += t * u[1];
-                z += t * u[2];
-            }
+            // `x + t u`, written `x - (-(t u))` with the subtrahend masked to +0 for a
+            // class that ignores the air: `x - (+0)` is `x` to the bit (even -0),
+            // where adding a zero weight's `+0` would turn a -0 into +0. A mask rather
+            // than a branch, so the loop still vectorises.
+            let mask = sees_air[c];
+            let pull = |v: f32, a: f32| v - f32::from_bits((-(t * a)).to_bits() & mask);
+            x = pull(x, u[0]);
+            y = pull(y, u[1]);
+            z = pull(z, u[2]);
 
             let (sx, sy, sz) = (x * dt, y * dt, z * dt);
             x = if sx.abs() < resolution(px[i]) { 0.0 } else { x };
@@ -703,6 +734,8 @@ impl ParticleEffects {
             py[i] += y * dt;
             pz[i] += z * dt;
             remaining[i] -= dt;
+        }
+            start = end;
         }
     }
 

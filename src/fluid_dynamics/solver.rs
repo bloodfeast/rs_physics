@@ -83,7 +83,7 @@ pub enum AdvectionScheme {
     /// First-order semi-Lagrangian advection (Stam 1999): trace each cell back along
     /// the velocity for one step and interpolate linearly where it lands. Stable at any
     /// step, and diffusive: linear interpolation at a fractional cell offset `a` acts
-    /// as a viscosity `h² a(1 - a) / (2 dt)` per axis, which is what smooths a plume's
+    /// as a viscosity `h^2 a(1 - a) / (2 dt)` per axis, which is what smooths a plume's
     /// edges and spins its eddies down. The default, and bit-identical to every grid
     /// before 2026-10-02.
     #[default]
@@ -119,11 +119,11 @@ pub enum AdvectionScheme {
 /// and a viscous force is `nu (z x grad omega)`: confinement is a negative viscosity
 /// `nu_c = epsilon h l`, with `l = |omega| / |grad|omega||` the length over which the
 /// rotation changes. The structures confinement exists to keep are the ones at the
-/// grid scale, `l = h`, so `nu_c = epsilon h²`.
+/// grid scale, `l = h`, so `nu_c = epsilon h^2`.
 ///
 /// What first-order semi-Lagrangian advection removes is also a viscosity. Linear
 /// interpolation at a fractional offset `a` of a cell has the modified equation
-/// `q_t + u q_x = nu_num q_xx` with `nu_num = h² a (1 - a) / (2 dt)`, per axis; at a
+/// `q_t + u q_x = nu_num q_xx` with `nu_num = h^2 a (1 - a) / (2 dt)`, per axis; at a
 /// Courant number below one, `a` is the Courant number itself and this is first-order
 /// upwind's familiar `|u| h (1 - a) / 2`. Setting `nu_c = nu_num` gives
 ///

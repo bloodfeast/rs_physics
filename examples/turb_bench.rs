@@ -18,7 +18,8 @@
 use std::time::{Duration, Instant};
 
 use rs_physics::fluid_dynamics::{
-    AdvectionScheme, FluidGrid3D, PlumeField, PlumeRegion, PlumeSource, SolverConfig, VorticityConfinement,
+    AdvectionScheme, FluidGrid3D, PlumeField, PlumeRegion, PlumeSource, SolverConfig,
+    VorticityConfinement,
 };
 use rs_physics::particles::{
     Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive, VelocityGrid,
@@ -38,11 +39,32 @@ impl Live {
     fn new(count: usize, air: Option<&mut SwirlField>) -> Live {
         let swirl = if air.is_some() { 1.0 } else { 0.0 };
         let mut fx = ParticleEffects::with_capacity(count + count / 4);
-        fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32, swirl });
-        fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0, swirl });
+        fx.set_class(
+            0,
+            ParticleClass {
+                gravity: 26.0,
+                drag: 1.4,
+                restitution: 0.32,
+                swirl,
+            },
+        );
+        fx.set_class(
+            1,
+            ParticleClass {
+                gravity: 1.6,
+                drag: 3.4,
+                restitution: 0.0,
+                swirl,
+            },
+        );
         let half = count as f32 / 2.0;
         let rate = [half / 0.35, half / 30.0];
-        let mut live = Live { fx, rng: EffectRng::new(0xC0FFEE), owed: [0.0; 2], rate };
+        let mut live = Live {
+            fx,
+            rng: EffectRng::new(0xC0FFEE),
+            owed: [0.0; 2],
+            rate,
+        };
         let mut air = air;
         for step in 0..(45.0 / DT) as usize {
             live.feed();
@@ -121,7 +143,8 @@ fn particles(rounds: usize) {
                 on.feed();
                 count += on.fx.len();
                 let started = Instant::now();
-                on.fx.integrate_in_air(std::hint::black_box(DT), field.velocity());
+                on.fx
+                    .integrate_in_air(std::hint::black_box(DT), field.velocity());
                 spent += started.elapsed();
             }
             t_on.push(spent.as_nanos() as f64 / count as f64);
@@ -138,6 +161,35 @@ fn particles(rounds: usize) {
             }
             t_fetch.push(started.elapsed().as_nanos() as f64 / (steps * xs.len()) as f64);
         }
+        // Probes: the same on the field-on pool with a tiny grid (every tap in L1).
+        let mut tiny = VelocityGrid::new([-40.0, 0.0, -40.0], 40.0, [3, 3, 3]).unwrap();
+        tiny.fill([0.1, 0.2, -0.1]);
+        let (mut t_tiny_fetch, mut t_tiny_on) = (Vec::new(), Vec::new());
+        for _ in 0..rounds {
+            let (xs, ys, zs) = on.fx.positions_soa();
+            let started = Instant::now();
+            for _ in 0..steps {
+                for i in 0..xs.len() {
+                    let u = tiny.sample([xs[i], ys[i], zs[i]]);
+                    sink += u[0] + u[1] + u[2];
+                }
+            }
+            t_tiny_fetch.push(started.elapsed().as_nanos() as f64 / (steps * xs.len()) as f64);
+            let (mut spent, mut count) = (Duration::ZERO, 0usize);
+            let mut copy = on.fx.clone();
+            for _ in 0..steps {
+                count += copy.len();
+                let started = Instant::now();
+                copy.integrate_in_air(std::hint::black_box(DT), &tiny);
+                spent += started.elapsed();
+            }
+            t_tiny_on.push(spent.as_nanos() as f64 / count as f64);
+        }
+        println!(
+            "  {n:>9}: tiny grid: fetch alone {:6.2}  on {:6.2}",
+            median(t_tiny_fetch),
+            median(t_tiny_on)
+        );
         let (a, b, f) = (median(t_off), median(t_on), median(t_fetch));
         println!(
             "  {n:>9}: off {a:6.2}  on {b:6.2}  ratio {:5.2}  fetch alone {f:6.2}   (sink {})",
@@ -150,7 +202,11 @@ fn particles(rounds: usize) {
 /// The 1b gate: `integrate_in_air` reading a plume whose worker steps beside it.
 fn particles_with_worker(rounds: usize) {
     println!("particles beside a stepping plume worker (32^3 of 2 m, 20 Hz): ns a particle");
-    let region = PlumeRegion { origin: [-32.0, 8.0, -32.0], cells: [32, 32, 32], cell_size: 2.0 };
+    let region = PlumeRegion {
+        origin: [-32.0, 8.0, -32.0],
+        cells: [32, 32, 32],
+        cell_size: 2.0,
+    };
     let source = PlumeSource {
         position: [0.0, 9.0, 0.0],
         drive: TurbulenceDrive::new(3.0, 12.0).unwrap(),
@@ -183,7 +239,8 @@ fn particles_with_worker(rounds: usize) {
                 let started = Instant::now();
                 // The frame thread's whole cost: take the newest frame, then integrate.
                 let frame = air.latest();
-                on.fx.integrate_in_air(std::hint::black_box(DT), frame.velocity());
+                on.fx
+                    .integrate_in_air(std::hint::black_box(DT), frame.velocity());
                 spent += started.elapsed();
             }
             t_on.push(spent.as_nanos() as f64 / count as f64);
@@ -208,11 +265,20 @@ fn source_3d(grid: &mut FluidGrid3D, n: usize) {
 }
 
 fn grid(rounds: usize) {
-    println!("FluidGrid3D step: ms, median of {rounds} interleaved rounds (and pressure iterations)");
+    println!(
+        "FluidGrid3D step: ms, median of {rounds} interleaved rounds (and pressure iterations)"
+    );
     let configs = [
         ("off", SolverConfig::default()),
-        ("maccormack", SolverConfig::default().with_advection(AdvectionScheme::MacCormack)),
-        ("confinement", SolverConfig::default().with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation)),
+        (
+            "maccormack",
+            SolverConfig::default().with_advection(AdvectionScheme::MacCormack),
+        ),
+        (
+            "confinement",
+            SolverConfig::default()
+                .with_vorticity_confinement(VorticityConfinement::MatchNumericalDissipation),
+        ),
         (
             "both",
             SolverConfig::default()
@@ -260,8 +326,46 @@ fn grid(rounds: usize) {
     }
 }
 
+/// A `PlumeField` step on this thread (sources, grid step with both options, swirl,
+/// writing the frame) at 32^3 and 64^3 regions of 2 m cells.
+fn plume(rounds: usize) {
+    println!(
+        "PlumeField::step_now: ms a step, median of {rounds}, and the fraction of a 20 Hz period"
+    );
+    for &n in &[32usize, 64] {
+        let region = PlumeRegion {
+            origin: [-(n as f32), 0.0, -(n as f32)],
+            cells: [n, n, n],
+            cell_size: 2.0,
+        };
+        let source = PlumeSource {
+            position: [0.0, 1.0, 0.0],
+            drive: TurbulenceDrive::new(3.0, 12.0).unwrap(),
+            smoke_rate: 1.0,
+        };
+        let (mut plume, mut air) = PlumeField::new(region, source, [2.0, 0.0, 0.5], 1).unwrap();
+        for _ in 0..5 {
+            plume.step_now(0.05);
+        }
+        let mut costs = Vec::new();
+        for _ in 0..rounds {
+            plume.step_now(0.05);
+            costs.push(air.latest().step_cost().as_secs_f64() * 1e3);
+        }
+        let m = median(costs);
+        println!(
+            "  {n}^3: {m:.2} ms, {:.0}% of 50 ms; {} bytes",
+            100.0 * m / 50.0,
+            plume.bytes()
+        );
+    }
+}
+
 fn main() {
-    let rounds: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(9);
+    let rounds: usize = std::env::args()
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(9);
     let which = std::env::args().nth(2).unwrap_or_else(|| "all".into());
     if which == "all" || which == "particles" {
         particles(rounds);
@@ -271,5 +375,8 @@ fn main() {
     }
     if which == "all" || which == "grid" {
         grid(rounds);
+    }
+    if which == "all" || which == "plume" {
+        plume(rounds);
     }
 }
