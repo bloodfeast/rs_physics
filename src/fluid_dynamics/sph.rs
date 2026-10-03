@@ -91,14 +91,29 @@
 //!
 //! **Binning.** After the particle grid is built, each solid's bounds, grown by the
 //! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
-//! contact radius, `h / 4`), are binned into the hash buckets of the cells they cover,
-//! clipped to the cells the fluid occupies and skipping buckets that hold no particle.
-//! Serial, in solid order, O(solids x cells covered) after one serial min and max over
-//! the particle cells (O(n) integer work that vectorises), into reused buffers: a
-//! counting sort over only the buckets touched, which are zeroed again after the step,
-//! so the table is never cleared whole. Any particle that can meet a solid starts the
-//! substep within that reach, so it finds the solid in its own cell's bin, one bucket
-//! read: the bins are the cells the ray can cross, gathered on the solid's side.
+//! contact radius, `h / 4`), are binned into the hash buckets of the occupied cells they
+//! cover, clipped to the cells the fluid spans: one entry a solid for each cell in its
+//! reach that holds a particle, filed under that cell's bucket. Any particle that can
+//! meet a solid starts the substep within that reach, so it finds the solid in its own
+//! cell's bin, one bucket read: the bins are the cells the ray can cross, gathered on the
+//! solid's side. A bucket's solids are in solid order, which is the order a particle
+//! tests them in.
+//!
+//! Two walks find the occupied cells, and write the same bins. The **cell walk** visits
+//! each solid's clipped box cell by cell: a hash, a bucket read and a look at the
+//! bucket's cells (so a cell is binned for its own particles, never for another cell's
+//! that hashes beside it), about 6 ns a cell. The **particle scan** tests every
+//! particle's cell against the boxes instead: the boxes are listed in a grid of blocks
+//! over their union, sized each step by the cost it implies, and a particle outside the
+//! union costs one branch-free test, 64 to a word, about 1.4 ns a particle. A long solid
+//! over a wide, sparse fluid (a 4 m hull over 16,384 drops spread across 20 m covers
+//! 200,000 cells) costs the walk milliseconds and the scan tens of microseconds; a limb in
+//! a pool costs the walk a few hundred cells. The step takes the scan once the clipped
+//! boxes hold more than a third of the particle count in cells between them, the
+//! measured crossover (`SCAN_CROSSOVER`). Serial, after one serial min and max over the
+//! particle cells (O(n) integer work that vectorises), into reused buffers: a counting
+//! sort over only the buckets touched, which are zeroed again after the step, so the
+//! table is never cleared whole.
 //!
 //! **Contact.** In the move, after the velocity update and before the ground, a particle
 //! whose bin is not empty casts a ray from where it was to where it is going, extended
@@ -123,16 +138,19 @@
 //!
 //! **Cost.** A solid covers about `(L / h + 2.3)` cells along each axis of length `L`
 //! (its extent plus `1.3 h` of reach); a 0.4 m limb of radius 6 cm in blood (`h` = 4 cm)
-//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. Each covered cell is one
-//! hash and one bucket read, and writes an entry only where particles are. A particle
-//! pays one bucket read when no solid is near it, and the contact test against each
-//! solid in its bin when one is. Solids that reach no particle write no entry, and then
-//! the move is the plain one: the binning is the whole price.
+//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. The binning costs the
+//! cheaper of the walk over those cells and the scan over the particles (above); it
+//! writes an entry only where particles are. A particle pays one bucket read when no
+//! solid is near it, and the contact test against each solid in its bin when one is.
+//! Solids that reach no particle write no entry, and then the move is the plain one: the
+//! binning is the whole price.
 //!
 //! **Memory.** A capsule is 144 bytes and a box 88 in [`SphSolids`]. The fluid's bins
 //! are 8 bytes a bucket (two to four buckets a particle, allocated on the first step with
-//! solids) plus 12 bytes an entry and 4 a touched bucket, all kept at their high-water
-//! marks.
+//! solids) plus 12 bytes an entry and 4 a touched bucket, and 28 bytes a solid in reach
+//! for its clipped box; the scan's block grid is 4 bytes a block plus 4 a block a box
+//! lists, its size picked each step by cost (one block for a lone hull). All kept at
+//! their high-water marks.
 //!
 //! # Examples
 //!

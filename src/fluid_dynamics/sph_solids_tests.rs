@@ -499,3 +499,244 @@ fn picture_of_a_waded_pool() {
     }
     eprintln!("{out}");
 }
+
+/// Drops scattered over a `side` metre square of rolling ground (half a metre of relief),
+/// `n` of them, from a fixed xorshift: a wide, sparse fluid whose hash buckets mostly
+/// hold one cell, and sometimes two.
+fn scattered(n: usize, side: f64) -> SphFluid {
+    let mut f = SphFluid::new(SphParams::blood(), n).unwrap();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut unit = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    while f.len() < n {
+        let (x, z) = (side * unit(), side * unit());
+        let y = 0.3 * (1.3 * x).sin() + 0.2 * (0.9 * z).cos() + 0.4 * unit();
+        f.spawn([x, y, z], [0.0; 3]);
+    }
+    f
+}
+
+/// Limbs and crates over the scattered field, and one long hull across it: solids of
+/// every size, overlapping each other, in and out of reach.
+fn mixed_solids(side: f64) -> SphSolids {
+    let mut solids = SphSolids::new();
+    for k in 0..40 {
+        let x = side * ((k * 37) % 97) as f64 / 97.0;
+        let z = side * ((k * 61) % 89) as f64 / 89.0;
+        solids.push_capsule(
+            [x, -0.1, z],
+            [x + 0.1, 0.4, z - 0.05],
+            0.06,
+            [0.0; 3],
+            [0.0; 3],
+        );
+        if k % 5 == 0 {
+            solids.push_box([z, 0.2, x], [0.3, 0.2, 0.15], k as f64, [0.0; 3]);
+        }
+    }
+    solids.push_capsule(
+        [0.0, 0.3, 0.2 * side],
+        [side, 0.1, 0.8 * side],
+        0.4,
+        [0.0; 3],
+        [0.0; 3],
+    );
+    solids
+}
+
+/// Every bucket's bin under one walk.
+fn bins_by(f: &mut SphFluid, solids: &SphSolids, path: solids::BinPath) -> Vec<Vec<u32>> {
+    f.build_grid();
+    f.bin_solids_by(solids, path);
+    let contact = solids::Contact::new(&f.solid_bins, solids, 0.0, 0.0, 1.0);
+    let out = (0..=f.table_mask)
+        .map(|b| contact.binned(b as u32).to_vec())
+        .collect();
+    f.solid_bins.reset();
+    out
+}
+
+/// The two walks write the same bins, bucket for bucket and in the same order, and both
+/// equal a brute-force oracle: for each solid in order, its id once for every occupied
+/// cell of the bucket that lies in its reach, cells taken from the particles themselves.
+#[test]
+fn both_binning_walks_write_the_oracles_bins() {
+    let side = 3.0;
+    let mut f = scattered(3000, side);
+    let solids = mixed_solids(side);
+    let cells = bins_by(&mut f, &solids, solids::BinPath::Cells);
+    let particles = bins_by(&mut f, &solids, solids::BinPath::Particles);
+    let measured = bins_by(&mut f, &solids, solids::BinPath::Measured);
+
+    // The oracle, from the grid `bins_by` left built.
+    let h = f.params.smoothing_radius;
+    let reach = (CFL_FRACTION * h + f.contact_radius()) * (1.0 + 1e-6);
+    let mut occupied: Vec<([i32; 3], usize)> = (0..f.len())
+        .map(|i| {
+            (
+                [f.cell_x[i], f.cell_y[i], f.cell_z[i]],
+                f.bucket_of[i] as usize,
+            )
+        })
+        .collect();
+    occupied.sort_unstable();
+    occupied.dedup();
+    let mut oracle = vec![Vec::new(); f.table_mask + 1];
+    let mut shared = 0;
+    for id in 0..solids.len() {
+        let (lo, hi) = solids.bounds(id);
+        for &(c, b) in &occupied {
+            if (0..3)
+                .all(|a| c[a] >= cell_of(lo[a] - reach, h) && c[a] <= cell_of(hi[a] + reach, h))
+            {
+                oracle[b].push(id as u32);
+            }
+        }
+    }
+    for (b, bin) in oracle.iter().enumerate() {
+        if bin.windows(2).any(|w| w[0] != w[1]) {
+            shared += 1;
+        }
+        assert_eq!(
+            cells[b], *bin,
+            "bucket {b}: the cell walk differs from the oracle"
+        );
+        assert_eq!(
+            particles[b], *bin,
+            "bucket {b}: the particle scan differs from the oracle"
+        );
+        assert_eq!(
+            measured[b], *bin,
+            "bucket {b}: the measured choice differs from the oracle"
+        );
+    }
+    let entries: usize = oracle.iter().map(Vec::len).sum();
+    assert!(
+        entries > 500,
+        "only {entries} bin entries: the scene does not exercise the bins"
+    );
+    assert!(
+        shared > 10,
+        "only {shared} buckets hold two solids: the order is not exercised"
+    );
+}
+
+/// A long hull over a wide, sparse fluid (its box holds over a hundred cells a particle,
+/// so the step takes the particle scan): at every step the cell walk, rebuilt from the
+/// same grid, writes the same bins, so the move reads what the walk would have given it.
+/// Stepped at 1, 4 and 8 threads: the scan is serial, and the move that reads its bins is
+/// not.
+#[test]
+fn the_particle_scan_steps_bit_identically_at_any_thread_count() {
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let side = 6.0;
+            let mut f = scattered(2500, side);
+            let mut solids = SphSolids::new();
+            let mut scanned = 0;
+            for s in 0..60 {
+                let x = 0.5 + 0.02 * s as f64;
+                solids.clear();
+                solids.push_capsule(
+                    [x, 0.2, 0.5],
+                    [x + 4.0, 0.2, 5.0],
+                    0.45,
+                    [1.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                );
+                f.step_with_solids(DT, 9.81, flat, &solids);
+                // The same step's bins rebuilt both ways from the stepped fluid agree.
+                let mut probe = f.clone();
+                let a = bins_by(&mut probe, &solids, solids::BinPath::Cells);
+                let b = bins_by(&mut probe, &solids, solids::BinPath::Particles);
+                assert!(a == b, "step {s}: the walks disagree");
+                if f.solid_stats().bin_entries > 0 {
+                    scanned += 1;
+                }
+            }
+            assert!(
+                scanned > 50,
+                "the hull reached the fluid on only {scanned} steps"
+            );
+            bits(&f)
+        })
+    };
+    let one = run(1);
+    for t in [4, 8] {
+        assert!(run(t) == one, "{t} threads gave a different fluid from one");
+    }
+}
+
+/// The crossover between the two walks, measured: a capsule of growing size over a
+/// sparse fluid, binned by each walk, best of many runs. Prints the box cells, the
+/// particle count and both times; the scan wins once the cells pass the particles by the
+/// printed ratio. Run in release.
+#[test]
+#[ignore = "perf diagnostic: run with --release --ignored --nocapture"]
+fn binning_crossover() {
+    for n in [1_024usize, 4_096, 16_384] {
+        let side = (n as f64 / 40.0).sqrt();
+        let mut f = scattered(n, side);
+        f.build_grid();
+        for (len, radius) in [
+            (0.0, 0.02),
+            (0.1, 0.02),
+            (0.2, 0.04),
+            (0.4, 0.06),
+            (0.4, 0.15),
+            (0.8, 0.3),
+            (1.6, 0.3),
+            (3.2, 0.3),
+            (6.4, 0.3),
+        ] {
+            let (len, radius): (f64, f64) = (len, radius);
+            let mut solids = SphSolids::new();
+            let c = 0.5 * side;
+            solids.push_capsule(
+                [c - 0.5 * len, 0.3, c],
+                [c + 0.5 * len, 0.3, c + 0.3 * len],
+                radius,
+                [0.0; 3],
+                [0.0; 3],
+            );
+            let time = |f: &mut SphFluid, path| {
+                let mut best = f64::INFINITY;
+                for _ in 0..200 {
+                    let t = std::time::Instant::now();
+                    f.bin_solids_by(&solids, path);
+                    best = best.min(t.elapsed().as_secs_f64() * 1e6);
+                    f.solid_bins.reset();
+                }
+                best
+            };
+            let walk = time(&mut f, solids::BinPath::Cells);
+            let scan = time(&mut f, solids::BinPath::Particles);
+            let h = f.params.smoothing_radius;
+            let (lo, hi) = solids.bounds(0);
+            let reach = CFL_FRACTION * h + f.contact_radius();
+            let span = |a: usize| {
+                let (mn, mx) = (0..f.len()).fold((i32::MAX, i32::MIN), |(mn, mx), i| {
+                    let c = [f.cell_x[i], f.cell_y[i], f.cell_z[i]][a];
+                    (mn.min(c), mx.max(c))
+                });
+                let c0 = cell_of(lo[a] - reach, h).max(mn);
+                let c1 = cell_of(hi[a] + reach, h).min(mx);
+                (c1 - c0 + 1).max(0) as f64
+            };
+            let cells = span(0) * span(1) * span(2);
+            eprintln!(
+                "n {n:>6} len {len:>4} m r {radius:>4} m: cells {cells:>8} ({:>6.2} a particle)  walk {walk:>8.1} us  scan {scan:>7.1} us  walk/scan {:>6.2}",
+                cells / n as f64,
+                walk / scan
+            );
+        }
+    }
+}
