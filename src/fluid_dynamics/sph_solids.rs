@@ -1,5 +1,6 @@
 //! Solids the liquid meets: capsules and yawed boxes a caller places every frame, binned
-//! into the SPH hash once a step and met by a short swept ray in `integrate`.
+//! into the SPH hash once a step and met by a short swept sphere in `integrate` (a ray
+//! against each solid inflated by the contact radius).
 //!
 //! A child module of `sph` so the binning can read the step's grid (the particle cells,
 //! the bucket table) without widening anything public. The design, the one-way rule and
@@ -484,7 +485,8 @@ impl SolidBins {
 
 impl SphFluid {
     /// The contact radius, metres: how far from a solid's surface the contact keeps a
-    /// particle's centre, and how far past its substep the swept ray reaches.
+    /// particle's centre, which is the radius of the sphere the contact casts each
+    /// particle as.
     ///
     /// Half the rest spacing, which [`super::SphParams::with_spacing`] sets at half the
     /// smoothing radius, so a particle rests against a solid as it rests against its
@@ -538,14 +540,15 @@ impl SphFluid {
     /// starts from it: the longer of the speed ceiling's travel and the solid's own
     /// travel in the substep (its fastest surface speed times `dt`), plus the contact
     /// radius. The contact casts each particle in the solid's frame (see
-    /// [`Contact::resolve`]), from `p0 + v_s dt` to `p1`, so a hit point lies at
-    /// `p0 + (1 - l) v_s dt + l (p1 - p0)` for `l` up to one, then up to a contact radius
-    /// further: within `max(|p1 - p0|, |v_s| dt)` of `p0` plus the contact radius, and
-    /// `|p1 - p0|` is at most the ceiling's travel. A particle inside the solid's start
-    /// pose is within `|v_s| dt` of it. A solid slower than the ceiling therefore reaches
+    /// [`Contact::resolve`]) as a sphere of the contact radius, from `p0 + v_s dt` to
+    /// `p1`, so it meets the solid where its centre, at
+    /// `p0 + (1 - l) v_s dt + l (p1 - p0)` for `l` up to one, comes within a contact
+    /// radius of the surface: the solid is within `max(|p1 - p0|, |v_s| dt)` of `p0`
+    /// plus the contact radius, and `|p1 - p0|` is at most the ceiling's travel. A
+    /// particle inside the solid's start pose, or touching it, is within `|v_s| dt` plus
+    /// the contact radius of it. A solid slower than the ceiling therefore reaches
     /// exactly what it reached before solids were cast in their own frame. Any particle
-    /// whose ray can meet the solid, or which starts inside it, starts within that
-    /// reach, so its own cell
+    /// whose cast can meet the solid starts within that reach, so its own cell
     /// (the cell `build_grid` gave it, from where the substep starts) is binned: one
     /// bucket read a particle finds every solid it can touch. Cells are clipped to the
     /// cells the fluid occupies.
@@ -953,27 +956,42 @@ impl<'a> Contact<'a> {
     }
 
     /// Meet the solids `ids` on the substep from `p0` to `p1` at velocity `v`, each in
-    /// its own frame.
+    /// its own frame, casting the particle as a sphere of the contact radius.
     ///
     /// A solid is given at its pose at the END of the substep, moving at its surface
     /// velocity, so it stood that velocity times `dt` further back when the substep
     /// began. Seen from the solid, the particle started at `p0 + v_s dt` and ends at
     /// `p1`: its displacement relative to the surface is `p1 - p0 - v_s dt`, and that is
-    /// what it casts, against the solid at the given pose. A drop carried with the
-    /// surface casts only what gravity added, straight at the surface; a particle the
-    /// surface swept onto casts back along the solid's motion and meets its leading face.
-    /// `v_s` is the velocity of the surface nearest `p0` (a capsule's blend at the axis
-    /// parameter of `p0`, a box's one velocity). A solid at rest casts exactly the world
-    /// displacement it always did.
+    /// what it casts, against the solid at the given pose. `v_s` is the velocity of the
+    /// surface nearest `p0` (a capsule's blend at the axis parameter of `p0`, a box's
+    /// one velocity). A solid at rest casts exactly the world displacement.
     ///
-    /// A particle that starts inside a solid, in that solid's frame (inside the pose the
-    /// solid had when the substep began), is pushed out of the first such solid, in bin
-    /// order, along the nearest surface normal. Otherwise the nearest surface along the
-    /// rays, each reaching the contact radius past `p1`, stops it: it is set on the
-    /// surface, pushed out by the contact radius along the normal. "Nearest" is the
-    /// distance along each solid's own ray. Either way its velocity relative to the
-    /// surface loses its approaching normal part to `restitution` and its tangential part
-    /// to the ground's friction decay, and then takes the surface's velocity.
+    /// The cast is a sphere of the contact radius `r`, which is a ray against the solid
+    /// inflated by `r`: its exact Minkowski sum with the sphere. A capsule of radius `R`
+    /// inflates to the capsule of radius `R + r` on the same axis; a box inflates to the
+    /// rounded box, its faces moved out by `r`, its edges quarter cylinders and its
+    /// corners eighth spheres of radius `r`. Where the cast starts decides the rest:
+    ///
+    /// - Inside the solid itself, in that solid's frame (inside the pose the solid had
+    ///   when the substep began): pushed out of the first such solid, in bin order, along
+    ///   the nearest surface normal, to a contact radius off it.
+    /// - Within the inflation (touching: at most a contact radius off the surface) and
+    ///   moving into it: met at `s = 0`. A drop resting or sliding on a surface sits a
+    ///   contact radius off it, so it meets the surface here every substep, whatever its
+    ///   speed along it.
+    /// - Clear of it: met where the ray enters the inflated solid, if that is within the
+    ///   cast's length.
+    ///
+    /// The nearest meeting (the shortest distance along each solid's own ray) stops the
+    /// particle on the inflated surface at the meeting, and what is left of its cast
+    /// carries on along the surface: its part along the surface normal is dropped and
+    /// its tangential part is scaled by the friction decay, so the particle travels the
+    /// rest of the substep at the tangential velocity the response leaves it. That is
+    /// the implicit friction step for the position as well as the velocity: a drop
+    /// sliding at `u` across a surface stops in `u / rate` (the ground's `friction` rate),
+    /// however many substeps that takes. Its velocity relative to the surface loses its
+    /// approaching normal part to `restitution` and its tangential part to that decay,
+    /// and then takes the surface's velocity.
     ///
     /// Returns, if a solid moved the particle, that solid's id and the square of the
     /// particle's speed relative to the surface after the response, which is what its
@@ -990,13 +1008,14 @@ impl<'a> Contact<'a> {
         // particle meeting only moving solids never needs it.
         let mut world: Option<Ray> = None;
 
+        let r = self.contact_radius;
         let caps = self.solids.capsules.len();
         let mut best = f64::INFINITY;
         let mut best_id = u32::MAX;
         let mut best_ray = Ray {
             origin: p0,
             dir: [0.0; 3],
-            reach: 0.0,
+            len: 0.0,
             moving: false,
         };
         for &id in ids {
@@ -1006,30 +1025,40 @@ impl<'a> Contact<'a> {
             } else {
                 self.solids.boxes[k - caps].velocity
             };
-            // A solid at rest takes the world ray itself, so its arithmetic is the
-            // world cast's operation for operation (and -0.0 stays -0.0).
+            // A solid at rest takes the world ray itself, so every solid at rest casts
+            // the same ray, operation for operation.
             let ray = if vs == [0.0; 3] {
-                *world.get_or_insert_with(|| Ray::between(p0, *p1, self.contact_radius))
+                *world.get_or_insert_with(|| Ray::between(p0, *p1))
             } else {
-                Ray::between(add(p0, scale(vs, self.dt)), *p1, self.contact_radius)
+                Ray::between(add(p0, scale(vs, self.dt)), *p1)
             };
-            let inside = if k < caps {
-                capsule_inside(&self.solids.capsules[k], ray.origin)
+            let start = if k < caps {
+                capsule_start(&self.solids.capsules[k], ray.origin, r)
             } else {
-                box_inside(&self.solids.boxes[k - caps], ray.origin)
+                box_start(&self.solids.boxes[k - caps], ray.origin, r)
             };
-            if let Some(hit) = inside {
-                return Some((id, self.respond(hit, p1, v)));
-            }
-            if !ray.moving {
-                continue;
-            }
-            let s = if k < caps {
-                capsule_ray(&self.solids.capsules[k], ray.origin, ray.dir)
-            } else {
-                box_ray(&self.solids.boxes[k - caps], ray.origin, ray.dir)
+            let s = match start {
+                Start::Inside(hit) => return Some((id, self.respond(hit, [0.0; 3], p1, v))),
+                // `out` points away from the solid; only a cast into it meets it.
+                Start::Touching(out) => {
+                    if !ray.moving || dot(ray.dir, out) >= 0.0 {
+                        continue;
+                    }
+                    0.0
+                }
+                Start::Clear => {
+                    if !ray.moving {
+                        continue;
+                    }
+                    if k < caps {
+                        let c = &self.solids.capsules[k];
+                        capsule_ray(c, ray.origin, ray.dir, c.radius + r)
+                    } else {
+                        box_ray(&self.solids.boxes[k - caps], ray.origin, ray.dir, r)
+                    }
+                }
             };
-            if s <= ray.reach && s < best {
+            if s <= ray.len && s < best {
                 best = s;
                 best_id = id;
                 best_ray = ray;
@@ -1045,14 +1074,31 @@ impl<'a> Contact<'a> {
         } else {
             box_surface(&self.solids.boxes[k - caps], q)
         };
-        Some((best_id, self.respond(hit, p1, v)))
+        // What is left of the cast past the meeting, along the surface.
+        let rest = scale(best_ray.dir, best_ray.len - best);
+        let slide = sub(rest, scale(hit.normal, dot(rest, hit.normal)));
+        let rel_sq = self.respond(hit, slide, p1, v);
+        if slide != [0.0; 3] {
+            // The slide runs along the tangent plane at the meeting, which a curved
+            // surface falls away from by the slide's square over twice its radius: set
+            // the end back on the inflated surface, a contact radius off the solid.
+            let end = if k < caps {
+                capsule_surface(&self.solids.capsules[k], *p1)
+            } else {
+                box_surface(&self.solids.boxes[k - caps], *p1)
+            };
+            *p1 = add(end.point, scale(end.normal, r));
+        }
+        Some((best_id, rel_sq))
     }
 
-    /// Set the particle on the surface, a contact radius out, and apply the response.
-    /// Returns the square of its speed relative to the surface after it.
+    /// Set the particle on the surface, a contact radius out, carry it `slide` along the
+    /// surface at the decayed tangential velocity, and apply the response. Returns the
+    /// square of its speed relative to the surface after it.
     #[inline]
-    fn respond(&self, hit: Hit, p: &mut [f64; 3], v: &mut [f64; 3]) -> f64 {
-        *p = add(hit.point, scale(hit.normal, self.contact_radius));
+    fn respond(&self, hit: Hit, slide: [f64; 3], p: &mut [f64; 3], v: &mut [f64; 3]) -> f64 {
+        let on = add(hit.point, scale(hit.normal, self.contact_radius));
+        *p = add(on, scale(slide, self.friction_keep));
         let n = hit.normal;
         let rel = sub(*v, hit.velocity);
         let vn = dot(rel, n);
@@ -1066,36 +1112,63 @@ impl<'a> Contact<'a> {
     }
 }
 
+/// How far past the inflated surface, as a factor on the squared distance it is
+/// compared in, a cast's start still counts as touching.
+///
+/// A contact sets a particle exactly on the inflated surface, and rounding leaves it a
+/// few ulps either side. Just outside, the ray's entry is a root of a near-zero
+/// quadratic and can come out a hair behind the origin, a miss: the drop would sink a
+/// substep's sag before the next substep met it. The band is `1e-9` of the squared
+/// distance, half that of the distance: 55 picometres off a 0.11 m inflated hull, 5 off
+/// a 1 cm inflated box face. That is far above the rounding (the cylinder's quadratic
+/// carries about `1e-16` of the squared distance from the capsule's end, about `1e-15`
+/// m^2 for a 4 m hull, against a band of `1e-11` m^2 on a 0.11 m radius) and far below
+/// anything the fluid resolves. A start in the band is met at once, and set on the
+/// surface, as one inside it is.
+const TOUCHING: f64 = 1.0 + 1e-9;
+
+/// Where a particle's cast starts against one solid.
+#[derive(Debug, Clone, Copy)]
+enum Start {
+    /// Inside the solid itself: pushed out to this contact.
+    Inside(Hit),
+    /// Within a contact radius of its surface, outside it; the vector points away from
+    /// the solid (the offset from its nearest point, not normalised).
+    Touching([f64; 3]),
+    /// Further off than a contact radius.
+    Clear,
+}
+
 /// A particle's swept ray in one solid's frame: from where it started, as that solid
-/// sees it, towards where it ends.
+/// sees it, to where it ends.
 #[derive(Debug, Clone, Copy)]
 struct Ray {
     origin: [f64; 3],
     /// Unit direction, or zero when the particle did not move in this frame.
     dir: [f64; 3],
-    /// The displacement's length plus the contact radius: how far along `dir` a hit
-    /// still counts. Zero when not moving.
-    reach: f64,
+    /// The displacement's length: how far along `dir` a meeting still counts. Zero when
+    /// not moving.
+    len: f64,
     moving: bool,
 }
 
 impl Ray {
-    /// The ray from `origin` to `end`, reaching `contact_radius` past it.
+    /// The ray from `origin` to `end`.
     #[inline]
-    fn between(origin: [f64; 3], end: [f64; 3], contact_radius: f64) -> Ray {
+    fn between(origin: [f64; 3], end: [f64; 3]) -> Ray {
         let d = sub(end, origin);
         let len2 = dot(d, d);
         let moving = len2 > 0.0;
-        let (dir, reach) = if moving {
+        let (dir, len) = if moving {
             let len = len2.sqrt();
-            (scale(d, 1.0 / len), len + contact_radius)
+            (scale(d, 1.0 / len), len)
         } else {
             ([0.0; 3], 0.0)
         };
         Ray {
             origin,
             dir,
-            reach,
+            len,
             moving,
         }
     }
@@ -1166,32 +1239,39 @@ fn perpendicular(axis: [f64; 3], axis_len2: f64) -> [f64; 3] {
     [0.0, 1.0, 0.0]
 }
 
-/// `Some` surface contact if `p` is strictly inside capsule `c`.
+/// Where a cast from `p` starts against capsule `c` inflated by `r`: strictly inside the
+/// capsule (with the contact it is pushed out to), within `r` of it, or clear.
 #[inline]
-fn capsule_inside(c: &Capsule, p: [f64; 3]) -> Option<Hit> {
+fn capsule_start(c: &Capsule, p: [f64; 3], r: f64) -> Start {
     let t = capsule_param(c, p);
     let off = sub(p, add(c.a, scale(c.axis, t)));
-    if dot(off, off) < c.radius * c.radius {
-        Some(capsule_hit(c, p, t))
+    let d2 = dot(off, off);
+    if d2 < c.radius * c.radius {
+        Start::Inside(capsule_hit(c, p, t))
+    } else if d2 <= (c.radius + r) * (c.radius + r) * TOUCHING {
+        Start::Touching(off)
     } else {
-        None
+        Start::Clear
     }
 }
 
-/// The contact at surface point `q` of capsule `c`.
+/// The contact for point `q` on or near capsule `c`: the nearest surface point, the
+/// outward normal there (which is the inflated capsule's normal at `q` too) and the
+/// surface velocity.
 #[inline]
 fn capsule_surface(c: &Capsule, q: [f64; 3]) -> Hit {
     capsule_hit(c, q, capsule_param(c, q))
 }
 
-/// Distance along the unit ray `o + s rd` to where it enters capsule `c`, for an origin
+/// Distance along the unit ray `o + s rd` to where it enters the capsule on `c`'s axis
+/// with radius `radius` (`c`'s own, inflated by the contact radius), for an origin
 /// outside it; infinite on a miss. The first point of the ray in the capsule is the first
 /// in any of its three convex parts (the side of the cylinder, the two end spheres), so
 /// it is the nearest of three closed-form entries; a ray entering through a flat end of
 /// the cylinder meets that end's sphere first.
 #[inline]
-fn capsule_ray(c: &Capsule, o: [f64; 3], rd: [f64; 3]) -> f64 {
-    let r2 = c.radius * c.radius;
+fn capsule_ray(c: &Capsule, o: [f64; 3], rd: [f64; 3], radius: f64) -> f64 {
+    let r2 = radius * radius;
     let mut best = f64::INFINITY;
     let baba = c.axis_len2;
     if baba > 0.0 {
@@ -1261,10 +1341,45 @@ fn box_face(b: &YawBox, l: [f64; 3], axis: usize, sign: f64) -> Hit {
     }
 }
 
-/// `Some` contact on the nearest face if `p` is strictly inside box `b`.
+/// Where a cast from `p` starts against box `b` inflated by `r` (the rounded box):
+/// strictly inside the box (with the contact on its nearest face it is pushed out to),
+/// within `r` of it, or clear.
 #[inline]
-fn box_inside(b: &YawBox, p: [f64; 3]) -> Option<Hit> {
+fn box_start(b: &YawBox, p: [f64; 3], r: f64) -> Start {
     let l = to_box(b, sub(p, b.centre));
+    if let Some(hit) = box_inside_local(b, l) {
+        return Start::Inside(hit);
+    }
+    let off = box_offset(b, l);
+    let d2 = dot(off, off);
+    if d2 <= r * r * TOUCHING {
+        // On the box's own surface (`d2` zero) the offset gives no direction; the
+        // nearest face's normal does.
+        let out = if d2 > 0.0 {
+            from_box(b, off)
+        } else {
+            box_surface_face(b, l).normal
+        };
+        Start::Touching(out)
+    } else {
+        Start::Clear
+    }
+}
+
+/// Local point `l`'s offset from its nearest point of box `b`, in the box's frame: zero
+/// on or inside the box.
+#[inline]
+fn box_offset(b: &YawBox, l: [f64; 3]) -> [f64; 3] {
+    [
+        l[0] - l[0].clamp(-b.half[0], b.half[0]),
+        l[1] - l[1].clamp(-b.half[1], b.half[1]),
+        l[2] - l[2].clamp(-b.half[2], b.half[2]),
+    ]
+}
+
+/// `Some` contact on the nearest face if local point `l` is strictly inside box `b`.
+#[inline]
+fn box_inside_local(b: &YawBox, l: [f64; 3]) -> Option<Hit> {
     let mut axis = 0;
     let mut depth = f64::INFINITY;
     for a in 0..3 {
@@ -1281,11 +1396,31 @@ fn box_inside(b: &YawBox, p: [f64; 3]) -> Option<Hit> {
     Some(box_face(b, l, axis, sign))
 }
 
-/// The contact at surface point `q` of box `b`: the face `q` lies on, taken as the axis
-/// where `q` is deepest outside, or least inside, its slab.
+/// The contact for point `q` on or near box `b`, outside it: the nearest point of the
+/// box, the outward normal from it to `q` (the rounded box's normal at `q`: a face's
+/// normal over a face, radial off an edge or a corner) and the box's velocity. A `q`
+/// that rounding put on or inside the box takes [`box_surface_face`].
 #[inline]
 fn box_surface(b: &YawBox, q: [f64; 3]) -> Hit {
     let l = to_box(b, sub(q, b.centre));
+    let off = box_offset(b, l);
+    let d2 = dot(off, off);
+    if d2 > 0.0 {
+        let n = scale(off, 1.0 / d2.sqrt());
+        Hit {
+            point: add(b.centre, from_box(b, sub(l, off))),
+            normal: from_box(b, n),
+            velocity: b.velocity,
+        }
+    } else {
+        box_surface_face(b, l)
+    }
+}
+
+/// The contact at local point `l` of box `b`, on the face `l` lies on, taken as the axis
+/// where `l` is deepest outside, or least inside, its slab.
+#[inline]
+fn box_surface_face(b: &YawBox, l: [f64; 3]) -> Hit {
     let mut axis = 0;
     let mut out = f64::NEG_INFINITY;
     for a in 0..3 {
@@ -1299,33 +1434,96 @@ fn box_surface(b: &YawBox, q: [f64; 3]) -> Hit {
     box_face(b, l, axis, sign)
 }
 
-/// Distance along the unit ray `o + s rd` to where it enters box `b`, for an origin
-/// outside it; infinite on a miss. The slab test in the box's frame: three divisions.
+/// Distance along the unit ray `o + s rd` to where it enters box `b` inflated by `r`
+/// (the rounded box: every point within `r` of the box), for an origin further than `r`
+/// from the box; infinite on a miss.
+///
+/// The slab test in the box's frame against the box grown by `r` on every side (three
+/// divisions) finds where the ray enters that grown box. Over a face (at most one axis
+/// past the box's own half extent there) the rounded box is the grown box, and that is
+/// the entry. Otherwise the entry is over an edge or a corner, where the rounded box is
+/// cut back to cylinders and spheres of radius `r`: then it is the nearest entry into
+/// the corner sphere and the three edge cylinders (each clipped to its edge's length) of
+/// the one corner the ray can reach, the corner on the side the entry point is past the
+/// box on each axis where it is past it, and on the side the ray heads on the others.
+/// Each is a closed-form quadratic. The same corner is used for an origin already inside
+/// the grown box, which can only be over an edge or a corner.
 #[inline]
-fn box_ray(b: &YawBox, o: [f64; 3], rd: [f64; 3]) -> f64 {
+fn box_ray(b: &YawBox, o: [f64; 3], rd: [f64; 3], r: f64) -> f64 {
     let lo = to_box(b, sub(o, b.centre));
     let ld = to_box(b, rd);
+    let h = b.half;
     let mut enter = f64::NEG_INFINITY;
     let mut exit = f64::INFINITY;
     for a in 0..3 {
-        let h = b.half[a];
+        let e = h[a] + r;
         if ld[a] == 0.0 {
-            if lo[a].abs() >= h {
+            if lo[a].abs() >= e {
                 return f64::INFINITY;
             }
             continue;
         }
         let inv = 1.0 / ld[a];
-        let (t0, t1) = ((-h - lo[a]) * inv, (h - lo[a]) * inv);
+        let (t0, t1) = ((-e - lo[a]) * inv, (e - lo[a]) * inv);
         let (near, far) = if t0 < t1 { (t0, t1) } else { (t1, t0) };
         enter = enter.max(near);
         exit = exit.min(far);
     }
-    if enter <= exit && enter >= 0.0 {
-        enter
-    } else {
-        f64::INFINITY
+    if enter > exit || exit < 0.0 {
+        return f64::INFINITY;
     }
+    // The origin is outside the rounded box, so an entry behind it (rounding aside) is
+    // an origin inside the grown box, over an edge or a corner.
+    let t = enter.max(0.0);
+    let pos = [lo[0] + ld[0] * t, lo[1] + ld[1] * t, lo[2] + ld[2] * t];
+    let past = [
+        pos[0].abs() > h[0],
+        pos[1].abs() > h[1],
+        pos[2].abs() > h[2],
+    ];
+    if enter >= 0.0 && (past[0] as u8 + past[1] as u8 + past[2] as u8) <= 1 {
+        return t;
+    }
+    // Mirror into the reachable corner's octant: the corner is at `+h`.
+    let mut ro = [0.0; 3];
+    let mut rv = [0.0; 3];
+    for a in 0..3 {
+        let side = if past[a] { pos[a] } else { ld[a] };
+        let sign = if side < 0.0 { -1.0 } else { 1.0 };
+        ro[a] = lo[a] * sign - h[a];
+        rv[a] = ld[a] * sign;
+    }
+    let r2 = r * r;
+    let mut best = f64::INFINITY;
+    // The corner sphere: `rv` is a unit vector.
+    let bq = dot(ro, rv);
+    let disc = bq * bq - (dot(ro, ro) - r2);
+    if disc >= 0.0 {
+        let s = -bq - disc.sqrt();
+        if s >= 0.0 {
+            best = s;
+        }
+    }
+    // The edge along axis `a`, from `-h[a]` to `+h[a]` about the corner's other two
+    // coordinates.
+    for a in 0..3 {
+        let (j, k) = ((a + 1) % 3, (a + 2) % 3);
+        let qa = rv[j] * rv[j] + rv[k] * rv[k];
+        if qa <= 0.0 {
+            continue;
+        }
+        let qb = ro[j] * rv[j] + ro[k] * rv[k];
+        let qc = ro[j] * ro[j] + ro[k] * ro[k] - r2;
+        let disc = qb * qb - qa * qc;
+        if disc >= 0.0 {
+            let s = (-qb - disc.sqrt()) / qa;
+            let along = ro[a] + h[a] + rv[a] * s;
+            if s >= 0.0 && s < best && along.abs() <= h[a] {
+                best = s;
+            }
+        }
+    }
+    best
 }
 
 #[inline]

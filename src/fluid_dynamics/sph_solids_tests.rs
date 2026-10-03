@@ -821,9 +821,8 @@ fn ride(params: SphParams, dt: f64, speed: f64, steps: usize) -> (SphFluid, Vec<
 /// the hull's top a contact radius up, carried with it (its velocity the surface's, to
 /// within the one substep of gravity a resting contact leaves it), no sooner than
 /// `SETTLE_TIME` after it landed. Later by the time the hull takes to bring it up to
-/// speed: it lands at rest, and a drop sliding relative to a surface meets it only every
-/// few substeps (the module's "Settling" section), so friction acts that often. Measured:
-/// 0.08 s at 1 m/s (240 Hz), 0.27 s at 5 m/s (480 Hz).
+/// speed: it lands at rest and bounces (restitution), and friction acts on each substep
+/// it touches the hull (see `a_drop_set_on_a_1_m_s_hull_reaches_its_speed_within_a_few_substeps`).
 fn assert_rode(f: &SphFluid, settled: &[(usize, Settled)], dt: f64, speed: f64) {
     assert_eq!(settled.len(), 1, "{speed} m/s: drained {settled:?}");
     let (step, d) = settled[0];
@@ -940,29 +939,88 @@ fn a_drop_on_a_rising_lift_settles_with_its_index_and_the_lift_velocity() {
     );
 }
 
-/// A drop riding a hull at 2 m/s, for less than the settle time, stops with the hull:
-/// its count restarts when the hull stops (it is suddenly 2 m/s off the surface's
-/// speed), friction takes it to rest, and it settles with the hull's index and no
-/// velocity but the one substep of gravity, no sooner than `SETTLE_TIME` after the stop.
-/// It slides on first: a drop sliding across a surface meets it every few substeps, so
-/// friction stops it in 0.15 s and 14.5 cm (measured) rather than a few substeps; the
-/// same holds on a solid that never moved.
+/// The share of its tangential speed relative to a surface a drop keeps through one
+/// substep of `dt` in contact: the ground's implicit friction decay, which the solids use.
+fn friction_keep(params: &SphParams, dt: f64) -> f64 {
+    1.0 / (1.0 + FRICTION_REFERENCE_HZ * (1.0 / params.friction - 1.0) * dt)
+}
+
+/// The friction rate, 1/s: a drop sliding at `u` across a surface it stays on stops in
+/// `u / rate`, whatever the substep.
+fn friction_rate(params: &SphParams) -> f64 {
+    FRICTION_REFERENCE_HZ * (1.0 / params.friction - 1.0)
+}
+
+/// N, the substeps in contact friction takes to bring a drop sliding at `speed` across a
+/// surface to rest on it. Each keeps `friction_keep` of the tangential speed, and a drop
+/// is at rest on a surface once that is under `g dt`, the one substep of gravity a resting
+/// contact leaves it: N is the least k with `speed keep^k <= g dt`. With the sphere cast a
+/// drop on a surface meets it every substep, so N contacts are N substeps.
+fn substeps_to_rest(params: &SphParams, dt: f64, speed: f64) -> usize {
+    ((9.81 * dt / speed).ln() / friction_keep(params, dt).ln()).ceil() as usize
+}
+
+/// N for the two hull tests below: blood, 240 Hz, the faster of the two slides (2 m/s).
+fn hull_substeps_to_rest() -> usize {
+    let n = substeps_to_rest(&SphParams::blood(), DT, 2.0);
+    // A few, not tens: blood keeps 35% a substep, so 2 m/s is under g dt in four.
+    assert!(n <= 5, "N = {n}");
+    n
+}
+
+/// A drop riding a hull at 2 m/s, for less than the settle time, stops with the hull. It
+/// is suddenly 2 m/s off the surface's speed, and since it sits a contact radius off the
+/// hull it meets it on every substep from the stop: friction brings it to rest within N
+/// substeps (`hull_substeps_to_rest`), and it slides `u / rate` (the implicit decay's
+/// stopping distance, 4.5 mm for blood), under a centimetre. Before the sphere cast the
+/// drop met the stopped hull about one substep in ten and slid 14.5 cm. Its count restarts
+/// at the stop, and it settles with the hull's index and no velocity but the one substep
+/// of gravity, no sooner than `SETTLE_TIME` after the stop.
 #[test]
-fn a_drop_on_a_hull_that_stops_settles_with_its_index_and_no_velocity() {
+fn a_drop_on_a_hull_that_stops_comes_to_rest_within_a_few_substeps() {
     let mut f = SphFluid::new(SphParams::blood(), 4).unwrap();
     let rc = f.contact_radius();
     let speed = 2.0;
     f.spawn([0.0, 0.6 + rc, 0.0], [speed, 0.0, 0.0]);
     let stop = 48; // 0.2 s, under SETTLE_TIME
+    let n = hull_substeps_to_rest();
     let x = |s: usize| (s.min(stop) + 1) as f64 * DT * speed;
-    let settled = settle_run(&mut f, 480, far_below, |s, solids| {
+    let mut solids = SphSolids::new();
+    let mut settled = Vec::new();
+    let mut at_stop = ([0.0; 3], [0.0; 3]);
+    for s in 0..480 {
         let v = if s <= stop {
             [speed, 0.0, 0.0]
         } else {
             [0.0; 3]
         };
+        solids.clear();
         solids.push_capsule([x(s) - 1.0, 0.5, 0.0], [x(s) + 1.0, 0.5, 0.0], 0.1, v, v);
-    });
+        f.step_with_solids(DT, 9.81, far_below, &solids);
+        if f.is_empty() {
+            break;
+        }
+        if s == stop {
+            at_stop = (f.position(0), f.velocity(0));
+        }
+        if s > stop && s <= stop + n {
+            assert_eq!(
+                f.solid_stats().contacts,
+                1,
+                "{} substeps after the stop the drop did not meet the hull",
+                s - stop
+            );
+        }
+        if s == stop + n {
+            let v = f.velocity(0);
+            assert!(
+                v[0].abs() <= 9.81 * DT,
+                "{n} substeps after the stop the drop still slides at {} m/s",
+                v[0]
+            );
+        }
+        f.drain_settled(|d| settled.push((s, d)));
+    }
     assert_eq!(settled.len(), 1, "drained {settled:?}");
     let (step, d) = settled[0];
     assert_eq!(d.on_solid, Some(0));
@@ -972,18 +1030,295 @@ fn a_drop_on_a_hull_that_stops_settles_with_its_index_and_no_velocity() {
         d.velocity
     );
     assert!((d.position[1] - (0.6 + rc)).abs() <= 9.81 * DT * DT);
-    // It rode the hull 0.2 s, about 0.4 m, then slid on along the stopped hull's top.
-    let rode = x(stop);
+    // It rode the hull to the stop, then slid u / rate on along its top: each substep
+    // moves it at the speed the decay leaves it, so the slide is the sum of
+    // `u keep^k dt` over k from one, `u dt keep / (1 - keep)`, which is `u / rate`.
+    let u = at_stop.1[0];
+    let slide = d.position[0] - at_stop.0[0];
+    let law = u / friction_rate(f.params());
     assert!(
-        d.position[0] >= rode && d.position[0] <= rode + 1.0,
-        "settled at x = {}, the hull carried it {rode:.3} m",
-        d.position[0]
+        (slide - law).abs() <= 1e-9 && slide < 0.01,
+        "slid {slide:.6} m from {u:.4} m/s; the decay stops it in {law:.6} m"
     );
     let t = (step + 1) as f64 * DT;
     let stopped = (stop + 1) as f64 * DT;
     assert!(
         t >= stopped + SETTLE_TIME,
         "settled at {t:.3} s; the hull stopped at {stopped:.3} s"
+    );
+}
+
+/// A drop set down at rest on a hull moving at 1 m/s (touching it, a contact radius off
+/// its top) meets it on every substep and comes up to its speed by the decay law: after
+/// k substeps it is `keep^k` of the hull's speed behind, and within N substeps
+/// (`hull_substeps_to_rest`) it is within `g dt` of it. Before the sphere cast it met the
+/// hull about one substep in ten, so friction acted that often.
+#[test]
+fn a_drop_set_on_a_1_m_s_hull_reaches_its_speed_within_a_few_substeps() {
+    let mut f = SphFluid::new(SphParams::blood(), 4).unwrap();
+    let rc = f.contact_radius();
+    let speed = 1.0;
+    let n = hull_substeps_to_rest();
+    let keep = friction_keep(f.params(), DT);
+    f.spawn([0.0, 0.6 + rc, 0.0], [0.0; 3]);
+    let v = [speed, 0.0, 0.0];
+    let mut solids = SphSolids::new();
+    for s in 0..n {
+        let x = (s + 1) as f64 * DT * speed;
+        solids.clear();
+        solids.push_capsule([x - 3.0, 0.5, 0.0], [x + 1.0, 0.5, 0.0], 0.1, v, v);
+        f.step_with_solids(DT, 9.81, far_below, &solids);
+        assert_eq!(f.solid_stats().contacts, 1, "substep {s}: no contact");
+        let behind = speed - f.velocity(0)[0];
+        let law = speed * keep.powi(s as i32 + 1);
+        assert!(
+            (behind - law).abs() <= 1e-12,
+            "substep {s}: {behind:.6} m/s behind the hull, the decay leaves {law:.6}"
+        );
+        let p = f.position(0);
+        assert!(
+            (p[1] - (0.6 + rc)).abs() <= 1e-12,
+            "substep {s}: at y = {}",
+            p[1]
+        );
+    }
+    let behind = speed - f.velocity(0)[0];
+    assert!(
+        behind <= 9.81 * DT,
+        "after {n} substeps the drop is {behind:.4} m/s behind a {speed} m/s hull"
+    );
+}
+
+/// A drop thrown down a static 30 degree incline (the top of a tilted capsule) at 2 m/s
+/// decelerates on every substep, along the law the decay sets: each substep adds
+/// `g sin 30 dt` along the slope and keeps `keep` of the result, so its speed down the
+/// slope tends to `v* = keep g sin 30 dt / (1 - keep)` and its excess over that shrinks by
+/// exactly `keep` a substep, with no substep-in-ten steps. Thrown across a static box's
+/// lid the same way, with no slope, its speed shrinks by `keep` a substep to nothing. For
+/// blood, water and napalm (each friction from the stickiest to the slickest).
+#[test]
+fn a_drop_sliding_on_a_static_solid_decelerates_every_substep() {
+    let (sin, cos) = (30f64.to_radians().sin(), 30f64.to_radians().cos());
+    for params in [SphParams::blood(), SphParams::water(), SphParams::napalm()] {
+        let name = format!("friction {}", params.friction);
+        let keep = friction_keep(&params, DT);
+        let v0 = 2.0;
+        assert!(SphFluid::new(params, 1).unwrap().speed_ceiling(DT) > v0);
+
+        // Down the incline: the capsule's axis runs downhill along `down`, and the drop
+        // sits on its crest, a contact radius above it, with the up-slope normal.
+        let mut f = SphFluid::new(params, 4).unwrap();
+        let (radius, rc) = (0.1, f.contact_radius());
+        let down = [cos, -sin, 0.0];
+        let normal = [sin, cos, 0.0];
+        let a = [0.0, 1.0, 0.0];
+        let b = [a[0] + 2.0 * down[0], a[1] + 2.0 * down[1], 0.0];
+        let along = 0.2;
+        let lift = radius + rc;
+        f.spawn(
+            [
+                a[0] + along * down[0] + lift * normal[0],
+                a[1] + along * down[1] + lift * normal[1],
+                0.0,
+            ],
+            [v0 * down[0], v0 * down[1], 0.0],
+        );
+        let mut incline = SphSolids::new();
+        incline.push_capsule(a, b, radius, [0.0; 3], [0.0; 3]);
+        let terminal = keep * 9.81 * sin * DT / (1.0 - keep);
+        let mut excess = v0 - terminal;
+        for s in 0..40 {
+            f.step_with_solids(DT, 9.81, far_below, &incline);
+            assert_eq!(f.solid_stats().contacts, 1, "{name}, incline, substep {s}");
+            let next = dot(f.velocity(0), down) - terminal;
+            assert!(
+                (next - keep * excess).abs() <= 1e-9 * v0,
+                "{name}, incline, substep {s}: excess speed {excess:.6} -> {next:.6} m/s, \
+                 the decay keeps {keep:.4} of it"
+            );
+            excess = next;
+            let off = segment_distance(f.position(0), a, b) - radius;
+            assert!(
+                (off - rc).abs() <= 1e-12,
+                "{name}, incline, substep {s}: {off} off"
+            );
+        }
+
+        // Across a lid: a box yawed a quarter-ish turn, the drop thrown along its own x.
+        let mut f = SphFluid::new(params, 4).unwrap();
+        let yaw: f64 = 0.4;
+        let dir = [yaw.cos(), 0.0, -yaw.sin()];
+        let mut lid = SphSolids::new();
+        lid.push_box([0.0, 0.25, 0.0], [1.0, 0.25, 0.5], yaw, [0.0; 3]);
+        let top = 0.5 + f.contact_radius();
+        f.spawn(
+            [-0.6 * dir[0], top, -0.6 * dir[2]],
+            [v0 * dir[0], 0.0, v0 * dir[2]],
+        );
+        let mut speed = v0;
+        for s in 0..40 {
+            f.step_with_solids(DT, 9.81, far_below, &lid);
+            assert_eq!(f.solid_stats().contacts, 1, "{name}, lid, substep {s}");
+            let next = dot(f.velocity(0), dir);
+            assert!(
+                (next - keep * speed).abs() <= 1e-9 * v0,
+                "{name}, lid, substep {s}: {speed:.6} -> {next:.6} m/s, the decay keeps \
+                 {keep:.4}"
+            );
+            speed = next;
+            assert!(
+                (f.position(0)[1] - top).abs() <= 1e-12,
+                "{name}, lid, substep {s}"
+            );
+        }
+    }
+}
+
+/// Distance from `p` to box `centre`, `half`, yawed by `yaw` about +y (the convention of
+/// `SphSolids::push_box`).
+fn box_distance(p: [f64; 3], centre: [f64; 3], half: [f64; 3], yaw: f64) -> f64 {
+    let (s, c) = yaw.sin_cos();
+    let w = sub(p, centre);
+    let l = [c * w[0] - s * w[2], w[1], s * w[0] + c * w[2]];
+    let o: Vec<f64> = (0..3).map(|a| (l[a].abs() - half[a]).max(0.0)).collect();
+    (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt()
+}
+
+/// The sphere cast against an oracle: droplets fired at a yawed box's faces, edges and
+/// corners and at a tilted capsule from every side, one substep each, with no gravity.
+/// Where the straight path from start to end comes within a contact radius of the solid
+/// (its distance along the path is convex, so a ternary search finds the closest), the
+/// solid meets the droplet and leaves it exactly a contact radius off its surface; where
+/// it does not, the droplet goes where it was going, untouched. Starts already within a
+/// contact radius are included: moving in, they are met at once; moving out, never.
+#[test]
+fn the_sphere_cast_meets_exactly_the_paths_that_come_within_a_contact_radius() {
+    let (centre, half, yaw) = ([0.1, 0.5, -0.1], [0.2, 0.1, 0.15], 0.7);
+    let (ca, cb, cr) = ([-0.3, 0.3, 0.2], [0.2, 0.6, -0.1], 0.06);
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut unit = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let probe = SphFluid::new(SphParams::blood(), 1).unwrap();
+    let (rc, ceiling) = (probe.contact_radius(), probe.speed_ceiling(DT));
+    let (mut met, mut missed, mut touching) = (0, 0, 0);
+    for case in 0..1200 {
+        let on_box = case % 2 == 0;
+        let distance = |p: [f64; 3]| {
+            if on_box {
+                box_distance(p, centre, half, yaw)
+            } else {
+                segment_distance(p, ca, cb) - cr
+            }
+        };
+        // A target near the solid's surface (for a box, mostly near its edges and
+        // corners), and a start up to a substep at the ceiling away from it.
+        let target = if on_box {
+            let (s, c) = yaw.sin_cos();
+            let l: Vec<f64> = (0..3)
+                .map(|a| {
+                    let side = if unit() < 0.5 { -1.0 } else { 1.0 };
+                    side * half[a] * (0.7 + 0.6 * unit())
+                })
+                .collect();
+            [
+                centre[0] + c * l[0] + s * l[2],
+                centre[1] + l[1],
+                centre[2] - s * l[0] + c * l[2],
+            ]
+        } else {
+            let t = unit() * 1.2 - 0.1;
+            let axis = sub(cb, ca);
+            [
+                ca[0] + t * axis[0] + (unit() - 0.5) * 0.2,
+                ca[1] + t * axis[1] + (unit() - 0.5) * 0.2,
+                ca[2] + t * axis[2] + (unit() - 0.5) * 0.2,
+            ]
+        };
+        let heading = {
+            let d = [unit() - 0.5, unit() - 0.5, unit() - 0.5];
+            let l = dot(d, d).sqrt();
+            [d[0] / l, d[1] / l, d[2] / l]
+        };
+        let speed = ceiling * (0.2 + 0.79 * unit());
+        let back = speed * DT * (0.3 + unit());
+        let p0 = [
+            target[0] - heading[0] * back,
+            target[1] - heading[1] * back,
+            target[2] - heading[2] * back,
+        ];
+        let start = distance(p0);
+        if start <= 0.0 {
+            continue;
+        }
+        let v = [heading[0] * speed, heading[1] * speed, heading[2] * speed];
+        let p1 = [p0[0] + v[0] * DT, p0[1] + v[1] * DT, p0[2] + v[2] * DT];
+        // The closest the path comes; in-flight starts take the closest point ahead.
+        let at = |t: f64| {
+            distance([
+                p0[0] + (p1[0] - p0[0]) * t,
+                p0[1] + (p1[1] - p0[1]) * t,
+                p0[2] + (p1[2] - p0[2]) * t,
+            ])
+        };
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..200 {
+            let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if at(m1) <= at(m2) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        let closest = at(0.5 * (lo + hi)).min(at(0.0)).min(at(1.0));
+        let inside_start = start <= rc;
+        let moving_in = at(1e-6) < start;
+        let expect_meet = if inside_start {
+            moving_in
+        } else {
+            closest <= rc
+        };
+        // Grazing paths, within rounding of the inflated surface, decide nothing.
+        if (closest - rc).abs() < 1e-9 || (start - rc).abs() < 1e-9 {
+            continue;
+        }
+        let mut f = SphFluid::new(SphParams::blood(), 1).unwrap();
+        f.spawn(p0, v);
+        let mut solids = SphSolids::new();
+        if on_box {
+            solids.push_box(centre, half, yaw, [0.0; 3]);
+        } else {
+            solids.push_capsule(ca, cb, cr, [0.0; 3], [0.0; 3]);
+        }
+        f.step_with_solids(DT, 0.0, far_below, &solids);
+        let p = f.position(0);
+        let contacts = f.solid_stats().contacts;
+        if expect_meet {
+            met += 1;
+            touching += inside_start as usize;
+            assert_eq!(contacts, 1, "case {case}: {p0:?} -> {p1:?} was not met");
+            let off = distance(p);
+            assert!(
+                (off - rc).abs() <= 1e-9,
+                "case {case}: {p0:?} -> {p1:?} ended {off:.9} m off, not a contact \
+                 radius ({rc})"
+            );
+        } else {
+            missed += 1;
+            assert_eq!(contacts, 0, "case {case}: {p0:?} -> {p1:?} was met");
+            let d = sub(p, p1);
+            assert!(
+                dot(d, d) <= 1e-24,
+                "case {case}: moved from {p1:?} to {p:?}"
+            );
+        }
+    }
+    assert!(
+        met > 60 && missed > 200 && touching > 20,
+        "met {met}, missed {missed}, touching at the start {touching}"
     );
 }
 
@@ -1147,14 +1482,18 @@ fn settling_on_solids_is_bit_identical_at_any_thread_count() {
     }
 }
 
-/// Static solids and the ground are bit-identical to 0.3.5: drops raining onto a
+/// Static solids and the ground step to a recorded checksum: drops raining onto a
 /// capsule, a yawed crate, a sphere and a sloped ground, every solid at rest, step to the
-/// same checksum of positions, velocities and drained indices that 0.3.5 stepped them to.
-/// The relative cast of 0.3.6 shifts a ray's origin by its solid's velocity times the
-/// substep, and a solid at rest takes the world cast it always had, operation for
-/// operation; the literal was measured on 0.3.5 (9d2c669).
+/// same checksum of positions, velocities and drained indices every time.
+///
+/// The literal moves only with a deliberate change to the static contact, recorded here.
+/// 0.3.5 and 0.3.6 stepped it to `0x7c0b_de12_850b_324d` (measured on 0.3.5, 9d2c669: the
+/// relative cast of 0.3.6 leaves a solid at rest the world cast it always had). 0.3.7's
+/// sphere cast changes it: a drop sliding on a solid meets it on every substep instead
+/// of about one in ten, and every contact carries the particle on along the surface for
+/// the rest of its substep.
 #[test]
-fn a_static_scene_steps_to_the_checksum_it_had_in_0_3_5() {
+fn a_static_scene_steps_to_its_recorded_checksum() {
     let slope = |x: f64, z: f64| 0.08 * x - 0.05 * z;
     let mut f = SphFluid::new(SphParams::blood(), 1024).unwrap();
     for k in 0..800usize {
@@ -1210,7 +1549,7 @@ fn a_static_scene_steps_to_the_checksum_it_had_in_0_3_5() {
     );
     assert_eq!(
         h,
-        0x7c0b_de12_850b_324d,
+        0xa768_fcfb_039f_9def,
         "checksum {h:#018x} over {} drained",
         settled.len()
     );

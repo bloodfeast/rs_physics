@@ -129,27 +129,45 @@
 //! table is never cleared whole.
 //!
 //! **Contact.** In the move, after the velocity update and before the ground, a particle
-//! whose bin is not empty casts a ray against each solid in it, in that solid's frame:
-//! from where it started as the solid sees it, `p0 + v_s dt` (`v_s` the velocity of the
-//! surface nearest `p0`), to where it is going, `p1`, extended by the contact radius,
-//! against the solid at its given (end) pose. A drop carried with a moving surface casts
-//! only the sag of one substep's gravity, straight at it, and is set back on it every
-//! substep, as a drop on a solid at rest is; a particle a surface sweeps onto casts back
-//! along the solid's motion and meets its leading face, however thin the solid. A solid
-//! at rest casts the world displacement, the same arithmetic as before the cast was
-//! relative. Closed form, no iteration: a capsule is the nearest of its cylinder side and
-//! its two end spheres (three square roots), a box is the slab test in its own frame
-//! (three divisions; its yaw's sine and cosine are taken once, when it is pushed). At the
-//! nearest hit (the shortest distance along each solid's own ray) the particle is set on
-//! the surface a contact radius out along the normal; a particle that starts inside a
-//! solid in that solid's frame (inside the pose it had when the substep began: a solid
-//! that appeared on it, or turned onto it) is pushed out along the nearest normal
-//! instead. Its velocity relative to the surface keeps `restitution` of an approaching
-//! normal part, decays its tangential part at the ground's `friction` rate, and takes on
-//! the surface velocity: the ground's response, with no new coefficient. Swept rather
-//! than a point test, so a droplet at the speed ceiling cannot pass through a box one
-//! spacing thick or a blade. One contact a substep: a particle pushed from one solid into
-//! another meets the second next substep.
+//! whose bin is not empty casts itself against each solid in it as a sphere of the
+//! contact radius (`h / 4`), in that solid's frame: from where it started as the solid
+//! sees it, `p0 + v_s dt` (`v_s` the velocity of the surface nearest `p0`), to where it
+//! is going, `p1`, against the solid at its given (end) pose. A sphere cast is a ray
+//! against the solid inflated by the contact radius, its exact Minkowski sum with the
+//! sphere: a capsule of radius `R` inflates to the capsule of radius `R + h / 4` on the
+//! same axis, and a box to the rounded box (its faces out by `h / 4`, its edges quarter
+//! cylinders and its corners eighth spheres of that radius). Closed form, no iteration: a
+//! capsule is the nearest of its cylinder side and its two end spheres (three square
+//! roots); a box is the slab test against the box grown on every side, in its own frame
+//! (three divisions; its yaw's sine and cosine are taken once, when it is pushed), and
+//! only an entry over an edge or a corner tests the one reachable corner's sphere and
+//! three edge cylinders.
+//!
+//! Where the cast starts decides how it meets the solid. Clear of the inflation, it meets
+//! it where the ray enters, if that is within the substep. Within it (touching: at most a
+//! contact radius off the surface) and moving into it, it meets it at once. Inside the
+//! solid itself, in the solid's frame (inside the pose it had when the substep began: a
+//! solid that appeared on it, or turned onto it), it is pushed out along the nearest
+//! normal to a contact radius off it. A drop resting or sliding on a surface sits a
+//! contact radius off it, so it meets it on every substep, at any speed along it; a drop
+//! carried with a moving surface casts only the sag of one substep's gravity, straight
+//! at it, as on a solid at rest; a particle a surface sweeps onto casts back along the
+//! solid's motion and meets its leading face, however thin the solid.
+//!
+//! At the nearest meeting (the shortest distance along each solid's own ray) the
+//! particle is set on the inflated surface, and the rest of its cast carries on along the
+//! surface: the part along the normal is dropped and the tangential part scaled by the
+//! friction decay, then the end is set back on the inflated surface (a curved surface
+//! falls away from its tangent by the slide's square over twice its radius). Its velocity
+//! relative to the surface keeps `restitution` of an approaching normal part, decays its
+//! tangential part at the ground's `friction` rate, and takes on the surface velocity:
+//! the ground's response, with no new coefficient. Moving the rest of the substep at the
+//! decayed speed is the implicit friction step for the position as well as the velocity,
+//! so a drop sliding at `u` across a surface it stays on stops in exactly `u / rate`
+//! (4.5 mm from 2 m/s for blood), however many substeps that takes: blood under `g dt`
+//! in four. Swept rather than a point test, so a droplet at the speed ceiling cannot pass
+//! through a box one spacing thick or a blade. One contact a substep: a particle pushed
+//! from one solid into another meets the second next substep.
 //!
 //! **Settling.** A particle a solid's contact set on its surface, moving slower than
 //! the ground's settle speed (0.35 m/s) relative to that surface, is still on that
@@ -169,15 +187,17 @@
 //! at 1 m/s, a lift rising at 0.5) is set on it every substep and settles on it with the
 //! surface's velocity, as on a solid at rest.
 //!
-//! Two known gaps. A drop *sliding* across a surface, at rest or moving, faster than
-//! about `g dt` relative to it casts a ray nearly parallel to it and meets it only once
-//! it has sunk the contact radius, about one substep in ten, so friction acts that often:
-//! a drop landing at rest on a moving hull takes longer to come up to its speed (0.08 s
-//! at 1 m/s, 0.27 s at 5 m/s), and a drop thrown across a lid slides further (2 m/s
-//! stops in 0.15 s and 14.5 cm), before the settle time starts. And the speed cap is a
-//! world-frame limit: a surface faster than the fluid's speed ceiling (3.84 m/s for
-//! blood at 240 Hz) has its riders capped back to the ceiling every substep, so they
-//! slip back along it and do not settle (pinned by an ignored test in the solids tests).
+//! A drop sliding across a surface, at rest or moving, meets it on every substep (the
+//! sphere cast above), so friction acts every substep: a drop set at rest on a hull at
+//! 1 m/s is within `g dt` of its speed in four substeps of blood, and a drop on a hull
+//! that stops at 2 m/s slides 4.5 mm. Before 0.3.7 the cast was a point ray, which a
+//! sliding drop's nearly parallel ray met only once it had sunk the contact radius, about
+//! one substep in ten (0.08 s to come up to 1 m/s, 14.5 cm to stop from 2 m/s).
+//!
+//! One known gap: the speed cap is a world-frame limit, so a surface faster than the
+//! fluid's speed ceiling (3.84 m/s for blood at 240 Hz) has its riders capped back to
+//! the ceiling every substep; they slip back along it and do not settle (pinned by an
+//! ignored test in the solids tests).
 //!
 //! **The slope.** With solids the ground has a normal too: a particle in ground contact
 //! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
@@ -1214,13 +1234,15 @@ impl SphFluid {
     /// Everything [`Self::step`] does, and two things more (the module documentation's
     /// "Solids" section has the design and the cost):
     ///
-    /// - **The solids.** Each particle casts a short ray along its substep relative to
-    ///   each solid binned in its cell (its displacement less the solid's own, `v_s dt`),
-    ///   reaching [`Self::contact_radius`] further, against the solid at its
-    ///   end-of-substep pose, so a drop riding a moving surface stays on it. The nearest
-    ///   surface it meets stops it a contact radius out; a particle a solid moved onto is
-    ///   pushed out along the nearest normal. Either way its velocity relative to the
-    ///   surface keeps `restitution` of its approaching normal part and decays its
+    /// - **The solids.** Each particle casts itself, as a sphere of
+    ///   [`Self::contact_radius`], along its substep relative to each solid binned in its
+    ///   cell (its displacement less the solid's own, `v_s dt`), against the solid at its
+    ///   end-of-substep pose, so a drop riding a moving surface stays on it and a drop
+    ///   sliding across one meets it every substep. The nearest surface it meets stops it
+    ///   a contact radius out, and it carries on along the surface for the rest of the
+    ///   substep at the tangential speed friction leaves it; a particle a solid moved
+    ///   onto is pushed out along the nearest normal. Either way its velocity relative to
+    ///   the surface keeps `restitution` of its approaching normal part and decays its
     ///   tangential part at the ground's `friction` rate, then takes on the surface's
     ///   velocity: a boot displaces a pool, a falling corpse throws a splash. Swept, so a
     ///   droplet at the speed ceiling cannot pass through a blade.
