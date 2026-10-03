@@ -118,3 +118,7 @@ required-features = ["particles", "fluid_simulation"]
 [[example]]
 name = "grid_options"
 required-features = ["fluid_simulation"]
+
+[[example]]
+name = "turb_bench"
+required-features = ["particles", "fluid_simulation"]

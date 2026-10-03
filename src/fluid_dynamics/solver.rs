@@ -400,6 +400,11 @@ pub(crate) struct PcgWorkspace {
 }
 
 impl PcgWorkspace {
+    /// The elements the four work vectors hold, as allocated.
+    pub(crate) fn capacity(&self) -> usize {
+        self.r.capacity() + self.z.capacity() + self.s.capacity() + self.t.capacity()
+    }
+
     /// Sizes every vector to `len`, zero-filled. Called on every solve, but only
     /// allocates when the length changes; the cells a solve never writes (the grid's
     /// boundary ring) are zero from here on.

@@ -29,7 +29,7 @@
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects};
+use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive};
 
 /// Populations spanning "a few sparks from one hit" to "a debris field".
 const SCALES: [usize; 5] = [1_000, 10_000, 100_000, 500_000, 1_000_000];
@@ -48,18 +48,38 @@ struct Live {
 
 impl Live {
     fn new(count: usize) -> Live {
+        Live::in_air(count, None, 1)
+    }
+
+    /// The same pool, with both classes on the air (`swirl` 1, the physical coupling)
+    /// when `air` is given, warmed up in it so the population has the spread the swirl
+    /// gives it. The field is advanced every `period` frames and the particles refresh
+    /// their samples over that period.
+    fn in_air(count: usize, mut air: Option<&mut SwirlField>, period: usize) -> Live {
         let mut fx = ParticleEffects::with_capacity(count + count / 4);
         fx.set_class(0, ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 });
         fx.set_class(1, ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 });
+        if air.is_some() {
+            fx.set_swirl(0, 1.0);
+            fx.set_swirl(1, 1.0);
+        }
         // Two classes interleaved, because a single-class pool would let the class
         // lookup fold away entirely and flatter the result. Steady state: population
         // is the emission rate times the mean lifetime.
         let half = count as f32 / 2.0;
         let rate = [half / 0.35, half / 30.0];
         let mut live = Live { fx, rng: EffectRng::new(0xC0FFEE), owed: [0.0; 2], rate };
-        for _ in 0..(45.0 / DT) as usize {
+        for step in 0..(45.0 / DT) as usize {
             live.feed();
-            live.fx.integrate(DT);
+            match air.as_deref_mut() {
+                Some(field) => {
+                    if step % period == 0 {
+                        field.advance(period as f32 * DT);
+                    }
+                    live.fx.integrate_in_air(DT, field.velocity(), period as f32 * DT);
+                }
+                None => live.fx.integrate(DT),
+            }
         }
         live
     }
@@ -125,5 +145,134 @@ fn collide(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, integrate, collide);
+/// The swirl the field-on case integrates through: 32^3 cells of 2 m over the 64 m
+/// around the emitter, driven by a 3 m/s plume 12 m wide (octaves of 4 and 8 m).
+fn swirl_field() -> SwirlField {
+    let drive = TurbulenceDrive::new(3.0, 12.0).unwrap();
+    SwirlField::new([-32.0, 8.0, -32.0], [32, 32, 32], 2.0, drive, 0x5EED).unwrap()
+}
+
+/// The gate for the swirl: `integrate_in_air` with both classes on the air against
+/// `integrate` on the same live population, adjacent in one run at every scale, with
+/// the field updated at 10 Hz (every 6 frames) and at 20 Hz (every 3) and each
+/// particle refreshing its sample once a field period. The field's own update is
+/// outside the timed span (it is reported by `swirl_advance`). The field-on cost a
+/// particle must stay under twice the field-off cost.
+fn air(c: &mut Criterion) {
+    let mut group = c.benchmark_group("particle_effects/air");
+    for &n in &SCALES {
+        let mut off = Live::new(n);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("off", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    off.feed();
+                    let started = Instant::now();
+                    off.fx.integrate(std::hint::black_box(DT));
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        for (name, period) in [("on_10hz", 6usize), ("on_20hz", 3)] {
+            let mut field = swirl_field();
+            let mut on = Live::in_air(n, Some(&mut field), period);
+            let mut frame = 0usize;
+            group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+                b.iter_custom(|iters| {
+                    let mut spent = Duration::ZERO;
+                    for _ in 0..iters {
+                        on.feed();
+                        if frame % period == 0 {
+                            field.advance(period as f32 * DT);
+                        }
+                        frame += 1;
+                        let started = Instant::now();
+                        on.fx.integrate_in_air(std::hint::black_box(DT), field.velocity(), period as f32 * DT);
+                        spent += started.elapsed();
+                    }
+                    spent
+                });
+            });
+        }
+    }
+    group.finish();
+
+    // What a swirl update costs, on whichever thread calls it.
+    let mut group = c.benchmark_group("particle_effects/swirl_advance");
+    group.sample_size(20);
+    for &n in &[32usize, 64] {
+        let drive = TurbulenceDrive::new(3.0, 40.0).unwrap();
+        let mut field = SwirlField::new([0.0; 3], [n, n, n], 2.0, drive, 1).unwrap();
+        eprintln!("swirl {n}^3: {} bytes", field.bytes());
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| field.advance(std::hint::black_box(0.1)));
+        });
+    }
+    group.finish();
+}
+
+/// The plume gate: `integrate_in_air` reading a `PlumeField` whose worker steps at
+/// 20 Hz on its own thread beside the bench, against `integrate` on the same live
+/// population in the same run, each particle refreshing its sample once a worker
+/// period. The timed span is the frame thread's whole cost: taking the newest frame
+/// and integrating through it.
+#[cfg(feature = "fluid_simulation")]
+fn air_with_plume_worker(c: &mut Criterion) {
+    use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    let region = PlumeRegion { origin: [-32.0, 8.0, -32.0], cells: [32, 32, 32], cell_size: 2.0 };
+    let source = PlumeSource {
+        position: [0.0, 9.0, 0.0],
+        drive: TurbulenceDrive::new(3.0, 12.0).unwrap(),
+        smoke_rate: 1.0,
+    };
+    let mut group = c.benchmark_group("particle_effects/air_with_plume_worker");
+    for &n in &[100_000usize, 1_000_000] {
+        let mut off = Live::new(n);
+        let mut field = swirl_field();
+        let mut on = Live::in_air(n, Some(&mut field), 3);
+        let (plume, mut air) = PlumeField::new(region, source, [2.0, 0.0, 0.5], 0x5EED).unwrap();
+        let worker = plume.spawn(20.0).unwrap();
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("off", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    off.feed();
+                    let started = Instant::now();
+                    off.fx.integrate(std::hint::black_box(DT));
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("on", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let mut spent = Duration::ZERO;
+                for _ in 0..iters {
+                    on.feed();
+                    let started = Instant::now();
+                    let frame = air.latest();
+                    on.fx.integrate_in_air(std::hint::black_box(DT), frame.velocity(), frame.interval());
+                    spent += started.elapsed();
+                }
+                spent
+            });
+        });
+        let frame = air.latest();
+        eprintln!(
+            "plume worker at step {}, last step cost {:.2} ms",
+            frame.step(),
+            frame.step_cost().as_secs_f64() * 1e3
+        );
+        drop(worker);
+    }
+    group.finish();
+}
+
+#[cfg(feature = "fluid_simulation")]
+criterion_group!(benches, integrate, collide, air, air_with_plume_worker);
+#[cfg(not(feature = "fluid_simulation"))]
+criterion_group!(benches, integrate, collide, air);
 criterion_main!(benches);

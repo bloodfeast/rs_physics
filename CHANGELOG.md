@@ -3,6 +3,29 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## Unreleased (stacked on 0.3.2, not merged)
+
+The particle half of package TURB. Additive: `ParticleClass` is unchanged.
+
+### Added
+
+- `VelocityGrid`, `TurbulenceDrive` and `SwirlField`: curl noise in three octaves at
+  2h, 4h and 8h, each octave's rms speed set exactly to Kolmogorov's `U (l / L)^(1/3)`
+  and cross-faded over its turnover time `l / u_l`.
+- `ParticleEffects::set_swirl` and `swirl`, and `ParticleEffects::integrate_in_air(dt,
+  air, refresh)`: drag relaxes a class towards the local air at `swirl * drag`, each
+  particle re-sampling the air once per field period, staggered across the frames
+  (12 bytes a particle for the samples). A class with `swirl` 0 integrates
+  bit-identically to `integrate`.
+- `PlumeField` and its reader, frame and worker: a `FluidGrid3D` with both turbulence
+  options over a source's region plus the swirl, summed into one `VelocityGrid` and
+  published through a lock-free triple buffer from a worker thread.
+
+### Gate
+
+`integrate_in_air` against `integrate`, same run, gate 2x: 1.8 to 1.97x with the field
+at 10 Hz, 2.2 to 2.6x at 20 Hz (beside another build). Not met at 20 Hz.
+
 ## 0.3.2 (2026-10-02)
 
 Turbulence options on the grid fluids (package TURB, first half). Additive: with the new
