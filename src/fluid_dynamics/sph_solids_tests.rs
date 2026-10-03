@@ -865,11 +865,13 @@ fn a_drop_settled_on_the_ground_reports_no_solid() {
 /// step, however the bins under it change: rain falling around the crate, a limb
 /// sweeping across it and a solid added mid-rest change which buckets are binned
 /// from step to step, and the crate, refilled in the same place in the order, is the one
-/// named. Moved to another index mid-rest, the drop counts its stillness again and
-/// reports the new one.
+/// named. Its solid's index shifting between steps (as a set refilled every frame from
+/// the actors in reach does) neither restarts nor stalls its count: reindexed once
+/// mid-rest, or on every other step, it settles on the same step, in the same place to
+/// the bit, reporting the index of the step it drained after.
 #[test]
 fn a_resting_drops_solid_index_survives_the_bins_being_rebuilt() {
-    let run = |reindex_at: Option<usize>| {
+    let run = |extra_limbs: &dyn Fn(usize) -> bool| {
         let mut f = SphFluid::new(SphParams::blood(), 1024).unwrap();
         f.spawn([0.0, 0.8, 0.0], [0.0; 3]);
         let (mut last, mut changes) = (usize::MAX, 0);
@@ -881,7 +883,7 @@ fn a_resting_drops_solid_index_survives_the_bins_being_rebuilt() {
             let r = 0.4 + 0.3 * ((s * 7) % 11) as f64 / 11.0;
             f.spawn([r * a.cos(), 0.5, r * a.sin()], [0.0, -1.0, 0.0]);
             solids.clear();
-            if reindex_at.is_some_and(|r| s >= r) {
+            if extra_limbs(s) {
                 // Two more limbs from here on: capsules come first, so the crate goes from
                 // solid 1 to solid 3.
                 solids.push_capsule([3.0, 0.0, 3.0], [3.0, 1.0, 3.0], 0.06, [0.0; 3], [0.0; 3]);
@@ -917,22 +919,31 @@ fn a_resting_drops_solid_index_survives_the_bins_being_rebuilt() {
         out
     };
 
-    let steady = run(None);
+    let steady = run(&|_| false);
     assert_eq!(steady.len(), 1, "{steady:?}");
     assert_eq!(steady[0].1.on_solid, Some(1));
 
-    // Reindexed after it has rested a while but before it settles.
-    let (settle, _) = steady[0];
+    // Reindexed once after it has rested a while but before it settles, and on every
+    // other step throughout.
+    let (settle, first) = steady[0];
     let at = settle - 20;
-    let moved = run(Some(at));
-    assert_eq!(moved.len(), 1, "{moved:?}");
-    assert_eq!(moved[0].1.on_solid, Some(3));
-    let restart = (SETTLE_TIME / DT).round() as usize;
-    assert!(
-        moved[0].0 + 1 >= at + restart,
-        "settled {} steps after the reindex, under SETTLE_TIME",
-        moved[0].0 - at
-    );
+    let bits = |d: &Settled| d.position.map(f64::to_bits);
+    for (name, moved) in [
+        ("once", run(&|s| s >= at)),
+        ("every other step", run(&|s| s % 2 == 1)),
+    ] {
+        assert_eq!(moved.len(), 1, "{name}: {moved:?}");
+        let (step, d) = moved[0];
+        assert_eq!(step, settle, "{name}: settled on step {step}, not {settle}");
+        assert_eq!(bits(&d), bits(&first), "{name}: settled somewhere else");
+        // The index of the step it drained after: 3 with the two extra limbs pushed.
+        let expect = if (name == "once") || step % 2 == 1 {
+            3
+        } else {
+            1
+        };
+        assert_eq!(d.on_solid, Some(expect), "{name}");
+    }
 }
 
 /// Drops raining onto crates, a moving hull and the ground settle in the same places,

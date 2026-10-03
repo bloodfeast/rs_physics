@@ -17,11 +17,13 @@ is bit-identical to 0.3.4's in every scene measured.
   a solid in the `SphSolids` handed to the last `step_with_solids` (capsules first, then
   boxes, in push order), or `None` for the ground. A particle a solid's contact set on
   its surface, slower than the settle speed (0.35 m/s) relative to that surface, is
-  still on that solid, and drains after `SETTLE_TIME` (0.25 s) still on the same surface.
+  still on that solid, and drains after `SETTLE_TIME` (0.25 s) still on solids.
   The threshold is the ground's, applied in the surface's frame (the ground is a
   surface at rest), derived in the module's "Solids" section and on the constant. The ground runs after the
-  solids and wins a particle that touched both; a particle that comes to rest on another
-  surface, or whose solid takes another index in the set, counts again.
+  solids and wins a particle that touched both. The count restarts when a particle moves
+  between the ground and a solid, not when its solid's index changes: a set refilled
+  every frame from the actors in reach shifts indices most frames, and the index
+  reported is the one from the step the particle drained after.
 - The binning's particle scan (internal): every particle's cell tested against the
   solids' boxes, listed in a block grid over their union whose block size is chosen each
   step by the cost it implies, with a branch-free union test 64 particles to a word.

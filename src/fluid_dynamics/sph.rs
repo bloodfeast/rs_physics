@@ -136,11 +136,14 @@
 //! number; held for the settle time (0.25 s) it admits at most 8.75 cm of creep across
 //! the surface in either frame, and a drop resting on a solid sits near `g dt`
 //! (0.04 m/s at 240 Hz), the one substep of gravity the response leaves it. Still on
-//! the same surface for the settle time, it is drained by [`SphFluid::drain_settled`] with
-//! [`Settled::on_solid`] naming the solid's index in the set (capsules first, then
-//! boxes, so a set refilled in the same order keeps its indices). The ground, which runs
-//! after the solids, wins a particle that touched both, and a particle that comes to rest
-//! on another surface counts again. One known gap: the contact casts the particle's world
+//! the solids for the settle time, it is drained by [`SphFluid::drain_settled`] with
+//! [`Settled::on_solid`] naming the solid's index in the set of the step it drained
+//! after (capsules first, then boxes). The count is kept across solid indices: a caller
+//! refilling its set every frame from whatever is in reach shifts the indices most
+//! frames, and a drop still relative to each step's surface is still, whatever that
+//! surface's index. It restarts only when the particle moves between the ground and a
+//! solid, or stops being still. The ground, which runs after the solids, wins a particle
+//! that touched both. One known gap: the contact casts the particle's world
 //! displacement, so a drop carried along a moving surface meets it only every few
 //! substeps and does not settle on it (pinned by an ignored test in the solids tests).
 //!
@@ -404,8 +407,9 @@ pub struct Settled {
     /// were pushed), or `None` for the ground.
     ///
     /// A drop on a hull, a corpse or a limb is still when its velocity relative to that
-    /// solid's surface is, so it settles riding a moving hull; the caller can parent its
-    /// stain to whatever that index named this frame. Added in 0.3.5.
+    /// solid's surface is. The index is the current step's: a set refilled in a different
+    /// order between steps does not restart the drop's count, and the caller maps the
+    /// index through the set it handed that step. Added in 0.3.5.
     pub on_solid: Option<u32>,
 }
 
@@ -513,9 +517,10 @@ pub struct SphFluid {
     /// once it has been still for a moment, so a drip that is briefly slow at the
     /// apex of a bounce is not mistaken for one that has stopped.
     still_for: Vec<f64>,
-    /// The surface each particle's `still_for` is counted against: the index of a solid
-    /// in the last step's [`SphSolids`], or [`NO_SOLID`] for the ground. A particle that
-    /// comes to rest on another surface starts its count again.
+    /// The surface each particle was last still on: the index of a solid in the last
+    /// step's [`SphSolids`], or [`NO_SOLID`] for the ground. Reported at drain; its count,
+    /// `still_for`, restarts only when this moves between the ground and a solid, since
+    /// a caller's solid indices shift from step to step.
     rest_on: Vec<u32>,
 
     params: SphParams,
@@ -1709,8 +1714,9 @@ impl SphFluid {
     /// Then each particle's stillness: on the ground, below [`SETTLE_SPEED`]; otherwise,
     /// with `solids` (the move with solids ran), set on a solid this substep and below it
     /// relative to that solid's surface (`still_on_solid`). The ground, which runs last,
-    /// wins a particle that touched both. A particle still on a different surface from
-    /// the one it was counting against starts its count again.
+    /// wins a particle that touched both. A particle still on the ground after a solid,
+    /// or on a solid after the ground, starts its count again; a change of solid index
+    /// does not restart it (the index is recorded, the count kept).
     fn ground<F>(
         &mut self,
         dt: f64,
@@ -1767,10 +1773,10 @@ impl SphFluid {
             };
             match still_on {
                 Some(surface) => {
-                    if self.rest_on[i] != surface {
-                        self.rest_on[i] = surface;
+                    if (self.rest_on[i] == NO_SOLID) != (surface == NO_SOLID) {
                         self.still_for[i] = 0.0;
                     }
+                    self.rest_on[i] = surface;
                     self.still_for[i] += dt;
                 }
                 None => self.still_for[i] = 0.0,
