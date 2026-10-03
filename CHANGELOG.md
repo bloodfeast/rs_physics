@@ -5,6 +5,101 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+## 0.3.6 (2026-10-03)
+
+Package SPH-SOLIDS-c: drops ride moving solids. The solid contact is cast in each solid's
+frame. No signature changes; moving solids' results change (under Changed), and static
+solids and the ground are bit-identical to 0.3.5.
+
+### Changed
+
+- **A solid's pose is the end of the substep.** Stated in the module's "Solids" section,
+  on `SphSolids`, `push_capsule`, `push_box` and `step_with_solids`: a solid is given
+  where it is when the substep ends, with the surface velocity that carried it there, so
+  it stood `v dt` further back when the substep began. This is what a caller with one
+  pose a frame and a velocity has, and what the existing tests and examples already did.
+- **The contact casts relative to the surface.** Each particle casts, against each
+  solid in its bin, its displacement relative to that solid, `p1 - p0 - v_s dt`, from
+  `p0 + v_s dt` (where it started as the solid sees it) to `p1`, against the solid at its
+  end pose; `v_s` is the velocity of the surface nearest `p0` (a capsule's blend at
+  `p0`'s axis parameter, a box's one velocity). Before, it cast its world displacement
+  against the new pose, so a drop carried along a surface moving tangentially faster
+  than about `g dt` (0.04 m/s at 240 Hz) cast a ray nearly parallel to it and met it only
+  after sinking the whole contact radius, one substep in ten at 1 m/s, and a rising
+  surface met a drop only by pushing it out; neither settled. Now a drop moving with the
+  surface casts only one substep's gravity sag, straight at it, and settles on it as on a
+  solid at rest. A particle a surface sweeps onto casts back along the solid's motion and
+  meets its leading face; the push-out runs for a particle inside the solid's start pose.
+  Every result involving a moving solid changes; a solid with zero velocity takes the
+  world ray itself, the same arithmetic as 0.3.5.
+- **A fast solid's reach grows by its travel.** The binning reach is now per solid: the
+  longer of the speed ceiling's travel and the solid's own (its fastest surface speed
+  times `dt`), plus the contact radius. That is the exact bound on where a particle that
+  can meet the solid starts, under the relative cast (a hit lies within the longer of
+  the two travels of `p0`, plus the contact radius). A solid slower than the ceiling
+  (3.84 m/s for blood and water at 240 Hz) reaches exactly what it did; only a faster
+  one pays for a wider box.
+
+### Fixed
+
+- A drop riding a moving solid settles on it (SPH-SOLIDS-b's known gap): the ignored
+  `a_drop_riding_a_moving_capsule_settles_with_its_index_and_the_surface_velocity` runs
+  and passes at 1 m/s, with a 5 m/s ride, a lift rising at 0.5 m/s and a hull that stops
+  beside it.
+
+### Added
+
+- Tests: the 5 m/s ride (at 480 Hz, where blood's ceiling, 7.68 m/s, clears it), a drop
+  on a rising lift, a drop on a hull that stops, a 30 m/s blade sweeping a pool (no
+  particle left inside or behind its face: the reach growth at work), a static scene
+  stepped to the checksum it had on 0.3.5, and an ignored known-gap test for a hull
+  faster than the ceiling.
+- `examples/sph_solids_binning.rs` prints the move and whole-step medians beside the
+  binning, and steps two more scenes, (e) `pool_off` and (f) `pool_wade`, the bench's
+  wading pair.
+
+### Known gaps
+
+- **Sliding.** A drop sliding across a surface, moving or at rest, faster than about
+  `g dt` relative to it still meets it only every few substeps (the same parallel-ray
+  geometry, now in the surface's frame), so friction acts that often. A drop that lands
+  at rest on a moving hull takes longer to come up to its speed before its settle time
+  starts (measured 0.08 s at 1 m/s, 0.27 s at 5 m/s), and a drop at 2 m/s on a hull that
+  stops slides 14.5 cm over 0.15 s rather than a few substeps. Static solids keep this
+  behaviour, bit for bit.
+- **Faster than the ceiling.** The speed cap is a world-frame limit, applied before the
+  contact, so a surface faster than the fluid's ceiling has its riders capped back to the
+  ceiling every substep: at 5 m/s under blood's 3.84 m/s at 240 Hz the drop slips back
+  along the hull at 1.16 m/s and does not settle. Pinned by
+  `a_drop_rides_a_hull_faster_than_the_speed_ceiling` (ignored).
+
+### Measured
+
+`examples/sph_solids_binning 400`, release, medians of 400 steps, microseconds; before is
+0.3.5 with the example's new scenes (fd21248), after is this change: five before runs
+and three of the final build, interleaved with each other and with probe builds, with a
+Ridgeline build's `cargo` and `rustc` running beside them. Ranges over the runs:
+
+| scene | binning before | after | move before | after | step before | after |
+|---|---|---|---|---|---|---|
+| (a) far, 4,096 | 4.8 to 5.3 | 5.2 to 5.5 | 96 to 102 | 99 to 101 | 722 to 739 | 721 to 744 |
+| (b) hull_1k | 3.8 to 4.1 | 3.5 to 3.9 | 90 to 97 | 99 to 100 | 441 to 460 | 458 to 468 |
+| (c) hull_16k | 58.8 to 59.4 | 59.6 to 60.5 | 1,359 to 1,380 | 1,364 to 1,372 | 2,660 to 2,712 | 2,675 to 2,707 |
+| (d) melee_16k | 90.5 to 92.5 | 91.3 to 93.1 | 1,339 to 1,349 | 1,336 to 1,344 | 2,684 to 2,712 | 2,676 to 2,706 |
+| (f) less (e), wading | | | 18.7 to 20.7 | 19.6 to 21.2 | 0.0 to 6.5 | -3.7 to 1.7 |
+
+- (a) is bit-identical (its solids are out of reach), and so is every static scene: the
+  checksum test holds 0.3.5's literal.
+- (b) is the one scene that moves: every one of its 1,024 particles tests the moving hull
+  each substep, and the move pays 4 to 8 us for it (the adjacent before and after pairs),
+  about 5 ns a particle-solid test for the surface velocity and the shifted ray, 1 to 2%
+  of the step. A probe build that kept the new code but cast the world ray measured the
+  same, so it is the per-test work, not the different trajectories.
+- The wading shin (1 m/s, under the ceiling) costs what it did: about 20 us in the move
+  in both, and nothing measurable on the whole step.
+- (c) and (d) are within their spread; their checksums differ from 0.3.5's because their
+  solids move.
+
 ## 0.3.5 (2026-10-03)
 
 Package SPH-SOLIDS-b: solids binned by the cells they actually reach, and drops that

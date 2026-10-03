@@ -43,7 +43,8 @@ pub(super) struct YawBox {
 /// Presentation only and one way: the solids push the liquid and the liquid never pushes
 /// a solid back, so nothing here can reach a lockstep simulation. The caller clears and
 /// refills the set each frame from wherever its actors, corpses and props are; the step
-/// reads it and never writes it.
+/// reads it and never writes it. Each solid is given at its pose at the end of the
+/// substep, with the velocity that carried it there.
 ///
 /// Storage is two `Vec`s of whole records (a capsule is 144 bytes, a box 88), because the
 /// contact reads every field of the one solid it is testing; cleared rather than freed,
@@ -220,9 +221,13 @@ impl SphSolids {
     ///
     /// # Arguments
     ///
-    /// * `a`, `b` - the axis end points, metres.
+    /// * `a`, `b` - the axis end points, metres, where they are at the END of the
+    ///   substep the set is stepped with: the capsule stood `velocity * dt` further back
+    ///   when it began.
     /// * `radius` - metres, positive.
-    /// * `velocity_a`, `velocity_b` - the surface velocity at each end, m/s.
+    /// * `velocity_a`, `velocity_b` - the surface velocity at each end, m/s: what
+    ///   carried each end to `a` and `b`. The contact casts each particle relative to it,
+    ///   so a drop moving with the surface stays on it.
     ///
     /// # Returns
     ///
@@ -284,13 +289,16 @@ impl SphSolids {
     ///
     /// # Arguments
     ///
-    /// * `centre` - metres.
+    /// * `centre` - metres, where the box is at the END of the substep the set is stepped
+    ///   with: it stood `velocity * dt` further back when it began.
     /// * `half_extents` - half the box's size along its own x, y and z, metres, each
     ///   positive.
     /// * `yaw` - radians, a right-handed rotation about +y: the box's own +x axis lies
     ///   along `(cos yaw, 0, -sin yaw)` and its +z along `(sin yaw, 0, cos yaw)`. Its sine
     ///   and cosine are taken here, once, so the step's inner loop has no transcendental.
-    /// * `velocity` - the surface velocity, m/s.
+    /// * `velocity` - the surface velocity, m/s: what carried the box to `centre`. The
+    ///   contact casts each particle relative to it, so a drop moving with the box stays
+    ///   on it.
     ///
     /// # Returns
     ///
@@ -365,6 +373,18 @@ impl SphSolids {
                 [b.centre[0] - e[0], b.centre[1] - e[1], b.centre[2] - e[2]],
                 [b.centre[0] + e[0], b.centre[1] + e[1], b.centre[2] + e[2]],
             )
+        }
+    }
+
+    /// The fastest surface of solid `id`, m/s: the faster end of a capsule (its blend
+    /// along the axis is never faster), a box's one speed.
+    pub(super) fn max_speed(&self, id: usize) -> f64 {
+        let norm = |v: [f64; 3]| dot(v, v).sqrt();
+        if id < self.capsules.len() {
+            let c = &self.capsules[id];
+            norm(c.velocity_a).max(norm(c.velocity_b))
+        } else {
+            norm(self.boxes[id - self.capsules.len()].velocity)
         }
     }
 }
@@ -511,11 +531,21 @@ impl SphFluid {
         self.solid_stats
     }
 
-    /// Bin every solid's reach into the hash buckets of this step's grid.
+    /// Bin every solid's reach into the hash buckets of this step's grid, for a substep
+    /// of `dt` seconds.
     ///
-    /// A solid's reach is its bounds grown by the longest swept ray a particle can cast,
-    /// the speed ceiling's travel plus the contact radius. Any particle whose ray can meet
-    /// the solid, or which starts inside it, starts within that reach, so its own cell
+    /// A solid's reach is its bounds grown by the farthest a particle that can meet it
+    /// starts from it: the longer of the speed ceiling's travel and the solid's own
+    /// travel in the substep (its fastest surface speed times `dt`), plus the contact
+    /// radius. The contact casts each particle in the solid's frame (see
+    /// [`Contact::resolve`]), from `p0 + v_s dt` to `p1`, so a hit point lies at
+    /// `p0 + (1 - l) v_s dt + l (p1 - p0)` for `l` up to one, then up to a contact radius
+    /// further: within `max(|p1 - p0|, |v_s| dt)` of `p0` plus the contact radius, and
+    /// `|p1 - p0|` is at most the ceiling's travel. A particle inside the solid's start
+    /// pose is within `|v_s| dt` of it. A solid slower than the ceiling therefore reaches
+    /// exactly what it reached before solids were cast in their own frame. Any particle
+    /// whose ray can meet the solid, or which starts inside it, starts within that
+    /// reach, so its own cell
     /// (the cell `build_grid` gave it, from where the substep starts) is binned: one
     /// bucket read a particle finds every solid it can touch. Cells are clipped to the
     /// cells the fluid occupies.
@@ -530,21 +560,23 @@ impl SphFluid {
     ///
     /// Serial and in solid order, so the bins, and the order a particle tests its solids
     /// in, are fixed by the data.
-    pub(super) fn bin_solids(&mut self, solids: &SphSolids) {
-        self.bin_solids_by(solids, BinPath::Measured);
+    pub(super) fn bin_solids(&mut self, solids: &SphSolids, dt: f64) {
+        self.bin_solids_by(solids, dt, BinPath::Measured);
     }
 
     /// [`Self::bin_solids`], with the walk chosen by `path`.
-    pub(super) fn bin_solids_by(&mut self, solids: &SphSolids, path: BinPath) {
+    pub(super) fn bin_solids_by(&mut self, solids: &SphSolids, dt: f64, path: BinPath) {
         self.solid_bins.reset();
         let n = self.len();
         if solids.is_empty() || n == 0 {
             return;
         }
         let h = self.params.smoothing_radius;
-        // The longest ray: a substep at the speed ceiling (CFL_FRACTION of h, whatever
-        // dt is) plus the contact radius, with room for rounding in the cap.
-        let reach = (CFL_FRACTION * h + self.contact_radius()) * (1.0 + 1e-6);
+        // A particle's travel: a substep at the speed ceiling (CFL_FRACTION of h,
+        // whatever dt is). A solid's reach is the longer of that and its own travel,
+        // plus the contact radius, with room for rounding in the cap.
+        let ceiling = CFL_FRACTION * h;
+        let contact_radius = self.contact_radius();
 
         // The cells the fluid occupies: a serial min and max an axis over the integer
         // cells, which vectorises: the whole binning of 28 solids out of reach measured
@@ -572,6 +604,10 @@ impl SphFluid {
         let mut cells = 0u64;
         for id in 0..solids.len() {
             let (smin, smax) = solids.bounds(id);
+            // `max` returns the ceiling itself for any solid slower than it, so such a
+            // solid's reach is the same number it was before the relative cast.
+            let travel = ceiling.max(solids.max_speed(id) * dt);
+            let reach = (travel + contact_radius) * (1.0 + 1e-6);
             let mut c0 = [0i32; 3];
             let mut c1 = [0i32; 3];
             for a in 0..3 {
@@ -884,6 +920,9 @@ pub(super) struct Contact<'a> {
     pub(super) contact_radius: f64,
     pub(super) restitution: f64,
     pub(super) friction_keep: f64,
+    /// The substep, seconds: how far back along its velocity a moving solid's start pose
+    /// lies from the end pose it is given at.
+    pub(super) dt: f64,
 }
 
 impl<'a> Contact<'a> {
@@ -893,6 +932,7 @@ impl<'a> Contact<'a> {
         contact_radius: f64,
         restitution: f64,
         friction_keep: f64,
+        dt: f64,
     ) -> Contact<'a> {
         Contact {
             solids,
@@ -901,6 +941,7 @@ impl<'a> Contact<'a> {
             contact_radius,
             restitution,
             friction_keep,
+            dt,
         }
     }
 
@@ -911,15 +952,28 @@ impl<'a> Contact<'a> {
         &self.entries[s as usize..e as usize]
     }
 
-    /// Meet the solids `ids` on the substep from `p0` to `p1` at velocity `v`.
+    /// Meet the solids `ids` on the substep from `p0` to `p1` at velocity `v`, each in
+    /// its own frame.
     ///
-    /// A particle that starts inside a solid (the solid moved onto it) is pushed out of
-    /// the first such solid, in bin order, along the nearest surface normal. Otherwise
-    /// it casts a ray from `p0` along its displacement, reaching the contact radius past
-    /// `p1`, and the nearest surface it meets stops it: it is set on the surface, pushed
-    /// out by the contact radius along the normal. Either way its velocity relative to
-    /// the surface loses its approaching normal part to `restitution` and its tangential
-    /// part to the ground's friction decay, and then takes the surface's velocity.
+    /// A solid is given at its pose at the END of the substep, moving at its surface
+    /// velocity, so it stood that velocity times `dt` further back when the substep
+    /// began. Seen from the solid, the particle started at `p0 + v_s dt` and ends at
+    /// `p1`: its displacement relative to the surface is `p1 - p0 - v_s dt`, and that is
+    /// what it casts, against the solid at the given pose. A drop carried with the
+    /// surface casts only what gravity added, straight at the surface; a particle the
+    /// surface swept onto casts back along the solid's motion and meets its leading face.
+    /// `v_s` is the velocity of the surface nearest `p0` (a capsule's blend at the axis
+    /// parameter of `p0`, a box's one velocity). A solid at rest casts exactly the world
+    /// displacement it always did.
+    ///
+    /// A particle that starts inside a solid, in that solid's frame (inside the pose the
+    /// solid had when the substep began), is pushed out of the first such solid, in bin
+    /// order, along the nearest surface normal. Otherwise the nearest surface along the
+    /// rays, each reaching the contact radius past `p1`, stops it: it is set on the
+    /// surface, pushed out by the contact radius along the normal. "Nearest" is the
+    /// distance along each solid's own ray. Either way its velocity relative to the
+    /// surface loses its approaching normal part to `restitution` and its tangential part
+    /// to the ground's friction decay, and then takes the surface's velocity.
     ///
     /// Returns, if a solid moved the particle, that solid's id and the square of the
     /// particle's speed relative to the surface after the response, which is what its
@@ -932,46 +986,59 @@ impl<'a> Contact<'a> {
         p1: &mut [f64; 3],
         v: &mut [f64; 3],
     ) -> Option<(u32, f64)> {
-        let d = sub(*p1, p0);
-        let len2 = dot(d, d);
-        let moving = len2 > 0.0;
-        let (rd, s_max) = if moving {
-            let len = len2.sqrt();
-            (scale(d, 1.0 / len), len + self.contact_radius)
-        } else {
-            ([0.0; 3], 0.0)
-        };
+        // The world ray, which every solid at rest casts, worked out at the first one: a
+        // particle meeting only moving solids never needs it.
+        let mut world: Option<Ray> = None;
 
         let caps = self.solids.capsules.len();
         let mut best = f64::INFINITY;
         let mut best_id = u32::MAX;
+        let mut best_ray = Ray {
+            origin: p0,
+            dir: [0.0; 3],
+            reach: 0.0,
+            moving: false,
+        };
         for &id in ids {
             let k = id as usize;
-            let inside = if k < caps {
-                capsule_inside(&self.solids.capsules[k], p0)
+            let vs = if k < caps {
+                capsule_velocity_near(&self.solids.capsules[k], p0)
             } else {
-                box_inside(&self.solids.boxes[k - caps], p0)
+                self.solids.boxes[k - caps].velocity
+            };
+            // A solid at rest takes the world ray itself, so its arithmetic is the
+            // world cast's operation for operation (and -0.0 stays -0.0).
+            let ray = if vs == [0.0; 3] {
+                *world.get_or_insert_with(|| Ray::between(p0, *p1, self.contact_radius))
+            } else {
+                Ray::between(add(p0, scale(vs, self.dt)), *p1, self.contact_radius)
+            };
+            let inside = if k < caps {
+                capsule_inside(&self.solids.capsules[k], ray.origin)
+            } else {
+                box_inside(&self.solids.boxes[k - caps], ray.origin)
             };
             if let Some(hit) = inside {
                 return Some((id, self.respond(hit, p1, v)));
             }
-            if !moving {
+            if !ray.moving {
                 continue;
             }
             let s = if k < caps {
-                capsule_ray(&self.solids.capsules[k], p0, rd)
+                capsule_ray(&self.solids.capsules[k], ray.origin, ray.dir)
             } else {
-                box_ray(&self.solids.boxes[k - caps], p0, rd)
+                box_ray(&self.solids.boxes[k - caps], ray.origin, ray.dir)
             };
-            if s <= s_max && s < best {
+            if s <= ray.reach && s < best {
                 best = s;
                 best_id = id;
+                best_ray = ray;
             }
         }
         if best_id == u32::MAX {
             return None;
         }
-        let q = add(p0, scale(rd, best));
+        let q = add(best_ray.origin, scale(best_ray.dir, best));
         let k = best_id as usize;
         let hit = if k < caps {
             capsule_surface(&self.solids.capsules[k], q)
@@ -997,6 +1064,52 @@ impl<'a> Contact<'a> {
         *v = add(hit.velocity, kept);
         dot(kept, kept)
     }
+}
+
+/// A particle's swept ray in one solid's frame: from where it started, as that solid
+/// sees it, towards where it ends.
+#[derive(Debug, Clone, Copy)]
+struct Ray {
+    origin: [f64; 3],
+    /// Unit direction, or zero when the particle did not move in this frame.
+    dir: [f64; 3],
+    /// The displacement's length plus the contact radius: how far along `dir` a hit
+    /// still counts. Zero when not moving.
+    reach: f64,
+    moving: bool,
+}
+
+impl Ray {
+    /// The ray from `origin` to `end`, reaching `contact_radius` past it.
+    #[inline]
+    fn between(origin: [f64; 3], end: [f64; 3], contact_radius: f64) -> Ray {
+        let d = sub(end, origin);
+        let len2 = dot(d, d);
+        let moving = len2 > 0.0;
+        let (dir, reach) = if moving {
+            let len = len2.sqrt();
+            (scale(d, 1.0 / len), len + contact_radius)
+        } else {
+            ([0.0; 3], 0.0)
+        };
+        Ray {
+            origin,
+            dir,
+            reach,
+            moving,
+        }
+    }
+}
+
+/// The surface velocity of capsule `c` nearest `p`: its one velocity if both ends move
+/// alike, else the ends' blend at `p`'s axis parameter.
+#[inline]
+fn capsule_velocity_near(c: &Capsule, p: [f64; 3]) -> [f64; 3] {
+    if c.velocity_a == c.velocity_b {
+        return c.velocity_a;
+    }
+    let t = capsule_param(c, p);
+    add(c.velocity_a, scale(sub(c.velocity_b, c.velocity_a), t))
 }
 
 /// A point on a solid's surface, its outward unit normal, and the surface's velocity

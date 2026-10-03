@@ -85,19 +85,32 @@
 //! a surface velocity at each end, blended along the axis) and boxes yawed about +y
 //! (debris, a crate, a corpse's bounds, with one velocity).
 //!
+//! **The pose is the end of the substep.** A solid is given where it is when the substep
+//! ends, with the velocity that carried it there: it stood `v dt` further back when the
+//! substep began. That is what a caller with one pose a frame and a velocity has, and it
+//! is the reading the contact is built on (below). A caller that steps several substeps
+//! a frame gives each substep its own pose, the frame's less `v dt` for each substep
+//! still to come, so that pose and velocity agree.
+//!
 //! **One way.** Solids push the liquid; the liquid never pushes a solid. The set is
 //! borrowed read-only for the step and nothing is written back, so no fluid state can
 //! reach anything a lockstep simulation reads.
 //!
-//! **Binning.** After the particle grid is built, each solid's bounds, grown by the
-//! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
-//! contact radius, `h / 4`), are binned into the hash buckets of the occupied cells they
-//! cover, clipped to the cells the fluid spans: one entry a solid for each cell in its
-//! reach that holds a particle, filed under that cell's bucket. Any particle that can
-//! meet a solid starts the substep within that reach, so it finds the solid in its own
-//! cell's bin, one bucket read: the bins are the cells the ray can cross, gathered on the
-//! solid's side. A bucket's solids are in solid order, which is the order a particle
-//! tests them in.
+//! **Binning.** After the particle grid is built, each solid's bounds, grown by its
+//! reach, are binned into the hash buckets of the occupied cells they cover, clipped to
+//! the cells the fluid spans: one entry a solid for each cell in its reach that holds a
+//! particle, filed under that cell's bucket. The reach is the longer of the speed
+//! ceiling's travel (`0.4 h`) and the solid's own travel in the substep (its fastest
+//! surface speed times `dt`), plus the contact radius (`h / 4`): the contact casts in
+//! the solid's frame, from `p0 + v_s dt` to `p1`, so a hit lies within the longer of the
+//! particle's travel and the solid's of where the particle starts, plus the contact
+//! radius. Per solid and exact, so a solid slower than the ceiling (a limb, a walking
+//! hull: 3.84 m/s for blood at 240 Hz) reaches exactly what it did before the cast was
+//! relative, and only a faster one (a thrown blade, a vehicle) pays for a wider box. Any
+//! particle that can meet a solid starts the substep within that reach, so it finds the
+//! solid in its own cell's bin, one bucket read: the bins are the cells the ray can
+//! cross, gathered on the solid's side. A bucket's solids are in solid order, which is
+//! the order a particle tests them in.
 //!
 //! Two walks find the occupied cells, and write the same bins. The **cell walk** visits
 //! each solid's clipped box cell by cell: a hash, a bucket read and a look at the
@@ -116,18 +129,27 @@
 //! table is never cleared whole.
 //!
 //! **Contact.** In the move, after the velocity update and before the ground, a particle
-//! whose bin is not empty casts a ray from where it was to where it is going, extended
-//! by the contact radius. Closed form, no iteration: a capsule is the nearest of its
-//! cylinder side and its two end spheres (three square roots), a box is the slab test in
-//! its own frame (three divisions; its yaw's sine and cosine are taken once, when it is
-//! pushed). At the nearest hit the particle is set on the surface a contact radius out
-//! along the normal; a particle that starts inside a solid (the solid moved onto it) is
-//! pushed out along the nearest normal instead. Its velocity relative to the surface
-//! keeps `restitution` of an approaching normal part, decays its tangential part at the
-//! ground's `friction` rate, and takes on the surface velocity: the ground's response,
-//! with no new coefficient. Swept rather than a point test, so a droplet at the speed
-//! ceiling cannot pass through a box one spacing thick or a blade. One contact a
-//! substep: a particle pushed from one solid into another meets the second next substep.
+//! whose bin is not empty casts a ray against each solid in it, in that solid's frame:
+//! from where it started as the solid sees it, `p0 + v_s dt` (`v_s` the velocity of the
+//! surface nearest `p0`), to where it is going, `p1`, extended by the contact radius,
+//! against the solid at its given (end) pose. A drop carried with a moving surface casts
+//! only the sag of one substep's gravity, straight at it, and is set back on it every
+//! substep, as a drop on a solid at rest is; a particle a surface sweeps onto casts back
+//! along the solid's motion and meets its leading face, however thin the solid. A solid
+//! at rest casts the world displacement, the same arithmetic as before the cast was
+//! relative. Closed form, no iteration: a capsule is the nearest of its cylinder side and
+//! its two end spheres (three square roots), a box is the slab test in its own frame
+//! (three divisions; its yaw's sine and cosine are taken once, when it is pushed). At the
+//! nearest hit (the shortest distance along each solid's own ray) the particle is set on
+//! the surface a contact radius out along the normal; a particle that starts inside a
+//! solid in that solid's frame (inside the pose it had when the substep began: a solid
+//! that appeared on it, or turned onto it) is pushed out along the nearest normal
+//! instead. Its velocity relative to the surface keeps `restitution` of an approaching
+//! normal part, decays its tangential part at the ground's `friction` rate, and takes on
+//! the surface velocity: the ground's response, with no new coefficient. Swept rather
+//! than a point test, so a droplet at the speed ceiling cannot pass through a box one
+//! spacing thick or a blade. One contact a substep: a particle pushed from one solid into
+//! another meets the second next substep.
 //!
 //! **Settling.** A particle a solid's contact set on its surface, moving slower than
 //! the ground's settle speed (0.35 m/s) relative to that surface, is still on that
@@ -143,9 +165,19 @@
 //! frames, and a drop still relative to each step's surface is still, whatever that
 //! surface's index. It restarts only when the particle moves between the ground and a
 //! solid, or stops being still. The ground, which runs after the solids, wins a particle
-//! that touched both. One known gap: the contact casts the particle's world
-//! displacement, so a drop carried along a moving surface meets it only every few
-//! substeps and does not settle on it (pinned by an ignored test in the solids tests).
+//! that touched both. Cast in the solid's frame, a drop riding a moving surface (a hull
+//! at 1 m/s, a lift rising at 0.5) is set on it every substep and settles on it with the
+//! surface's velocity, as on a solid at rest.
+//!
+//! Two known gaps. A drop *sliding* across a surface, at rest or moving, faster than
+//! about `g dt` relative to it casts a ray nearly parallel to it and meets it only once
+//! it has sunk the contact radius, about one substep in ten, so friction acts that often:
+//! a drop landing at rest on a moving hull takes longer to come up to its speed (0.08 s
+//! at 1 m/s, 0.27 s at 5 m/s), and a drop thrown across a lid slides further (2 m/s
+//! stops in 0.15 s and 14.5 cm), before the settle time starts. And the speed cap is a
+//! world-frame limit: a surface faster than the fluid's speed ceiling (3.84 m/s for
+//! blood at 240 Hz) has its riders capped back to the ceiling every substep, so they
+//! slip back along it and do not settle (pinned by an ignored test in the solids tests).
 //!
 //! **The slope.** With solids the ground has a normal too: a particle in ground contact
 //! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
@@ -155,13 +187,13 @@
 //! solid in reach `step_with_solids` is bit-identical to `step`.
 //!
 //! **Cost.** A solid covers about `(L / h + 2.3)` cells along each axis of length `L`
-//! (its extent plus `1.3 h` of reach); a 0.4 m limb of radius 6 cm in blood (`h` = 4 cm)
-//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. The binning costs the
-//! cheaper of the walk over those cells and the scan over the particles (above); it
-//! writes an entry only where particles are. A particle pays one bucket read when no
-//! solid is near it, and the contact test against each solid in its bin when one is.
-//! Solids that reach no particle write no entry, and then the move is the plain one: the
-//! binning is the whole price.
+//! (its extent plus `1.3 h` of reach, for a solid slower than the ceiling); a 0.4 m limb
+//! of radius 6 cm in blood (`h` = 4 cm) spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near
+//! 400 cells. The binning costs the cheaper of the walk over those cells and the scan
+//! over the particles (above); it writes an entry only where particles are. A particle
+//! pays one bucket read when no solid is near it, and the contact test against each
+//! solid in its bin when one is. Solids that reach no particle write no entry, and then
+//! the move is the plain one: the binning is the whole price.
 //!
 //! **Memory.** A capsule is 144 bytes and a box 88 in [`SphSolids`]. The fluid's bins
 //! are 8 bytes a bucket (two to four buckets a particle, allocated on the first step with
@@ -1182,15 +1214,16 @@ impl SphFluid {
     /// Everything [`Self::step`] does, and two things more (the module documentation's
     /// "Solids" section has the design and the cost):
     ///
-    /// - **The solids.** Each particle casts a short ray along its substep, from where it
-    ///   was to where it is going, reaching [`Self::contact_radius`] further, against the
-    ///   solids binned in its cell. The nearest surface it meets stops it a contact
-    ///   radius out; a particle a solid moved onto is pushed out along the nearest
-    ///   normal. Either way its velocity relative to the surface keeps `restitution` of
-    ///   its approaching normal part and decays its tangential part at the ground's
-    ///   `friction` rate, then takes on the surface's velocity: a boot displaces a pool,
-    ///   a falling corpse throws a splash. Swept, so a droplet at the speed ceiling
-    ///   cannot pass through a blade.
+    /// - **The solids.** Each particle casts a short ray along its substep relative to
+    ///   each solid binned in its cell (its displacement less the solid's own, `v_s dt`),
+    ///   reaching [`Self::contact_radius`] further, against the solid at its
+    ///   end-of-substep pose, so a drop riding a moving surface stays on it. The nearest
+    ///   surface it meets stops it a contact radius out; a particle a solid moved onto is
+    ///   pushed out along the nearest normal. Either way its velocity relative to the
+    ///   surface keeps `restitution` of its approaching normal part and decays its
+    ///   tangential part at the ground's `friction` rate, then takes on the surface's
+    ///   velocity: a boot displaces a pool, a falling corpse throws a splash. Swept, so a
+    ///   droplet at the speed ceiling cannot pass through a blade.
     /// - **The slope.** A particle in ground contact samples `ground_height` twice more,
     ///   a rest spacing along +x and along +z, and meets the ground along that slope's
     ///   normal with the same response, so a drop on an incline runs downhill (SPH-F5).
@@ -1210,7 +1243,9 @@ impl SphFluid {
     /// * `gravity` - downward acceleration, m/s^2. A non-finite value does nothing.
     /// * `ground_height` - terrain height in metres at a world `(x, z)`, as for
     ///   [`Self::step`].
-    /// * `solids` - the solids this substep, at their poses for it. Read only.
+    /// * `solids` - the solids this substep, each at its pose at the END of the substep,
+    ///   with the surface velocity that carried it there (the module documentation's
+    ///   "Solids" section). Read only.
     ///
     /// # Examples
     ///
@@ -1265,7 +1300,7 @@ impl SphFluid {
         let mut binning = Duration::ZERO;
         if let Some(solids) = solids {
             let tb = Instant::now();
-            self.bin_solids(solids);
+            self.bin_solids(solids, dt);
             binning = tb.elapsed();
         }
         let t1 = Instant::now();
@@ -1601,6 +1636,7 @@ impl SphFluid {
                 self.contact_radius(),
                 restitution,
                 friction_keep,
+                dt,
             );
             let n = self.px.len();
             self.still_on_solid.clear();
