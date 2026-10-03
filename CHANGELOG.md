@@ -5,6 +5,56 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+## 0.3.7 (2026-10-03)
+
+Package SPH-SOLIDS-d: the sphere-cast contact, so a sliding drop gets friction every
+substep. No signature changes and no new public item; every result involving a solid
+changes (under Changed), static solids included. The ground path is untouched.
+
+### Changed
+
+- **The contact casts a sphere of the contact radius.** Each particle's ray is tested
+  against each solid inflated by the contact radius, the exact Minkowski sum with the
+  sphere: a capsule of radius `R` as the capsule of radius `R + h / 4` on the same axis,
+  a box as the rounded box (faces out by `h / 4`, edges quarter cylinders, corners eighth
+  spheres). Before, the ray was a point's, extended a contact radius past the substep,
+  and the particle was set a contact radius out only after it met the surface, so a
+  drop sliding across a solid faster than about `g dt` cast a ray nearly parallel to it
+  and met it only once it had sunk the contact radius, about one substep in ten:
+  friction and the surface velocity acted that often. Now a particle within a contact
+  radius of a surface and moving into it meets it at once, so a drop on a solid meets it
+  every substep. The push-out for a particle starting inside a solid stays. A start
+  within `1e-9` (of the squared distance) past the inflated surface counts as touching,
+  so rounding cannot turn a drop set on the surface into a miss.
+- **A contact carries the particle on along the surface.** At the meeting the rest of
+  the cast keeps its tangential part, scaled by the friction decay, and the end is set
+  back on the inflated surface. Before, the particle stopped at the meeting point, which
+  a drop meeting a surface every substep would never leave. Moving the rest of the
+  substep at the decayed speed is the implicit friction step for the position as well
+  as the velocity, so a drop sliding at `u` stops in exactly `u / rate`: a 2 m/s drop on
+  a hull that stops slides 4.5 mm (it slid 14.5 cm), and a drop set on a 1 m/s hull is
+  within `g dt` of its speed in four substeps of blood.
+- Static solids' results change with both, so the static-scene checksum test
+  (`a_static_scene_steps_to_its_recorded_checksum`, renamed from `..._it_had_in_0_3_5`)
+  takes `0xa768_fcfb_039f_9def`, with 0.3.5 and 0.3.6's `0x7c0b_de12_850b_324d` recorded in
+  its doc comment.
+
+### Fixed
+
+- A drop sliding across a solid gets friction and the surface velocity every substep
+  (SPH-SOLIDS-c's known sliding gap), on solids at rest and moving.
+
+### Added
+
+- Tests: a drop on a hull that stops comes to rest within N substeps (derived from the
+  friction decay and `g dt`: four for blood at 2 m/s) and slides `u / rate`, under a
+  centimetre; a drop set on a 1 m/s hull follows the decay law to its speed every
+  substep; a drop thrown down a 30 degree incline and across a yawed box's lid
+  decelerates by the decay every substep (blood, water, napalm); and an oracle test of
+  the sphere cast, droplets fired at a capsule and at a yawed box's faces, edges and
+  corners, met exactly where the path comes within a contact radius and left a contact
+  radius off.
+
 ## 0.3.6 (2026-10-03)
 
 Package SPH-SOLIDS-c: drops ride moving solids. The solid contact is cast in each solid's
