@@ -85,11 +85,22 @@ impl Live {
     }
 
     fn feed(&mut self) {
+        let Live { fx, rng, owed, rate } = self;
+        Self::emit_owed(owed, *rate, rng, |burst, rng| fx.emit(burst, rng));
+    }
+
+    /// This pool's emission for one frame, into a GPU pool instead of its own.
+    #[cfg(feature = "gpu")]
+    fn feed_into(&mut self, pool: &mut rs_physics::gpu::GpuParticlePool) {
+        Self::emit_owed(&mut self.owed, self.rate, &mut self.rng, |burst, rng| pool.emit(burst, rng));
+    }
+
+    fn emit_owed(owed: &mut [f32; 2], rate: [f32; 2], rng: &mut EffectRng, mut emit: impl FnMut(&Burst, &mut EffectRng)) {
         for c in 0..2 {
-            self.owed[c] += self.rate[c] * DT;
-            let whole = self.owed[c].floor();
-            self.owed[c] -= whole;
-            self.fx.emit(
+            owed[c] += rate[c] * DT;
+            let whole = owed[c].floor();
+            owed[c] -= whole;
+            emit(
                 &Burst {
                     origin: [0.0, 40.0, 0.0],
                     class: c as u8,
@@ -99,7 +110,7 @@ impl Live {
                     size: 0.7..1.3,
                     lift: 0.35,
                 },
-                &mut self.rng,
+                rng,
             );
         }
     }
@@ -271,8 +282,134 @@ fn air_with_plume_worker(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "fluid_simulation")]
+/// The resident GPU pool (`gpu` feature, where an adapter exists, on a context of its
+/// own from `GpuContext::with_features`): the same live population emitted into a
+/// `GpuParticlePool` with both classes on an `rgba16float` swirl updated every 3 frames
+/// (20 Hz) and uploaded the frame it changes. Two figures a population, both per frame:
+///
+/// - `device`: the GPU time of the emit and integrate passes, from timestamp queries
+///   around them (what the policy's GPU cost model calls the dispatch);
+/// - `host`: the frame thread's cost of the GPU path, staging the emission plus the
+///   encode and its one buffer write, plus the field upload on the frames it happens.
+///
+/// Set `WGPU_VALIDATION_INDIRECT_CALL=0` to measure as the engine's release build runs
+/// (wgpu 30 otherwise adds a validation dispatch to every indirect dispatch).
+#[cfg(feature = "gpu")]
+fn gpu_pool(c: &mut Criterion) {
+    use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig, PoolTimestamps};
+
+    let Some(gpu) = GpuContext::with_features(wgpu::Features::TIMESTAMP_QUERY) else {
+        eprintln!("gpu_pool: no adapter, skipped");
+        return;
+    };
+    if !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        eprintln!("gpu_pool: no timestamp queries, skipped");
+        return;
+    }
+    // Timestamps a chunk of frames at a time: four a frame (emit and integrate).
+    const CHUNK: usize = 256;
+    let queries = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: None,
+        ty: wgpu::QueryType::Timestamp,
+        count: (4 * CHUNK) as u32,
+    });
+    let bytes = (4 * CHUNK * 8) as u64;
+    let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: bytes,
+        usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let read = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let period = gpu.queue.get_timestamp_period() as f64;
+
+    let mut group = c.benchmark_group("particle_effects/gpu_pool");
+    for &n in &[10_000usize, 100_000, 1_000_000] {
+        // The live pool's emission, into the GPU pool instead.
+        let mut feed = Live::new(1);
+        let half = n as f32 / 2.0;
+        feed.rate = [half / 0.35, half / 30.0];
+        let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new((n + n / 4) as u32)).unwrap();
+        for (c, class) in [feed.fx.class(0), feed.fx.class(1)].into_iter().enumerate() {
+            pool.set_class(c as u8, class);
+            pool.set_swirl(c as u8, 1.0);
+        }
+        let mut field = swirl_field();
+        let mut frame = 0usize;
+        let mut run = |frames: usize, timed: bool, pool: &mut GpuParticlePool, feed: &mut Live| -> (Duration, Duration) {
+            let mut host = Duration::ZERO;
+            let mut device_ns = 0.0f64;
+            let mut done = 0;
+            while done < frames {
+                let chunk = (frames - done).min(CHUNK);
+                for f in 0..chunk {
+                    let started = Instant::now();
+                    feed.feed_into(pool);
+                    if frame % 3 == 0 {
+                        field.advance(3.0 * DT);
+                        pool.upload_field(field.velocity());
+                    }
+                    frame += 1;
+                    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                    let base = (4 * f) as u32;
+                    pool.encode_timed(
+                        &mut encoder,
+                        DT,
+                        timed.then_some(PoolTimestamps { query_set: &queries, field: None, emit: Some(base), integrate: Some(base + 2) }),
+                    );
+                    host += started.elapsed();
+                    gpu.queue.submit([encoder.finish()]);
+                }
+                if timed {
+                    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                    encoder.resolve_query_set(&queries, 0..(4 * chunk) as u32, &resolve, 0);
+                    encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, (4 * chunk * 8) as u64);
+                    gpu.queue.submit([encoder.finish()]);
+                    let slice = read.slice(..);
+                    slice.map_async(wgpu::MapMode::Read, |_| {});
+                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    {
+                        let view = slice.get_mapped_range().unwrap();
+                        let ticks: &[u64] = bytemuck::cast_slice(&view);
+                        for f in 0..chunk {
+                            for pass in [0, 2] {
+                                device_ns += ticks[4 * f + pass + 1].wrapping_sub(ticks[4 * f + pass]) as f64 * period;
+                            }
+                        }
+                    }
+                    read.unmap();
+                } else {
+                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                }
+                done += chunk;
+            }
+            (host, Duration::from_nanos(device_ns as u64))
+        };
+        // The 45 s warm-up of the CPU pools, so the dust has its age spread.
+        run((45.0 / DT) as usize, false, &mut pool, &mut feed);
+
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("device", n), &n, |b, _| {
+            b.iter_custom(|iters| run(iters as usize, true, &mut pool, &mut feed).1);
+        });
+        group.bench_with_input(BenchmarkId::new("host", n), &n, |b, _| {
+            b.iter_custom(|iters| run(iters as usize, false, &mut pool, &mut feed).0);
+        });
+    }
+    group.finish();
+}
+
+#[cfg(all(feature = "fluid_simulation", feature = "gpu"))]
+criterion_group!(benches, integrate, collide, air, air_with_plume_worker, gpu_pool);
+#[cfg(all(feature = "fluid_simulation", not(feature = "gpu")))]
 criterion_group!(benches, integrate, collide, air, air_with_plume_worker);
-#[cfg(not(feature = "fluid_simulation"))]
+#[cfg(all(not(feature = "fluid_simulation"), feature = "gpu"))]
+criterion_group!(benches, integrate, collide, air, gpu_pool);
+#[cfg(all(not(feature = "fluid_simulation"), not(feature = "gpu")))]
 criterion_group!(benches, integrate, collide, air);
 criterion_main!(benches);

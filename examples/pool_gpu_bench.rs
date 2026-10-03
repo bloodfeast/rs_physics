@@ -250,7 +250,11 @@ fn median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
         return f64::NAN;
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.retain(|x| !x.is_nan());
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(f64::total_cmp);
     v[v.len() / 2]
 }
 
@@ -292,6 +296,8 @@ fn main() {
         mapped_at_creation: false,
     });
     let queries = Some((&set, &resolve, &read));
+
+    overheads(&gpu);
 
     let formats: [(&str, Option<FieldFormat>); 4] = [
         ("gpu f16", Some(FieldFormat::F16Filtered)),
@@ -367,4 +373,43 @@ fn main() {
             }
         }
     }
+}
+
+/// What the driver calls under an encode cost on the CPU, each alone: a 10 KB and a
+/// 512 KiB `write_buffer`, an empty compute pass, and a command encoder's creation and
+/// `finish`.
+fn overheads(gpu: &GpuContext) {
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 1 << 20,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let small = vec![0u8; 10 << 10];
+    let big = vec![0u8; 512 << 10];
+    let mut times = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for _ in 0..200 {
+        let t = Instant::now();
+        gpu.queue.write_buffer(&buffer, 0, &small);
+        times[0].push(t.elapsed().as_nanos() as f64);
+        let t = Instant::now();
+        gpu.queue.write_buffer(&buffer, 0, &big);
+        times[1].push(t.elapsed().as_nanos() as f64);
+        let t = Instant::now();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        times[2].push(t.elapsed().as_nanos() as f64);
+        let t = Instant::now();
+        drop(encoder.begin_compute_pass(&Default::default()));
+        times[3].push(t.elapsed().as_nanos() as f64);
+        let t = Instant::now();
+        let done = encoder.finish();
+        times[4].push(t.elapsed().as_nanos() as f64);
+        gpu.queue.submit([done]);
+    }
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let names = ["write_buffer 10 KB", "write_buffer 512 KiB", "create encoder", "empty compute pass", "finish"];
+    for (name, t) in names.iter().zip(times) {
+        println!("  {name:<22} {:>7.1} us", median(t) / 1e3);
+    }
+    println!();
 }
