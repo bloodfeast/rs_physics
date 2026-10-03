@@ -331,8 +331,10 @@ fn probe_sqrt_div(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = probe.inputs + 2u * k;
     let x = bitcast<f32>(records[b]);
     let y = bitcast<f32>(records[b + 1u]);
-    out[2u * k] = bitcast<u32>(sqrt_rn(abs(x)));
-    out[2u * k + 1u] = bitcast<u32>(div_rn(x, abs(y)));
+    out[4u * k] = bitcast<u32>(sqrt_rn(abs(x)));
+    out[4u * k + 1u] = bitcast<u32>(div_rn(x, abs(y)));
+    out[4u * k + 2u] = bitcast<u32>(sqrt_rn_by(abs(x), true));
+    out[4u * k + 3u] = bitcast<u32>(div_rn_by(x, abs(y), true));
 }
 "#;
 
@@ -562,18 +564,21 @@ fn the_device_sqrt_and_divide_are_correctly_rounded() {
         pairs.push((v, 1e-6));
     }
     let inputs: Vec<u32> = pairs.iter().flat_map(|&(x, y)| [x.to_bits(), y.to_bits()]).collect();
-    let out = prober.run("probe_sqrt_div", pairs.len() as u32, 0, &inputs, 2 * pairs.len());
+    let out = prober.run("probe_sqrt_div", pairs.len() as u32, 0, &inputs, 4 * pairs.len());
     let mut checked = 0;
     for (k, &(x, y)) in pairs.iter().enumerate() {
         let (sq, q) = (x.abs().sqrt(), x / y.abs());
         // Below the normal range the device reads zero (documented); none arises in emission.
+        // Both paths: the estimate settled by the bracket, and the fallback alone.
         if x.abs() >= f32::MIN_POSITIVE || x == 0.0 {
-            assert_eq!(f32::from_bits(out[2 * k]).to_bits(), sq.to_bits(), "sqrt {x:e}");
+            assert_eq!(out[4 * k], sq.to_bits(), "sqrt {x:e}");
+            assert_eq!(out[4 * k + 2], sq.to_bits(), "digit sqrt {x:e}");
         }
         if q.abs() >= f32::MIN_POSITIVE && q.is_finite() || x == 0.0 {
-            assert_eq!(f32::from_bits(out[2 * k + 1]).to_bits(), q.to_bits(), "{x:e} / {y:e}");
+            assert_eq!(out[4 * k + 1], q.to_bits(), "{x:e} / {y:e}");
+            assert_eq!(out[4 * k + 3], q.to_bits(), "long division {x:e} / {y:e}");
             checked += 1;
         }
     }
-    println!("sqrt_rn and div_rn: {} square roots and {checked} quotients equal the CPU's", pairs.len());
+    println!("sqrt_rn and div_rn, each by both paths: {} square roots and {checked} quotients equal the CPU's", pairs.len());
 }

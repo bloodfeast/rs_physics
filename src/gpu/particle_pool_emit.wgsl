@@ -15,7 +15,9 @@
 //   first. Products that feed only a multiply or a store need nothing.
 // - Add, subtract and multiply are correctly rounded on Vulkan, as on the CPU.
 // - Division (2.5 ulp on Vulkan) and square root (inherited from inversesqrt) are not.
-//   `div_rn` and `sqrt_rn` below are correctly rounded in integer arithmetic.
+//   `div_rn` and `sqrt_rn` below are correctly rounded: the device's own result as an
+//   estimate, settled by exact integer comparisons (long division and a digit-by-digit
+//   root as the fallback).
 // - `x / 2^24` in `unit` is a multiply by 2^-24 here: exact either way, so the same.
 // - u32 to f32: exact below 2^24, which is all `unit` and `sin_cos_turn` convert.
 // - sin and cos: `sin_cos_turn` in i32 arithmetic and the same table as the CPU's.
@@ -108,21 +110,28 @@ fn sin_cos_turn(turn: u32, sine: u32) -> vec2<f32> {
     return vec2<f32>(f32(si) * scale, f32(ci) * scale);
 }
 
-// The correctly rounded square root of a non-negative finite `x`, digit by digit on the
-// significand: what the CPU's `f32::sqrt` (IEEE 754) returns. A subnormal reads as zero.
-fn sqrt_rn(x: f32) -> f32 {
-    let bits = bitcast<u32>(x);
-    let e = (bits >> 23u) & 0xffu;
-    if (e == 0u) {
-        return 0.0;
-    }
-    let m = (bits & 0x7fffffu) | 0x800000u;
-    // x = m 2^p; shift the significand so the remaining exponent is even, and so the
-    // root of the 50-bit radicand M = m 2^s has 25 bits: 24 and a rounding bit.
-    let p = i32(e) - 150;
-    let s = select(26u, 25u, (p & 1) != 0);
-    let hi = m >> (32u - s);
-    let lo = m << s;
+// `a * b` for `a`, `b` below 2^26, exactly, as (high word, low word): 16-bit limbs.
+fn mul_wide(a: u32, b: u32) -> vec2<u32> {
+    let ah = a >> 16u;
+    let al = a & 0xffffu;
+    let bh = b >> 16u;
+    let bl = b & 0xffffu;
+    let low = al * bl;
+    // Each cross term is below 2^26, so the sum fits.
+    let mid = ah * bl + al * bh;
+    let lo = low + (mid << 16u);
+    let carry = select(0u, 1u, lo < low);
+    return vec2<u32>(ah * bh + (mid >> 16u) + carry, lo);
+}
+
+// `a > b` for 64-bit values as (high, low).
+fn wide_greater(a: vec2<u32>, b: vec2<u32>) -> bool {
+    return a.x > b.x || (a.x == b.x && a.y > b.y);
+}
+
+// The correctly rounded square root's significand, digit by digit: `sqrt(M) / 2`
+// rounded to nearest, M = `hi lo` (50 bits). The fallback of `sqrt_rn`.
+fn sqrt_digits(hi: u32, lo: u32) -> u32 {
     var rem = 0u;
     var root = 0u;
     for (var j = 0u; j < 25u; j = j + 1u) {
@@ -141,23 +150,91 @@ fn sqrt_rn(x: f32) -> f32 {
             root = root | 1u;
         }
     }
-    var sig = root >> 1u;
+    // No square root of an f32 lies on a rounding midpoint, so the remainder decides
+    // only which side: round half up is round to nearest here.
+    return (root >> 1u) + (root & 1u);
+}
+
+// The correctly rounded square root of a non-negative finite `x`: what the CPU's
+// `f32::sqrt` (IEEE 754) returns. A subnormal reads as zero.
+//
+// x = m 2^p; the significand is shifted so the remaining exponent is even, giving the
+// 50-bit radicand M = m 2^s, whose root's significand is `sqrt(M) / 2` in [2^23, 2^24).
+// The rounded significand is the integer c with (2c - 1)^2 < M < (2c + 1)^2 (M is even
+// and the bounds odd, so neither is ever equal). The device's own `sqrt` estimates c to
+// a few units; six exact 64-bit comparisons against the odd squares round it bracket
+// the answer, independently, so the chain is short. If the bracket does not hold (an
+// estimate off by more than 2, which no conformant device gives), the digit-by-digit
+// root decides. Either way the result is exact; the estimate only picks the path.
+fn sqrt_rn(x: f32) -> f32 {
+    return sqrt_rn_by(x, false);
+}
+
+// `sqrt_rn`, or with `digits` its fallback alone (for the tests).
+fn sqrt_rn_by(x: f32, digits: bool) -> f32 {
+    let bits = bitcast<u32>(x);
+    let e = (bits >> 23u) & 0xffu;
+    if (e == 0u) {
+        return 0.0;
+    }
+    let m = (bits & 0x7fffffu) | 0x800000u;
+    let p = i32(e) - 150;
+    let s = select(26u, 25u, (p & 1) != 0);
+    let radicand = vec2<u32>(m >> (32u - s), m << s);
+    // sqrt(M) / 2 = sqrt(4m) 2^11 (s = 26) or sqrt(2m) 2^11 (s = 25); 4m and 2m are
+    // exact in f32.
+    let c0 = u32(sqrt(f32(m << (s - 24u))) * 2048.0);
+    var below = 0u;
+    for (var j = 0u; j < 6u; j = j + 1u) {
+        let u = 2u * (c0 + j - 3u) + 1u;
+        below = below + select(0u, 1u, wide_greater(radicand, mul_wide(u, u)));
+    }
+    var sig: u32;
+    if (digits || below == 0u || below == 6u) {
+        sig = sqrt_digits(radicand.x, radicand.y);
+    } else {
+        sig = c0 - 3u + below;
+    }
     var exponent = (p - i32(s)) / 2 + 24;
-    if ((root & 1u) == 1u && (rem != 0u || (sig & 1u) == 1u)) {
-        sig = sig + 1u;
-        if (sig == 0x1000000u) {
-            sig = 0x800000u;
-            exponent = exponent + 1;
-        }
+    if (sig == 0x1000000u) {
+        sig = 0x800000u;
+        exponent = exponent + 1;
     }
     return bitcast<f32>((u32(exponent + 127) << 23u) | (sig & 0x7fffffu));
 }
 
-// The correctly rounded quotient `a / b` of a finite `a` and a positive normal `b`, by
-// long division of the significands: what the CPU's `/` (IEEE 754) returns when the
-// quotient is a normal f32. A subnormal `a` reads as zero, and a quotient below the
-// normal range is zero (the CPU would give a subnormal).
+// The correctly rounded quotient significand `ma 2^23 / mb`, by long division: the
+// fallback of `div_rn`.
+fn div_digits(ma: u32, mb: u32) -> u32 {
+    var rem = ma;
+    var q = 0u;
+    for (var j = 0u; j < 25u; j = j + 1u) {
+        q = q << 1u;
+        if (rem >= mb) {
+            rem = rem - mb;
+            q = q | 1u;
+        }
+        rem = rem << 1u;
+    }
+    // No quotient of two f32 lies on a rounding midpoint: round half up is to nearest.
+    return (q >> 1u) + (q & 1u);
+}
+
+// The correctly rounded quotient `a / b` of a finite `a` and a positive normal `b`: what
+// the CPU's `/` (IEEE 754) returns when the quotient is a normal f32. A subnormal `a`
+// reads as zero, and a quotient below the normal range is zero (the CPU would give a
+// subnormal).
+//
+// With the significands scaled so ma / mb is in [1, 2), the rounded significand is the
+// integer c with (2c - 1) mb < ma 2^24 < (2c + 1) mb (never equal: no quotient of two
+// f32 is a midpoint). As `sqrt_rn`: the device's division estimates c, six exact
+// comparisons bracket it, and long division decides if they do not.
 fn div_rn(a: f32, b: f32) -> f32 {
+    return div_rn_by(a, b, false);
+}
+
+// `div_rn`, or with `digits` its fallback alone (for the tests).
+fn div_rn_by(a: f32, b: f32, digits: bool) -> f32 {
     let ba = bitcast<u32>(a);
     let bb = bitcast<u32>(b);
     let sign = ba & 0x80000000u;
@@ -173,24 +250,23 @@ fn div_rn(a: f32, b: f32) -> f32 {
         ma = ma << 1u;
         exponent = exponent - 1;
     }
-    // ma / mb in [1, 2): 25 quotient bits, 24 and a rounding bit; the remainder is sticky.
-    var rem = ma;
-    var q = 0u;
-    for (var j = 0u; j < 25u; j = j + 1u) {
-        q = q << 1u;
-        if (rem >= mb) {
-            rem = rem - mb;
-            q = q | 1u;
-        }
-        rem = rem << 1u;
+    // ma and mb are below 2^25, exact in f32.
+    let c0 = u32(f32(ma) / f32(mb) * 8388608.0);
+    let numerator = vec2<u32>(ma >> 8u, ma << 24u);
+    var below = 0u;
+    for (var j = 0u; j < 6u; j = j + 1u) {
+        let u = 2u * (c0 + j - 3u) + 1u;
+        below = below + select(0u, 1u, wide_greater(numerator, mul_wide(u, mb)));
     }
-    var sig = q >> 1u;
-    if ((q & 1u) == 1u && (rem != 0u || (sig & 1u) == 1u)) {
-        sig = sig + 1u;
-        if (sig == 0x1000000u) {
-            sig = 0x800000u;
-            exponent = exponent + 1;
-        }
+    var sig: u32;
+    if (digits || below == 0u || below == 6u) {
+        sig = div_digits(ma, mb);
+    } else {
+        sig = c0 - 3u + below;
+    }
+    if (sig == 0x1000000u) {
+        sig = 0x800000u;
+        exponent = exponent + 1;
     }
     let biased = exponent + 127;
     if (biased <= 0) {
