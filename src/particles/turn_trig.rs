@@ -104,8 +104,8 @@ fn quarter(p: u32) -> i32 {
 /// # Cost
 ///
 /// 4.7 ns a call on the CPU against 21.0 ns for `f32::sin_cos` (Windows, i9-10980XE,
-/// `--release`, 2026-10-03, beside a compiler; a 2^11-interval table measured 4.7 ns
-/// too, and a 26-step CORDIC 42.6 ns).
+/// `--release`, 2026-10-03, beside another project's test run). A 2^11-interval table
+/// measured 4.7 ns too, and a 26-step CORDIC (shifts and adds only) 42.6 ns.
 ///
 /// # Arguments
 ///

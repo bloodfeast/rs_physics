@@ -186,8 +186,9 @@ fn bursts_expanded_on_the_device_are_the_cpus_to_the_bit() {
 }
 
 /// The frame bound cuts a burst and a full pool drops the oldest staged particles: a
-/// descriptor's remainder carries on from the right draw either way. Checked against
-/// the same particles staged as records (drawn by the CPU pool, in order).
+/// descriptor's remainder carries on from the right draw either way, and records staged
+/// among the bursts keep their order. Checked against the same particles staged as
+/// records only (the bursts drawn by the CPU pool, in order).
 #[test]
 fn a_burst_cut_by_the_frame_bound_or_the_capacity_resumes_on_the_right_draw() {
     let Some(gpu) = gpu() else { return };
@@ -221,6 +222,13 @@ fn a_burst_cut_by_the_frame_bound_or_the_capacity_resumes_on_the_right_draw() {
                 drawn.size(i),
                 drawn.class_of(i),
             );
+        }
+        // Explicit particles between the bursts, so frames mix record runs and
+        // descriptors, and the records cut by the bound carry over among them.
+        for k in 0..7 {
+            let v = [k as f32, frame as f32, 1.0];
+            by_descriptor.emit_one([0.5; 3], v, 25.0, 3.0, 1);
+            by_record.emit_one([0.5; 3], v, 25.0, 3.0, 1);
         }
         assert_eq!(by_descriptor.staged(), by_record.staged(), "frame {frame}");
         by_descriptor.step(DT);

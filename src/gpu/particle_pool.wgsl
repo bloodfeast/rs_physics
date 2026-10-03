@@ -66,6 +66,12 @@ struct Frame {
     table_base: u32,
     jump_levels: u32,
     zero: u32,
+    // The word in `records` where the segment table starts (after the records and the
+    // burst descriptors it indexes).
+    segment_table: u32,
+    pad2: u32,
+    pad3: u32,
+    pad4: u32,
 }
 
 struct State {
@@ -102,7 +108,7 @@ fn emit_zero() -> u32 {
 // The frame's particle `r` (0 the oldest) into `slot`.
 fn write_record(slot: u32, r: u32, born: u32) {
     let jump_words = frame.jump_levels * DIGIT_TABLES * JUMP_TABLE_WORDS;
-    let p = emitted(r, frame.emit_segments, frame.table_base, frame.jump_levels, frame.table_base + jump_words);
+    let p = emitted(r, frame.segment_table, frame.emit_segments, frame.table_base, frame.jump_levels, frame.table_base + jump_words);
     pos_life[slot] = vec4<f32>(p.position, p.remaining);
     vel[slot] = vec4<f32>(p.velocity, p.lifetime);
     // Class, then the size's bits.

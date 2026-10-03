@@ -347,21 +347,21 @@ fn record_particle(b: u32) -> Emitted {
 }
 
 // The frame's particle `r` (0 the oldest): the segment holding it found by binary search
-// over the segment table at word 0, then a record read or a burst expanded.
-fn emitted(r: u32, segments: u32, tables: u32, levels: u32, sine: u32) -> Emitted {
+// over the segment table at word `table`, then a record read or a burst expanded.
+fn emitted(r: u32, table: u32, segments: u32, tables: u32, levels: u32, sine: u32) -> Emitted {
     var lo = 0u;
     var hi = segments;
     while (hi - lo > 1u) {
         let mid = (lo + hi) / 2u;
-        if (records[mid * SEGMENT_WORDS] <= r) {
+        if (records[table + mid * SEGMENT_WORDS] <= r) {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    let e = lo * SEGMENT_WORDS;
+    let e = table + lo * SEGMENT_WORDS;
     let j = r - records[e];
-    let o = segments * SEGMENT_WORDS + records[e + 3u];
+    let o = records[e + 3u];
     if (records[e + 2u] == SEGMENT_RECORDS) {
         return record_particle(o + j * EMIT_RECORD_WORDS);
     }

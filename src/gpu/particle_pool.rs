@@ -15,17 +15,17 @@ use crate::particles::{
 const WG: u32 = 64;
 
 /// Words of the frame header at the front of the frame buffer: the WGSL `Frame` struct
-/// is 80 words; the emission data starts at 512 bytes, a storage-binding offset every
+/// is 84 words; the emission data starts at 512 bytes, a storage-binding offset every
 /// device accepts.
 const HEADER_WORDS: usize = 128;
-const FRAME_WORDS: usize = 80;
+const FRAME_WORDS: usize = 84;
 
 /// Words a staged particle takes: position 3, velocity 3, remaining, lifetime, size,
 /// class.
 const RECORD_WORDS: usize = 10;
 
 /// Words of a segment-table entry: first particle (in the frame), count, kind, payload
-/// offset (words after the table).
+/// offset (words from the start of the emission data).
 const SEGMENT_WORDS: usize = 4;
 const SEGMENT_RECORDS: u32 = 0;
 const SEGMENT_BURST: u32 = 1;
@@ -354,7 +354,7 @@ impl PoolWrite<'_> {
 /// Emission staged and not yet placed.
 #[derive(Debug, Clone, Copy)]
 enum Pending {
-    /// This many records at the front of the pending records.
+    /// This many records, the next in `upload`.
     Records(usize),
     /// A burst's remaining particles: the descriptor payload (its state the one before
     /// the first remaining particle's draws) and how many remain.
@@ -451,24 +451,30 @@ struct AirBinding {
 ///
 /// # Emission
 ///
-/// [`GpuParticlePool::emit`] does not draw the burst's particles on the CPU. It stages a
-/// descriptor (the [`EffectRng`] state, origin, class, the speed, lifetime and size
-/// ranges and the lift: 12 words, plus a 4-word segment entry) and moves the CPU's
-/// stream on by [`Burst::DRAWS_PER_PARTICLE`] draws a particle with [`EffectRng::jump`],
-/// so the stream is exactly where [`ParticleEffects::emit`] would leave it. On the device
-/// the placement passes find each new particle's segment and, for a burst, give particle
-/// `i` the state `5 i` draws in (xorshift32 is linear over GF(2): one byte-sliced 32x32
-/// bit matrix per non-zero hex digit of `i`, the powers `M^(5 d 16^k)` uploaded once at
-/// construction),
-/// then take its five draws with the CPU's arithmetic in the CPU's order. The CPU's
-/// `f32` adds and multiplies are correctly rounded on the device too; every product
-/// that feeds an add is forced to its own rounding first (the driver may otherwise fuse
-/// the two, and does); the square root and the divide are done in integers, correctly
-/// rounded; the direction's sine and cosine are
-/// [`sin_cos_turn`](crate::particles::sin_cos_turn), integer arithmetic on the same
-/// table. So a seed gives the same particles, to the bit, on the device and on the CPU
-/// pool. Explicit particles ([`GpuParticlePool::emit_one`],
-/// [`GpuParticlePool::adopt`], and a burst of one) stay 40-byte records.
+/// [`GpuParticlePool::emit`] does not draw a burst's particles on the CPU. It stages a
+/// descriptor: the [`EffectRng`] state, the origin, the class, the speed, lifetime and
+/// size ranges and the lift (12 words), plus a 4-word segment entry. It then moves the
+/// CPU's stream on by [`Burst::DRAWS_PER_PARTICLE`] draws a particle with
+/// [`EffectRng::jump`], so the stream is exactly where [`ParticleEffects::emit`] would
+/// leave it.
+///
+/// On the device the placement passes find each new particle's segment. Particle `i` of
+/// a burst starts from the state `5 i` draws in: xorshift32 is linear over GF(2), so that
+/// is one byte-sliced 32x32 bit matrix per non-zero hex digit of `i`, from the powers
+/// `M^(5 d 16^k)` uploaded once at construction. It then takes its five draws with the
+/// CPU's arithmetic, in the CPU's order:
+///
+/// - `f32` adds and multiplies are correctly rounded on the device as on the CPU;
+/// - every product that feeds an add is forced to its own rounding first, since the
+///   driver may otherwise fuse the two (and does: without it a velocity is 1 ulp off);
+/// - the square root and the divide are the device's own result settled by exact integer
+///   comparisons, so correctly rounded as the CPU's are;
+/// - the direction's sine and cosine are [`sin_cos_turn`](crate::particles::sin_cos_turn),
+///   integer arithmetic on the same table.
+///
+/// So a seed gives the same particles, to the bit, on the device and on the CPU pool.
+/// Explicit particles ([`GpuParticlePool::emit_one`], [`GpuParticlePool::adopt`], and a
+/// burst of one) stay 40-byte records drawn on the CPU.
 ///
 /// A device may flush subnormal floats. No draw produces one from burst ranges of
 /// normal magnitude; a subnormal `lift` or range end is read as zero on the device.
@@ -556,16 +562,19 @@ pub struct GpuParticlePool {
     classes: [ParticleClass; MAX_CLASSES],
     swirl: [f32; MAX_CLASSES],
 
-    /// The frame buffer's contents for the frame being staged: the header, then the
-    /// emission's segment table and payloads.
+    /// The frame buffer's contents: the header, then every staged record, oldest
+    /// first, as 0.3.3 staged them; a frame appends its burst descriptors and segment
+    /// table after the records it takes.
     upload: Vec<u32>,
-    /// Staged emission, oldest first, and the records its record runs read.
+    /// Staged emission, oldest first: runs of the records in `upload`, and bursts.
     pending: VecDeque<Pending>,
-    pending_records: VecDeque<u32>,
     /// Particles in `pending`.
     pending_count: usize,
-    /// Scratch for a frame's segment payloads.
+    /// Scratch for a frame's burst payloads, its segment table, and the records it
+    /// leaves staged.
     payload: Vec<u32>,
+    table: Vec<u32>,
+    carry: Vec<u32>,
     /// Words of the emission region; the jump tables follow it in the frame buffer.
     data_words: usize,
     /// Hex digits the jump tables cover: particle indices within a frame are below
@@ -1007,9 +1016,10 @@ impl GpuParticlePool {
             swirl: [0.0; MAX_CLASSES],
             upload,
             pending: VecDeque::new(),
-            pending_records: VecDeque::new(),
             pending_count: 0,
             payload: Vec::new(),
+            table: Vec::new(),
+            carry: Vec::new(),
             data_words,
             jump_levels,
             frame,
@@ -1382,7 +1392,7 @@ impl GpuParticlePool {
             _ => self.pending.push_back(Pending::Records(1)),
         }
         self.pending_count += 1;
-        self.pending_records.extend([
+        self.upload.extend_from_slice(&[
             bits(pos[0]),
             bits(pos[1]),
             bits(pos[2]),
@@ -1576,7 +1586,9 @@ impl GpuParticlePool {
             let (k, left) = match front {
                 Pending::Records(n) => {
                     let k = (*n).min(over);
-                    self.pending_records.drain(..k * RECORD_WORDS);
+                    // The oldest records are first after the header.
+                    self.upload
+                        .drain(HEADER_WORDS..HEADER_WORDS + k * RECORD_WORDS);
                     *n -= k;
                     (k, *n)
                 }
@@ -2050,72 +2062,95 @@ impl GpuParticlePool {
     /// gpu.queue.submit([encoder.finish()]);
     /// ```
     pub fn stage_frame_with<F: FnOnce(PoolWrite<'_>)>(&mut self, dt: f32, write: F) {
-        let (emit, segments) = self.take_frame_emission();
-        self.write_header(dt, emit as u32, segments as u32);
+        let (emit, segments, table_at) = self.take_frame_emission();
+        self.write_header(dt, emit as u32, segments as u32, table_at as u32);
         write(PoolWrite::Buffer {
             destination: &self.frame,
             offset: 0,
             bytes: bytes_of(&self.upload),
         });
+        // The records left staged go back after the header.
+        self.upload.truncate(HEADER_WORDS);
+        self.upload.extend_from_slice(&self.carry);
         self.prepared = Some((dt, emit));
     }
 
     /// The oldest staged emission, up to [`GpuPoolConfig::max_emit_per_frame`]
-    /// particles, as this frame's segment table and payloads after the header in
-    /// `upload`: a record run is its records, a burst its 12-word descriptor whatever its
-    /// count. A burst cut by the frame's bound leaves its remainder staged, its state
-    /// advanced past the particles taken.
+    /// particles, laid out after the header in `upload` as the device reads it: the
+    /// records this frame takes (already there, the oldest staged), then each burst's
+    /// 12-word descriptor whatever its count, then the segment table. The records left
+    /// staged are moved to `carry` meanwhile (none, unless the frame's bound cut them).
+    /// A burst cut by the frame's bound leaves its remainder staged, its state advanced
+    /// past the particles taken.
     ///
-    /// Returns the particles and the segments taken.
-    fn take_frame_emission(&mut self) -> (usize, usize) {
+    /// Returns the particles and the segments taken, and the word of the emission data
+    /// where the segment table starts.
+    fn take_frame_emission(&mut self) -> (usize, usize, usize) {
         let want = self
             .pending_count
             .min(self.config.max_emit_per_frame as usize);
-        self.upload.truncate(HEADER_WORDS);
         self.payload.clear();
-        let (mut taken, mut segments) = (0usize, 0usize);
+        self.table.clear();
+        self.carry.clear();
+        let (mut taken, mut records) = (0usize, 0usize);
         while taken < want {
-            let used = (segments + 1) * SEGMENT_WORDS + self.payload.len();
+            let used = records * RECORD_WORDS
+                + self.payload.len()
+                + self.table.len()
+                + SEGMENT_WORDS;
             let Some(front) = self.pending.front_mut() else {
                 break;
             };
-            let offset = self.payload.len() as u32;
-            let (k, kind, left) = match front {
+            let (k, left) = match front {
                 Pending::Records(n) => {
                     let room = self.data_words.saturating_sub(used) / RECORD_WORDS;
                     let k = (*n).min(want - taken).min(room);
                     if k == 0 {
                         break;
                     }
-                    self.payload
-                        .extend(self.pending_records.drain(..k * RECORD_WORDS));
+                    let at = records * RECORD_WORDS;
+                    self.table
+                        .extend([taken as u32, k as u32, SEGMENT_RECORDS, at as u32]);
+                    records += k;
                     *n -= k;
-                    (k, SEGMENT_RECORDS, *n)
+                    (k, *n)
                 }
                 Pending::Burst(payload, n) => {
                     if used + BURST_WORDS > self.data_words {
                         break;
                     }
                     let k = (*n).min(want - taken);
+                    // Offset among the bursts for now; the records' words go before them.
+                    let at = self.payload.len();
+                    self.table
+                        .extend([taken as u32, k as u32, SEGMENT_BURST, at as u32]);
                     self.payload.extend_from_slice(payload);
                     *n -= k;
                     if *n > 0 {
                         payload[0] = skip_particles(payload[0], k);
                     }
-                    (k, SEGMENT_BURST, *n)
+                    (k, *n)
                 }
             };
-            self.upload
-                .extend([taken as u32, k as u32, kind, offset]);
             if left == 0 {
                 self.pending.pop_front();
             }
             taken += k;
-            segments += 1;
             self.pending_count -= k;
         }
+        let record_words = records * RECORD_WORDS;
+        for entry in self.table.chunks_exact_mut(SEGMENT_WORDS) {
+            if entry[2] == SEGMENT_BURST {
+                entry[3] += record_words as u32;
+            }
+        }
+        let end = HEADER_WORDS + record_words;
+        self.carry.extend_from_slice(&self.upload[end..]);
+        self.upload.truncate(end);
         self.upload.extend_from_slice(&self.payload);
-        (taken, segments)
+        let table_at = record_words + self.payload.len();
+        self.upload.extend_from_slice(&self.table);
+        (taken, self.table.len() / SEGMENT_WORDS, table_at)
     }
 
     /// The second half of [`Self::encode`]: the passes of the frame
@@ -2244,7 +2279,7 @@ impl GpuParticlePool {
         self.queue.submit([encoder.finish()]);
     }
 
-    fn write_header(&mut self, dt: f32, emit: u32, segments: u32) {
+    fn write_header(&mut self, dt: f32, emit: u32, segments: u32, table_at: u32) {
         let h = &mut self.upload[..FRAME_WORDS];
         h.fill(0);
         let f = |v: f32| v.to_bits();
@@ -2293,6 +2328,7 @@ impl GpuParticlePool {
         h[77] = self.data_words as u32;
         h[78] = self.jump_levels;
         // h[79] stays 0: the shader's opaque zero.
+        h[80] = table_at;
     }
 
     // -- What the renderer reads --
@@ -2614,7 +2650,7 @@ impl GpuParticlePool {
         }
         // The field's words into the frame header; nothing placed, nothing stepped. The
         // next `encode` writes the header again.
-        self.write_header(0.0, 0, 0);
+        self.write_header(0.0, 0, 0, 0);
         self.queue
             .write_buffer(&self.frame, 0, bytes_of(&self.upload[..FRAME_WORDS]));
         let device = self.device.clone();
