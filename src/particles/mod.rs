@@ -5,6 +5,8 @@ mod particle_backend;
 #[cfg(feature = "particles")]
 mod particle_effects;
 #[cfg(feature = "particles")]
+mod swirl;
+#[cfg(feature = "particles")]
 mod particle_simulation;
 #[cfg(feature = "particles")]
 mod particle_interactions_barnes_hut;
@@ -21,6 +23,11 @@ pub use particle_backend::*;
 
 #[cfg(feature = "particles")]
 pub use particle_effects::*;
+#[cfg(all(feature = "particles", feature = "gpu"))]
+pub(crate) use particle_effects::for_each_in_burst;
+
+#[cfg(feature = "particles")]
+pub use swirl::*;
 
 #[cfg(feature = "particles")]
 pub use particle_simulation::*;
@@ -40,3 +47,6 @@ mod particle_interactions_barnes_hut_tests;
 #[cfg(test)]
 #[cfg(feature = "particles")]
 mod particle_regression_tests;
+#[cfg(test)]
+#[cfg(feature = "particles")]
+mod swirl_tests;

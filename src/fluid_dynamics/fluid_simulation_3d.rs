@@ -86,6 +86,9 @@ pub struct FluidGrid3D {
     precon: Vec<f64>,
     workspace: Workspace,
     last_pressure_iterations: usize,
+    /// A uniform far-field velocity the walls hold the normal flow to, widths/s, or
+    /// `None` for closed walls. Crate-internal: the plume field's wind.
+    far_field: Option<[f64; 3]>,
 }
 
 impl FluidGrid3D {
@@ -156,6 +159,7 @@ impl FluidGrid3D {
             precon: vec![0.0; size],
             workspace: Workspace::default(),
             last_pressure_iterations: 0,
+            far_field: None,
         };
         grid.build_preconditioner();
         Ok(grid)
@@ -320,6 +324,35 @@ impl FluidGrid3D {
         self.pressure = [pressure, pressure_after_advection];
         self.workspace = ws;
         self.last_pressure_iterations = pressure_iterations;
+    }
+
+    /// Holds the walls' normal velocity to a uniform far field, widths/s (`None`
+    /// closes them again). Crate-internal: the walls of a plume's box are open air, and
+    /// a wind blows in one side and out the other.
+    pub(crate) fn set_far_field(&mut self, far_field: Option<[f64; 3]>) {
+        self.far_field = far_field;
+    }
+
+    /// Everything the grid keeps, bytes: the state, the warm starts, the
+    /// preconditioner and the workspace, as allocated.
+    pub(crate) fn bytes(&self) -> usize {
+        let ws = &self.workspace;
+        let s = &ws.solve;
+        let vecs: [&Vec<f64>; 22] = [
+            &self.density, &self.velocity_x, &self.velocity_y, &self.velocity_z,
+            &self.pressure[0], &self.pressure[1], &self.precon,
+            &s.jacobi, &s.rhs, &s.relax_pressure, &s.relax_divergence,
+            &ws.velocity_x0, &ws.velocity_y0, &ws.velocity_z0, &ws.density0,
+            &ws.back, &ws.low, &ws.high,
+            &ws.omega[0], &ws.omega[1], &ws.omega[2], &ws.omega[3],
+        ];
+        let fields: usize = vecs.iter().map(|v| v.capacity()).sum();
+        (fields + s.pcg.capacity()) * std::mem::size_of::<f64>()
+    }
+
+    /// The velocity components, `z` fastest, ghost layer included.
+    pub(crate) fn velocity_slices(&self) -> [&[f64]; 3] {
+        [&self.velocity_x, &self.velocity_y, &self.velocity_z]
     }
 
     /// Gets the number of pressure-solve iterations the last [`FluidGrid3D::step`]
@@ -630,6 +663,44 @@ impl FluidGrid3D {
                 } else {
                     x[self.get_index(self.width-2, j, k)]
                 };
+            }
+        }
+
+        // A far field holds the normal velocity at the faces its component crosses to
+        // the far-field value: the wall, half-way between ghost and fluid cell, sees it
+        // instead of zero. A uniform field enters one face and leaves the opposite one,
+        // so the projection's right-hand side still sums to zero.
+        if let Some(far) = self.far_field {
+            let (w, h, d) = (self.width, self.height, self.depth);
+            match boundary_type {
+                BoundaryType::VelocityX => {
+                    let twice = 2.0 * far[0];
+                    for j in 1..h - 1 {
+                        for k in 1..d - 1 {
+                            x[self.get_index(0, j, k)] = twice - x[self.get_index(1, j, k)];
+                            x[self.get_index(w - 1, j, k)] = twice - x[self.get_index(w - 2, j, k)];
+                        }
+                    }
+                }
+                BoundaryType::VelocityY => {
+                    let twice = 2.0 * far[1];
+                    for i in 1..w - 1 {
+                        for k in 1..d - 1 {
+                            x[self.get_index(i, 0, k)] = twice - x[self.get_index(i, 1, k)];
+                            x[self.get_index(i, h - 1, k)] = twice - x[self.get_index(i, h - 2, k)];
+                        }
+                    }
+                }
+                BoundaryType::VelocityZ => {
+                    let twice = 2.0 * far[2];
+                    for i in 1..w - 1 {
+                        for j in 1..h - 1 {
+                            x[self.get_index(i, j, 0)] = twice - x[self.get_index(i, j, 1)];
+                            x[self.get_index(i, j, d - 1)] = twice - x[self.get_index(i, j, d - 2)];
+                        }
+                    }
+                }
+                BoundaryType::Density => {}
             }
         }
 

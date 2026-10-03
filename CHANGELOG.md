@@ -3,6 +3,100 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## Unreleased
+
+### Planned
+
+- Emission expanded on the device: burst descriptors uploaded instead of particles, and
+  each particle's draws taken on the device by xorshift32 jump-ahead (a GF(2) matrix
+  power), so the device keeps `EffectRng`'s exact sequence and a seed emits the same
+  particles on either backend. Its own package, after POOL-GPU. At a million particles
+  the CPU's draws are 770 us of the frame thread (contended).
+
+## 0.3.3 (2026-10-03)
+
+The particle half of package TURB, and package POOL-GPU half A: the effect pool resident
+on the GPU. Additive: `ParticleClass` is unchanged, and every new item sits beside the
+old ones.
+
+### Added (POOL-GPU)
+
+- `gpu::GpuParticlePool` (features `gpu` and `particles`): the effect pool's arrays as
+  device buffers at capacity (44 bytes a particle: position and life, velocity and
+  lifetime, class and size, the free stack; 44 MB at a million), emission staged on the
+  CPU and placed by one `write_buffer` and a compute pass a frame into slots from a GPU
+  free stack the integrate refills, and one indirect dispatch of the integrate over the
+  slots in use. The integrate is `integrate_in_air`'s arithmetic with the air sampled
+  every frame from a 3D texture, ground contact against the engine's height texture
+  (restitution and the 0.55 tangential friction as `collide_ground_with`) and retirement
+  in the same pass. Landings append to a bounded buffer (4,096 a frame by default, 24
+  bytes each). The positions, velocities, classes and sizes, the counters and draw
+  arguments are exposed as buffers for an indirect or instanced draw with no CPU copy.
+  Readback exists only in the `*_blocking` debug and test methods.
+- `gpu::FieldFormat`: `rgba16float` with hardware trilinear filtering (the default),
+  `rgba32float` filtered (needs `FLOAT32_FILTERABLE`), and `rgba32float` with the CPU's
+  fetch in `f32`. `upload_field` and `upload_plume` write a field once a field update,
+  from the frame thread.
+- `GpuParticlePool::stage_frame_with` and `encode_staged`, `upload_field_with` and
+  `upload_plume_with`, and `gpu::PoolWrite`: the same frame and field uploads handed to a
+  host's own staging ring as bytes and a destination, in place of the pool's
+  `write_buffer` (wgpu allocates a staging buffer for each). The device contents are
+  bit-identical to `encode` and `upload_field`'s, which stay the default path.
+- The backend is decided once at startup, by whether an adapter exists; there is no
+  runtime switch between the CPU and GPU pools and no readback path (documented on
+  `GpuParticlePool` and `BackendPolicy`).
+- `GpuParticlePool::register` declares the pool to a `BackendPolicy` as a resident GPU
+  backend, so `choose` can return `Backend::Gpu`; `adopt` moves a CPU pool's particles
+  onto the device in the next frame's write.
+- `GpuContext::from_device(device, queue)`, to run on an engine's device (owned clones
+  of wgpu 30's reference-counted handles, so no lifetime ties the pool to the engine),
+  and `GpuContext::with_features`.
+- `examples/pool_gpu_bench.rs` (interleaved CPU and GPU timings, timestamp queries) and
+  the `particle_effects/gpu_pool` group in `benches/particle_effects.rs`.
+
+### Changed (POOL-GPU)
+
+- `BackendPolicy`'s GPU seeds are the resident pool's measured costs: 10 us a frame
+  fixed and 0.1 ns a particle (were 60 us and 0.4 ns, estimates), which moves the seeded
+  resident crossover from about 23,000 particles to about 3,400.
+
+### Measured (POOL-GPU)
+
+RTX 3090, Vulkan, wgpu 30, indirect-call validation off (as the engine's release build
+runs), beside another build. The live sparks-and-dust pool with the air at 20 Hz:
+
+| particles | GPU emit pass | GPU integrate pass | integrate a particle | CPU `integrate` | CPU air 10 Hz |
+|---|---|---|---|---|---|
+| 10k | 6.9 us | 4.5 us | 0.46 ns | 2.76 ns | 5.04 ns |
+| 100k | 7.0 us | 10.2 us | 0.104 ns | 2.93 ns | 5.57 ns |
+| 1M | 13.9 us | 90.8 us | 0.092 ns | 4.16 ns | 8.17 ns |
+
+GPU frame = 9.7 us + 0.096 ns a particle; it costs less device time than the CPU's
+`integrate` from about 3,300 particles and than the 10 Hz air path from about 1,800.
+
+The particle half of TURB, carried into this version:
+
+### Added (TURB)
+
+- `VelocityGrid`, `TurbulenceDrive` and `SwirlField`: curl noise in three octaves at
+  2h, 4h and 8h, each octave's rms speed set exactly to Kolmogorov's `U (l / L)^(1/3)`
+  and cross-faded over its turnover time `l / u_l`.
+- `ParticleEffects::set_swirl` and `swirl`, and `ParticleEffects::integrate_in_air(dt,
+  air, refresh)`: drag relaxes a class towards the local air at `swirl * drag`, each
+  particle re-sampling the air once per field period, staggered across the frames
+  (12 bytes a particle for the samples). A class with `swirl` 0 integrates
+  bit-identically to `integrate`.
+- `PlumeField` and its reader, frame and worker: a `FluidGrid3D` with both turbulence
+  options over a source's region plus the swirl, summed into one `VelocityGrid` and
+  published through a lock-free triple buffer from a worker thread.
+
+### Gate (TURB)
+
+`integrate_in_air` against `integrate`, same run, gate 2x: 1.8 to 1.97x with the field
+at 10 Hz, 2.2 to 2.6x at 20 Hz (beside another build). Not met at 20 Hz on the CPU;
+the 20 Hz field is the GPU pool's (above), whose integrate pass costs 1.04 to 1.19 times
+its field-off cost.
+
 ## 0.3.2 (2026-10-02)
 
 Turbulence options on the grid fluids (package TURB, first half). Additive: with the new

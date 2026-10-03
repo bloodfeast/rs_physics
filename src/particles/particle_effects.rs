@@ -74,6 +74,7 @@ use core::ops::Range;
 use std::time::Instant;
 
 use crate::particles::particle_backend::{Backend, BackendPolicy};
+use crate::particles::swirl::VelocityGrid;
 
 /// How many distinct behaviours a single [`ParticleEffects`] pool can hold.
 ///
@@ -176,6 +177,23 @@ pub struct ParticleEffects {
     class: Vec<u8>,
 
     classes: [ParticleClass; MAX_CLASSES],
+    /// Per class, the fraction of its drag that acts against moving air; see
+    /// [`ParticleEffects::set_swirl`].
+    swirl: [f32; MAX_CLASSES],
+    /// Each particle's last sample of the air, m/s, for
+    /// [`ParticleEffects::integrate_in_air`]. Empty until that is first called, so a pool
+    /// that never sees air pays nothing for them.
+    air_x: Vec<f32>,
+    air_y: Vec<f32>,
+    air_z: Vec<f32>,
+    /// Where the next round of air samples starts.
+    air_cursor: usize,
+    /// Particles emitted since the last integration, which have no sample yet: those
+    /// appended from `fresh_from`, and a run of `rewritten_len` slots the full pool
+    /// overwrote from `rewritten_start`.
+    fresh_from: usize,
+    rewritten_start: usize,
+    rewritten_len: usize,
     capacity: usize,
     /// Rotating write cursor for the full-pool case.
     oldest: usize,
@@ -223,6 +241,14 @@ impl ParticleEffects {
             size: Vec::with_capacity(capacity),
             class: Vec::with_capacity(capacity),
             classes: [ParticleClass::default(); MAX_CLASSES],
+            swirl: [0.0; MAX_CLASSES],
+            air_x: Vec::new(),
+            air_y: Vec::new(),
+            air_z: Vec::new(),
+            air_cursor: 0,
+            fresh_from: 0,
+            rewritten_start: 0,
+            rewritten_len: 0,
             capacity,
             oldest: 0,
             // No GPU backend is registered until a caller supplies one, so `Auto`
@@ -312,6 +338,58 @@ impl ParticleEffects {
         self.classes[(index as usize).min(MAX_CLASSES - 1)]
     }
 
+    /// Set how much of the moving air class `index` takes on, for
+    /// [`Self::integrate_in_air`]; [`Self::integrate`] does not read it.
+    ///
+    /// Drag is the air's grip on a particle: it pulls the particle's velocity towards
+    /// the air's at the rate `drag`, per second. With no air field the air is still and
+    /// drag only slows. With one, a class of `fraction` 1 relaxes towards the local air
+    /// velocity at exactly its drag rate, which is the physics and adds no number: smoke
+    /// and dust (high drag) ride the air within a fraction of a second, sparks and debris
+    /// (low drag) barely notice it. Below 1 it is a response rate of `fraction * drag`,
+    /// for a class that should take less of the field than its drag would; 0, the
+    /// default, ignores the air and integrates bit-identically to [`Self::integrate`].
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - the class slot, `0..MAX_CLASSES`; larger values are clamped to the last.
+    /// * `fraction` - 0 to 1; values outside are clamped, and NaN is 0.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::ParticleEffects;
+    /// let mut fx = ParticleEffects::with_capacity(8);
+    /// fx.set_swirl(1, 1.0);
+    /// assert_eq!(fx.swirl(1), 1.0);
+    /// assert_eq!(fx.swirl(0), 0.0);
+    /// ```
+    pub fn set_swirl(&mut self, index: u8, fraction: f32) {
+        let index = (index as usize).min(MAX_CLASSES - 1);
+        // `max` then `min`, so NaN lands on 0.
+        self.swirl[index] = fraction.max(0.0).min(1.0);
+    }
+
+    /// The fraction of the moving air class `index` takes on; see [`Self::set_swirl`].
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - the class slot; values past the table are clamped to the last slot.
+    ///
+    /// # Returns
+    ///
+    /// The fraction, 0 to 1.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::ParticleEffects;
+    /// assert_eq!(ParticleEffects::with_capacity(8).swirl(3), 0.0);
+    /// ```
+    pub fn swirl(&self, index: u8) -> f32 {
+        self.swirl[(index as usize).min(MAX_CLASSES - 1)]
+    }
+
     /// How many particles are alive.
     ///
     /// # Returns
@@ -387,7 +465,13 @@ impl ParticleEffects {
         self.lifetime.clear();
         self.size.clear();
         self.class.clear();
+        self.air_x.clear();
+        self.air_y.clear();
+        self.air_z.clear();
         self.oldest = 0;
+        self.air_cursor = 0;
+        self.fresh_from = 0;
+        self.rewritten_len = 0;
     }
 
     // ── Emission ─────────────────────────────────────────────────────────────
@@ -421,24 +505,9 @@ impl ParticleEffects {
     /// assert_eq!(fx.len(), 16);
     /// ```
     pub fn emit(&mut self, burst: &Burst, rng: &mut EffectRng) {
-        let class = burst.class.min((MAX_CLASSES - 1) as u8);
-
-        for _ in 0..burst.count {
-            let dir = rng.hemisphere(burst.lift);
-            let speed = rng.range(burst.speed.start, burst.speed.end);
-            let life = rng
-                .range(burst.lifetime.start, burst.lifetime.end)
-                .max(f32::EPSILON);
-            let size = rng.range(burst.size.start, burst.size.end);
-
-            self.push(
-                burst.origin,
-                [dir[0] * speed, dir[1] * speed, dir[2] * speed],
-                life,
-                size,
-                class,
-            );
-        }
+        for_each_in_burst(burst, rng, |pos, vel, life, size, class| {
+            self.push(pos, vel, life, size, class)
+        });
     }
 
     /// Emit a single particle with an explicit velocity, for cases an isotropic
@@ -489,6 +558,11 @@ impl ParticleEffects {
             self.lifetime.push(lifetime);
             self.size.push(size);
             self.class.push(class);
+            if self.tracks_air() {
+                self.air_x.push(0.0);
+                self.air_y.push(0.0);
+                self.air_z.push(0.0);
+            }
             return;
         }
 
@@ -504,7 +578,21 @@ impl ParticleEffects {
         self.lifetime[i] = lifetime;
         self.size[i] = size;
         self.class[i] = class;
+        if self.tracks_air() {
+            // The run of overwritten slots is contiguous (mod the capacity) between two
+            // integrations, so a start and a length describe it.
+            if self.rewritten_len == 0 {
+                self.rewritten_start = i;
+            }
+            self.rewritten_len = (self.rewritten_len + 1).min(self.capacity);
+        }
         self.oldest = (i + 1) % self.capacity;
+    }
+
+    /// Whether the pool keeps air samples: from the first [`Self::integrate_in_air`].
+    #[inline]
+    fn tracks_air(&self) -> bool {
+        self.air_x.capacity() > 0
     }
 
     // ── Integration ──────────────────────────────────────────────────────────
@@ -557,6 +645,348 @@ impl ParticleEffects {
         self.policy.record(Backend::Cpu, count, started.elapsed());
 
         self.retire_expired();
+    }
+
+    /// Advance every particle through moving air, and retire the expired ones.
+    ///
+    /// As [`Self::integrate`], with the air's velocity at each particle: a class's drag
+    /// pulls its velocity towards the air's instead of towards zero, at the rate
+    /// `swirl * drag` (see [`Self::set_swirl`]). The per-step update for a class is
+    /// `v' = (v - g dt) (1 - k) + swirl k u` with `k = min(drag dt, 1)` and `u` the
+    /// particle's sample of the air; `swirl` 1 is exact relaxation towards the air at
+    /// the drag rate. The air can be a [`SwirlField`](crate::particles::SwirlField)'s, a
+    /// plume's, or anything a caller writes into a [`VelocityGrid`].
+    ///
+    /// # Samples are refreshed once a field period, staggered
+    ///
+    /// A field is updated at its own rate, 10 to 20 times a second, and between updates
+    /// it does not change. So a particle need not read it every frame: each particle
+    /// re-samples once per `refresh` seconds, the re-samples spread evenly over the frames
+    /// of that period (a `dt / refresh` share of the pool a frame, in turn), and between
+    /// samples it keeps its last one. A particle emitted since the last call is sampled
+    /// on this one. Every sample is of the field as it now is, so this is the same
+    /// physics; the one loss is position. A particle that crosses into a new cell between
+    /// samples feels the old cell for up to one period, an error in where it reads the
+    /// field of at most `speed * refresh`, against the cell size `h` the field varies
+    /// over: smoke rising at 3 m/s through 2 m cells at 10 Hz reads the field up to
+    /// 0.3 m, 15% of a cell, from where it is. The samples take 12 bytes a particle,
+    /// allocated for the whole capacity on the first call.
+    ///
+    /// # Cost
+    ///
+    /// Measured 2026-10-02 beside another build, on the live sparks-and-dust pool of
+    /// `benches/particle_effects.rs` with both classes on the air, against
+    /// [`Self::integrate`] in the same run: 1.8 to 1.97 times its cost a particle with
+    /// the field at 10 Hz, 2.2 to 2.6 times at 20 Hz (one fetch, about 11 ns on that
+    /// machine, for a sixth or a third of the pool a frame, plus the new particles).
+    ///
+    /// When no class has a `swirl` above zero this is [`Self::integrate`], to the bit,
+    /// and costs nothing more. Otherwise a class with `swirl` 0 still integrates
+    /// bit-identically to [`Self::integrate`]: its update selects the plain result.
+    ///
+    /// The flush of velocities too small to move a particle applies here too. For a
+    /// class that sees the air it is no longer exact (the air can add to a component
+    /// later), but a flushed component is below a quarter of a position's resolution,
+    /// so the particle it belongs to cannot be seen to differ.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` - the step, seconds. A step of zero or less does nothing.
+    /// * `air` - the air velocity, m/s, over the region the particles move in; outside
+    ///   it the outermost cells are read.
+    /// * `refresh` - seconds between the air's updates. At or below `dt` (or not
+    ///   finite), every particle re-samples every call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::{ParticleClass, ParticleEffects, VelocityGrid};
+    /// let mut air = VelocityGrid::new([-10.0, 0.0, -10.0], 1.0, [20, 20, 20]).unwrap();
+    /// air.fill([2.0, 0.0, 0.0]); // a 2 m/s breeze along x
+    ///
+    /// let mut fx = ParticleEffects::with_capacity(8);
+    /// fx.set_class(0, ParticleClass { gravity: 0.0, drag: 3.0, restitution: 0.0 });
+    /// fx.set_class(1, ParticleClass { gravity: 0.0, drag: 3.0, restitution: 0.0 });
+    /// fx.set_swirl(0, 1.0);
+    /// fx.emit_one([0.0, 5.0, 0.0], [0.0; 3], 100.0, 1.0, 0);
+    /// fx.emit_one([0.0, 5.0, 0.0], [0.0; 3], 100.0, 1.0, 1);
+    /// for _ in 0..300 {
+    ///     // The air updates at 10 Hz; each particle re-samples it once a tenth of a second.
+    ///     fx.integrate_in_air(1.0 / 60.0, &air, 0.1);
+    /// }
+    /// // Smoke that sees the air is carried at the breeze's speed; the class that
+    /// // ignores it stays put.
+    /// assert!((fx.velocity(0)[0] - 2.0).abs() < 1e-3);
+    /// assert_eq!(fx.velocity(1)[0], 0.0);
+    /// ```
+    pub fn integrate_in_air(&mut self, dt: f32, air: &VelocityGrid, refresh: f32) {
+        if dt <= 0.0 || self.is_empty() {
+            return;
+        }
+        // The branch per class, outside the loop: no class sees the air, no fetch.
+        if self.swirl.iter().all(|s| !(*s > 0.0)) {
+            self.integrate(dt);
+            return;
+        }
+
+        let count = self.len();
+        let started = Instant::now();
+        self.sample_air(dt, air, refresh);
+        self.integrate_through_air(dt);
+        self.policy.record(Backend::Cpu, count, started.elapsed());
+        self.retire_expired();
+    }
+
+    /// Brings the air samples up to date: every particle emitted since the last
+    /// integration, and this call's turn of the pool.
+    fn sample_air(&mut self, dt: f32, air: &VelocityGrid, refresh: f32) {
+        let n = self.len();
+        if self.air_x.len() != n {
+            // First use (or a pool that stopped tracking): one allocation for the whole
+            // capacity, then every particle is new.
+            for v in [&mut self.air_x, &mut self.air_y, &mut self.air_z] {
+                v.clear();
+                v.reserve_exact(self.capacity);
+                v.resize(n, 0.0);
+            }
+            self.fresh_from = 0;
+            self.rewritten_len = 0;
+        }
+        let (px, py, pz) = (&self.pos_x[..n], &self.pos_y[..n], &self.pos_z[..n]);
+        let (ax, ay, az) = (&mut self.air_x[..n], &mut self.air_y[..n], &mut self.air_z[..n]);
+        // A contiguous run of particles, read and written as slices.
+        let mut sample = |range: core::ops::Range<usize>| {
+            air.sample_run(
+                [&px[range.clone()], &py[range.clone()], &pz[range.clone()]],
+                [&mut ax[range.clone()], &mut ay[range.clone()], &mut az[range]],
+            );
+        };
+        sample(self.fresh_from.min(n)..n);
+        if self.rewritten_len > 0 {
+            // The run the full pool overwrote, which may wrap past the end.
+            let first = self.rewritten_start.min(n);
+            let end = (self.rewritten_start + self.rewritten_len).min(self.capacity);
+            sample(first..end.min(n));
+            let wrapped = (self.rewritten_start + self.rewritten_len).saturating_sub(self.capacity);
+            sample(0..wrapped.min(n));
+        }
+        // This call's turn: `n dt / refresh` particles, rounded up so the whole pool is
+        // covered within one period.
+        let turn = if refresh.is_finite() && refresh > dt {
+            (((n as f64) * (dt as f64) / (refresh as f64)).ceil() as usize).clamp(1, n)
+        } else {
+            n
+        };
+        let from = self.air_cursor.min(n - 1);
+        let to = from + turn;
+        sample(from..to.min(n));
+        let wrapped = to.saturating_sub(n);
+        sample(0..wrapped);
+        self.air_cursor = if to >= n { wrapped } else { to };
+    }
+
+    /// [`Self::integrate_free_flight`] with the air: the same arithmetic, operation for
+    /// operation, plus the relaxation towards each particle's air sample, masked per
+    /// class.
+    fn integrate_through_air(&mut self, dt: f32) {
+        const ROUNDS_AWAY: f32 = f32::EPSILON * 0.25;
+        const EXPONENT: u32 = 0x7f80_0000;
+
+        // One row a class: gravity times the step, the damping factor, 1 where the
+        // vertical velocity only decays, and the share of the air's velocity a step
+        // hands over (`swirl * min(drag dt, 1)`, zero for a class that ignores it).
+        let mut rows = [[0.0f32; 4]; MAX_CLASSES];
+        for (c, row) in rows.iter_mut().enumerate() {
+            let class = self.classes[c];
+            let k = (class.drag * dt).min(1.0);
+            *row = [
+                class.gravity * dt,
+                1.0 - k,
+                if class.gravity == 0.0 { 1.0 } else { 0.0 },
+                self.swirl[c] * k.max(0.0),
+            ];
+        }
+
+        let resolution = |p: f32| {
+            (f32::from_bits(p.to_bits() & EXPONENT) * ROUNDS_AWAY).max(f32::MIN_POSITIVE)
+        };
+
+        let n = self.len();
+        let (px, py, pz) = (&mut self.pos_x[..n], &mut self.pos_y[..n], &mut self.pos_z[..n]);
+        let (vx, vy, vz) = (&mut self.vel_x[..n], &mut self.vel_y[..n], &mut self.vel_z[..n]);
+        let (ax, ay, az) = (&self.air_x[..n], &self.air_y[..n], &self.air_z[..n]);
+        let remaining = &mut self.remaining[..n];
+        let class = &self.class[..n];
+
+        // Four particles at a time with SSE2 (every x86-64 has it). The compiler's own
+        // vectorisation reads each per-class constant into a vector one lane at a time,
+        // four tables here, and that shuffle traffic was half the loop; one 16-byte row
+        // a particle and a 4 x 4 transpose replace it. Every lane does exactly the
+        // scalar loop's operations below, in the same order, so the results are the
+        // same to the bit (the tests compare a class with `swirl` 0 against
+        // `integrate`).
+        let mut start = 0;
+        // Eight at a time where the build has AVX (this crate's own `.cargo/config.toml`
+        // turns it on): the same lanes, twice as wide, with the eight class rows paired
+        // into 256-bit registers before the same 4 x 4 transpose in each half.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+        {
+            use std::arch::x86_64::*;
+            let octets = n / 8;
+            // SAFETY: AVX is enabled for this build (the `cfg`). Every pointer read or
+            // written is `i..i + 8` of a slice `n` long with `i + 8 <= n`, and each row
+            // is a `[f32; 4]`.
+            unsafe {
+                let dtv = _mm256_set1_ps(dt);
+                let exponent = _mm256_castsi256_ps(_mm256_set1_epi32(EXPONENT as i32));
+                let rounds_away = _mm256_set1_ps(ROUNDS_AWAY);
+                let min_positive = _mm256_set1_ps(f32::MIN_POSITIVE);
+                let magnitude = _mm256_castsi256_ps(_mm256_set1_epi32(0x7fff_ffff));
+                let zero = _mm256_setzero_ps();
+                let resolution8 =
+                    |p: __m256| _mm256_max_ps(_mm256_mul_ps(_mm256_and_ps(p, exponent), rounds_away), min_positive);
+                let select = |mask: __m256, a: __m256, b: __m256| {
+                    _mm256_or_ps(_mm256_and_ps(mask, a), _mm256_andnot_ps(mask, b))
+                };
+                for o in 0..octets {
+                    let i = 8 * o;
+                    let row = |k: usize| _mm_loadu_ps(rows[(class[i + k] as usize) & (MAX_CLASSES - 1)].as_ptr());
+                    let pair = |k: usize| _mm256_insertf128_ps(_mm256_castps128_ps256(row(k)), row(k + 4), 1);
+                    let (r0, r1, r2, r3) = (pair(0), pair(1), pair(2), pair(3));
+                    let (t0, t1) = (_mm256_unpacklo_ps(r0, r1), _mm256_unpacklo_ps(r2, r3));
+                    let (t2, t3) = (_mm256_unpackhi_ps(r0, r1), _mm256_unpackhi_ps(r2, r3));
+                    // movelh / movehl, per 128-bit half.
+                    let gravity = _mm256_shuffle_ps(t0, t1, 0x44);
+                    let damping = _mm256_shuffle_ps(t0, t1, 0xEE);
+                    let decays_y = _mm256_shuffle_ps(t2, t3, 0x44);
+                    let take = _mm256_shuffle_ps(t2, t3, 0xEE);
+
+                    let load = |s: &[f32]| _mm256_loadu_ps(s.as_ptr().add(i));
+                    let (ppx, ppy, ppz) = (load(px), load(py), load(pz));
+                    let mut x = _mm256_mul_ps(load(vx), damping);
+                    let mut y = _mm256_mul_ps(_mm256_sub_ps(load(vy), gravity), damping);
+                    let mut z = _mm256_mul_ps(load(vz), damping);
+                    let on = _mm256_cmp_ps(take, zero, _CMP_NEQ_UQ);
+                    x = select(on, _mm256_add_ps(x, _mm256_mul_ps(take, load(ax))), x);
+                    y = select(on, _mm256_add_ps(y, _mm256_mul_ps(take, load(ay))), y);
+                    z = select(on, _mm256_add_ps(z, _mm256_mul_ps(take, load(az))), z);
+
+                    let (sx, sy, sz) = (_mm256_mul_ps(x, dtv), _mm256_mul_ps(y, dtv), _mm256_mul_ps(z, dtv));
+                    let below = |s: __m256, r: __m256| _mm256_cmp_ps(_mm256_and_ps(s, magnitude), r, _CMP_LT_OQ);
+                    x = _mm256_andnot_ps(below(sx, resolution8(ppx)), x);
+                    y = _mm256_andnot_ps(below(sy, _mm256_mul_ps(resolution8(ppy), decays_y)), y);
+                    z = _mm256_andnot_ps(below(sz, resolution8(ppz)), z);
+
+                    let store = |s: &mut [f32], v: __m256| _mm256_storeu_ps(s.as_mut_ptr().add(i), v);
+                    store(vx, x);
+                    store(vy, y);
+                    store(vz, z);
+                    store(px, _mm256_add_ps(ppx, _mm256_mul_ps(x, dtv)));
+                    store(py, _mm256_add_ps(ppy, _mm256_mul_ps(y, dtv)));
+                    store(pz, _mm256_add_ps(ppz, _mm256_mul_ps(z, dtv)));
+                    store(remaining, _mm256_sub_ps(load(remaining), dtv));
+                }
+            }
+            start = 8 * octets;
+        }
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "avx")))]
+        {
+            use std::arch::x86_64::*;
+            let quads = n / 4;
+            // SAFETY: SSE2 is part of the x86-64 baseline. Every pointer read or written
+            // is `i..i + 4` of a slice `n` long with `i + 4 <= n`, and each row is a
+            // `[f32; 4]`.
+            unsafe {
+                let dtv = _mm_set1_ps(dt);
+                let exponent = _mm_castsi128_ps(_mm_set1_epi32(EXPONENT as i32));
+                let rounds_away = _mm_set1_ps(ROUNDS_AWAY);
+                let min_positive = _mm_set1_ps(f32::MIN_POSITIVE);
+                let magnitude = _mm_castsi128_ps(_mm_set1_epi32(0x7fff_ffff));
+                let zero = _mm_setzero_ps();
+                let resolution4 = |p: __m128| _mm_max_ps(_mm_mul_ps(_mm_and_ps(p, exponent), rounds_away), min_positive);
+                // `mask ? a : b`, bitwise.
+                let select = |mask: __m128, a: __m128, b: __m128| _mm_or_ps(_mm_and_ps(mask, a), _mm_andnot_ps(mask, b));
+                for q in 0..quads {
+                    let i = 4 * q;
+                    let row = |k: usize| _mm_loadu_ps(rows[(class[i + k] as usize) & (MAX_CLASSES - 1)].as_ptr());
+                    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+                    let (t0, t1) = (_mm_unpacklo_ps(r0, r1), _mm_unpacklo_ps(r2, r3));
+                    let (t2, t3) = (_mm_unpackhi_ps(r0, r1), _mm_unpackhi_ps(r2, r3));
+                    let gravity = _mm_movelh_ps(t0, t1);
+                    let damping = _mm_movehl_ps(t1, t0);
+                    let decays_y = _mm_movelh_ps(t2, t3);
+                    let take = _mm_movehl_ps(t3, t2);
+
+                    let load = |s: &[f32]| _mm_loadu_ps(s.as_ptr().add(i));
+                    let (ppx, ppy, ppz) = (load(px), load(py), load(pz));
+                    let mut x = _mm_mul_ps(load(vx), damping);
+                    let mut y = _mm_mul_ps(_mm_sub_ps(load(vy), gravity), damping);
+                    let mut z = _mm_mul_ps(load(vz), damping);
+                    let on = _mm_cmpneq_ps(take, zero);
+                    x = select(on, _mm_add_ps(x, _mm_mul_ps(take, load(ax))), x);
+                    y = select(on, _mm_add_ps(y, _mm_mul_ps(take, load(ay))), y);
+                    z = select(on, _mm_add_ps(z, _mm_mul_ps(take, load(az))), z);
+
+                    let (sx, sy, sz) = (_mm_mul_ps(x, dtv), _mm_mul_ps(y, dtv), _mm_mul_ps(z, dtv));
+                    x = _mm_andnot_ps(_mm_cmplt_ps(_mm_and_ps(sx, magnitude), resolution4(ppx)), x);
+                    y = _mm_andnot_ps(
+                        _mm_cmplt_ps(_mm_and_ps(sy, magnitude), _mm_mul_ps(resolution4(ppy), decays_y)),
+                        y,
+                    );
+                    z = _mm_andnot_ps(_mm_cmplt_ps(_mm_and_ps(sz, magnitude), resolution4(ppz)), z);
+
+                    let store = |s: &mut [f32], v: __m128| _mm_storeu_ps(s.as_mut_ptr().add(i), v);
+                    store(vx, x);
+                    store(vy, y);
+                    store(vz, z);
+                    store(px, _mm_add_ps(ppx, _mm_mul_ps(x, dtv)));
+                    store(py, _mm_add_ps(ppy, _mm_mul_ps(y, dtv)));
+                    store(pz, _mm_add_ps(ppz, _mm_mul_ps(z, dtv)));
+                    store(remaining, _mm_sub_ps(load(remaining), dtv));
+                }
+            }
+            start = 4 * quads;
+        }
+
+        for i in start..n {
+            let [gravity, d, decays_y, t] = rows[(class[i] as usize) & (MAX_CLASSES - 1)];
+
+            let mut x = vx[i] * d;
+            let mut y = (vy[i] - gravity) * d;
+            let mut z = vz[i] * d;
+            // Selected, not added with a zero weight: `-0 + 0` is `+0`, and a class that
+            // ignores the air must keep every bit.
+            let on = t != 0.0;
+            x = if on { x + t * ax[i] } else { x };
+            y = if on { y + t * ay[i] } else { y };
+            z = if on { z + t * az[i] } else { z };
+
+            let (sx, sy, sz) = (x * dt, y * dt, z * dt);
+            x = if sx.abs() < resolution(px[i]) { 0.0 } else { x };
+            y = if sy.abs() < resolution(py[i]) * decays_y { 0.0 } else { y };
+            z = if sz.abs() < resolution(pz[i]) { 0.0 } else { z };
+
+            vx[i] = x;
+            vy[i] = y;
+            vz[i] = z;
+            px[i] += x * dt;
+            py[i] += y * dt;
+            pz[i] += z * dt;
+            remaining[i] -= dt;
+        }
+    }
+
+    /// Particle `i`'s seconds remaining and total lifetime, for handing a live pool to
+    /// another backend.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn life_of(&self, i: usize) -> (f32, f32) {
+        (self.remaining[i], self.lifetime[i])
+    }
+
+    /// Particle `i`'s last sample of the air, for tests.
+    #[cfg(test)]
+    pub(crate) fn air_sample(&self, i: usize) -> [f32; 3] {
+        [self.air_x[i], self.air_y[i], self.air_z[i]]
     }
 
 
@@ -668,12 +1098,23 @@ impl ParticleEffects {
             self.lifetime.swap_remove(i);
             self.size.swap_remove(i);
             self.class.swap_remove(i);
+            if !self.air_x.is_empty() {
+                self.air_x.swap_remove(i);
+                self.air_y.swap_remove(i);
+                self.air_z.swap_remove(i);
+            }
         }
         // Compaction moved everything, so the rotation cursor no longer refers to
         // the particle it was pointing at. Reset rather than track it -- being
         // approximately-oldest is all this needs to be.
         if self.oldest >= self.len() {
             self.oldest = 0;
+        }
+        // Whatever was emitted before this point has been integrated once.
+        self.fresh_from = self.len();
+        self.rewritten_len = 0;
+        if self.air_cursor >= self.len() {
+            self.air_cursor = 0;
         }
     }
 
@@ -929,6 +1370,34 @@ impl ParticleEffects {
     /// ```
     pub fn positions_soa(&self) -> (&[f32], &[f32], &[f32]) {
         (&self.pos_x, &self.pos_y, &self.pos_z)
+    }
+}
+
+/// The particles of a burst, drawn from `rng` in the order [`ParticleEffects::emit`]
+/// draws them: `f(position, velocity, lifetime, size, class)` once a particle, with the
+/// lifetime already raised to `f32::EPSILON` and the class clamped. Shared with the GPU
+/// pool so the same seed emits the same particles on either.
+pub(crate) fn for_each_in_burst<F>(burst: &Burst, rng: &mut EffectRng, mut f: F)
+where
+    F: FnMut([f32; 3], [f32; 3], f32, f32, u8),
+{
+    let class = burst.class.min((MAX_CLASSES - 1) as u8);
+
+    for _ in 0..burst.count {
+        let dir = rng.hemisphere(burst.lift);
+        let speed = rng.range(burst.speed.start, burst.speed.end);
+        let life = rng
+            .range(burst.lifetime.start, burst.lifetime.end)
+            .max(f32::EPSILON);
+        let size = rng.range(burst.size.start, burst.size.end);
+
+        f(
+            burst.origin,
+            [dir[0] * speed, dir[1] * speed, dir[2] * speed],
+            life,
+            size,
+            class,
+        );
     }
 }
 
