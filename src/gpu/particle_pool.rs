@@ -468,12 +468,17 @@ impl GpuParticlePool {
     /// let pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(1 << 20)).unwrap();
     /// assert_eq!(pool.capacity(), 1 << 20);
     /// ```
-    pub fn new(gpu: &GpuContext, mut config: GpuPoolConfig) -> Result<GpuParticlePool, GpuPoolError> {
+    pub fn new(
+        gpu: &GpuContext,
+        mut config: GpuPoolConfig,
+    ) -> Result<GpuParticlePool, GpuPoolError> {
         config.max_emit_per_frame = config.max_emit_per_frame.min(config.capacity);
         let device = gpu.device.clone();
         let queue = gpu.queue.clone();
         if config.capacity == 0 || config.max_emit_per_frame == 0 {
-            return Err(GpuPoolError::Limit("capacity and max_emit_per_frame must be at least 1"));
+            return Err(GpuPoolError::Limit(
+                "capacity and max_emit_per_frame must be at least 1",
+            ));
         }
         let limits = device.limits();
         let slots = config.capacity.div_ceil(WG) * WG;
@@ -484,15 +489,21 @@ impl GpuParticlePool {
             || (config.max_emit_per_frame as u64) * (RECORD_WORDS as u64) * 4
                 > limits.max_storage_buffer_binding_size as u64
         {
-            return Err(GpuPoolError::Limit("arrays past the device's storage binding size"));
+            return Err(GpuPoolError::Limit(
+                "arrays past the device's storage binding size",
+            ));
         }
         if limits.max_storage_buffers_per_shader_stage < 8 {
             return Err(GpuPoolError::Limit("the pool binds 8 storage buffers"));
         }
         if config.field == FieldFormat::F32Filtered
-            && !device.features().contains(wgpu::Features::FLOAT32_FILTERABLE)
+            && !device
+                .features()
+                .contains(wgpu::Features::FLOAT32_FILTERABLE)
         {
-            return Err(GpuPoolError::MissingFeature(wgpu::Features::FLOAT32_FILTERABLE));
+            return Err(GpuPoolError::MissingFeature(
+                wgpu::Features::FLOAT32_FILTERABLE,
+            ));
         }
 
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
@@ -503,11 +514,15 @@ impl GpuParticlePool {
                 mapped_at_creation: false,
             })
         };
-        let rw = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+        let rw = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
         let frame = buffer(
             "pool frame",
             (HEADER_WORDS * 4 + config.max_emit_per_frame as usize * RECORD_WORDS * 4) as u64,
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
         );
         // Zeroed at creation, so every slot starts dead.
         let pos_life = buffer("pool position and life", slots as u64 * 16, rw);
@@ -533,7 +548,11 @@ impl GpuParticlePool {
         initial[0] = config.capacity;
         queue.write_buffer(&state, 0, bytes_of(&initial));
         // A first frame with nothing to integrate.
-        queue.write_buffer(&args, 0, bytes_of(&[0u32, 1, 1, 0, 1, 1, 0, 0, config.sprite_vertices, 0, 0, 0]));
+        queue.write_buffer(
+            &args,
+            0,
+            bytes_of(&[0u32, 1, 1, 0, 1, 1, 0, 0, config.sprite_vertices, 0, 0, 0]),
+        );
 
         let main_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pool main"),
@@ -553,7 +572,9 @@ impl GpuParticlePool {
             binding: 0,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: filtered },
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: filtered,
+                },
                 view_dimension: wgpu::TextureViewDimension::D3,
                 multisampled: false,
             },
@@ -645,14 +666,16 @@ impl GpuParticlePool {
                 bind_group_layouts: &[Some(&convert_layout)],
                 immediate_size: 0,
             });
-            Some(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("convert"),
-                layout: Some(&layout),
-                module: &module,
-                entry_point: Some("convert"),
-                compilation_options: Default::default(),
-                cache: None,
-            }))
+            Some(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("convert"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some("convert"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+            )
         } else {
             None
         };
@@ -669,7 +692,11 @@ impl GpuParticlePool {
         let ground_placeholder = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("pool no ground"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -700,22 +727,51 @@ impl GpuParticlePool {
                         size: None,
                     }),
                 },
-                wgpu::BindGroupEntry { binding: 2, resource: pos_life.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: vel.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: meta.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: free.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: state.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: landings.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pos_life.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: vel.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: meta.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: free.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: landings.as_entire_binding(),
+                },
             ],
         });
         let args_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pool arguments"),
             layout: &args_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: args.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: args.as_entire_binding(),
+            }],
         });
-        let air_group = Self::air_group(&device, &air_layout, filtered, &air.view, &sampler, &ground_placeholder);
+        let air_group = Self::air_group(
+            &device,
+            &air_layout,
+            filtered,
+            &air.view,
+            &sampler,
+            &ground_placeholder,
+        );
 
-        let mut upload = Vec::with_capacity(HEADER_WORDS + config.max_emit_per_frame as usize * RECORD_WORDS);
+        let mut upload =
+            Vec::with_capacity(HEADER_WORDS + config.max_emit_per_frame as usize * RECORD_WORDS);
         upload.resize(HEADER_WORDS, 0);
 
         Ok(GpuParticlePool {
@@ -794,15 +850,26 @@ impl GpuParticlePool {
                 label: Some("pool field conversion"),
                 layout: convert_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
                 ],
             });
             Some((buffer, group))
         } else {
             None
         };
-        AirBinding { texture, view, dims, staging }
+        AirBinding {
+            texture,
+            view,
+            dims,
+            staging,
+        }
     }
 
     fn air_group(
@@ -813,11 +880,20 @@ impl GpuParticlePool {
         sampler: &wgpu::Sampler,
         ground: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(air) }];
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(air),
+        }];
         if filtered {
-            entries.push(wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
         }
-        entries.push(wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(ground) });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::TextureView(ground),
+        });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pool air and ground"),
             layout,
@@ -1059,7 +1135,15 @@ impl GpuParticlePool {
 
     // -- Emission --
 
-    fn stage(&mut self, pos: [f32; 3], vel: [f32; 3], remaining: f32, lifetime: f32, size: f32, class: u8) {
+    fn stage(
+        &mut self,
+        pos: [f32; 3],
+        vel: [f32; 3],
+        remaining: f32,
+        lifetime: f32,
+        size: f32,
+        class: u8,
+    ) {
         let bits = |v: f32| v.to_bits();
         self.upload.extend_from_slice(&[
             bits(pos[0]),
@@ -1147,9 +1231,23 @@ impl GpuParticlePool {
     /// pool.emit_one([0.0, 2.0, 0.0], [3.0, 0.0, 0.0], 1.0, 1.0, 0);
     /// assert_eq!(pool.staged(), 1);
     /// ```
-    pub fn emit_one(&mut self, origin: [f32; 3], velocity: [f32; 3], lifetime: f32, size: f32, class: u8) {
+    pub fn emit_one(
+        &mut self,
+        origin: [f32; 3],
+        velocity: [f32; 3],
+        lifetime: f32,
+        size: f32,
+        class: u8,
+    ) {
         let life = lifetime.max(f32::EPSILON);
-        self.stage(origin, velocity, life, life, size, class.min((MAX_CLASSES - 1) as u8));
+        self.stage(
+            origin,
+            velocity,
+            life,
+            life,
+            size,
+            class.min((MAX_CLASSES - 1) as u8),
+        );
         self.bound_staging();
     }
 
@@ -1181,7 +1279,14 @@ impl GpuParticlePool {
     pub fn adopt(&mut self, fx: &mut ParticleEffects) {
         for i in 0..fx.len() {
             let (remaining, lifetime) = fx.life_of(i);
-            self.stage(fx.position(i), fx.velocity(i), remaining, lifetime, fx.size(i), fx.class_of(i));
+            self.stage(
+                fx.position(i),
+                fx.velocity(i),
+                remaining,
+                lifetime,
+                fx.size(i),
+                fx.class_of(i),
+            );
         }
         fx.clear();
         self.bound_staging();
@@ -1192,7 +1297,8 @@ impl GpuParticlePool {
     fn bound_staging(&mut self) {
         let over = self.staged().saturating_sub(self.config.capacity as usize);
         if over > 0 {
-            self.upload.drain(HEADER_WORDS..HEADER_WORDS + over * RECORD_WORDS);
+            self.upload
+                .drain(HEADER_WORDS..HEADER_WORDS + over * RECORD_WORDS);
         }
     }
 
@@ -1227,7 +1333,8 @@ impl GpuParticlePool {
     pub fn upload_field(&mut self, air: &VelocityGrid) {
         let dims = air.dims();
         if dims != self.air.dims {
-            self.air = Self::air_binding(&self.device, &self.convert_layout, self.config.field, dims);
+            self.air =
+                Self::air_binding(&self.device, &self.convert_layout, self.config.field, dims);
             self.rebuild_air_group();
         }
         let cells = bytemuck::cast_slice::<[f32; 4], u8>(air.cells());
@@ -1265,11 +1372,26 @@ impl GpuParticlePool {
         // As `VelocityGrid::new` computes them, so the exact fetch reads the same cells.
         let first = o.map(|v| v + 0.5 * h);
         self.air_words = Some([
-            scale[0], scale[1], scale[2], 0.0,
-            offset[0], offset[1], offset[2], 0.0,
-            first[0], first[1], first[2], 1.0 / h,
-            n[0] - 1.0, n[1] - 1.0, n[2] - 1.0, 0.0,
-            n[0] - 2.0, n[1] - 2.0, n[2] - 2.0, 0.0,
+            scale[0],
+            scale[1],
+            scale[2],
+            0.0,
+            offset[0],
+            offset[1],
+            offset[2],
+            0.0,
+            first[0],
+            first[1],
+            first[2],
+            1.0 / h,
+            n[0] - 1.0,
+            n[1] - 1.0,
+            n[2] - 1.0,
+            0.0,
+            n[0] - 2.0,
+            n[1] - 2.0,
+            n[2] - 2.0,
+            0.0,
         ]);
     }
 
@@ -1463,9 +1585,14 @@ impl GpuParticlePool {
     ) {
         let emit = self.staged().min(self.config.max_emit_per_frame as usize);
         self.write_header(dt, emit as u32);
-        self.queue.write_buffer(&self.frame, 0, bytes_of(&self.upload[..HEADER_WORDS + emit * RECORD_WORDS]));
+        self.queue.write_buffer(
+            &self.frame,
+            0,
+            bytes_of(&self.upload[..HEADER_WORDS + emit * RECORD_WORDS]),
+        );
         if emit > 0 {
-            self.upload.drain(HEADER_WORDS..HEADER_WORDS + emit * RECORD_WORDS);
+            self.upload
+                .drain(HEADER_WORDS..HEADER_WORDS + emit * RECORD_WORDS);
         }
 
         let writes = |pair: Option<u32>| {
@@ -1511,7 +1638,11 @@ impl GpuParticlePool {
     }
 
     /// The pass converting a newly uploaded `rgba16float` field, when one is pending.
-    fn encode_field(&mut self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>) {
+    fn encode_field(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         if !self.field_pending {
             return;
         }
@@ -1546,9 +1677,11 @@ impl GpuParticlePool {
     /// assert_eq!(pool.read_counts_blocking().live, 1);
     /// ```
     pub fn step(&mut self, dt: f32) {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pool step"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pool step"),
+            });
         self.encode(&mut encoder, dt);
         self.queue.submit([encoder.finish()]);
     }
@@ -1761,7 +1894,9 @@ impl GpuParticlePool {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device lost while reading the pool back");
-        let words = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().expect("mapped readback")).to_vec();
+        let words =
+            bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().expect("mapped readback"))
+                .to_vec();
         staging.unmap();
         words
     }
@@ -1868,7 +2003,10 @@ impl GpuParticlePool {
     /// assert!(pool.read_landings_blocking().is_empty());
     /// ```
     pub fn read_landings_blocking(&self) -> Vec<Landing> {
-        let n = self.read_counts_blocking().landings.min(self.config.landing_capacity) as usize;
+        let n = self
+            .read_counts_blocking()
+            .landings
+            .min(self.config.landing_capacity) as usize;
         let w = self.read_blocking(&self.landings, (n * LANDING_WORDS * 4) as u64);
         let f = f32::from_bits;
         (0..n)
@@ -1915,7 +2053,8 @@ impl GpuParticlePool {
         // The field's words into the frame header; nothing placed, nothing stepped. The
         // next `encode` writes the header again.
         self.write_header(0.0, 0);
-        self.queue.write_buffer(&self.frame, 0, bytes_of(&self.upload[..FRAME_WORDS]));
+        self.queue
+            .write_buffer(&self.frame, 0, bytes_of(&self.upload[..FRAME_WORDS]));
         let device = self.device.clone();
 
         let source = format!("{}\n{}", self.module_source, air_section("probe"));
@@ -1925,7 +2064,11 @@ impl GpuParticlePool {
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pool probe"),
-            entries: &[uniform_entry(0), storage_entry(8, true), storage_entry(9, false)],
+            entries: &[
+                uniform_entry(0),
+                storage_entry(8, true),
+                storage_entry(9, false),
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pool probe"),
@@ -1940,7 +2083,10 @@ impl GpuParticlePool {
             compilation_options: Default::default(),
             cache: None,
         });
-        let input: Vec<f32> = points.iter().flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
+        let input: Vec<f32> = points
+            .iter()
+            .flat_map(|p| [p[0], p[1], p[2], 0.0])
+            .collect();
         let bytes = (points.len() * 16) as u64;
         let probe_in = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe in"),
@@ -1948,7 +2094,8 @@ impl GpuParticlePool {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&probe_in, 0, bytemuck::cast_slice(&input));
+        self.queue
+            .write_buffer(&probe_in, 0, bytemuck::cast_slice(&input));
         let probe_out = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("probe out"),
             size: bytes,
@@ -1967,8 +2114,14 @@ impl GpuParticlePool {
                         size: wgpu::BufferSize::new((HEADER_WORDS * 4) as u64),
                     }),
                 },
-                wgpu::BindGroupEntry { binding: 8, resource: probe_in.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: probe_out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: probe_in.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: probe_out.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -1983,7 +2136,13 @@ impl GpuParticlePool {
         self.queue.submit([encoder.finish()]);
         let w = self.read_blocking(&probe_out, bytes);
         (0..points.len())
-            .map(|i| [f32::from_bits(w[4 * i]), f32::from_bits(w[4 * i + 1]), f32::from_bits(w[4 * i + 2])])
+            .map(|i| {
+                [
+                    f32::from_bits(w[4 * i]),
+                    f32::from_bits(w[4 * i + 1]),
+                    f32::from_bits(w[4 * i + 2]),
+                ]
+            })
             .collect()
     }
 }

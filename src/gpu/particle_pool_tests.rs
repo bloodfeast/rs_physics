@@ -32,9 +32,30 @@ fn gpu(features: wgpu::Features) -> Option<GpuContext> {
 fn classes(swirl: bool) -> [(ParticleClass, f32); 3] {
     let s = if swirl { 1.0 } else { 0.0 };
     [
-        (ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 }, s),
-        (ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 }, s),
-        (ParticleClass { gravity: 9.8, drag: 0.2, restitution: 0.5 }, 0.0),
+        (
+            ParticleClass {
+                gravity: 26.0,
+                drag: 1.4,
+                restitution: 0.32,
+            },
+            s,
+        ),
+        (
+            ParticleClass {
+                gravity: 1.6,
+                drag: 3.4,
+                restitution: 0.0,
+            },
+            s,
+        ),
+        (
+            ParticleClass {
+                gravity: 9.8,
+                drag: 0.2,
+                restitution: 0.5,
+            },
+            0.0,
+        ),
     ]
 }
 
@@ -151,7 +172,10 @@ struct Emitter {
 
 impl Emitter {
     fn new(seed: u32) -> Emitter {
-        Emitter { rng: EffectRng::new(seed), next_id: 1 }
+        Emitter {
+            rng: EffectRng::new(seed),
+            next_id: 1,
+        }
     }
 
     /// `count` particles round the emitter, every class, lifetimes from a fifth of a
@@ -159,7 +183,11 @@ impl Emitter {
     fn emit(&mut self, count: usize, fx: &mut ParticleEffects, pool: &mut GpuParticlePool) {
         for _ in 0..count {
             let r = &mut self.rng;
-            let pos = [r.range(-10.0, 10.0), r.range(2.0, 14.0), r.range(-10.0, 10.0)];
+            let pos = [
+                r.range(-10.0, 10.0),
+                r.range(2.0, 14.0),
+                r.range(-10.0, 10.0),
+            ];
             let dir = r.hemisphere(0.4);
             let speed = r.range(1.0, 12.0);
             let vel = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
@@ -175,7 +203,9 @@ impl Emitter {
 
 /// The CPU pool's particles by id: position, velocity, class.
 fn cpu_by_id(fx: &ParticleEffects) -> HashMap<u32, ([f32; 3], [f32; 3])> {
-    (0..fx.len()).map(|i| (fx.size(i) as u32, (fx.position(i), fx.velocity(i)))).collect()
+    (0..fx.len())
+        .map(|i| (fx.size(i) as u32, (fx.position(i), fx.velocity(i))))
+        .collect()
 }
 
 /// The device pool's live particles by id.
@@ -203,7 +233,12 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// the population and every particle's position and velocity against the bounds.
 fn track_the_cpu(format: FieldFormat, features: wgpu::Features) {
     let Some(gpu) = gpu(features) else { return };
-    if format == FieldFormat::F32Filtered && !gpu.device.features().contains(wgpu::Features::FLOAT32_FILTERABLE) {
+    if format == FieldFormat::F32Filtered
+        && !gpu
+            .device
+            .features()
+            .contains(wgpu::Features::FLOAT32_FILTERABLE)
+    {
         println!("No FLOAT32_FILTERABLE: skipping the f32 filtered case");
         return;
     }
@@ -233,13 +268,20 @@ fn track_the_cpu(format: FieldFormat, features: wgpu::Features) {
     let emitted = (emitter.next_id - 1) as usize;
     let counts = pool.read_counts_blocking();
     assert_eq!(counts.live as usize, fx.len(), "live counts differ");
-    assert_eq!(counts.retired as usize, emitted - fx.len(), "retire counts differ");
+    assert_eq!(
+        counts.retired as usize,
+        emitted - fx.len(),
+        "retire counts differ"
+    );
     assert_eq!(counts.placed as usize, emitted);
     assert_eq!(counts.free + counts.live, pool.capacity());
 
     let cpu = cpu_by_id(&fx);
     let device = gpu_by_id(&pool);
-    assert_eq!(cpu.keys().collect::<HashSet<_>>(), device.keys().collect::<HashSet<_>>());
+    assert_eq!(
+        cpu.keys().collect::<HashSet<_>>(),
+        device.keys().collect::<HashSet<_>>()
+    );
 
     let fetch = fetch_bound(format, a, d);
     let bound = trajectory_bound(frames, fetch, v_max, p_max, g);
@@ -255,8 +297,14 @@ fn track_the_cpu(format: FieldFormat, features: wgpu::Features) {
         "{format:?}: {} live; position {worst_p:.3e} m (bound {bound:.3e}), velocity {worst_v:.3e} m/s (bound {v_bound:.3e}); A {a:.3}, D {d:.3}, V {v_max:.2}, P {p_max:.2}",
         cpu.len()
     );
-    assert!(worst_p <= bound, "{format:?}: position {worst_p} past {bound}");
-    assert!(worst_v <= v_bound, "{format:?}: velocity {worst_v} past {v_bound}");
+    assert!(
+        worst_p <= bound,
+        "{format:?}: position {worst_p} past {bound}"
+    );
+    assert!(
+        worst_v <= v_bound,
+        "{format:?}: velocity {worst_v} past {v_bound}"
+    );
 }
 
 #[test]
@@ -278,15 +326,27 @@ fn the_f32_filtered_integrate_tracks_the_cpu_within_the_filter_bound() {
 /// `VelocityGrid::sample`.
 #[test]
 fn each_fetch_is_within_its_format_precision() {
-    let Some(gpu) = gpu(wgpu::Features::FLOAT32_FILTERABLE) else { return };
+    let Some(gpu) = gpu(wgpu::Features::FLOAT32_FILTERABLE) else {
+        return;
+    };
     let air = swirl_air();
     let (a, d) = field_extent(&air);
     let mut rng = EffectRng::new(17);
     let points: Vec<[f32; 3]> = (0..4_096)
-        .map(|_| [rng.range(-20.0, 20.0), rng.range(-4.0, 36.0), rng.range(-20.0, 20.0)])
+        .map(|_| {
+            [
+                rng.range(-20.0, 20.0),
+                rng.range(-4.0, 36.0),
+                rng.range(-20.0, 20.0),
+            ]
+        })
         .collect();
     let mut by_format = Vec::new();
-    for format in [FieldFormat::F32Exact, FieldFormat::F32Filtered, FieldFormat::F16Filtered] {
+    for format in [
+        FieldFormat::F32Exact,
+        FieldFormat::F32Filtered,
+        FieldFormat::F16Filtered,
+    ] {
         let mut config = GpuPoolConfig::new(64);
         config.field = format;
         let Ok(mut pool) = GpuParticlePool::new(&gpu, config) else {
@@ -308,12 +368,23 @@ fn each_fetch_is_within_its_format_precision() {
     // The half-precision storage alone: the f16 field against the f32 field through the
     // same hardware filter. Rounding 11 significant bits is `A 2^-11` to nearest,
     // `A 2^-10` toward zero, and the filter's half-precision arithmetic as much again.
-    let f32_filtered = by_format.iter().find(|(f, _)| *f == FieldFormat::F32Filtered);
-    let f16_filtered = by_format.iter().find(|(f, _)| *f == FieldFormat::F16Filtered);
+    let f32_filtered = by_format
+        .iter()
+        .find(|(f, _)| *f == FieldFormat::F32Filtered);
+    let f16_filtered = by_format
+        .iter()
+        .find(|(f, _)| *f == FieldFormat::F16Filtered);
     if let (Some((_, wide)), Some((_, half))) = (f32_filtered, f16_filtered) {
-        let worst = wide.iter().zip(half).map(|(w, h)| distance(*w, *h)).fold(0.0f32, f32::max);
+        let worst = wide
+            .iter()
+            .zip(half)
+            .map(|(w, h)| distance(*w, *h))
+            .fold(0.0f32, f32::max);
         let bound = 2.0 * a / 1024.0;
-        println!("f16 storage against the f32 field: {worst:.3e} m/s (bound {bound:.3e}, {:.4}% of A)", 100.0 * worst / a);
+        println!(
+            "f16 storage against the f32 field: {worst:.3e} m/s (bound {bound:.3e}, {:.4}% of A)",
+            100.0 * worst / a
+        );
         assert!(worst <= bound, "f16 storage {worst} past {bound}");
     }
 }
@@ -322,7 +393,9 @@ fn each_fetch_is_within_its_format_precision() {
 /// integrates to the bit as it does with no field at all.
 #[test]
 fn a_class_off_the_air_is_bit_identical_with_and_without_a_field() {
-    let Some(gpu) = gpu(wgpu::Features::empty()) else { return };
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
     let mut on = GpuParticlePool::new(&gpu, GpuPoolConfig::new(4_096)).unwrap();
     let mut off = GpuParticlePool::new(&gpu, GpuPoolConfig::new(4_096)).unwrap();
     let mut fx = ParticleEffects::with_capacity(4_096);
@@ -345,8 +418,16 @@ fn a_class_off_the_air_is_bit_identical_with_and_without_a_field() {
     for (id, (p, v)) in &without {
         if id % 3 == 2 {
             let (wp, wv) = with[id];
-            assert_eq!(p.map(f32::to_bits), wp.map(f32::to_bits), "particle {id} moved");
-            assert_eq!(v.map(f32::to_bits), wv.map(f32::to_bits), "particle {id} moved");
+            assert_eq!(
+                p.map(f32::to_bits),
+                wp.map(f32::to_bits),
+                "particle {id} moved"
+            );
+            assert_eq!(
+                v.map(f32::to_bits),
+                wv.map(f32::to_bits),
+                "particle {id} moved"
+            );
             compared += 1;
         }
     }
@@ -358,11 +439,17 @@ fn a_class_off_the_air_is_bit_identical_with_and_without_a_field() {
 /// the CPU puts them.
 #[test]
 fn landings_match_the_cpu_in_count_and_position() {
-    let Some(gpu) = gpu(wgpu::Features::empty()) else { return };
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
     let corners = [33u32, 29];
     let (min, cell) = ([-16.0f32, -14.0], 1.0f32);
     let heights: Vec<f32> = (0..corners[1])
-        .flat_map(|iz| (0..corners[0]).map(move |ix| 0.12 * ix as f32 - 0.08 * iz as f32 + ((ix * 7 + iz * 3) % 5) as f32 * 0.1))
+        .flat_map(|iz| {
+            (0..corners[0]).map(move |ix| {
+                0.12 * ix as f32 - 0.08 * iz as f32 + ((ix * 7 + iz * 3) % 5) as f32 * 0.1
+            })
+        })
         .collect();
     // The engine's heightfield on the CPU: bilinear between corners, edges clamped.
     let at = |ix: i64, iz: i64| {
@@ -382,7 +469,11 @@ fn landings_match_the_cpu_in_count_and_position() {
     };
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test heights"),
-        size: wgpu::Extent3d { width: corners[0], height: corners[1], depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: corners[0],
+            height: corners[1],
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -398,8 +489,16 @@ fn landings_match_the_cpu_in_count_and_position() {
             aspect: wgpu::TextureAspect::All,
         },
         bytemuck::cast_slice(&heights),
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(corners[0] * 4), rows_per_image: None },
-        wgpu::Extent3d { width: corners[0], height: corners[1], depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(corners[0] * 4),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: corners[0],
+            height: corners[1],
+            depth_or_array_layers: 1,
+        },
     );
 
     let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(4_096)).unwrap();
@@ -420,13 +519,19 @@ fn landings_match_the_cpu_in_count_and_position() {
     for frame in 0..frames {
         emitter.emit(if frame == 0 { 1_500 } else { 30 }, &mut fx, &mut pool);
         fx.integrate(DT);
-        let before: HashMap<u32, f32> = (0..fx.len()).map(|i| (fx.size(i) as u32, fx.position(i)[1])).collect();
+        let before: HashMap<u32, f32> = (0..fx.len())
+            .map(|i| (fx.size(i) as u32, fx.position(i)[1]))
+            .collect();
         let mut cpu = HashMap::new();
         fx.collide_ground_with(height, |l| {
             cpu.insert(l.size as u32, l);
         });
         pool.step(DT);
-        let device: HashMap<u32, _> = pool.read_landings_blocking().into_iter().map(|l| (l.size as u32, l)).collect();
+        let device: HashMap<u32, _> = pool
+            .read_landings_blocking()
+            .into_iter()
+            .map(|l| (l.size as u32, l))
+            .collect();
         for i in 0..fx.len() {
             p_max = p_max.max(max_abs(fx.position(i)));
         }
@@ -437,13 +542,19 @@ fn landings_match_the_cpu_in_count_and_position() {
                 Some(d) => worst = worst.max(distance(l.position, d.position)),
                 None => {
                     borderline += 1;
-                    println!("frame {frame}: particle {id} landed on the CPU only, {:.3e} m below", l.position[1] - before[id]);
+                    println!(
+                        "frame {frame}: particle {id} landed on the CPU only, {:.3e} m below",
+                        l.position[1] - before[id]
+                    );
                 }
             }
         }
         for id in device.keys().filter(|id| !cpu.contains_key(id)) {
             borderline += 1;
-            println!("frame {frame}: particle {id} landed on the device only, {:.3e} m above", before[id] - height_of(&fx, *id, &height));
+            println!(
+                "frame {frame}: particle {id} landed on the device only, {:.3e} m above",
+                before[id] - height_of(&fx, *id, &height)
+            );
         }
     }
     // No air, so velocities agree to the bit until a bounce and positions differ only
@@ -459,7 +570,9 @@ fn landings_match_the_cpu_in_count_and_position() {
 }
 
 fn height_of(fx: &ParticleEffects, id: u32, height: &impl Fn(f32, f32) -> f32) -> f32 {
-    let i = (0..fx.len()).find(|&i| fx.size(i) as u32 == id).expect("particle alive");
+    let i = (0..fx.len())
+        .find(|&i| fx.size(i) as u32 == id)
+        .expect("particle alive");
     let p = fx.position(i);
     height(p[0], p[2])
 }
@@ -470,10 +583,19 @@ fn height_of(fx: &ParticleEffects, id: u32, height: &impl Fn(f32, f32) -> f32) -
 /// particle that was not overwritten still where it was.
 #[test]
 fn the_free_list_never_hands_out_a_live_slot() {
-    let Some(gpu) = gpu(wgpu::Features::empty()) else { return };
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
     let capacity = 1_000u32;
     let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(capacity)).unwrap();
-    pool.set_class(0, ParticleClass { gravity: 0.0, drag: 0.0, restitution: 0.0 });
+    pool.set_class(
+        0,
+        ParticleClass {
+            gravity: 0.0,
+            drag: 0.0,
+            restitution: 0.0,
+        },
+    );
 
     let check = |pool: &GpuParticlePool| {
         let counts = pool.read_counts_blocking();
@@ -487,10 +609,17 @@ fn the_free_list_never_hands_out_a_live_slot() {
             if slot.remaining > 0.0 {
                 live += 1;
                 assert!(!free_set.contains(&(i as u32)), "slot {i} is live and free");
-                assert!(ids.insert(slot.size as u32), "particle {} in two slots", slot.size);
+                assert!(
+                    ids.insert(slot.size as u32),
+                    "particle {} in two slots",
+                    slot.size
+                );
             }
         }
-        assert!(free.iter().all(|&s| s < capacity), "a slot past the capacity");
+        assert!(
+            free.iter().all(|&s| s < capacity),
+            "a slot past the capacity"
+        );
         assert_eq!(live, counts.live);
         assert_eq!(counts.free, free.len() as u32);
         assert_eq!(counts.live + counts.free, capacity, "slots lost or made");
@@ -505,7 +634,10 @@ fn the_free_list_never_hands_out_a_live_slot() {
     }
     pool.step(DT);
     let (counts, _) = check(&pool);
-    assert_eq!((counts.live, counts.free, counts.high_water), (capacity, 0, capacity));
+    assert_eq!(
+        (counts.live, counts.free, counts.high_water),
+        (capacity, 0, capacity)
+    );
 
     // The short half retires.
     for _ in 0..10 {
@@ -526,12 +658,25 @@ fn the_free_list_never_hands_out_a_live_slot() {
     assert_eq!(counts.overwritten + counts.dropped, 100);
     // Half of slots 0 to 99 held short-lived particles and were refilled from the stack.
     assert_eq!((counts.overwritten, counts.dropped), (50, 50));
-    let new: HashSet<u32> =
-        slots.iter().filter(|s| s.remaining > 0.0 && s.size >= 10_000.0).map(|s| s.size as u32 - 10_000).collect();
-    assert_eq!(new.len() as u32, 500 + counts.overwritten, "a new particle was placed over another new one");
-    assert!((101..=600).all(|id| new.contains(&id)), "one of the newest 500 is missing");
+    let new: HashSet<u32> = slots
+        .iter()
+        .filter(|s| s.remaining > 0.0 && s.size >= 10_000.0)
+        .map(|s| s.size as u32 - 10_000)
+        .collect();
+    assert_eq!(
+        new.len() as u32,
+        500 + counts.overwritten,
+        "a new particle was placed over another new one"
+    );
+    assert!(
+        (101..=600).all(|id| new.contains(&id)),
+        "one of the newest 500 is missing"
+    );
     // Every surviving old particle is untouched.
-    let old: Vec<_> = slots.iter().filter(|s| s.remaining > 0.0 && s.size < 10_000.0).collect();
+    let old: Vec<_> = slots
+        .iter()
+        .filter(|s| s.remaining > 0.0 && s.size < 10_000.0)
+        .collect();
     assert_eq!(old.len() as u32, 500 - counts.overwritten);
     for s in old {
         assert_eq!(s.position[0], s.size, "an old particle was corrupted");
@@ -554,7 +699,9 @@ fn the_free_list_never_hands_out_a_live_slot() {
 /// More staged in a frame than the bound: the rest wait for the next frame, in order.
 #[test]
 fn emission_past_the_frame_bound_carries_over() {
-    let Some(gpu) = gpu(wgpu::Features::empty()) else { return };
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
     let mut config = GpuPoolConfig::new(1_000);
     config.max_emit_per_frame = 300;
     let mut pool = GpuParticlePool::new(&gpu, config).unwrap();
@@ -573,7 +720,9 @@ fn emission_past_the_frame_bound_carries_over() {
 /// The pool runs on a device it did not open, and the policy may then choose it.
 #[test]
 fn a_shared_device_runs_the_pool_and_the_policy_can_choose_it() {
-    let Some(own) = gpu(wgpu::Features::empty()) else { return };
+    let Some(own) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
     let shared = GpuContext::from_device(own.device.clone(), own.queue.clone());
     assert_eq!(shared.adapter_info().name, own.adapter_info().name);
     let mut pool = GpuParticlePool::new(&shared, GpuPoolConfig::new(1_024)).unwrap();

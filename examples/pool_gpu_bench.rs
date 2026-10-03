@@ -26,7 +26,9 @@
 use std::time::Instant;
 
 use rs_physics::gpu::{FieldFormat, GpuContext, GpuParticlePool, GpuPoolConfig, PoolTimestamps};
-use rs_physics::particles::{Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive};
+use rs_physics::particles::{
+    Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive,
+};
 
 const DT: f32 = 1.0 / 60.0;
 const FRAMES: usize = 60;
@@ -61,7 +63,11 @@ struct Feed {
 impl Feed {
     fn new(count: usize) -> Feed {
         let half = count as f32 / 2.0;
-        Feed { rng: EffectRng::new(0xC0FFEE), owed: [0.0; 2], rate: [half / 0.35, half / 30.0] }
+        Feed {
+            rng: EffectRng::new(0xC0FFEE),
+            owed: [0.0; 2],
+            rate: [half / 0.35, half / 30.0],
+        }
     }
 
     fn feed(&mut self, sink: &mut impl Sink) {
@@ -87,8 +93,16 @@ impl Feed {
 
 fn classes() -> [ParticleClass; 2] {
     [
-        ParticleClass { gravity: 26.0, drag: 1.4, restitution: 0.32 },
-        ParticleClass { gravity: 1.6, drag: 3.4, restitution: 0.0 },
+        ParticleClass {
+            gravity: 26.0,
+            drag: 1.4,
+            restitution: 0.32,
+        },
+        ParticleClass {
+            gravity: 1.6,
+            drag: 3.4,
+            restitution: 0.0,
+        },
     ]
 }
 
@@ -117,7 +131,13 @@ impl Cpu {
                 fx.set_swirl(c as u8, 1.0);
             }
         }
-        let mut cpu = Cpu { fx, feed: Feed::new(count), field: swirl_field(), period, frame: 0 };
+        let mut cpu = Cpu {
+            fx,
+            feed: Feed::new(count),
+            field: swirl_field(),
+            period,
+            frame: 0,
+        };
         for _ in 0..(45.0 / DT) as usize {
             cpu.frame_ns();
         }
@@ -133,7 +153,8 @@ impl Cpu {
         self.frame += 1;
         let started = Instant::now();
         if self.period > 0 {
-            self.fx.integrate_in_air(DT, self.field.velocity(), self.period as f32 * DT);
+            self.fx
+                .integrate_in_air(DT, self.field.velocity(), self.period as f32 * DT);
         } else {
             self.fx.integrate(DT);
         }
@@ -169,7 +190,12 @@ impl Gpu {
             pool.set_class(c as u8, class);
             pool.set_swirl(c as u8, if format.is_some() { 1.0 } else { 0.0 });
         }
-        let mut g = Gpu { pool, feed: Feed::new(count), field: format.map(|_| swirl_field()), frame: 0 };
+        let mut g = Gpu {
+            pool,
+            feed: Feed::new(count),
+            field: format.map(|_| swirl_field()),
+            frame: 0,
+        };
         for chunk in 0..(45.0 / DT) as usize / FRAMES {
             let _ = chunk;
             g.round(gpu, None);
@@ -178,7 +204,11 @@ impl Gpu {
     }
 
     /// `FRAMES` frames, timed when `queries` is given.
-    fn round(&mut self, gpu: &GpuContext, queries: Option<(&wgpu::QuerySet, &wgpu::Buffer, &wgpu::Buffer)>) -> GpuRound {
+    fn round(
+        &mut self,
+        gpu: &GpuContext,
+        queries: Option<(&wgpu::QuerySet, &wgpu::Buffer, &wgpu::Buffer)>,
+    ) -> GpuRound {
         let mut stage = Vec::with_capacity(FRAMES);
         let mut encode = Vec::with_capacity(FRAMES);
         let mut upload = Vec::new();
@@ -215,11 +245,17 @@ impl Gpu {
                 }),
             );
             encode.push(started.elapsed().as_nanos() as f64);
-            gpu.queue.submit([std::mem::replace(&mut encoder, gpu.device.create_command_encoder(&Default::default())).finish()]);
+            gpu.queue.submit([std::mem::replace(
+                &mut encoder,
+                gpu.device.create_command_encoder(&Default::default()),
+            )
+            .finish()]);
         }
         let Some((set, resolve, read)) = queries else {
             gpu.queue.submit([encoder.finish()]);
-            gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
             return GpuRound::default();
         };
         encoder.resolve_query_set(set, 0..(6 * FRAMES) as u32, resolve, 0);
@@ -227,11 +263,15 @@ impl Gpu {
         gpu.queue.submit([encoder.finish()]);
         let slice = read.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let ticks: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
         read.unmap();
         let period = gpu.queue.get_timestamp_period() as f64;
-        let span = |f: usize, k: usize| (ticks[6 * f + k + 1].wrapping_sub(ticks[6 * f + k])) as f64 * period;
+        let span = |f: usize, k: usize| {
+            (ticks[6 * f + k + 1].wrapping_sub(ticks[6 * f + k])) as f64 * period
+        };
         let emit: Vec<f64> = (0..FRAMES).map(|f| span(f, 2)).collect();
         let integrate: Vec<f64> = (0..FRAMES).map(|f| span(f, 4)).collect();
         let convert: Vec<f64> = converted.iter().map(|&f| span(f, 0)).collect();
@@ -266,17 +306,28 @@ fn main() {
         populations = vec![1_000, 10_000, 100_000, 1_000_000];
     }
 
-    let Some(gpu) = GpuContext::with_features(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::FLOAT32_FILTERABLE) else {
+    let Some(gpu) = GpuContext::with_features(
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::FLOAT32_FILTERABLE,
+    ) else {
         eprintln!("no GPU adapter");
         return;
     };
-    if !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+    if !gpu
+        .device
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
         eprintln!("the adapter has no timestamp queries");
         return;
     }
     let info = gpu.adapter_info();
-    println!("adapter: {} ({:?}), driver {}", info.name, info.backend, info.driver_info);
-    println!("rounds: {rounds}, {FRAMES} frames each, medians of per-frame times, then of rounds\n");
+    println!(
+        "adapter: {} ({:?}), driver {}",
+        info.name, info.backend, info.driver_info
+    );
+    println!(
+        "rounds: {rounds}, {FRAMES} frames each, medians of per-frame times, then of rounds\n"
+    );
 
     let set = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("pool bench"),
@@ -308,7 +359,11 @@ fn main() {
 
     let mut fit = Vec::new();
     for &n in &populations {
-        let mut cpu = [("cpu integrate", Cpu::new(n, 0)), ("cpu air 10 Hz", Cpu::new(n, 6)), ("cpu air 20 Hz", Cpu::new(n, 3))];
+        let mut cpu = [
+            ("cpu integrate", Cpu::new(n, 0)),
+            ("cpu air 10 Hz", Cpu::new(n, 6)),
+            ("cpu air 20 Hz", Cpu::new(n, 3)),
+        ];
         let mut gpus: Vec<(&str, Gpu)> = formats
             .iter()
             .filter_map(|(name, format)| Gpu::new(&gpu, n, *format).map(|g| (*name, g)))
@@ -330,7 +385,11 @@ fn main() {
         for (k, (name, _)) in cpu.iter().enumerate() {
             let t = median(cpu_rounds[k].clone());
             cpu_ns[k] = t / live as f64;
-            println!("  {name:<18} {:>10.1} us/frame  {:>6.2} ns/particle", t / 1e3, t / live as f64);
+            println!(
+                "  {name:<18} {:>10.1} us/frame  {:>6.2} ns/particle",
+                t / 1e3,
+                t / live as f64
+            );
         }
         for (k, (name, g)) in gpus.iter().enumerate() {
             let r = &gpu_rounds[k];
@@ -359,15 +418,29 @@ fn main() {
     // GPU frame = a + b n, least squares over the populations measured.
     if fit.len() >= 2 {
         let m = fit.len() as f64;
-        let (sx, sy) = fit.iter().fold((0.0, 0.0), |(a, b), (x, y, _)| (a + x, b + y));
-        let (sxx, sxy) = fit.iter().fold((0.0, 0.0), |(a, b), (x, y, _)| (a + x * x, b + x * y));
+        let (sx, sy) = fit
+            .iter()
+            .fold((0.0, 0.0), |(a, b), (x, y, _)| (a + x, b + y));
+        let (sxx, sxy) = fit
+            .iter()
+            .fold((0.0, 0.0), |(a, b), (x, y, _)| (a + x * x, b + x * y));
         let b = (m * sxy - sx * sy) / (m * sxx - sx * sx);
         let a = (sy - b * sx) / m;
-        println!("gpu f16 frame (emit + integrate) = {:.1} us + {:.3} ns x n", a / 1e3, b);
-        for (k, name) in ["cpu integrate", "cpu air 10 Hz", "cpu air 20 Hz"].iter().enumerate() {
+        println!(
+            "gpu f16 frame (emit + integrate) = {:.1} us + {:.3} ns x n",
+            a / 1e3,
+            b
+        );
+        for (k, name) in ["cpu integrate", "cpu air 10 Hz", "cpu air 20 Hz"]
+            .iter()
+            .enumerate()
+        {
             let c = median(fit.iter().map(|(_, _, ns)| ns[k]).collect());
             if c > b {
-                println!("  crossover against {name} ({c:.2} ns/particle): {:.0} particles", a / (c - b));
+                println!(
+                    "  crossover against {name} ({c:.2} ns/particle): {:.0} particles",
+                    a / (c - b)
+                );
             } else {
                 println!("  crossover against {name} ({c:.2} ns/particle): none");
             }
@@ -406,8 +479,16 @@ fn overheads(gpu: &GpuContext) {
         times[4].push(t.elapsed().as_nanos() as f64);
         gpu.queue.submit([done]);
     }
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let names = ["write_buffer 10 KB", "write_buffer 512 KiB", "create encoder", "empty compute pass", "finish"];
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    let names = [
+        "write_buffer 10 KB",
+        "write_buffer 512 KiB",
+        "create encoder",
+        "empty compute pass",
+        "finish",
+    ];
     for (name, t) in names.iter().zip(times) {
         println!("  {name:<22} {:>7.1} us", median(t) / 1e3);
     }

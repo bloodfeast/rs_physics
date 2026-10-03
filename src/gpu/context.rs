@@ -72,7 +72,8 @@ impl GpuContext {
     async fn open(wanted: Features) -> Option<Self> {
         // wgpu 30: no display handle, since this context never presents; `_from_env` so
         // `WGPU_BACKEND` is honoured the way the engine's context honours it.
-        let instance = Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance =
+            Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
