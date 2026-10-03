@@ -16,12 +16,17 @@
 //!   the timed span;
 //! - the GPU pool with an `rgba16float`, an `rgba32float` filtered (where the device
 //!   can filter it) and an `rgba32float` exact field, the field advanced every 3 frames
-//!   (20 Hz) and uploaded the frame it changes, and with no field.
+//!   (20 Hz) and uploaded the frame it changes, and with no field;
+//! - the `rgba16float` pool again with its emission staged the 0.3.3 way, as the
+//!   "before" of POOL-GPU-RNG: every particle drawn on the CPU (the direction's sine and
+//!   cosine from `f32::sin_cos`, as then) and staged as a 40-byte record, where the
+//!   other GPU cases stage each burst as a descriptor and expand it on the device.
 //!
 //! Reported: GPU time per frame of the emit pass and the integrate pass, ns a particle;
 //! the CPU cost on the frame thread of the GPU path (staging the emission, and the
-//! encode with its one buffer write) per frame, and of a field upload; the CPU paths in
-//! ns a particle; the crossover populations from a straight-line fit of the GPU frame.
+//! encode with its one buffer write) per frame, and of a field upload; the bytes of the
+//! frame's buffer write; the CPU paths in ns a particle; the crossover populations from
+//! a straight-line fit of the GPU frame.
 
 use std::time::Instant;
 
@@ -49,6 +54,40 @@ impl Sink for ParticleEffects {
 impl Sink for GpuParticlePool {
     fn burst(&mut self, burst: &Burst, rng: &mut EffectRng) {
         self.emit(burst, rng);
+    }
+}
+
+/// The 0.3.3 emission into a GPU pool: each particle drawn on the CPU, its direction's
+/// sine and cosine from `f32::sin_cos` of `unit() * TAU` as `EffectRng::hemisphere` was
+/// then, and staged as a record with `emit_one`. The cost of what the descriptor path
+/// replaced.
+struct Records<'a>(&'a mut GpuParticlePool);
+
+impl Sink for Records<'_> {
+    fn burst(&mut self, burst: &Burst, rng: &mut EffectRng) {
+        for _ in 0..burst.count {
+            let azimuth = rng.unit() * core::f32::consts::TAU;
+            let y = rng.range(-1.0, 1.0);
+            let r = (1.0 - y * y).max(0.0).sqrt();
+            let (sin, cos) = azimuth.sin_cos();
+            let mut dir = [r * cos, y + burst.lift, r * sin];
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            if len > 1e-6 {
+                dir = dir.map(|d| d / len);
+            } else {
+                dir = [0.0, 1.0, 0.0];
+            }
+            let speed = rng.range(burst.speed.start, burst.speed.end);
+            let life = rng.range(burst.lifetime.start, burst.lifetime.end);
+            let size = rng.range(burst.size.start, burst.size.end);
+            self.0.emit_one(
+                burst.origin,
+                dir.map(|d| d * speed),
+                life,
+                size,
+                burst.class,
+            );
+        }
     }
 }
 
@@ -168,6 +207,8 @@ struct Gpu {
     feed: Feed,
     field: Option<SwirlField>,
     frame: usize,
+    /// Emission staged as records drawn on the CPU (the 0.3.3 path), not descriptors.
+    records: bool,
 }
 
 /// One round of a GPU pool: per-frame medians.
@@ -179,10 +220,16 @@ struct GpuRound {
     encode_cpu_ns: f64,
     upload_cpu_ns: f64,
     convert_gpu_ns: f64,
+    frame_bytes: f64,
 }
 
 impl Gpu {
-    fn new(gpu: &GpuContext, count: usize, format: Option<FieldFormat>) -> Option<Gpu> {
+    fn new(
+        gpu: &GpuContext,
+        count: usize,
+        format: Option<FieldFormat>,
+        records: bool,
+    ) -> Option<Gpu> {
         let mut config = GpuPoolConfig::new((count + count / 4) as u32);
         config.field = format.unwrap_or_default();
         let mut pool = GpuParticlePool::new(gpu, config).ok()?;
@@ -195,6 +242,7 @@ impl Gpu {
             feed: Feed::new(count),
             field: format.map(|_| swirl_field()),
             frame: 0,
+            records,
         };
         for chunk in 0..(45.0 / DT) as usize / FRAMES {
             let _ = chunk;
@@ -213,10 +261,15 @@ impl Gpu {
         let mut encode = Vec::with_capacity(FRAMES);
         let mut upload = Vec::new();
         let mut converted = Vec::new();
+        let mut bytes = Vec::with_capacity(FRAMES);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for f in 0..FRAMES {
             let started = Instant::now();
-            self.feed.feed(&mut self.pool);
+            if self.records {
+                self.feed.feed(&mut Records(&mut self.pool));
+            } else {
+                self.feed.feed(&mut self.pool);
+            }
             stage.push(started.elapsed().as_nanos() as f64);
             if let Some(field) = &mut self.field {
                 if self.frame % 3 == 0 {
@@ -233,10 +286,17 @@ impl Gpu {
                 converted.push(f);
             }
             let started = Instant::now();
-            // One encoder a frame and one submission a frame, as a renderer would.
-            self.pool.encode_timed(
+            // One encoder a frame and one submission a frame, as a renderer would: what
+            // `encode_timed` does, split to count the frame's bytes.
+            let mut written = 0;
+            self.pool.stage_frame_with(DT, |write| {
+                if let rs_physics::gpu::PoolWrite::Buffer { bytes, .. } = write {
+                    written = bytes.len();
+                }
+                write.write_now(&gpu.queue);
+            });
+            self.pool.encode_staged(
                 &mut encoder,
-                DT,
                 queries.map(|(set, _, _)| PoolTimestamps {
                     query_set: set,
                     field: Some(base),
@@ -245,6 +305,7 @@ impl Gpu {
                 }),
             );
             encode.push(started.elapsed().as_nanos() as f64);
+            bytes.push(written as f64);
             gpu.queue.submit([std::mem::replace(
                 &mut encoder,
                 gpu.device.create_command_encoder(&Default::default()),
@@ -282,6 +343,7 @@ impl Gpu {
             encode_cpu_ns: median(encode),
             upload_cpu_ns: median(upload),
             convert_gpu_ns: median(convert),
+            frame_bytes: median(bytes),
         }
     }
 }
@@ -350,11 +412,12 @@ fn main() {
 
     overheads(&gpu);
 
-    let formats: [(&str, Option<FieldFormat>); 4] = [
-        ("gpu f16", Some(FieldFormat::F16Filtered)),
-        ("gpu f32 filtered", Some(FieldFormat::F32Filtered)),
-        ("gpu f32 exact", Some(FieldFormat::F32Exact)),
-        ("gpu no field", None),
+    let formats: [(&str, Option<FieldFormat>, bool); 5] = [
+        ("gpu f16", Some(FieldFormat::F16Filtered), false),
+        ("gpu f16 records", Some(FieldFormat::F16Filtered), true),
+        ("gpu f32 filtered", Some(FieldFormat::F32Filtered), false),
+        ("gpu f32 exact", Some(FieldFormat::F32Exact), false),
+        ("gpu no field", None, false),
     ];
 
     let mut fit = Vec::new();
@@ -366,7 +429,9 @@ fn main() {
         ];
         let mut gpus: Vec<(&str, Gpu)> = formats
             .iter()
-            .filter_map(|(name, format)| Gpu::new(&gpu, n, *format).map(|g| (*name, g)))
+            .filter_map(|(name, format, records)| {
+                Gpu::new(&gpu, n, *format, *records).map(|g| (*name, g))
+            })
             .collect();
         let mut cpu_rounds = vec![Vec::new(); cpu.len()];
         let mut gpu_rounds = vec![Vec::new(); gpus.len()];
@@ -397,7 +462,7 @@ fn main() {
             let (emit, integrate) = (pick(|r| r.emit_gpu_ns), pick(|r| r.integrate_gpu_ns));
             let counts = g.pool.read_counts_blocking();
             println!(
-                "  {name:<18} gpu emit {:>7.1} us, integrate {:>7.1} us ({:.3} ns/particle, {} live, high water {}); cpu stage {:>6.1} us, encode {:>5.1} us, upload {:>6.1} us; convert {:>5.1} us",
+                "  {name:<18} gpu emit {:>7.1} us, integrate {:>7.1} us ({:.3} ns/particle, {} live, high water {}); cpu stage {:>6.1} us, encode {:>5.1} us, upload {:>6.1} us; convert {:>5.1} us; frame {:>8.0} bytes",
                 emit / 1e3,
                 integrate / 1e3,
                 integrate / counts.live.max(1) as f64,
@@ -407,6 +472,7 @@ fn main() {
                 pick(|r| r.encode_cpu_ns) / 1e3,
                 pick(|r| r.upload_cpu_ns) / 1e3,
                 pick(|r| r.convert_gpu_ns) / 1e3,
+                pick(|r| r.frame_bytes),
             );
             if *name == "gpu f16" {
                 fit.push((live as f64, emit + integrate, cpu_ns));
