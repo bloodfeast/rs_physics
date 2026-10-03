@@ -101,7 +101,7 @@ Bit identity (`src/gpu/particle_pool_emit_tests.rs`, all passing on the RTX 3090
   two streams agree after every frame.
 - **A burst cut by the frame bound and by the capacity:** 211 a frame, with records
   between the bursts. It equals the same particles staged as records, every frame.
-- **The jump:** on the device it equals sequential steps at 377 indices up to 2^24 - 1,
+- **The jump:** on the device it equals sequential steps at 464 indices up to 2^24 - 1,
   including every single hex digit at every position. On the CPU the same holds over a
   sweep up to 5,000,000 steps, and a jump by the period is the identity.
 - **`sin_cos_turn`:** equal on the device and the CPU at all 2^24 turns, swept in 1.3 to
