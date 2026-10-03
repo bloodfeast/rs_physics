@@ -995,3 +995,61 @@ fn settling_on_solids_is_bit_identical_at_any_thread_count() {
         assert!(run(t).0 == one, "{t} threads settled differently from one");
     }
 }
+
+/// Static solids and the ground are bit-identical to 0.3.5: drops raining onto a
+/// capsule, a yawed crate, a sphere and a sloped ground, every solid at rest, step to the
+/// same checksum of positions, velocities and drained indices that 0.3.5 stepped them to.
+/// The relative cast of 0.3.6 shifts a ray's origin by its solid's velocity times the
+/// substep, and a solid at rest takes the world cast it always had, operation for
+/// operation; the literal was measured on 0.3.5 (9d2c669).
+#[test]
+fn a_static_scene_steps_to_the_checksum_it_had_in_0_3_5() {
+    let slope = |x: f64, z: f64| 0.08 * x - 0.05 * z;
+    let mut f = SphFluid::new(SphParams::blood(), 1024).unwrap();
+    for k in 0..800usize {
+        let (i, j) = (k % 40, k / 40);
+        f.spawn(
+            [
+                -0.8 + 0.04 * i as f64,
+                0.9 + 0.015 * (k % 5) as f64,
+                -0.4 + 0.04 * j as f64,
+            ],
+            [0.05 * (k % 3) as f64, -0.2, -0.05 * (k % 4) as f64],
+        );
+    }
+    let settled = settle_run(&mut f, 300, flat, |_, solids| {
+        solids.push_capsule([-0.6, 0.35, -0.3], [0.2, 0.4, 0.3], 0.12, [0.0; 3], [0.0; 3]);
+        solids.push_capsule([0.5, 0.3, 0.1], [0.5, 0.3, 0.1], 0.15, [0.0; 3], [0.0; 3]);
+        solids.push_box([0.2, 0.2, -0.2], [0.2, 0.2, 0.15], 0.6, [0.0; 3]);
+    });
+    // The settle run's ground is flat; step the survivors on the slope too.
+    let solids = {
+        let mut s = SphSolids::new();
+        s.push_box([0.0, -0.1, 0.0], [0.3, 0.12, 0.3], -0.4, [0.0; 3]);
+        s
+    };
+    for _ in 0..60 {
+        f.step_with_solids(DT, 9.81, slope, &solids);
+    }
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut eat = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for v in bits(&f) {
+        eat(v);
+    }
+    for (s, d) in &settled {
+        eat(*s as u64);
+        for c in d.position.iter().chain(&d.velocity) {
+            eat(c.to_bits());
+        }
+        eat(d.on_solid.map_or(u64::MAX, u64::from));
+    }
+    assert!(settled.len() > 50, "only {} drops settled", settled.len());
+    assert!(
+        settled.iter().any(|(_, d)| d.on_solid.is_some()),
+        "nothing settled on a solid"
+    );
+    assert_eq!(h, 0x7c0b_de12_850b_324d, "checksum {h:#018x} over {} drained", settled.len());
+}
