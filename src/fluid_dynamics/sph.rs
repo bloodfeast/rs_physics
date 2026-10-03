@@ -130,9 +130,13 @@
 //! substep: a particle pushed from one solid into another meets the second next substep.
 //!
 //! **Settling.** A particle a solid's contact set on its surface, moving slower than
-//! the ground's settle speed relative to that surface (`SETTLE_SPEED`, the ground's own
-//! test seen from the surface's frame), is still on that solid; held for `SETTLE_TIME`
-//! on the same surface, it is drained by [`SphFluid::drain_settled`] with
+//! the ground's settle speed (0.35 m/s) relative to that surface, is still on that
+//! solid. That is the ground's own test seen from the surface's frame: the ground is a
+//! surface at rest, so its threshold carried into a moving surface's frame is the same
+//! number; held for the settle time (0.25 s) it admits at most 8.75 cm of creep across
+//! the surface in either frame, and a drop resting on a solid sits near `g dt`
+//! (0.04 m/s at 240 Hz), the one substep of gravity the response leaves it. Still on
+//! the same surface for the settle time, it is drained by [`SphFluid::drain_settled`] with
 //! [`Settled::on_solid`] naming the solid's index in the set (capsules first, then
 //! boxes, so a set refilled in the same order keeps its indices). The ground, which runs
 //! after the solids, wins a particle that touched both, and a particle that comes to rest

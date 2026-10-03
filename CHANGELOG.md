@@ -5,6 +5,83 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+## 0.3.5 (2026-10-03)
+
+Package SPH-SOLIDS-b: solids binned by the cells they actually reach, and drops that
+settle on a solid. Additive apart from one field on `Settled`, under Changed. The fluid
+is bit-identical to 0.3.4's in every scene measured.
+
+### Added
+
+- `Settled::on_solid: Option<u32>`: what a drained particle came to rest on, the index of
+  a solid in the `SphSolids` handed to the last `step_with_solids` (capsules first, then
+  boxes, in push order), or `None` for the ground. A particle a solid's contact set on
+  its surface, slower than the settle speed (0.35 m/s) relative to that surface, is
+  still on that solid, and drains after `SETTLE_TIME` (0.25 s) still on the same surface.
+  The threshold is the ground's, applied in the surface's frame (the ground is a
+  surface at rest), derived in the module's "Solids" section and on the constant. The ground runs after the
+  solids and wins a particle that touched both; a particle that comes to rest on another
+  surface, or whose solid takes another index in the set, counts again.
+- The binning's particle scan (internal): every particle's cell tested against the
+  solids' boxes, listed in a block grid over their union whose block size is chosen each
+  step by the cost it implies, with a branch-free union test 64 particles to a word.
+  The step takes it over the cell walk once the solids' clipped boxes hold more than a
+  third of the particle count in cells between them, the measured crossover
+  (`binning_crossover`, an ignored perf test in the solids tests).
+- `examples/sph_solids_binning.rs`: the binning's median for four scenes and a checksum
+  of each stepped fluid, for comparing two builds.
+
+### Changed
+
+- `Settled` has a fourth public field, `on_solid`. Code that only reads `Settled` (as
+  `drain_settled`'s callback receives it) is unaffected; a struct literal of `Settled`
+  outside this crate needs the field.
+- The solid bins hold a cell only for its own particles. Before, every cell in a solid's
+  reach whose hash bucket held any particle was binned, including cells whose bucket
+  held only another cell's particles, out of the solid's reach. Those entries met
+  nothing (the fluid is bit-identical) but cost the binning, its counting sort and a
+  contact test for every particle in the bucket: a 4 m hull over 16,384 drops spread over
+  20 m wrote 101,114 entries for the 329 cells it reaches, and 13,437 particles ran the
+  contact test, 542 now. `SphSolidStats::bin_entries` and `ray_tested` count the exact
+  bins.
+- Memory: 8 bytes a particle more (the surface a particle's stillness is counted
+  against, and the move's per-particle contact record), allocated at capacity; 28 bytes
+  a solid in reach and the scan's block grid in the bins, kept at their high-water marks.
+
+### Known gap
+
+- A drop riding a moving solid does not settle on it. The swept contact casts the
+  particle's world displacement against the solid at its new pose, so a drop carried
+  along a surface moving tangentially faster than about `g dt` (0.04 m/s at 240 Hz) casts
+  a ray nearly parallel to it and meets it only once it has sunk the whole contact
+  radius: at 1 m/s, one substep in ten, with a 6.6 mm bump each time. Pinned by
+  `a_drop_riding_a_moving_capsule_settles_with_its_index_and_the_surface_velocity`
+  (ignored). Casting the displacement relative to the surface fixes it and changes the
+  results of every moving solid, so it waits on a ruling.
+
+### Measured
+
+`examples/sph_solids_binning`, release, medians of 400 steps of each scene's binning
+(`SphSolidStats::binning`); "before" is 0.3.4 with the example added, and the builds ran
+before, after, after, before. A Ridgeline
+build's `cargo` and `cargo-nextest` were running beside every run.
+
+| scene | before | after | |
+|---|---|---|---|
+| (a) 28 solids out of reach, 4,096 packed | 5.0, 4.7 us | 4.4, 4.8 us | unchanged |
+| (b) 4 m hull across a 1,024 pool | 3.2, 2.9 us | 3.5, 3.3 us | +0.3 us |
+| (c) 4 m hull over 16,384 spread over 20 m | 1,669, 1,667 us | 58.0, 56.8 us | 29x |
+| (d) 150 limbs over the same 16,384 | 975, 972 us | 88.9, 88.1 us | 11x |
+
+- **Gate:** (c) and (d) down at least 5x. Met, at 29x and 11x.
+- **(b) moves by 0.3 us**, inside its own spread (2.9 to 3.5 us across the four runs);
+  the old walk wrote its false entries cheaply and paid for them in the counting sort
+  and the move, and the step's grid phase, which includes the binning, is 1.5 us
+  shorter after (33 against 35 us).
+- Every scene's checksum of positions and velocities is the same before and after.
+- The rest of (c) is the min and max over the cells (about 12 us) and the scan reading
+  the sorted cells another thread wrote (about 40 us at 16k).
+
 ## 0.3.4 (2026-10-03)
 
 Package POOL-GPU-RNG: the GPU pool expands a burst on the device, drawing each particle
