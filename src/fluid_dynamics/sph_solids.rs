@@ -375,11 +375,18 @@ impl SphSolids {
 pub struct SphSolidStats {
     /// Solids handed to the step.
     pub solids: usize,
-    /// `(solid, cell)` entries the binning wrote: one for every hash bucket holding
-    /// particles that a solid's reach overlaps. Zero means no particle could meet a solid
-    /// and the move ran exactly as it does without solids.
+    /// `(solid, cell)` entries the binning wrote: one for every cell holding particles
+    /// that a solid's reach covers, filed under the cell's hash bucket. Zero means no
+    /// particle could meet a solid and the move ran exactly as it does without solids.
+    ///
+    /// Since 0.3.5 a cell counts only if it holds a particle itself. Before, a cell whose
+    /// bucket held another cell's particles was binned too, which bound no particle to
+    /// anything it could reach (the far cell is out of reach) but wrote, at 16,384
+    /// particles spread over 20 m, a hundred thousand entries for a hull that reaches
+    /// three hundred cells. The fluid is bit-identical either way; this count, and
+    /// `ray_tested`, are smaller.
     pub bin_entries: usize,
-    /// Particles whose cell held at least one solid, so that ran the contact test.
+    /// Particles whose bucket held at least one solid, so that ran the contact test.
     pub ray_tested: usize,
     /// Particles a solid moved: a swept hit, or a push out of a solid that moved onto
     /// them.
@@ -387,6 +394,31 @@ pub struct SphSolidStats {
     /// Wall time of the binning, which the step's [`super::SphPhaseTimes::grid`] includes.
     pub binning: Duration,
 }
+
+/// How [`SphFluid::bin_solids_by`] finds the solids' occupied cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) enum BinPath {
+    /// Whichever is cheaper for the step's solids: the cell walk while their clipped
+    /// boxes hold at most a [`SCAN_CROSSOVER`]th of the particle count in cells between
+    /// them, the particle scan past that.
+    Measured,
+    /// The cells of each solid's clipped box.
+    Cells,
+    /// Every particle's cell, tested against the boxes.
+    Particles,
+}
+
+/// The crossover between the two walks: the particle scan runs once the solids' clipped
+/// boxes hold more than `n / SCAN_CROSSOVER` cells between them.
+///
+/// Measured by `binning_crossover` in the solids tests (release, one capsule of growing
+/// size over a sparse field, best of 200): the walk costs about 6 ns a cell (a hash, a
+/// bucket read and a look at the bucket's cells) and the scan about 1.4 ns a particle
+/// (a branch-free union test, 64 particles to a word) plus its block grid. They cross at
+/// about 0.45, 0.3 and 0.25 cells a particle at 1,024, 4,096 and 16,384 particles, and a
+/// third picks the faster walk at every one of the 27 measured sizes.
+const SCAN_CROSSOVER: u64 = 3;
 
 /// The solids binned into the step's hash buckets: for each bucket, a range of
 /// `entries` naming the solids whose reach overlaps a cell of that bucket.
@@ -401,6 +433,13 @@ pub(super) struct SolidBins {
     pair_solid: Vec<u32>,
     entries: Vec<u32>,
     touched: Vec<u32>,
+    /// Each binned solid's clipped box in cells, `[min, max]` inclusive, and its id.
+    boxes: Vec<[[i32; 3]; 2]>,
+    box_id: Vec<u32>,
+    /// The particle scan's block grid: prefix sums into `block_box`, one a block plus a
+    /// terminator, and the boxes (indices into `boxes`) each block overlaps.
+    block_start: Vec<u32>,
+    block_box: Vec<u32>,
 }
 
 impl SolidBins {
@@ -413,6 +452,8 @@ impl SolidBins {
         self.pair_bucket.clear();
         self.pair_solid.clear();
         self.entries.clear();
+        self.boxes.clear();
+        self.box_id.clear();
     }
 
     /// Entries written by the last binning.
@@ -477,11 +518,24 @@ impl SphFluid {
     /// the solid, or which starts inside it, starts within that reach, so its own cell
     /// (the cell `build_grid` gave it, from where the substep starts) is binned: one
     /// bucket read a particle finds every solid it can touch. Cells are clipped to the
-    /// cells the fluid occupies, and a cell whose bucket holds no particle writes nothing.
+    /// cells the fluid occupies.
+    ///
+    /// A solid writes one entry, under the cell's bucket, for every cell in its clipped
+    /// reach that holds a particle: an occupied cell, not merely a cell whose bucket some
+    /// other cell's particles share. It finds them by whichever of two walks is cheaper for
+    /// it ([`BinPath::Measured`]): the cells of its box, each one hash and a look at its
+    /// bucket's cells, or every particle's cell tested against the box, which costs the
+    /// particle count however long the solid. Both write the same entries, so the choice
+    /// changes no bin.
     ///
     /// Serial and in solid order, so the bins, and the order a particle tests its solids
     /// in, are fixed by the data.
     pub(super) fn bin_solids(&mut self, solids: &SphSolids) {
+        self.bin_solids_by(solids, BinPath::Measured);
+    }
+
+    /// [`Self::bin_solids`], with the walk chosen by `path`.
+    pub(super) fn bin_solids_by(&mut self, solids: &SphSolids, path: BinPath) {
         self.solid_bins.reset();
         let n = self.len();
         if solids.is_empty() || n == 0 {
@@ -504,9 +558,18 @@ impl SphFluid {
         let (x, y, z) = (span(&self.cell_x), span(&self.cell_y), span(&self.cell_z));
         let (lo, hi) = ([x.0, y.0, z.0], [x.1, y.1, z.1]);
 
-        let mask = self.table_mask;
-        let start = &self.bucket_start;
+        let grid = SortedCells {
+            x: &self.s_cell_x[..n],
+            y: &self.s_cell_y[..n],
+            z: &self.s_cell_z[..n],
+            start: &self.bucket_start,
+            mask: self.table_mask,
+        };
         let bins = &mut self.solid_bins;
+
+        // Each solid's reach in cells, clipped to the fluid's; a solid that reaches no
+        // cell the fluid spans drops out here.
+        let mut cells = 0u64;
         for id in 0..solids.len() {
             let (smin, smax) = solids.bounds(id);
             let mut c0 = [0i32; 3];
@@ -518,26 +581,33 @@ impl SphFluid {
             if (0..3).any(|a| c0[a] > c1[a]) {
                 continue;
             }
-            for cz in c0[2]..=c1[2] {
-                for cy in c0[1]..=c1[1] {
-                    let row = row_hash(cy, cz);
-                    for cx in c0[0]..=c1[0] {
-                        let b = bucket(row, cx, mask);
-                        if start[b] < start[b + 1] {
-                            bins.pair_bucket.push(b as u32);
-                            bins.pair_solid.push(id as u32);
-                        }
-                    }
-                }
-            }
+            let count = (0..3)
+                .map(|a| (c1[a] as i64 - c0[a] as i64 + 1) as u64)
+                .fold(1u64, u64::saturating_mul);
+            cells = cells.saturating_add(count);
+            bins.boxes.push([c0, c1]);
+            bins.box_id.push(id as u32);
+        }
+        if bins.boxes.is_empty() {
+            return;
+        }
+        let scan = match path {
+            BinPath::Measured => cells.saturating_mul(SCAN_CROSSOVER) > n as u64,
+            BinPath::Cells => false,
+            BinPath::Particles => true,
+        };
+        if scan {
+            bins.scan_particles(&grid, [lo, hi]);
+        } else {
+            bins.walk_cells(&grid);
         }
         if bins.pair_bucket.is_empty() {
             return;
         }
 
         // A counting sort of the pairs by bucket, over the touched buckets only.
-        if bins.range.len() <= mask {
-            bins.range.resize(mask + 1, [0, 0]);
+        if bins.range.len() <= grid.mask {
+            bins.range.resize(grid.mask + 1, [0, 0]);
         }
         for &b in &bins.pair_bucket {
             let r = &mut bins.range[b as usize];
@@ -558,6 +628,250 @@ impl SphFluid {
             let r = &mut bins.range[b as usize];
             bins.entries[r[1] as usize] = id;
             r[1] += 1;
+        }
+        // The cell walk writes in solid order, so each bucket's solids are already
+        // ascending. The particle scan writes in particle order; putting each bucket's
+        // solids in ascending order makes its bins the walk's exactly (equal ids are
+        // equal entries, so the sort's instability cannot show).
+        if scan {
+            for &b in &bins.touched {
+                let [s, e] = bins.range[b as usize];
+                let run = &mut bins.entries[s as usize..e as usize];
+                if run.len() > 1 {
+                    run.sort_unstable();
+                }
+            }
+        }
+    }
+}
+
+/// The step's particle cells in sorted order and the bucket table over them, borrowed
+/// for the binning.
+pub(super) struct SortedCells<'a> {
+    x: &'a [i32],
+    y: &'a [i32],
+    z: &'a [i32],
+    start: &'a [u32],
+    mask: usize,
+}
+
+impl SortedCells<'_> {
+    /// Whether bucket `b`'s run holds a particle in cell `(x, y, z)`, not only particles
+    /// of another cell that hashes to the same bucket.
+    #[inline]
+    fn holds(&self, b: usize, x: i32, y: i32, z: i32) -> bool {
+        let (s, e) = (self.start[b] as usize, self.start[b + 1] as usize);
+        (s..e).any(|j| self.x[j] == x && self.y[j] == y && self.z[j] == z)
+    }
+
+    /// Whether sorted slot `k`, in bucket `b`, is the first of its cell in the bucket's
+    /// run.
+    #[inline]
+    fn first_of_cell(&self, k: usize, b: usize) -> bool {
+        let (x, y, z) = (self.x[k], self.y[k], self.z[k]);
+        (self.start[b] as usize..k).all(|j| self.x[j] != x || self.y[j] != y || self.z[j] != z)
+    }
+}
+
+impl SolidBins {
+    /// The cell walk: each solid's clipped box, cell by cell, one hash and a look at the
+    /// bucket's run a cell. Writes one pair for each occupied cell, in solid order.
+    fn walk_cells(&mut self, grid: &SortedCells) {
+        for (&[c0, c1], &id) in self.boxes.iter().zip(&self.box_id) {
+            for cz in c0[2]..=c1[2] {
+                for cy in c0[1]..=c1[1] {
+                    let row = row_hash(cy, cz);
+                    for cx in c0[0]..=c1[0] {
+                        let b = bucket(row, cx, grid.mask);
+                        if grid.holds(b, cx, cy, cz) {
+                            self.pair_bucket.push(b as u32);
+                            self.pair_solid.push(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The particle scan: every particle's cell against the solids whose boxes could hold
+    /// it. Writes the same pairs as [`Self::walk_cells`], in particle order.
+    ///
+    /// The boxes are first listed in a dense grid of blocks, `2^s` cells a side, over
+    /// their union. `s` is chosen per step by the cost it implies, each term a count of
+    /// simple operations: the blocks to clear and sum, the box-block entries to write, and
+    /// a box test for each particle in the union for each box its block lists (the
+    /// particles in the union estimated from its share of the fluid's cell range). A
+    /// single hull takes one block; a melee's limbs take blocks about a limb wide. A
+    /// particle outside the union costs one branch on six compares; one inside tests its
+    /// cell against its block's boxes, in solid order. A cell is written at its first
+    /// particle in its bucket's run, so once however many particles it holds.
+    fn scan_particles(&mut self, grid: &SortedCells, span: [[i32; 3]; 2]) {
+        let SolidBins {
+            pair_bucket,
+            pair_solid,
+            boxes,
+            box_id,
+            block_start,
+            block_box,
+            ..
+        } = self;
+        let n = grid.x.len();
+        let mut u0 = [i32::MAX; 3];
+        let mut u1 = [i32::MIN; 3];
+        for [c0, c1] in boxes.iter() {
+            for a in 0..3 {
+                u0[a] = u0[a].min(c0[a]);
+                u1[a] = u1[a].max(c1[a]);
+            }
+        }
+        let width = |lo: i32, hi: i32| (hi as i64 - lo as i64 + 1) as f64;
+        let share = (0..3)
+            .map(|a| width(u0[a], u1[a]) / width(span[0][a], span[1][a]))
+            .product::<f64>();
+        let in_union = n as f64 * share;
+
+        // A cell's offset into the union, in blocks of 2^s cells: under 2^32.
+        let off = |c: i32, a: usize, s: u32| ((c as i64 - u0[a] as i64) as u64) >> s;
+        let shape = |s: u32| {
+            let dims = [
+                off(u1[0], 0, s) + 1,
+                off(u1[1], 1, s) + 1,
+                off(u1[2], 2, s) + 1,
+            ];
+            let blocks = dims[0].saturating_mul(dims[1]).saturating_mul(dims[2]);
+            let listed = boxes
+                .iter()
+                .map(|[c0, c1]| {
+                    (0..3)
+                        .map(|a| off(c1[a], a, s) - off(c0[a], a, s) + 1)
+                        .fold(1u64, u64::saturating_mul)
+                })
+                .fold(0u64, u64::saturating_add);
+            (dims, blocks, listed)
+        };
+        let cost = |s: u32| {
+            let (_, blocks, listed) = shape(s);
+            let (b, l) = (blocks as f64, listed as f64);
+            b + l + in_union * l / b
+        };
+        // Past the shift that makes the union one block a side nothing changes, so the
+        // search ends there: about log2 of the union's width, each try one pass over the
+        // boxes. The first of equal costs wins.
+        let widest = (0..3).map(|a| off(u1[a], a, 0)).max().unwrap_or(0);
+        let last = 64 - widest.leading_zeros();
+        let mut s = last;
+        let mut best = cost(last);
+        for t in 0..last {
+            let c = cost(t);
+            if c < best || (c == best && t < s) {
+                best = c;
+                s = t;
+            }
+        }
+        let (dims, blocks, _) = shape(s);
+        let blocks = blocks as usize;
+        let index = |b: [u64; 3]| ((b[2] * dims[1] + b[1]) * dims[0] + b[0]) as usize;
+        let block_box_of = |c0: [i32; 3], c1: [i32; 3]| {
+            (
+                [off(c0[0], 0, s), off(c0[1], 1, s), off(c0[2], 2, s)],
+                [off(c1[0], 0, s), off(c1[1], 1, s), off(c1[2], 2, s)],
+            )
+        };
+
+        // The block-box list, a counting sort in box order, so each block's boxes are in
+        // solid order.
+        block_start.clear();
+        block_start.resize(blocks + 1, 0);
+        for &[c0, c1] in boxes.iter() {
+            let (b0, b1) = block_box_of(c0, c1);
+            for bz in b0[2]..=b1[2] {
+                for by in b0[1]..=b1[1] {
+                    for bx in b0[0]..=b1[0] {
+                        block_start[index([bx, by, bz]) + 1] += 1;
+                    }
+                }
+            }
+        }
+        for k in 0..blocks {
+            block_start[k + 1] += block_start[k];
+        }
+        block_box.clear();
+        block_box.resize(block_start[blocks] as usize, 0);
+        // Fill through `block_start[k]` as the cursor, which leaves it at block k's end,
+        // then shift the table back by one.
+        for (i, &[c0, c1]) in boxes.iter().enumerate() {
+            let (b0, b1) = block_box_of(c0, c1);
+            for bz in b0[2]..=b1[2] {
+                for by in b0[1]..=b1[1] {
+                    for bx in b0[0]..=b1[0] {
+                        let k = index([bx, by, bz]);
+                        block_box[block_start[k] as usize] = i as u32;
+                        block_start[k] += 1;
+                    }
+                }
+            }
+        }
+        for k in (1..=blocks).rev() {
+            block_start[k] = block_start[k - 1];
+        }
+        block_start[0] = 0;
+
+        let inside = |c: [i32; 3], c0: [i32; 3], c1: [i32; 3]| {
+            (c[0] >= c0[0])
+                & (c[0] <= c1[0])
+                & (c[1] >= c0[1])
+                & (c[1] <= c1[1])
+                & (c[2] >= c0[2])
+                & (c[2] <= c1[2])
+        };
+        // The union test as data, 64 particles to a word, so it compiles to compares and
+        // masks with no branch a particle; as a branch it measured 7 ns a particle, much
+        // of it mispredicted. Only the particles whose bit is set go on.
+        let ext = [0, 1, 2].map(|a| u1[a].wrapping_sub(u0[a]) as u32);
+        let mut bits = 0u64;
+        let mut base = 0usize;
+        let mut k = 0usize;
+        loop {
+            if bits == 0 {
+                if base >= n {
+                    break;
+                }
+                let end = (base + 64).min(n);
+                let (xs, ys, zs) = (&grid.x[base..end], &grid.y[base..end], &grid.z[base..end]);
+                for j in 0..xs.len() {
+                    // One unsigned compare an axis: below the union's start wraps high.
+                    let hit = ((xs[j].wrapping_sub(u0[0]) as u32) <= ext[0])
+                        & ((ys[j].wrapping_sub(u0[1]) as u32) <= ext[1])
+                        & ((zs[j].wrapping_sub(u0[2]) as u32) <= ext[2]);
+                    bits |= (hit as u64) << j;
+                }
+                k = base;
+                base = end;
+                continue;
+            }
+            let slot = k + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let c = [grid.x[slot], grid.y[slot], grid.z[slot]];
+            let blk = index([off(c[0], 0, s), off(c[1], 1, s), off(c[2], 2, s)]);
+            let (j0, j1) = (block_start[blk] as usize, block_start[blk + 1] as usize);
+            // The bucket and whether this slot is its cell's first, worked out at the
+            // first box that holds the cell.
+            let mut first: Option<(usize, bool)> = None;
+            for &i in &block_box[j0..j1] {
+                let [c0, c1] = boxes[i as usize];
+                if !inside(c, c0, c1) {
+                    continue;
+                }
+                let (b, write) = *first.get_or_insert_with(|| {
+                    let b = bucket(row_hash(c[1], c[2]), c[0], grid.mask);
+                    (b, grid.first_of_cell(slot, b))
+                });
+                if !write {
+                    break;
+                }
+                pair_bucket.push(b as u32);
+                pair_solid.push(box_id[i as usize]);
+            }
         }
     }
 }
@@ -607,7 +921,9 @@ impl<'a> Contact<'a> {
     /// the surface loses its approaching normal part to `restitution` and its tangential
     /// part to the ground's friction decay, and then takes the surface's velocity.
     ///
-    /// Returns whether a solid moved the particle.
+    /// Returns, if a solid moved the particle, that solid's id and the square of the
+    /// particle's speed relative to the surface after the response, which is what its
+    /// stillness on the solid is judged by.
     #[inline]
     pub(super) fn resolve(
         &self,
@@ -615,7 +931,7 @@ impl<'a> Contact<'a> {
         p0: [f64; 3],
         p1: &mut [f64; 3],
         v: &mut [f64; 3],
-    ) -> bool {
+    ) -> Option<(u32, f64)> {
         let d = sub(*p1, p0);
         let len2 = dot(d, d);
         let moving = len2 > 0.0;
@@ -637,8 +953,7 @@ impl<'a> Contact<'a> {
                 box_inside(&self.solids.boxes[k - caps], p0)
             };
             if let Some(hit) = inside {
-                self.respond(hit, p1, v);
-                return true;
+                return Some((id, self.respond(hit, p1, v)));
             }
             if !moving {
                 continue;
@@ -654,7 +969,7 @@ impl<'a> Contact<'a> {
             }
         }
         if best_id == u32::MAX {
-            return false;
+            return None;
         }
         let q = add(p0, scale(rd, best));
         let k = best_id as usize;
@@ -663,13 +978,13 @@ impl<'a> Contact<'a> {
         } else {
             box_surface(&self.solids.boxes[k - caps], q)
         };
-        self.respond(hit, p1, v);
-        true
+        Some((best_id, self.respond(hit, p1, v)))
     }
 
     /// Set the particle on the surface, a contact radius out, and apply the response.
+    /// Returns the square of its speed relative to the surface after it.
     #[inline]
-    fn respond(&self, hit: Hit, p: &mut [f64; 3], v: &mut [f64; 3]) {
+    fn respond(&self, hit: Hit, p: &mut [f64; 3], v: &mut [f64; 3]) -> f64 {
         *p = add(hit.point, scale(hit.normal, self.contact_radius));
         let n = hit.normal;
         let rel = sub(*v, hit.velocity);
@@ -678,10 +993,9 @@ impl<'a> Contact<'a> {
         // Only an approaching particle bounces: one already leaving the surface faster
         // than it would keep its normal speed, or it would be sent back into the solid.
         let normal = if vn < 0.0 { -vn * self.restitution } else { vn };
-        *v = add(
-            hit.velocity,
-            add(scale(tangential, self.friction_keep), scale(n, normal)),
-        );
+        let kept = add(scale(tangential, self.friction_keep), scale(n, normal));
+        *v = add(hit.velocity, kept);
+        dot(kept, kept)
     }
 }
 

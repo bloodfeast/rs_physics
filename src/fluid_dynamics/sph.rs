@@ -91,14 +91,29 @@
 //!
 //! **Binning.** After the particle grid is built, each solid's bounds, grown by the
 //! longest ray a particle can cast (the speed ceiling's travel, `0.4 h`, plus the
-//! contact radius, `h / 4`), are binned into the hash buckets of the cells they cover,
-//! clipped to the cells the fluid occupies and skipping buckets that hold no particle.
-//! Serial, in solid order, O(solids x cells covered) after one serial min and max over
-//! the particle cells (O(n) integer work that vectorises), into reused buffers: a
-//! counting sort over only the buckets touched, which are zeroed again after the step,
-//! so the table is never cleared whole. Any particle that can meet a solid starts the
-//! substep within that reach, so it finds the solid in its own cell's bin, one bucket
-//! read: the bins are the cells the ray can cross, gathered on the solid's side.
+//! contact radius, `h / 4`), are binned into the hash buckets of the occupied cells they
+//! cover, clipped to the cells the fluid spans: one entry a solid for each cell in its
+//! reach that holds a particle, filed under that cell's bucket. Any particle that can
+//! meet a solid starts the substep within that reach, so it finds the solid in its own
+//! cell's bin, one bucket read: the bins are the cells the ray can cross, gathered on the
+//! solid's side. A bucket's solids are in solid order, which is the order a particle
+//! tests them in.
+//!
+//! Two walks find the occupied cells, and write the same bins. The **cell walk** visits
+//! each solid's clipped box cell by cell: a hash, a bucket read and a look at the
+//! bucket's cells (so a cell is binned for its own particles, never for another cell's
+//! that hashes beside it), about 6 ns a cell. The **particle scan** tests every
+//! particle's cell against the boxes instead: the boxes are listed in a grid of blocks
+//! over their union, sized each step by the cost it implies, and a particle outside the
+//! union costs one branch-free test, 64 to a word, about 1.4 ns a particle. A long solid
+//! over a wide, sparse fluid (a 4 m hull over 16,384 drops spread across 20 m covers
+//! 200,000 cells) costs the walk milliseconds and the scan tens of microseconds; a limb in
+//! a pool costs the walk a few hundred cells. The step takes the scan once the clipped
+//! boxes hold more than a third of the particle count in cells between them, the
+//! measured crossover (`SCAN_CROSSOVER`). Serial, after one serial min and max over the
+//! particle cells (O(n) integer work that vectorises), into reused buffers: a counting
+//! sort over only the buckets touched, which are zeroed again after the step, so the
+//! table is never cleared whole.
 //!
 //! **Contact.** In the move, after the velocity update and before the ground, a particle
 //! whose bin is not empty casts a ray from where it was to where it is going, extended
@@ -114,6 +129,24 @@
 //! ceiling cannot pass through a box one spacing thick or a blade. One contact a
 //! substep: a particle pushed from one solid into another meets the second next substep.
 //!
+//! **Settling.** A particle a solid's contact set on its surface, moving slower than
+//! the ground's settle speed (0.35 m/s) relative to that surface, is still on that
+//! solid. That is the ground's own test seen from the surface's frame: the ground is a
+//! surface at rest, so its threshold carried into a moving surface's frame is the same
+//! number; held for the settle time (0.25 s) it admits at most 8.75 cm of creep across
+//! the surface in either frame, and a drop resting on a solid sits near `g dt`
+//! (0.04 m/s at 240 Hz), the one substep of gravity the response leaves it. Still on
+//! the solids for the settle time, it is drained by [`SphFluid::drain_settled`] with
+//! [`Settled::on_solid`] naming the solid's index in the set of the step it drained
+//! after (capsules first, then boxes). The count is kept across solid indices: a caller
+//! refilling its set every frame from whatever is in reach shifts the indices most
+//! frames, and a drop still relative to each step's surface is still, whatever that
+//! surface's index. It restarts only when the particle moves between the ground and a
+//! solid, or stops being still. The ground, which runs after the solids, wins a particle
+//! that touched both. One known gap: the contact casts the particle's world
+//! displacement, so a drop carried along a moving surface meets it only every few
+//! substeps and does not settle on it (pinned by an ignored test in the solids tests).
+//!
 //! **The slope.** With solids the ground has a normal too: a particle in ground contact
 //! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
 //! only in contact, so a particle in flight pays nothing) and meets the ground along
@@ -123,16 +156,19 @@
 //!
 //! **Cost.** A solid covers about `(L / h + 2.3)` cells along each axis of length `L`
 //! (its extent plus `1.3 h` of reach); a 0.4 m limb of radius 6 cm in blood (`h` = 4 cm)
-//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. Each covered cell is one
-//! hash and one bucket read, and writes an entry only where particles are. A particle
-//! pays one bucket read when no solid is near it, and the contact test against each
-//! solid in its bin when one is. Solids that reach no particle write no entry, and then
-//! the move is the plain one: the binning is the whole price.
+//! spans 0.52 m by 0.12 m, about `5 x 15 x 5`, near 400 cells. The binning costs the
+//! cheaper of the walk over those cells and the scan over the particles (above); it
+//! writes an entry only where particles are. A particle pays one bucket read when no
+//! solid is near it, and the contact test against each solid in its bin when one is.
+//! Solids that reach no particle write no entry, and then the move is the plain one: the
+//! binning is the whole price.
 //!
 //! **Memory.** A capsule is 144 bytes and a box 88 in [`SphSolids`]. The fluid's bins
 //! are 8 bytes a bucket (two to four buckets a particle, allocated on the first step with
-//! solids) plus 12 bytes an entry and 4 a touched bucket, all kept at their high-water
-//! marks.
+//! solids) plus 12 bytes an entry and 4 a touched bucket, and 28 bytes a solid in reach
+//! for its clipped box; the scan's block grid is 4 bytes a block plus 4 a block a box
+//! lists, its size picked each step by cost (one block for a lone hull). All kept at
+//! their high-water marks.
 //!
 //! # Examples
 //!
@@ -360,7 +396,21 @@ pub struct Settled {
     /// landing straight down makes a round mark; one still carrying sideways speed
     /// smears along its travel. Without this the caller can only draw circles, which
     /// is exactly what a splash does not look like.
+    ///
+    /// World velocity, m/s. A drop that settled on a moving solid reports about the
+    /// solid's surface velocity where it rests (it was still relative to that surface,
+    /// not to the ground); subtract the surface's own velocity for the drop's motion
+    /// across it.
     pub velocity: [f64; 3],
+    /// What it came to rest on: the index of a solid in the [`SphSolids`] handed to the
+    /// last [`SphFluid::step_with_solids`] (capsules first, then boxes, in the order they
+    /// were pushed), or `None` for the ground.
+    ///
+    /// A drop on a hull, a corpse or a limb is still when its velocity relative to that
+    /// solid's surface is. The index is the current step's: a set refilled in a different
+    /// order between steps does not restart the drop's count, and the caller maps the
+    /// index through the set it handed that step. Added in 0.3.5.
+    pub on_solid: Option<u32>,
 }
 
 /// Wall time of each phase of the last [`SphFluid::step`], read with
@@ -467,6 +517,11 @@ pub struct SphFluid {
     /// once it has been still for a moment, so a drip that is briefly slow at the
     /// apex of a bounce is not mistaken for one that has stopped.
     still_for: Vec<f64>,
+    /// The surface each particle was last still on: the index of a solid in the last
+    /// step's [`SphSolids`], or [`NO_SOLID`] for the ground. Reported at drain; its count,
+    /// `still_for`, restarts only when this moves between the ground and a solid, since
+    /// a caller's solid indices shift from step to step.
+    rest_on: Vec<u32>,
 
     params: SphParams,
     capacity: usize,
@@ -516,12 +571,32 @@ pub struct SphFluid {
     /// no memory, until the first step with solids.
     solid_bins: solids::SolidBins,
     solid_stats: SphSolidStats,
+    /// Per particle, in particle order, written by the move with solids: the solid whose
+    /// contact set it on its surface this substep, slower relative to that surface than
+    /// [`SETTLE_SPEED`], or [`NO_SOLID`]. Read by the ground pass.
+    still_on_solid: Vec<u32>,
 }
 
 /// Below this speed, and touching ground, a particle is considered to have landed.
+///
+/// On a solid the same number is applied to the particle's velocity relative to the
+/// surface it was set on (the contact's surface velocity at that point), not to its world
+/// velocity. That is the ground's own test seen from the surface: the ground is a surface
+/// at rest, and a speed relative to it is a world speed, so the ground's threshold moved
+/// into a moving surface's frame is this one, unchanged, and a drop riding a hull at
+/// 1 m/s is as still as one on the ground. What it admits is the same in both frames:
+/// held for [`SETTLE_TIME`], at most `SETTLE_SPEED * SETTLE_TIME` = 8.75 cm of creep
+/// across the surface, and a drop at rest on a solid sits far below it, since each
+/// substep's gravity, `g dt` (0.041 m/s at 240 Hz), is all the response leaves it after
+/// keeping `restitution` of the approach. A bounce that leaves it faster than this
+/// relative to the surface starts the count again, as a bounce on the ground does.
 const SETTLE_SPEED: f64 = 0.35;
 /// ...and it must stay that way for this long before it is retired.
 const SETTLE_TIME: f64 = 0.25;
+
+/// `rest_on` and `still_on_solid`: no solid, the ground. Solid indices stop short of it,
+/// since [`SphSolids`] holds fewer than `u32::MAX` solids.
+const NO_SOLID: u32 = u32::MAX;
 
 /// Buckets for `n` particles: about two a particle keeps collisions rare, and a power
 /// of two reduces the hash with a mask.
@@ -625,6 +700,7 @@ impl SphFluid {
             vz: f(),
             density: f(),
             still_for: f(),
+            rest_on: Vec::with_capacity(capacity),
             params,
             capacity,
             cell_x: c(),
@@ -655,6 +731,7 @@ impl SphFluid {
             times: SphPhaseTimes::default(),
             solid_bins: solids::SolidBins::default(),
             solid_stats: SphSolidStats::default(),
+            still_on_solid: Vec::with_capacity(capacity),
         })
     }
 
@@ -757,6 +834,7 @@ impl SphFluid {
         ] {
             v.clear();
         }
+        self.rest_on.clear();
     }
 
     /// Position of particle `i`, metres, as of the last completed substep.
@@ -1057,6 +1135,7 @@ impl SphFluid {
         self.vz.push(velocity[2]);
         self.density.push(self.params.rest_density);
         self.still_for.push(0.0);
+        self.rest_on.push(NO_SOLID);
         true
     }
 
@@ -1523,6 +1602,9 @@ impl SphFluid {
                 restitution,
                 friction_keep,
             );
+            let n = self.px.len();
+            self.still_on_solid.clear();
+            self.still_on_solid.resize(n, NO_SOLID);
             let counts = (
                 self.vx.par_chunks_mut(STREAM_CHUNK),
                 self.vy.par_chunks_mut(STREAM_CHUNK),
@@ -1532,9 +1614,10 @@ impl SphFluid {
                 self.pz.par_chunks_mut(STREAM_CHUNK),
                 self.slot_of.par_chunks(STREAM_CHUNK),
                 self.bucket_of.par_chunks(STREAM_CHUNK),
+                self.still_on_solid.par_chunks_mut(STREAM_CHUNK),
             )
                 .into_par_iter()
-                .map(|(vx, vy, vz, px, py, pz, slots, buckets)| {
+                .map(|(vx, vy, vz, px, py, pz, slots, buckets, still)| {
                     let (mut tested, mut moved) = (0usize, 0usize);
                     for i in 0..slots.len() {
                         let k = slots[i] as usize;
@@ -1557,7 +1640,13 @@ impl SphFluid {
                         let ids = contact.binned(buckets[i]);
                         if !ids.is_empty() {
                             tested += 1;
-                            moved += contact.resolve(ids, p0, &mut p, &mut v) as usize;
+                            if let Some((id, rel_sq)) = contact.resolve(ids, p0, &mut p, &mut v)
+                            {
+                                moved += 1;
+                                if rel_sq < SETTLE_SPEED * SETTLE_SPEED {
+                                    still[i] = id;
+                                }
+                            }
                         }
                         vx[i] = v[0];
                         vy[i] = v[1];
@@ -1569,7 +1658,7 @@ impl SphFluid {
                     (tested, moved)
                 })
                 .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-            self.ground(dt, ground_height, true, restitution, friction_keep);
+            self.ground(dt, ground_height, true, true, restitution, friction_keep);
             return counts;
         }
 
@@ -1602,7 +1691,7 @@ impl SphFluid {
                 }
             });
         let slope = solids.is_some();
-        self.ground(dt, ground_height, slope, restitution, friction_keep);
+        self.ground(dt, ground_height, slope, false, restitution, friction_keep);
         (0, 0)
     }
 
@@ -1621,11 +1710,19 @@ impl SphFluid {
     /// particle not in contact samples nothing extra, and where both differences are
     /// exactly zero the level response below runs unchanged, so level ground is
     /// bit-identical either way.
+    ///
+    /// Then each particle's stillness: on the ground, below [`SETTLE_SPEED`]; otherwise,
+    /// with `solids` (the move with solids ran), set on a solid this substep and below it
+    /// relative to that solid's surface (`still_on_solid`). The ground, which runs last,
+    /// wins a particle that touched both. A particle still on the ground after a solid,
+    /// or on a solid after the ground, starts its count again; a change of solid index
+    /// does not restart it (the index is recorded, the count kept).
     fn ground<F>(
         &mut self,
         dt: f64,
         ground_height: &F,
         slope: bool,
+        solids: bool,
         restitution: f64,
         friction_keep: f64,
     ) where
@@ -1667,10 +1764,22 @@ impl SphFluid {
             }
 
             let speed_sq = self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i] + self.vz[i] * self.vz[i];
-            if on_ground && speed_sq < SETTLE_SPEED * SETTLE_SPEED {
-                self.still_for[i] += dt;
+            let still_on = if on_ground {
+                (speed_sq < SETTLE_SPEED * SETTLE_SPEED).then_some(NO_SOLID)
+            } else if solids && self.still_on_solid[i] != NO_SOLID {
+                Some(self.still_on_solid[i])
             } else {
-                self.still_for[i] = 0.0;
+                None
+            };
+            match still_on {
+                Some(surface) => {
+                    if (self.rest_on[i] == NO_SOLID) != (surface == NO_SOLID) {
+                        self.still_for[i] = 0.0;
+                    }
+                    self.rest_on[i] = surface;
+                    self.still_for[i] += dt;
+                }
+                None => self.still_for[i] = 0.0,
             }
 
             debug_assert!(
@@ -1713,10 +1822,12 @@ impl SphFluid {
             if self.still_for[i] < SETTLE_TIME {
                 continue;
             }
+            let on = self.rest_on[i];
             on_settled(Settled {
                 position: self.position(i),
                 mass,
                 velocity: self.velocity(i),
+                on_solid: (on != NO_SOLID).then_some(on),
             });
 
             // The previous positions are removed with the rest, which is the whole
@@ -1736,6 +1847,7 @@ impl SphFluid {
             ] {
                 v.swap_remove(i);
             }
+            self.rest_on.swap_remove(i);
         }
     }
 }
