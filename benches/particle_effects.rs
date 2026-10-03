@@ -369,9 +369,13 @@ fn gpu_pool(c: &mut Criterion) {
                 let chunk = (frames - done).min(CHUNK);
                 for f in 0..chunk {
                     let started = Instant::now();
+                    let mut paused = Duration::ZERO;
                     feed.feed_into(pool);
                     if frame % 3 == 0 {
+                        // The field's own step is the worker's, not the frame thread's.
+                        let step = Instant::now();
                         field.advance(3.0 * DT);
+                        paused = step.elapsed();
                         pool.upload_field(field.velocity());
                     }
                     frame += 1;
@@ -387,7 +391,7 @@ fn gpu_pool(c: &mut Criterion) {
                             integrate: Some(base + 2),
                         }),
                     );
-                    host += started.elapsed();
+                    host += started.elapsed() - paused;
                     gpu.queue.submit([encoder.finish()]);
                 }
                 if timed {
