@@ -43,7 +43,8 @@ pub(super) struct YawBox {
 /// Presentation only and one way: the solids push the liquid and the liquid never pushes
 /// a solid back, so nothing here can reach a lockstep simulation. The caller clears and
 /// refills the set each frame from wherever its actors, corpses and props are; the step
-/// reads it and never writes it.
+/// reads it and never writes it. Each solid is given at its pose at the end of the
+/// substep, with the velocity that carried it there.
 ///
 /// Storage is two `Vec`s of whole records (a capsule is 144 bytes, a box 88), because the
 /// contact reads every field of the one solid it is testing; cleared rather than freed,
@@ -220,9 +221,13 @@ impl SphSolids {
     ///
     /// # Arguments
     ///
-    /// * `a`, `b` - the axis end points, metres.
+    /// * `a`, `b` - the axis end points, metres, where they are at the END of the
+    ///   substep the set is stepped with: the capsule stood `velocity * dt` further back
+    ///   when it began.
     /// * `radius` - metres, positive.
-    /// * `velocity_a`, `velocity_b` - the surface velocity at each end, m/s.
+    /// * `velocity_a`, `velocity_b` - the surface velocity at each end, m/s: what
+    ///   carried each end to `a` and `b`. The contact casts each particle relative to it,
+    ///   so a drop moving with the surface stays on it.
     ///
     /// # Returns
     ///
@@ -284,13 +289,16 @@ impl SphSolids {
     ///
     /// # Arguments
     ///
-    /// * `centre` - metres.
+    /// * `centre` - metres, where the box is at the END of the substep the set is stepped
+    ///   with: it stood `velocity * dt` further back when it began.
     /// * `half_extents` - half the box's size along its own x, y and z, metres, each
     ///   positive.
     /// * `yaw` - radians, a right-handed rotation about +y: the box's own +x axis lies
     ///   along `(cos yaw, 0, -sin yaw)` and its +z along `(sin yaw, 0, cos yaw)`. Its sine
     ///   and cosine are taken here, once, so the step's inner loop has no transcendental.
-    /// * `velocity` - the surface velocity, m/s.
+    /// * `velocity` - the surface velocity, m/s: what carried the box to `centre`. The
+    ///   contact casts each particle relative to it, so a drop moving with the box stays
+    ///   on it.
     ///
     /// # Returns
     ///
@@ -978,13 +986,19 @@ impl<'a> Contact<'a> {
         p1: &mut [f64; 3],
         v: &mut [f64; 3],
     ) -> Option<(u32, f64)> {
-        // The world ray, which every solid at rest casts.
-        let world = Ray::between(p0, *p1, self.contact_radius);
+        // The world ray, which every solid at rest casts, worked out at the first one: a
+        // particle meeting only moving solids never needs it.
+        let mut world: Option<Ray> = None;
 
         let caps = self.solids.capsules.len();
         let mut best = f64::INFINITY;
         let mut best_id = u32::MAX;
-        let mut best_ray = world;
+        let mut best_ray = Ray {
+            origin: p0,
+            dir: [0.0; 3],
+            reach: 0.0,
+            moving: false,
+        };
         for &id in ids {
             let k = id as usize;
             let vs = if k < caps {
@@ -995,7 +1009,7 @@ impl<'a> Contact<'a> {
             // A solid at rest takes the world ray itself, so its arithmetic is the
             // world cast's operation for operation (and -0.0 stays -0.0).
             let ray = if vs == [0.0; 3] {
-                world
+                *world.get_or_insert_with(|| Ray::between(p0, *p1, self.contact_radius))
             } else {
                 Ray::between(add(p0, scale(vs, self.dt)), *p1, self.contact_radius)
             };
