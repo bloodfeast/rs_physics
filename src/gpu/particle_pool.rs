@@ -334,7 +334,7 @@ struct AirBinding {
 ///
 /// let mut air = VelocityGrid::new([-32.0, 0.0, -32.0], 2.0, [32, 32, 32]).unwrap();
 /// air.fill([2.0, 0.0, 0.0]);
-/// pool.upload_field(&air).unwrap(); // once a field update, not once a frame
+/// pool.upload_field(&air); // once a field update, not once a frame
 ///
 /// let mut rng = EffectRng::new(7);
 /// for _ in 0..60 {
