@@ -118,24 +118,28 @@ fn fetch_bound(format: FieldFormat, a: f32, d: f32) -> f32 {
 /// fetch bound `fetch` (m/s), the largest speed `v` and coordinate `p` the run reaches,
 /// and the field's steepest gradient `g` (1/s).
 ///
-/// A step's velocity is `v d + t a` (`d = 1 - k`, `t = swirl k`). The device may fuse
-/// the add into the multiply before it: one rounding, `U V`. An error `e` in the air
-/// moves the velocity by `t e` a step and decays at `d`, so it settles at
-/// `t e / (1 - d) = swirl e <= e`: the velocity error is at most `e + min(n, 1/k) U V`,
-/// and `n U V` bounds it for any class. The position `p + v dt` may also fuse: `U P` a
-/// step. So after `n` steps
+/// A step's velocity is `v d + t a` (`d = 1 - k`, `t = swirl k <= k`). The device may
+/// fuse the add into the multiply before it: one rounding, at most `U V`. The air read
+/// is off by the fetch's own error plus `g dp` when the position is off by `dp`. Since
+/// `t <= 1 - d`, the velocity error is a convex mix of its last value and the air's
+/// error, plus the rounding, so after `m` steps it is at most `fetch + g dp_m + m U V`.
+/// The position `p + v dt` may also fuse: `U P` a step. So, step by step,
 ///
 /// ```text
-/// dp <= n dt (e + n U V) + n U P,    e = fetch + g dp
+/// dp_(m+1) <= (1 + g dt) dp_m + dt (fetch + m U V) + U P
 /// ```
 ///
-/// since a position off by `dp` reads air off by up to `g dp`. Solved for `dp`, which
-/// needs `n dt g < 1`.
+/// the discrete Gronwall bound: a steep field amplifies any difference, by up to
+/// `e^(g n dt)`, because two particles a little apart are carried apart by it. That is
+/// the field's physics, not the device's error, and the bound includes it.
 fn trajectory_bound(n: usize, fetch: f32, v: f32, p: f32, g: f32) -> f32 {
-    let n = n as f32;
-    let feedback = 1.0 - n * DT * g;
-    assert!(feedback > 0.0, "the run is too long for the field's gradient to bound");
-    (n * DT * (fetch + n * U * v) + n * U * p) / feedback
+    let mut dp = 0.0f64;
+    for m in 0..n {
+        dp = (1.0 + g as f64 * DT as f64) * dp
+            + DT as f64 * (fetch as f64 + m as f64 * U as f64 * v as f64)
+            + U as f64 * p as f64;
+    }
+    dp as f32
 }
 
 /// Particle `id` carries `id` as its size, so the two pools can be matched after the
@@ -245,7 +249,7 @@ fn track_the_cpu(format: FieldFormat, features: wgpu::Features) {
         worst_p = worst_p.max(distance(*p, gp));
         worst_v = worst_v.max(distance(*v, gv));
     }
-    // The velocity's share of the same derivation: `e + n U V`.
+    // The velocity's share of the same derivation: `fetch + g dp + n U V`.
     let v_bound = fetch + g * bound + frames as f32 * U * v_max;
     println!(
         "{format:?}: {} live; position {worst_p:.3e} m (bound {bound:.3e}), velocity {worst_v:.3e} m/s (bound {v_bound:.3e}); A {a:.3}, D {d:.3}, V {v_max:.2}, P {p_max:.2}",
@@ -281,6 +285,7 @@ fn each_fetch_is_within_its_format_precision() {
     let points: Vec<[f32; 3]> = (0..4_096)
         .map(|_| [rng.range(-20.0, 20.0), rng.range(-4.0, 36.0), rng.range(-20.0, 20.0)])
         .collect();
+    let mut by_format = Vec::new();
     for format in [FieldFormat::F32Exact, FieldFormat::F32Filtered, FieldFormat::F16Filtered] {
         let mut config = GpuPoolConfig::new(64);
         config.field = format;
@@ -298,6 +303,18 @@ fn each_fetch_is_within_its_format_precision() {
         let bound = fetch_bound(format, a, d);
         println!("{format:?}: fetch {worst:.3e} m/s (bound {bound:.3e}; A {a:.3}, D {d:.3})");
         assert!(worst <= bound, "{format:?}: fetch {worst} past {bound}");
+        by_format.push((format, fetched));
+    }
+    // The half-precision storage alone: the f16 field against the f32 field through the
+    // same hardware filter. Rounding 11 significant bits is `A 2^-11` to nearest,
+    // `A 2^-10` toward zero, and the filter's half-precision arithmetic as much again.
+    let f32_filtered = by_format.iter().find(|(f, _)| *f == FieldFormat::F32Filtered);
+    let f16_filtered = by_format.iter().find(|(f, _)| *f == FieldFormat::F16Filtered);
+    if let (Some((_, wide)), Some((_, half))) = (f32_filtered, f16_filtered) {
+        let worst = wide.iter().zip(half).map(|(w, h)| distance(*w, *h)).fold(0.0f32, f32::max);
+        let bound = 2.0 * a / 1024.0;
+        println!("f16 storage against the f32 field: {worst:.3e} m/s (bound {bound:.3e}, {:.4}% of A)", 100.0 * worst / a);
+        assert!(worst <= bound, "f16 storage {worst} past {bound}");
     }
 }
 
@@ -497,18 +514,25 @@ fn the_free_list_never_hands_out_a_live_slot() {
     let (counts, _) = check(&pool);
     assert_eq!((counts.live, counts.retired), (capacity / 2, capacity / 2));
 
-    // Refill past the free slots: 500 into free slots, 100 over live particles.
+    // Refill past the free slots: the newest 500 into free slots, the 100 older ones
+    // over live particles at the cursor (slots 0 to 99), except where the cursor meets
+    // a slot filled this frame, where the older particle is dropped.
     for id in 1..=600 {
         pool.emit_one([0.0, 1.0, 0.0], [0.0; 3], 100.0, (10_000 + id) as f32, 0);
     }
     pool.step(DT);
     let (counts, slots) = check(&pool);
-    assert_eq!((counts.live, counts.free, counts.overwritten), (capacity, 0, 100));
-    let new = slots.iter().filter(|s| s.remaining > 0.0 && s.size >= 10_000.0).count();
-    assert_eq!(new, 600, "a new particle was placed over another new one");
+    assert_eq!((counts.live, counts.free), (capacity, 0));
+    assert_eq!(counts.overwritten + counts.dropped, 100);
+    // Half of slots 0 to 99 held short-lived particles and were refilled from the stack.
+    assert_eq!((counts.overwritten, counts.dropped), (50, 50));
+    let new: HashSet<u32> =
+        slots.iter().filter(|s| s.remaining > 0.0 && s.size >= 10_000.0).map(|s| s.size as u32 - 10_000).collect();
+    assert_eq!(new.len() as u32, 500 + counts.overwritten, "a new particle was placed over another new one");
+    assert!((101..=600).all(|id| new.contains(&id)), "one of the newest 500 is missing");
     // Every surviving old particle is untouched.
     let old: Vec<_> = slots.iter().filter(|s| s.remaining > 0.0 && s.size < 10_000.0).collect();
-    assert_eq!(old.len(), 400);
+    assert_eq!(old.len() as u32, 500 - counts.overwritten);
     for s in old {
         assert_eq!(s.position[0], s.size, "an old particle was corrupted");
     }

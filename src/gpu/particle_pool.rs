@@ -44,7 +44,10 @@
 //! cost is the dead slots under the high water, which the integrate skips.
 //!
 //! When the pool is full, new particles replace live ones at a rotating cursor, as the
-//! CPU pool replaces its oldest: the newest event is the one drawn whole.
+//! CPU pool replaces its oldest: the newest event is the one drawn whole. Within one
+//! frame's batch the newest particles take the free slots, and an older one whose turn
+//! of the cursor falls on a slot filled that same frame is dropped rather than replace
+//! a newer particle ([`GpuPoolCounts::dropped`]).
 //!
 //! # Memory
 //!
@@ -92,7 +95,7 @@ const FLAG_AIR: u32 = 1;
 const FLAG_GROUND: u32 = 2;
 
 /// Words of the state buffer; see [`GpuParticlePool::state`].
-const STATE_WORDS: usize = 8;
+const STATE_WORDS: usize = 9;
 
 /// Words of the indirect-arguments buffer; see [`GpuParticlePool::draw_args`].
 const ARGS_WORDS: usize = 12;
@@ -162,8 +165,9 @@ pub struct GpuPoolConfig {
     /// The most particles alive at once. At least one, and at most
     /// `65535 * 64` (4,194,240), the most one dispatch dimension covers.
     pub capacity: u32,
-    /// The most staged particles one [`GpuParticlePool::encode`] places. Particles staged
-    /// beyond it wait for the next frame, in order. Sizes the frame buffer: 40 bytes each.
+    /// The most staged particles one [`GpuParticlePool::encode`] places, at most the
+    /// capacity (a larger value is lowered to it). Particles staged beyond it wait for the
+    /// next frame, in order. Sizes the frame buffer: 40 bytes each.
     pub max_emit_per_frame: u32,
     /// The most landings one frame records; later landings that frame are counted in
     /// the state buffer but not written. 24 bytes each.
@@ -283,6 +287,9 @@ pub struct GpuPoolCounts {
     pub placed: u32,
     /// Particles placed over a live one because the pool was full.
     pub overwritten: u32,
+    /// Particles not placed: the pool was full and the cursor's slot held a particle
+    /// placed the same frame.
+    pub dropped: u32,
 }
 
 /// One slot's contents, from [`GpuParticlePool::read_slots_blocking`].
@@ -461,7 +468,8 @@ impl GpuParticlePool {
     /// let pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(1 << 20)).unwrap();
     /// assert_eq!(pool.capacity(), 1 << 20);
     /// ```
-    pub fn new(gpu: &GpuContext, config: GpuPoolConfig) -> Result<GpuParticlePool, GpuPoolError> {
+    pub fn new(gpu: &GpuContext, mut config: GpuPoolConfig) -> Result<GpuParticlePool, GpuPoolError> {
+        config.max_emit_per_frame = config.max_emit_per_frame.min(config.capacity);
         let device = gpu.device.clone();
         let queue = gpu.queue.clone();
         if config.capacity == 0 || config.max_emit_per_frame == 0 {
@@ -933,7 +941,7 @@ impl GpuParticlePool {
             + cells * self.config.field.bytes_per_cell()
     }
 
-    // ── Classes ──────────────────────────────────────────────────────────────
+    // -- Classes --
 
     /// Set the behaviour every particle of class `index` shares, as
     /// [`ParticleEffects::set_class`]. Takes effect on the next [`Self::encode`].
@@ -1049,7 +1057,7 @@ impl GpuParticlePool {
         }
     }
 
-    // ── Emission ─────────────────────────────────────────────────────────────
+    // -- Emission --
 
     fn stage(&mut self, pos: [f32; 3], vel: [f32; 3], remaining: f32, lifetime: f32, size: f32, class: u8) {
         let bits = |v: f32| v.to_bits();
@@ -1188,7 +1196,7 @@ impl GpuParticlePool {
         }
     }
 
-    // ── Field and ground ─────────────────────────────────────────────────────
+    // -- Field and ground --
 
     /// Write a new air field to the device: one copy of the cells, to be issued from
     /// the frame thread when the field has a new frame (10 to 20 times a second), never
@@ -1388,7 +1396,7 @@ impl GpuParticlePool {
         self.rebuild_air_group();
     }
 
-    // ── A frame ──────────────────────────────────────────────────────────────
+    // -- A frame --
 
     /// Record this frame's placement and integrate into `encoder`, after one write of
     /// this frame's constants and staged particles.
@@ -1470,19 +1478,7 @@ impl GpuParticlePool {
             })
         };
 
-        if self.field_pending {
-            self.field_pending = false;
-            if let (Some(convert), Some((_, group))) = (&self.convert, &self.air.staging) {
-                let cells = self.air.dims.iter().product::<usize>() as u32;
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("pool field"),
-                    timestamp_writes: writes(timestamps.and_then(|t| t.field)),
-                });
-                pass.set_pipeline(convert);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(cells.div_ceil(64), 1, 1);
-            }
-        }
+        self.encode_field(encoder, writes(timestamps.and_then(|t| t.field)));
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1511,6 +1507,24 @@ impl GpuParticlePool {
             pass.set_bind_group(0, &self.main_group, &[]);
             pass.set_bind_group(1, &self.air_group, &[]);
             pass.dispatch_workgroups_indirect(&self.args, 0);
+        }
+    }
+
+    /// The pass converting a newly uploaded `rgba16float` field, when one is pending.
+    fn encode_field(&mut self, encoder: &mut wgpu::CommandEncoder, timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>) {
+        if !self.field_pending {
+            return;
+        }
+        self.field_pending = false;
+        if let (Some(convert), Some((_, group))) = (&self.convert, &self.air.staging) {
+            let cells = self.air.dims.iter().product::<usize>() as u32;
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pool field"),
+                timestamp_writes: timestamps,
+            });
+            pass.set_pipeline(convert);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(cells.div_ceil(64), 1, 1);
         }
     }
 
@@ -1586,7 +1600,7 @@ impl GpuParticlePool {
         }
     }
 
-    // ── What the renderer reads ──────────────────────────────────────────────
+    // -- What the renderer reads --
 
     /// The position-and-life buffer, one `vec4<f32>` a slot: position in metres in
     /// `xyz`, seconds of life remaining in `w`. A slot is live while `w > 0`. Draw over
@@ -1630,9 +1644,10 @@ impl GpuParticlePool {
         &self.vel
     }
 
-    /// The class-and-size buffer, one `vec2<u32>` a slot: the class slot in `x`, the
-    /// renderer's size scalar as `f32` bits in `y` (`bitcast<f32>`). Read-only to anyone
-    /// but the pool.
+    /// The class-and-size buffer, one `vec2<u32>` a slot: the class slot in the low
+    /// three bits of `x` (bit 31 is set on the frame a particle is placed, until its
+    /// first integrate; mask it off), the renderer's size scalar as `f32` bits in `y`
+    /// (`bitcast<f32>`). Read-only to anyone but the pool.
     ///
     /// # Returns
     ///
@@ -1650,9 +1665,9 @@ impl GpuParticlePool {
         &self.meta
     }
 
-    /// The counters, eight `u32`s: free slots, live particles, high water, overwrite
-    /// cursor, landings this frame, retired, placed and overwritten (totals since the
-    /// pool was built). The `STATE_*` constants are their byte offsets. Read-only to
+    /// The counters, nine `u32`s: free slots, live particles, high water, overwrite
+    /// cursor, landings this frame, then totals since the pool was built: retired,
+    /// placed, overwritten and dropped (see [`GpuPoolCounts`]). The `STATE_*` constants are their byte offsets. Read-only to
     /// anyone but the pool.
     ///
     /// # Returns
@@ -1665,7 +1680,7 @@ impl GpuParticlePool {
     /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig};
     /// let gpu = GpuContext::new().expect("a GPU");
     /// let pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
-    /// assert_eq!(pool.state().size(), 32);
+    /// assert_eq!(pool.state().size(), 36);
     /// ```
     pub fn state(&self) -> &wgpu::Buffer {
         &self.state
@@ -1726,7 +1741,7 @@ impl GpuParticlePool {
     /// Byte offset of the draw arguments in [`Self::draw_args`].
     pub const DRAW_ARGS_OFFSET: u64 = 32;
 
-    // ── Debug and test readback: never on the frame thread ───────────────────
+    // -- Debug and test readback: never on the frame thread --
 
     fn read_blocking(&self, source: &wgpu::Buffer, bytes: u64) -> Vec<u32> {
         if bytes == 0 {
@@ -1746,7 +1761,7 @@ impl GpuParticlePool {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device lost while reading the pool back");
-        let words = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range()).to_vec();
+        let words = bytemuck::cast_slice::<u8, u32>(&slice.get_mapped_range().expect("mapped readback")).to_vec();
         staging.unmap();
         words
     }
@@ -1777,6 +1792,7 @@ impl GpuParticlePool {
             retired: w[5],
             placed: w[6],
             overwritten: w[7],
+            dropped: w[8],
         }
     }
 
@@ -1900,7 +1916,7 @@ impl GpuParticlePool {
         // next `encode` writes the header again.
         self.write_header(0.0, 0);
         self.queue.write_buffer(&self.frame, 0, bytes_of(&self.upload[..FRAME_WORDS]));
-        let device = &self.device;
+        let device = self.device.clone();
 
         let source = format!("{}\n{}", self.module_source, air_section("probe"));
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1956,6 +1972,7 @@ impl GpuParticlePool {
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
+        self.encode_field(&mut encoder, None);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&pipeline);

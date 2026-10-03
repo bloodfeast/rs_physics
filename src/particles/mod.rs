@@ -23,6 +23,8 @@ pub use particle_backend::*;
 
 #[cfg(feature = "particles")]
 pub use particle_effects::*;
+#[cfg(all(feature = "particles", feature = "gpu"))]
+pub(crate) use particle_effects::for_each_in_burst;
 
 #[cfg(feature = "particles")]
 pub use swirl::*;

@@ -20,6 +20,11 @@ const EXPONENT: u32 = 0x7f800000u;
 // Tangential friction on ground contact, as `collide_ground_with`.
 const GROUND_FRICTION: f32 = 0.55;
 
+// Set in a slot's class word by `place_free` for the frame the particle is placed, so
+// `place_overwrite` never replaces a particle placed the same frame; the integrate
+// clears it.
+const BORN: u32 = 0x80000000u;
+
 const FLAG_AIR: u32 = 1u;
 const FLAG_GROUND: u32 = 2u;
 
@@ -65,13 +70,14 @@ struct State {
     retired: atomic<u32>,
     placed: atomic<u32>,
     overwritten: atomic<u32>,
+    dropped: atomic<u32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<storage, read> records: array<u32>;
 @group(0) @binding(2) var<storage, read_write> pos_life: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> vel: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> meta: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read_write> class_size: array<vec2<u32>>;
 @group(0) @binding(5) var<storage, read_write> free: array<u32>;
 @group(0) @binding(6) var<storage, read_write> state: State;
 @group(0) @binding(7) var<storage, read_write> landings: array<u32>;
@@ -82,7 +88,7 @@ struct State {
 // dispatch, [8..12) a non-indexed draw over the slots in use.
 @group(2) @binding(0) var<storage, read_write> args: array<u32>;
 
-fn write_record(slot: u32, r: u32) {
+fn write_record(slot: u32, r: u32, born: u32) {
     let b = r * RECORD_WORDS;
     let p = vec3<f32>(bitcast<f32>(records[b]), bitcast<f32>(records[b + 1u]), bitcast<f32>(records[b + 2u]));
     let v = vec3<f32>(bitcast<f32>(records[b + 3u]), bitcast<f32>(records[b + 4u]), bitcast<f32>(records[b + 5u]));
@@ -91,14 +97,14 @@ fn write_record(slot: u32, r: u32) {
     pos_life[slot] = vec4<f32>(p, remaining);
     vel[slot] = vec4<f32>(v, lifetime);
     // Class, then the size's bits.
-    meta[slot] = vec2<u32>(records[b + 9u], records[b + 8u]);
+    class_size[slot] = vec2<u32>(records[b + 9u] | born, records[b + 8u]);
 }
 
 var<workgroup> wg_high: atomic<u32>;
 
-// New particles into free slots: record i takes the i-th slot from the top of the free
-// stack. Records past the free count are left to `place_overwrite`. Reads the free
-// count; `finalize` lowers it after every placement has read it.
+// New particles into free slots: the newest `min(e, f)` records take slots off the top of
+// the free stack. The older records past the free count are left to `place_overwrite`.
+// Reads the free count; `finalize` lowers it after every placement has read it.
 @compute @workgroup_size(WG)
 fn place_free(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     let i = gid.x;
@@ -115,9 +121,10 @@ fn place_free(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
         atomicStore(&wg_high, 0u);
     }
     workgroupBarrier();
-    if (i < e && i < f) {
+    let taken = min(e, f);
+    if (i < taken) {
         let slot = free[f - 1u - i];
-        write_record(slot, i);
+        write_record(slot, e - taken + i, BORN);
         atomicMax(&wg_high, slot + 1u);
     }
     workgroupBarrier();
@@ -126,11 +133,12 @@ fn place_free(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invo
     }
 }
 
-// Records that found no free slot replace live particles at a rotating cursor, the
-// oldest-first rotation `ParticleEffects` uses when full. Runs after `place_free`, so a
-// slot `place_free` just filled is overwritten whole or not at all. Dispatched
-// indirectly with the count `place_free` wrote: zero workgroups on any frame the pool
-// has room.
+// Records that found no free slot (the oldest of the frame's) replace live particles at
+// a rotating cursor, the rotation `ParticleEffects` uses when full. A slot `place_free`
+// filled this frame is not replaced: the older record is dropped instead, so the newest
+// particles are the ones kept. Runs after `place_free`, so every write is whole.
+// Dispatched indirectly with the count `place_free` wrote: zero workgroups on any frame
+// the pool has room.
 @compute @workgroup_size(WG)
 fn place_overwrite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let j = gid.x;
@@ -140,7 +148,13 @@ fn place_overwrite(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let slot = (atomicLoad(&state.cursor) + j) % frame.capacity;
-    write_record(slot, f + j);
+    if ((class_size[slot].x & BORN) != 0u) {
+        atomicAdd(&state.dropped, 1u);
+        return;
+    }
+    write_record(slot, j, 0u);
+    atomicAdd(&state.placed, 1u);
+    atomicAdd(&state.overwritten, 1u);
 }
 
 // One thread: settles the counts for this frame's placements, resets the landings and
@@ -153,8 +167,7 @@ fn finalize() {
     let over = e - taken;
     atomicStore(&state.free_count, f - taken);
     atomicAdd(&state.live, taken);
-    atomicAdd(&state.placed, e);
-    atomicAdd(&state.overwritten, over);
+    atomicAdd(&state.placed, taken);
     atomicStore(&state.cursor, (atomicLoad(&state.cursor) + over) % frame.capacity);
     atomicStore(&state.landings, 0u);
     let high = atomicLoad(&state.high_water);
@@ -206,8 +219,11 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let vw = vel[i];
-    let m = meta[i];
+    let m = class_size[i];
     let c = m.x & (MAX_CLASSES - 1u);
+    if ((m.x & BORN) != 0u) {
+        class_size[i].x = m.x & ~BORN;
+    }
     let row = frame.rows[c];
     let dt = frame.dt;
 
@@ -256,7 +272,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
                 landings[b + 1u] = bitcast<u32>(floor_y);
                 landings[b + 2u] = bitcast<u32>(a.z);
                 landings[b + 3u] = bitcast<u32>(-min(v.y, 0.0));
-                landings[b + 4u] = m.x;
+                landings[b + 4u] = c;
                 landings[b + 5u] = m.y;
             }
             a.y = floor_y;

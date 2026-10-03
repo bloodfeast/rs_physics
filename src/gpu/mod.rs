@@ -4,6 +4,7 @@
 //! - Particle integration (position/velocity updates)
 //! - 2D N-body gravitational simulation
 //! - 3D N-body gravitational simulation (cosmological)
+//! - The effect-particle pool resident on the device ([`GpuParticlePool`], with `particles`)
 //!
 //! # Example: Basic Particle Simulation
 //!
@@ -66,8 +67,17 @@ mod context;
 mod particle_sim;
 mod nbody;
 mod nbody_3d;
+#[cfg(feature = "particles")]
+mod particle_pool;
+#[cfg(all(test, feature = "particles"))]
+mod particle_pool_tests;
 
 pub use context::GpuContext;
 pub use particle_sim::{GpuParticleSimulation, GpuParticle};
 pub use nbody::{GpuNBodySimulation, NBodyParticle};
 pub use nbody_3d::{GpuNBody3DSimulation, NBody3DParticle};
+#[cfg(feature = "particles")]
+pub use particle_pool::{
+    FieldFormat, GpuParticlePool, GpuPoolConfig, GpuPoolCounts, GpuPoolError, GpuSlot, GroundHeights,
+    PoolTimestamps,
+};

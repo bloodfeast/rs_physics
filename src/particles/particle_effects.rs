@@ -505,24 +505,9 @@ impl ParticleEffects {
     /// assert_eq!(fx.len(), 16);
     /// ```
     pub fn emit(&mut self, burst: &Burst, rng: &mut EffectRng) {
-        let class = burst.class.min((MAX_CLASSES - 1) as u8);
-
-        for _ in 0..burst.count {
-            let dir = rng.hemisphere(burst.lift);
-            let speed = rng.range(burst.speed.start, burst.speed.end);
-            let life = rng
-                .range(burst.lifetime.start, burst.lifetime.end)
-                .max(f32::EPSILON);
-            let size = rng.range(burst.size.start, burst.size.end);
-
-            self.push(
-                burst.origin,
-                [dir[0] * speed, dir[1] * speed, dir[2] * speed],
-                life,
-                size,
-                class,
-            );
-        }
+        for_each_in_burst(burst, rng, |pos, vel, life, size, class| {
+            self.push(pos, vel, life, size, class)
+        });
     }
 
     /// Emit a single particle with an explicit velocity, for cases an isotropic
@@ -991,6 +976,13 @@ impl ParticleEffects {
         }
     }
 
+    /// Particle `i`'s seconds remaining and total lifetime, for handing a live pool to
+    /// another backend.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn life_of(&self, i: usize) -> (f32, f32) {
+        (self.remaining[i], self.lifetime[i])
+    }
+
     /// Particle `i`'s last sample of the air, for tests.
     #[cfg(test)]
     pub(crate) fn air_sample(&self, i: usize) -> [f32; 3] {
@@ -1378,6 +1370,34 @@ impl ParticleEffects {
     /// ```
     pub fn positions_soa(&self) -> (&[f32], &[f32], &[f32]) {
         (&self.pos_x, &self.pos_y, &self.pos_z)
+    }
+}
+
+/// The particles of a burst, drawn from `rng` in the order [`ParticleEffects::emit`]
+/// draws them: `f(position, velocity, lifetime, size, class)` once a particle, with the
+/// lifetime already raised to `f32::EPSILON` and the class clamped. Shared with the GPU
+/// pool so the same seed emits the same particles on either.
+pub(crate) fn for_each_in_burst<F>(burst: &Burst, rng: &mut EffectRng, mut f: F)
+where
+    F: FnMut([f32; 3], [f32; 3], f32, f32, u8),
+{
+    let class = burst.class.min((MAX_CLASSES - 1) as u8);
+
+    for _ in 0..burst.count {
+        let dir = rng.hemisphere(burst.lift);
+        let speed = rng.range(burst.speed.start, burst.speed.end);
+        let life = rng
+            .range(burst.lifetime.start, burst.lifetime.end)
+            .max(f32::EPSILON);
+        let size = rng.range(burst.size.start, burst.size.end);
+
+        f(
+            burst.origin,
+            [dir[0] * speed, dir[1] * speed, dir[2] * speed],
+            life,
+            size,
+            class,
+        );
     }
 }
 
