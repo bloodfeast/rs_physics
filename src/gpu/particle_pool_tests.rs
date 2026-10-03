@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::gpu::{FieldFormat, GpuContext, GpuParticlePool, GpuPoolConfig, GroundHeights};
 use crate::particles::{
-    Backend, BackendPolicy, EffectRng, ParticleClass, ParticleEffects, SwirlField, TurbulenceDrive,
+    Backend, BackendPolicy, Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField,
+    TurbulenceDrive,
     VelocityGrid,
 };
 
@@ -864,6 +865,8 @@ fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
             SwirlField::new([-16.0, 0.0, -16.0], [dims; 3], 32.0 / dims as f32, drive, 3).unwrap();
         let mut a = Emitter::new(77);
         let mut b = Emitter::new(77);
+        // Bursts too, staged as descriptors and expanded on the device.
+        let (mut burst_a, mut burst_b) = (EffectRng::new(78), EffectRng::new(78));
         let mut scratch = ParticleEffects::with_capacity(4_096);
         // Lives long enough that nothing retires for the first 12 frames, so slots are
         // assigned in the same order on both; after that, retirement's atomic order may
@@ -873,6 +876,17 @@ fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
             a.emit(n, &mut scratch, &mut queue_pool);
             b.emit(n, &mut scratch, &mut ring_pool);
             scratch.clear();
+            let burst = Burst {
+                origin: [0.0, 6.0, 0.0],
+                class: (frame % 3) as u8,
+                count: if frame == 0 { 300 } else { 20 },
+                speed: 1.0..8.0,
+                lifetime: 0.5..3.0,
+                size: 5_000.0..6_000.0,
+                lift: 0.4,
+            };
+            queue_pool.emit(&burst, &mut burst_a);
+            ring_pool.emit(&burst, &mut burst_b);
             if frame % 3 == 0 {
                 field.advance(0.05);
                 queue_pool.upload_field(field.velocity());
@@ -919,13 +933,33 @@ fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
             queue_pool.read_counts_blocking(),
             ring_pool.read_counts_blocking()
         );
-        let bits = |m: HashMap<u32, ([f32; 3], [f32; 3])>| -> HashMap<u32, ([u32; 3], [u32; 3])> {
-            m.into_iter()
-                .map(|(k, (p, v))| (k, (p.map(f32::to_bits), v.map(f32::to_bits))))
-                .collect()
+        // Every live particle by its whole record, so the bursts' particles (which share
+        // no id) are matched too.
+        let live_bits = |pool: &GpuParticlePool| {
+            let mut v: Vec<_> = pool
+                .read_slots_blocking()
+                .iter()
+                .filter(|s| s.remaining > 0.0)
+                .map(|s| {
+                    (
+                        s.position.map(f32::to_bits),
+                        s.velocity.map(f32::to_bits),
+                        s.remaining.to_bits(),
+                        s.lifetime.to_bits(),
+                        s.size.to_bits(),
+                        s.class,
+                    )
+                })
+                .collect();
+            v.sort();
+            v
         };
-        let (q, r) = (bits(gpu_by_id(&queue_pool)), bits(gpu_by_id(&ring_pool)));
+        let (q, r) = (live_bits(&queue_pool), live_bits(&ring_pool));
         assert!(q.len() > 1_000);
+        assert!(
+            q.iter().any(|p| f32::from_bits(p.4) >= 5_000.0),
+            "{format:?}: no burst particle alive at the end"
+        );
         assert_eq!(q, r, "{format:?}: particles differ");
         let landing_bits = |pool: &GpuParticlePool| {
             let mut v: Vec<_> = pool
