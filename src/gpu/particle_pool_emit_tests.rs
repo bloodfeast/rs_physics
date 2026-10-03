@@ -10,7 +10,8 @@
 
 use crate::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig};
 use crate::particles::{
-    sin_cos_turn, stride_tables, Burst, EffectRng, ParticleClass, ParticleEffects, QUARTER_SINE,
+    sin_cos_turn, stride_tables, Burst, EffectRng, ParticleClass, ParticleEffects, DIGIT_TABLES,
+    QUARTER_SINE,
 };
 
 /// A power of two, so the integrate's `v dt` is exact and a fused `p + v dt` on the
@@ -402,7 +403,7 @@ impl Prober {
     fn run(&self, entry: &str, count: u32, first: u32, inputs: &[u32], out_words: usize) -> Vec<u32> {
         use wgpu::util::DeviceExt;
         let device = &self.gpu.device;
-        let jump_words = self.levels * 1024;
+        let jump_words = self.levels * DIGIT_TABLES as u32 * 1024;
         let header = [
             0u32,
             count,
@@ -508,19 +509,23 @@ fn the_device_sin_cos_equals_the_cpus_at_every_turn() {
 }
 
 /// (c) on the device: the stride tables reach `5 i` steps for `i` in a sweep of small
-/// indices, powers of two and their neighbours, a million, and the largest index the
-/// levels cover.
+/// indices, powers of two and their neighbours, every single hex digit at every
+/// position, a million, and the largest index six digits cover (past the largest
+/// capacity, 4,194,240).
 #[test]
 fn the_device_jump_is_five_steps_a_particle() {
     let Some(gpu) = gpu() else { return };
-    let levels = 22;
-    let prober = Prober::new(gpu, levels);
+    let digits = 6;
+    let prober = Prober::new(gpu, digits);
     let mut cases = Vec::new();
     let mut indices: Vec<u32> = (0..300).collect();
-    for b in 0..levels {
+    for b in 0..4 * digits {
         indices.extend([(1 << b) - 1, 1 << b, (1 << b) + 1]);
     }
-    indices.extend([1_000_000, (1 << levels) - 1]);
+    for k in 0..digits {
+        indices.extend((1..16).map(|d| d << (4 * k)));
+    }
+    indices.extend([1_000_000, (1 << (4 * digits)) - 1]);
     for (n, &i) in indices.iter().enumerate() {
         let state = EffectRng::new(0x9E37_79B9 ^ (n as u32).wrapping_mul(0x85EB_CA6B)).next_u32();
         cases.push((state, i));
@@ -535,7 +540,11 @@ fn the_device_jump_is_five_steps_a_particle() {
         }
         assert_eq!(out[k], stepped.state(), "state {state:#x}, particle {i}");
     }
-    println!("jump_stride: {} indices up to {} on the device equal sequential steps", cases.len(), (1u32 << levels) - 1);
+    println!(
+        "jump_stride: {} indices up to {} on the device equal sequential steps",
+        cases.len(),
+        (1u32 << (4 * digits)) - 1
+    );
 }
 
 /// The device's `sqrt_rn` and `div_rn` against the CPU's IEEE `sqrt` and `/`, over

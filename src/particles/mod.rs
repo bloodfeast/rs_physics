@@ -35,7 +35,7 @@ pub use turn_trig::*;
 #[cfg(all(feature = "particles", feature = "gpu"))]
 pub(crate) use turn_trig::QUARTER_SINE;
 #[cfg(all(feature = "particles", feature = "gpu"))]
-pub(crate) use rng_jump::stride_tables;
+pub(crate) use rng_jump::{stride_tables, DIGIT_TABLES};
 
 #[cfg(feature = "particles")]
 pub use swirl::*;

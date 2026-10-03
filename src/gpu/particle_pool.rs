@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::gpu::GpuContext;
-use crate::particles::{for_each_in_burst, stride_tables, QUARTER_SINE};
+use crate::particles::{for_each_in_burst, stride_tables, DIGIT_TABLES, QUARTER_SINE};
 use crate::particles::{
     BackendPolicy, Burst, EffectRng, GpuResidency, Landing, ParticleClass, ParticleEffects,
     VelocityGrid, MAX_CLASSES,
@@ -124,7 +124,10 @@ pub struct GpuPoolConfig {
     pub capacity: u32,
     /// The most staged particles one [`GpuParticlePool::encode`] places, at most the
     /// capacity (a larger value is lowered to it). Particles staged beyond it wait for the
-    /// next frame, in order. Sizes the frame buffer: 40 bytes each.
+    /// next frame, in order; a burst cut by it carries its remainder over. Sizes the frame
+    /// buffer: 40 bytes each (what [`GpuParticlePool::emit_one`] records take; a burst
+    /// takes 64 bytes whatever its count), and the jump tables: 60 KB per hex digit of
+    /// the largest particle index, 240 KB at the default 65,536.
     pub max_emit_per_frame: u32,
     /// The most landings one frame records; later landings that frame are counted in
     /// the state buffer but not written. 24 bytes each.
@@ -394,14 +397,16 @@ struct AirBinding {
 /// # A frame
 ///
 /// 1. The host calls [`GpuParticlePool::emit`] / [`GpuParticlePool::emit_one`] as it
-///    would on the CPU pool. They append to a staging list; nothing touches the device.
+///    would on the CPU pool. A burst is staged as a 64-byte descriptor whatever its
+///    count, an explicit particle as a 40-byte record; nothing touches the device (see
+///    "Emission" below).
 /// 2. When the field has a new frame (10 to 20 times a second), the host calls
 ///    [`GpuParticlePool::upload_field`] from the frame thread: one copy of the cells.
-/// 3. [`GpuParticlePool::encode`] writes one buffer (this frame's constants and every
-///    staged particle, a single `write_buffer`) and records, into the host's encoder,
-///    the placement of the new particles into free slots, a one-thread pass that
-///    settles the counts, and one indirect dispatch of the integrate over the slots in
-///    use.
+/// 3. [`GpuParticlePool::encode`] writes one buffer (this frame's constants and the
+///    staged descriptors and records, a single `write_buffer`) and records, into the
+///    host's encoder, the placement of the new particles into free slots (expanding the
+///    bursts as it goes), a one-thread pass that settles the counts, and one indirect
+///    dispatch of the integrate over the slots in use.
 /// 4. The renderer draws from [`GpuParticlePool::positions`] and the others, with the
 ///    instance count from [`GpuParticlePool::draw_args`], and drains the landings.
 ///
@@ -444,13 +449,39 @@ struct AirBinding {
 /// of the cursor falls on a slot filled that same frame is dropped rather than replace
 /// a newer particle ([`GpuPoolCounts::dropped`]).
 ///
+/// # Emission
+///
+/// [`GpuParticlePool::emit`] does not draw the burst's particles on the CPU. It stages a
+/// descriptor (the [`EffectRng`] state, origin, class, the speed, lifetime and size
+/// ranges and the lift: 12 words, plus a 4-word segment entry) and moves the CPU's
+/// stream on by [`Burst::DRAWS_PER_PARTICLE`] draws a particle with [`EffectRng::jump`],
+/// so the stream is exactly where [`ParticleEffects::emit`] would leave it. On the device
+/// the placement passes find each new particle's segment and, for a burst, give particle
+/// `i` the state `5 i` draws in (xorshift32 is linear over GF(2): one byte-sliced 32x32
+/// bit matrix per non-zero hex digit of `i`, the powers `M^(5 d 16^k)` uploaded once at
+/// construction),
+/// then take its five draws with the CPU's arithmetic in the CPU's order. The CPU's
+/// `f32` adds and multiplies are correctly rounded on the device too; every product
+/// that feeds an add is forced to its own rounding first (the driver may otherwise fuse
+/// the two, and does); the square root and the divide are done in integers, correctly
+/// rounded; the direction's sine and cosine are
+/// [`sin_cos_turn`](crate::particles::sin_cos_turn), integer arithmetic on the same
+/// table. So a seed gives the same particles, to the bit, on the device and on the CPU
+/// pool. Explicit particles ([`GpuParticlePool::emit_one`],
+/// [`GpuParticlePool::adopt`], and a burst of one) stay 40-byte records.
+///
+/// A device may flush subnormal floats. No draw produces one from burst ranges of
+/// normal magnitude; a subnormal `lift` or range end is read as zero on the device.
+///
 /// # Memory
 ///
 /// 44 bytes a particle at capacity: position and remaining life (16), velocity and
 /// total lifetime (16), class and size (8), the free stack (4). 44 MB at a million. The
 /// CPU pool's 12-byte air sample has no counterpart, since every particle samples the
 /// field every frame. Fixed costs besides: the frame buffer (512 bytes plus 40 a staged
-/// particle at [`GpuPoolConfig::max_emit_per_frame`]), the landings (24 bytes each), the
+/// particle at [`GpuPoolConfig::max_emit_per_frame`], plus the emission's tables: 60 KB
+/// a hex digit of the largest index, 4 digits at the default, and the 16 KB sine), the
+/// landings (24 bytes each), the
 /// field texture (8 bytes a cell in `rgba16float`, 16 in `rgba32float`, plus a 16-byte
 /// staging cell for `rgba16float`). [`GpuParticlePool::bytes`] adds it up.
 ///
@@ -466,17 +497,22 @@ struct AirBinding {
 /// `integrate` (3 ns a particle) from about 3,300 particles. The field costs the integrate
 /// 4 to 19% over no field; the three [`FieldFormat`]s are within 12% of each other.
 ///
-/// On the frame thread the pool costs the emission's random draws (as the CPU pool's
-/// `emit` does), one `write_buffer` a frame and one a field update. wgpu 30 allocates a
-/// fresh staging buffer for every `write_buffer`; beside a compiler that measured 150 to
-/// 260 us a call regardless of size.
+/// On the frame thread the pool costs a descriptor and a jump of the stream a burst (no
+/// per-particle work: POOL-GPU-RNG figures below), one `write_buffer` a frame and one a
+/// field update. wgpu 30 allocates a fresh staging buffer for every `write_buffer`;
+/// beside a compiler that measured 150 to 260 us a call regardless of size.
+///
+/// POOL_GPU_RNG_FIGURES
 ///
 /// # Determinism
 ///
-/// None promised. The order particles take free slots in, and the order landings are
-/// appended in, depend on the device's scheduling; positions differ from the CPU's by
-/// float reordering (the device may fuse a multiply and an add) and, with a filtered
-/// field, by the texture filter's precision. The tests bound both.
+/// Emission is exact: a seed gives the CPU pool's particles to the bit (see "Emission").
+/// Beyond that none is promised. The order particles take free slots in, and the order
+/// landings are appended in, depend on the device's scheduling; the integrate's
+/// positions differ from the CPU's by float reordering (the device may fuse a multiply
+/// and an add) and, with a filtered field, by the texture filter's precision. The tests
+/// bound both. (With a power-of-two step, no field and no ground the integrate is exact
+/// too, which is how the emission test follows particles to retirement.)
 ///
 /// # Examples
 ///
@@ -532,8 +568,8 @@ pub struct GpuParticlePool {
     payload: Vec<u32>,
     /// Words of the emission region; the jump tables follow it in the frame buffer.
     data_words: usize,
-    /// Levels of the jump tables: particle indices within a frame are below
-    /// `2^jump_levels`.
+    /// Hex digits the jump tables cover: particle indices within a frame are below
+    /// `16^jump_levels`.
     jump_levels: u32,
 
     frame: wgpu::Buffer,
@@ -661,10 +697,13 @@ impl GpuParticlePool {
         if slots / WG > limits.max_compute_workgroups_per_dimension {
             return Err(GpuPoolError::Limit("capacity past one dispatch"));
         }
-        // Particle indices within a frame run below max_emit_per_frame.
-        let jump_levels = (32 - (config.max_emit_per_frame - 1).leading_zeros()).max(1);
+        // Particle indices within a frame run below max_emit_per_frame: hex digits of the
+        // largest.
+        let index_bits = (32 - (config.max_emit_per_frame - 1).leading_zeros()).max(1);
+        let jump_levels = index_bits.div_ceil(4);
         let data_words = config.max_emit_per_frame as usize * RECORD_WORDS + DATA_SLACK_WORDS;
-        let table_words = jump_levels as usize * JUMP_TABLE_WORDS + QUARTER_SINE.len();
+        let table_words =
+            jump_levels as usize * DIGIT_TABLES * JUMP_TABLE_WORDS + QUARTER_SINE.len();
         if (slots as u64) * 16 > limits.max_storage_buffer_binding_size as u64
             || ((data_words + table_words) as u64) * 4
                 > limits.max_storage_buffer_binding_size as u64
@@ -705,7 +744,7 @@ impl GpuParticlePool {
                 | wgpu::BufferUsages::COPY_DST,
         );
         // The emission's constant tables after the emission region, written once: the
-        // jump tables (M^(5 2^b), byte-sliced) and the quarter-wave sine.
+        // jump tables (M^(5 d 16^k), byte-sliced) and the quarter-wave sine.
         let mut tables = stride_tables(Burst::DRAWS_PER_PARTICLE, jump_levels as usize);
         tables.extend(QUARTER_SINE.iter().map(|&v| v as u32));
         queue.write_buffer(&frame, ((HEADER_WORDS + data_words) * 4) as u64, bytes_of(&tables));
@@ -1376,14 +1415,24 @@ impl GpuParticlePool {
         self.pending_count
     }
 
-    /// Emit a burst, as [`ParticleEffects::emit`]: the same seed draws the same
-    /// particles. They are staged on the CPU and placed on the next [`Self::encode`].
+    /// Emit a burst, as [`ParticleEffects::emit`]: the same seed gives the same
+    /// particles, to the bit. The burst is staged as a descriptor and expanded on the
+    /// device by the next [`Self::encode`] (see "Emission" on [`GpuParticlePool`]); `rng`
+    /// is moved on by [`Burst::DRAWS_PER_PARTICLE`] draws a particle at once, in at most
+    /// 32 table lookups, so the CPU does no per-particle work. A burst of one is drawn on
+    /// the CPU and staged as a record, which is smaller than a descriptor.
+    ///
+    /// Staged particles past the capacity drop the oldest, as before; a descriptor cut
+    /// that way, or by [`GpuPoolConfig::max_emit_per_frame`], keeps its remainder with
+    /// its state advanced past the particles cut.
     ///
     /// # Arguments
     ///
-    /// * `burst` - where, how many, and the ranges each particle's speed (m/s), lifetime
-    ///   (s) and size are sampled from.
-    /// * `rng` - the emission random stream.
+    /// * `burst` - where (metres), how many, and the ranges each particle's speed (m/s),
+    ///   lifetime (s) and size are sampled from, and the lift. Finite values; a subnormal
+    ///   one is read as zero on the device.
+    /// * `rng` - the emission random stream; left where [`ParticleEffects::emit`] leaves
+    ///   it.
     ///
     /// # Examples
     ///
@@ -1971,8 +2020,9 @@ impl GpuParticlePool {
     /// # Arguments
     ///
     /// * `dt` - the step, seconds; as [`Self::encode`].
-    /// * `write` - called once with the bytes (512 bytes of constants and 40 a particle
-    ///   placed) and the frame buffer they go to.
+    /// * `write` - called once with the bytes (512 bytes of constants, then 16 bytes a
+    ///   segment of the frame's emission, plus 48 for a burst's descriptor or 40 a record)
+    ///   and the frame buffer they go to.
     ///
     /// # Examples
     ///
@@ -1984,7 +2034,7 @@ impl GpuParticlePool {
     /// let mut encoder = gpu.device.create_command_encoder(&Default::default());
     /// pool.stage_frame_with(1.0 / 60.0, |write| {
     ///     let PoolWrite::Buffer { destination, offset, bytes } = write else { unreachable!() };
-    ///     assert_eq!(bytes.len(), 512 + 40);
+    ///     assert_eq!(bytes.len(), 512 + 16 + 40);
     ///     // A host's ring: the bytes into mapped staging memory, the copy onto the encoder.
     ///     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
     ///         label: None,

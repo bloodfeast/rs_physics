@@ -60,8 +60,8 @@ struct Frame {
     // Per class restitution, packed four a vector.
     restitution: array<vec4<f32>, 2>,
     // Emission: segments in the table at word 0 of `records`; the word in `records`
-    // where the jump tables start (the sine table follows them); jump levels; and a
-    // zero the compiler cannot see, for `rounded`.
+    // where the jump tables start (the sine table follows them); hex digits the jump
+    // tables cover; and a zero the compiler cannot see, for `rounded`.
     emit_segments: u32,
     table_base: u32,
     jump_levels: u32,
@@ -101,7 +101,7 @@ fn emit_zero() -> u32 {
 
 // The frame's particle `r` (0 the oldest) into `slot`.
 fn write_record(slot: u32, r: u32, born: u32) {
-    let jump_words = frame.jump_levels * JUMP_TABLE_WORDS;
+    let jump_words = frame.jump_levels * DIGIT_TABLES * JUMP_TABLE_WORDS;
     let p = emitted(r, frame.emit_segments, frame.table_base, frame.jump_levels, frame.table_base + jump_words);
     pos_life[slot] = vec4<f32>(p.position, p.remaining);
     vel[slot] = vec4<f32>(p.velocity, p.lifetime);

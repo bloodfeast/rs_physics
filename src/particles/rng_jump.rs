@@ -11,8 +11,10 @@
 //!
 //! - `M^(2^b)` for `b` in `0..32`, behind [`EffectRng::jump`](crate::particles::EffectRng::jump),
 //!   for any distance (the period is `2^32 - 1`, so a distance is reduced by it first).
-//! - `M^(5 * 2^b)`, the emission stride ([`Burst::DRAWS_PER_PARTICLE`](crate::particles::Burst::DRAWS_PER_PARTICLE)),
-//!   for the GPU pool: particle `i` of a burst starts `5 i` draws in.
+//! - `M^(5 d 16^k)` for each hex digit `d` in `1..16` of position `k`, the emission
+//!   stride ([`Burst::DRAWS_PER_PARTICLE`](crate::particles::Burst::DRAWS_PER_PARTICLE))
+//!   times every digit value, for the GPU pool: particle `i` of a burst starts `5 i`
+//!   draws in, reached with one table per non-zero hex digit of `i`.
 
 use std::sync::OnceLock;
 
@@ -121,16 +123,31 @@ pub(crate) fn jump(mut x: u32, steps: u64) -> u32 {
     x
 }
 
-/// `M^(stride * 2^b)` for `b` in `0..levels`, byte-sliced and laid end to end
-/// (`1024 * levels` words): the GPU pool's jump tables, so a thread reaches particle
-/// `i`'s first draw with one table per set bit of `i`.
-pub(crate) fn stride_tables(stride: u32, levels: usize) -> Vec<u32> {
+/// Tables per hex digit position: one for each non-zero digit value.
+pub(crate) const DIGIT_TABLES: usize = 15;
+
+/// `M^(stride * d * 16^k)` for `k` in `0..digits` and `d` in `1..16`, byte-sliced and laid
+/// end to end, table `15 k + d - 1` at word `1024 (15 k + d - 1)`: the GPU pool's jump
+/// tables. A thread reaches particle `i`'s first draw with one table per non-zero hex
+/// digit of `i` (4 at most below 65,536), a chain a quarter as long as one table per set
+/// bit, for 15 times the tables (60 KB a digit).
+pub(crate) fn stride_tables(stride: u32, digits: usize) -> Vec<u32> {
     let one = step_matrix();
-    let mut m = one;
+    let mut base = one;
     for _ in 1..stride {
-        m = compose(&one, &m);
+        base = compose(&one, &base);
     }
-    powers(m, levels).into_iter().flatten().collect()
+    let mut out = Vec::with_capacity(digits * DIGIT_TABLES * 1024);
+    for _ in 0..digits {
+        let mut m = base;
+        for _ in 0..DIGIT_TABLES {
+            out.extend_from_slice(&byte_table(&m));
+            m = compose(&base, &m);
+        }
+        // base^16: the next digit's unit.
+        base = m;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -179,15 +196,19 @@ mod tests {
     /// The stride tables reach particle `i`'s first draw: `5 i` steps.
     #[test]
     fn the_stride_tables_step_five_per_particle() {
-        let levels = 21;
-        let t = stride_tables(5, levels);
-        assert_eq!(t.len(), 1024 * levels);
+        let digits = 6;
+        let t = stride_tables(5, digits);
+        assert_eq!(t.len(), 1024 * DIGIT_TABLES * digits);
         let seed = 0xC0FFEE;
-        for i in [0u32, 1, 2, 3, 63, 64, 65, 1000, 65_535, 1_000_000, (1 << 21) - 1] {
+        let mut indices: Vec<u32> = (0..40).collect();
+        indices.extend([63, 64, 65, 255, 256, 1000, 4095, 4096, 65_535, 1_000_000, (1 << 24) - 1]);
+        for i in indices {
             let mut x = seed;
-            for b in 0..levels {
-                if (i >> b) & 1 == 1 {
-                    let table: &ByteTable = t[1024 * b..1024 * (b + 1)].try_into().unwrap();
+            for k in 0..digits {
+                let d = ((i >> (4 * k)) & 15) as usize;
+                if d != 0 {
+                    let at = 1024 * (DIGIT_TABLES * k + d - 1);
+                    let table: &ByteTable = t[at..at + 1024].try_into().unwrap();
                     x = apply_bytes(table, x);
                 }
             }

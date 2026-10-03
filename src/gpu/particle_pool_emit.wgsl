@@ -28,6 +28,8 @@
 
 // One byte-sliced 32x32 GF(2) matrix: four tables of 256 images.
 const JUMP_TABLE_WORDS: u32 = 1024u;
+// Jump tables per hex digit position: digits 1 to 15.
+const DIGIT_TABLES: u32 = 15u;
 // round(2^24 sin), 2^12 intervals of a quarter turn, the end knot twice.
 const SINE_WORDS: u32 = 4098u;
 const QUARTER_BITS: u32 = 22u;
@@ -56,16 +58,18 @@ fn xorshift(x0: u32) -> u32 {
     return x;
 }
 
-// `state` advanced `5 i` draws: the product of the stride tables (M^(5 2^b), byte-sliced
-// at `tables`) for the set bits of `i`.
-fn jump_stride(state: u32, i: u32, tables: u32, levels: u32) -> u32 {
+// `state` advanced `5 i` draws: the product of the stride tables (M^(5 d 16^k),
+// byte-sliced at `tables`, `digits` positions of 15) for the non-zero hex digits of `i`.
+fn jump_stride(state: u32, i: u32, tables: u32, digits: u32) -> u32 {
     var x = state;
-    for (var b = 0u; b < levels; b = b + 1u) {
-        if ((i >> b) == 0u) {
+    for (var k = 0u; k < digits; k = k + 1u) {
+        let rest = i >> (4u * k);
+        if (rest == 0u) {
             break;
         }
-        if (((i >> b) & 1u) == 1u) {
-            let t = tables + b * JUMP_TABLE_WORDS;
+        let d = rest & 15u;
+        if (d != 0u) {
+            let t = tables + (k * DIGIT_TABLES + d - 1u) * JUMP_TABLE_WORDS;
             x = records[t + (x & 255u)]
                 ^ records[t + 256u + ((x >> 8u) & 255u)]
                 ^ records[t + 512u + ((x >> 16u) & 255u)]
