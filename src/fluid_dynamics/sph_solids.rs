@@ -921,7 +921,9 @@ impl<'a> Contact<'a> {
     /// the surface loses its approaching normal part to `restitution` and its tangential
     /// part to the ground's friction decay, and then takes the surface's velocity.
     ///
-    /// Returns whether a solid moved the particle.
+    /// Returns, if a solid moved the particle, that solid's id and the square of the
+    /// particle's speed relative to the surface after the response, which is what its
+    /// stillness on the solid is judged by.
     #[inline]
     pub(super) fn resolve(
         &self,
@@ -929,7 +931,7 @@ impl<'a> Contact<'a> {
         p0: [f64; 3],
         p1: &mut [f64; 3],
         v: &mut [f64; 3],
-    ) -> bool {
+    ) -> Option<(u32, f64)> {
         let d = sub(*p1, p0);
         let len2 = dot(d, d);
         let moving = len2 > 0.0;
@@ -951,8 +953,7 @@ impl<'a> Contact<'a> {
                 box_inside(&self.solids.boxes[k - caps], p0)
             };
             if let Some(hit) = inside {
-                self.respond(hit, p1, v);
-                return true;
+                return Some((id, self.respond(hit, p1, v)));
             }
             if !moving {
                 continue;
@@ -968,7 +969,7 @@ impl<'a> Contact<'a> {
             }
         }
         if best_id == u32::MAX {
-            return false;
+            return None;
         }
         let q = add(p0, scale(rd, best));
         let k = best_id as usize;
@@ -977,13 +978,13 @@ impl<'a> Contact<'a> {
         } else {
             box_surface(&self.solids.boxes[k - caps], q)
         };
-        self.respond(hit, p1, v);
-        true
+        Some((best_id, self.respond(hit, p1, v)))
     }
 
     /// Set the particle on the surface, a contact radius out, and apply the response.
+    /// Returns the square of its speed relative to the surface after it.
     #[inline]
-    fn respond(&self, hit: Hit, p: &mut [f64; 3], v: &mut [f64; 3]) {
+    fn respond(&self, hit: Hit, p: &mut [f64; 3], v: &mut [f64; 3]) -> f64 {
         *p = add(hit.point, scale(hit.normal, self.contact_radius));
         let n = hit.normal;
         let rel = sub(*v, hit.velocity);
@@ -992,10 +993,9 @@ impl<'a> Contact<'a> {
         // Only an approaching particle bounces: one already leaving the surface faster
         // than it would keep its normal speed, or it would be sent back into the solid.
         let normal = if vn < 0.0 { -vn * self.restitution } else { vn };
-        *v = add(
-            hit.velocity,
-            add(scale(tangential, self.friction_keep), scale(n, normal)),
-        );
+        let kept = add(scale(tangential, self.friction_keep), scale(n, normal));
+        *v = add(hit.velocity, kept);
+        dot(kept, kept)
     }
 }
 

@@ -740,3 +740,247 @@ fn binning_crossover() {
         }
     }
 }
+
+/// Steps `f` for up to `steps` substeps, refilling `solids` before each with `fill(step)`,
+/// draining after each, and returns every drop drained with the step it settled on.
+fn settle_run(
+    f: &mut SphFluid,
+    steps: usize,
+    ground: fn(f64, f64) -> f64,
+    mut fill: impl FnMut(usize, &mut SphSolids),
+) -> Vec<(usize, Settled)> {
+    let mut solids = SphSolids::new();
+    let mut out = Vec::new();
+    for s in 0..steps {
+        solids.clear();
+        fill(s, &mut solids);
+        f.step_with_solids(DT, 9.81, ground, &solids);
+        f.drain_settled(|d| out.push((s, d)));
+    }
+    out
+}
+
+/// A crate sitting on the ground, with a far limb pushed before it so the crate is solid
+/// 1 (capsules come first).
+fn far_limb_and_crate(solids: &mut SphSolids) {
+    solids.push_capsule([5.0, 0.0, 5.0], [5.0, 1.0, 5.0], 0.06, [0.0; 3], [0.0; 3]);
+    solids.push_box([0.0, 0.25, 0.0], [0.25; 3], 0.3, [0.0; 3]);
+}
+
+/// A drop that lands on a resting crate settles on its lid, a contact radius up, with the
+/// crate's index, once it has been still on it for `SETTLE_TIME`.
+#[test]
+fn a_drop_landing_on_a_static_box_settles_with_its_index() {
+    let mut f = SphFluid::new(SphParams::blood(), 4).unwrap();
+    f.spawn([0.05, 0.8, -0.05], [0.0; 3]);
+    let settled = settle_run(&mut f, 480, flat, |_, s| far_limb_and_crate(s));
+    assert_eq!(settled.len(), 1, "drained {settled:?}");
+    let (step, d) = settled[0];
+    assert_eq!(d.on_solid, Some(1), "settled on {:?}", d.on_solid);
+    let lid = 0.5 + f.contact_radius();
+    assert!(
+        (d.position[1] - lid).abs() <= 9.81 * DT * DT,
+        "settled at y = {} against a lid at {lid}",
+        d.position[1]
+    );
+    // Falling 0.3 m takes 0.247 s, and then it must be still for SETTLE_TIME.
+    let fall = (2.0f64 * 0.3 / 9.81).sqrt();
+    let t = (step + 1) as f64 * DT;
+    assert!(
+        t >= fall + SETTLE_TIME && t <= fall + SETTLE_TIME + 0.1,
+        "settled at {t:.3} s; it lands at {fall:.3} s"
+    );
+}
+
+/// A drop that lands on a capsule moving at 1 m/s along its axis rides it, and settles
+/// with the capsule's index once it has been still relative to the capsule for
+/// `SETTLE_TIME`; its reported velocity is the surface's, to within the one substep of
+/// gravity (`g dt`) a resting contact leaves it.
+///
+/// Open: the contact casts the particle's world displacement against the solid at its
+/// new pose, so a drop carried along by a moving surface casts a ray nearly parallel to
+/// it, which meets the surface only once the drop has sunk the whole contact radius. It
+/// rides in a cycle (at 1 m/s, nine substeps of free fall relative to the hull and a
+/// bump of 6.6 mm), meets the hull one substep in ten, and is never still on it for
+/// `SETTLE_TIME`. Any tangential surface speed above about `g dt` (0.04 m/s at 240 Hz)
+/// does the same; a rising surface catches the drop only by pushing it out. Casting the
+/// displacement relative to the surface's velocity fixes it and changes the results of
+/// every moving solid, so it waits on a ruling.
+#[test]
+#[ignore = "known defect, not fixed in this change: the swept contact is cast in the world frame, so a drop riding a moving solid meets it one substep in ten and never settles on it"]
+fn a_drop_riding_a_moving_capsule_settles_with_its_index_and_the_surface_velocity() {
+    let mut f = SphFluid::new(SphParams::blood(), 4).unwrap();
+    f.spawn([0.0, 0.8, 0.0], [0.0; 3]);
+    let v = [1.0, 0.0, 0.0];
+    let settled = settle_run(&mut f, 720, far_below, |s, solids| {
+        let x = (s + 1) as f64 * DT;
+        solids.push_capsule([x - 1.0, 0.5, 0.0], [x + 2.0, 0.5, 0.0], 0.1, v, v);
+    });
+    assert_eq!(settled.len(), 1, "drained {settled:?}");
+    let (step, d) = settled[0];
+    assert_eq!(d.on_solid, Some(0));
+    let rel = sub(d.velocity, v);
+    assert!(
+        dot(rel, rel).sqrt() <= 9.81 * DT,
+        "settled at {:?} on a surface at {v:?}",
+        d.velocity
+    );
+    // On the capsule's top, a contact radius up, and carried along with it.
+    assert!((d.position[1] - (0.6 + f.contact_radius())).abs() <= 9.81 * DT * DT);
+    let x = (step + 1) as f64 * DT;
+    assert!(d.position[0] > x - 1.0 && d.position[0] < x + 2.0);
+    assert!(
+        d.position[0] > 0.3,
+        "it did not ride: settled at x = {}",
+        d.position[0]
+    );
+}
+
+/// A drop that comes to rest on the ground reports no solid, whether stepped plainly or
+/// with solids in reach of other particles.
+#[test]
+fn a_drop_settled_on_the_ground_reports_no_solid() {
+    let mut plain = SphFluid::new(SphParams::blood(), 4).unwrap();
+    plain.spawn([1.0, 0.3, 1.0], [0.0; 3]);
+    let mut drained = Vec::new();
+    for _ in 0..240 {
+        plain.step(DT, 9.81, flat);
+        plain.drain_settled(|d| drained.push(d));
+    }
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].on_solid, None);
+
+    let mut f = SphFluid::new(SphParams::blood(), 4).unwrap();
+    f.spawn([1.0, 0.3, 1.0], [0.0; 3]);
+    f.spawn([0.0, 0.8, 0.0], [0.0; 3]);
+    let settled = settle_run(&mut f, 480, flat, |_, s| far_limb_and_crate(s));
+    let on: Vec<Option<u32>> = settled.iter().map(|(_, d)| d.on_solid).collect();
+    assert_eq!(settled.len(), 2, "drained {settled:?}");
+    let ground = settled.iter().find(|(_, d)| d.position[1] < 0.1).unwrap();
+    assert_eq!(ground.1.on_solid, None, "{on:?}");
+    assert!(on.contains(&Some(1)), "{on:?}");
+}
+
+/// The index a resting drop reports is the one its solid has in the set handed to each
+/// step, however the bins under it change: rain falling around the crate, a limb
+/// sweeping across it and a solid added mid-rest change which buckets are binned
+/// from step to step, and the crate, refilled in the same place in the order, is the one
+/// named. Moved to another index mid-rest, the drop counts its stillness again and
+/// reports the new one.
+#[test]
+fn a_resting_drops_solid_index_survives_the_bins_being_rebuilt() {
+    let run = |reindex_at: Option<usize>| {
+        let mut f = SphFluid::new(SphParams::blood(), 1024).unwrap();
+        f.spawn([0.0, 0.8, 0.0], [0.0; 3]);
+        let (mut last, mut changes) = (usize::MAX, 0);
+        let mut solids = SphSolids::new();
+        let mut out = Vec::new();
+        for s in 0..480 {
+            // Rain around the crate, never on it, through the limb's path.
+            let a = s as f64 * 2.399;
+            let r = 0.4 + 0.3 * ((s * 7) % 11) as f64 / 11.0;
+            f.spawn([r * a.cos(), 0.5, r * a.sin()], [0.0, -1.0, 0.0]);
+            solids.clear();
+            if reindex_at.is_some_and(|r| s >= r) {
+                // Two more limbs from here on: capsules come first, so the crate goes from
+                // solid 1 to solid 3.
+                solids.push_capsule([3.0, 0.0, 3.0], [3.0, 1.0, 3.0], 0.06, [0.0; 3], [0.0; 3]);
+                solids.push_capsule([4.0, 0.0, 3.0], [4.0, 1.0, 3.0], 0.06, [0.0; 3], [0.0; 3]);
+            }
+            // A limb sweeping across the field and over the crate's edge.
+            let x = -0.8 + 1.6 * (s as f64 / 480.0);
+            solids.push_capsule(
+                [x, 0.0, 0.3],
+                [x, 0.7, 0.3],
+                0.05,
+                [0.8, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+            );
+            solids.push_box([0.0, 0.25, 0.0], [0.25; 3], 0.0, [0.0; 3]);
+            if s >= 100 {
+                // A crate dropped beside it: a box after this one, so its index stays.
+                solids.push_box([0.6, 0.2, -0.5], [0.1; 3], 0.5, [0.0; 3]);
+            }
+            f.step_with_solids(DT, 9.81, flat, &solids);
+            let entries = f.solid_stats().bin_entries;
+            changes += (entries != last) as usize;
+            last = entries;
+            // The drop on the crate's lid; the rain settles elsewhere.
+            f.drain_settled(|d| {
+                let p = d.position;
+                if p[1] > 0.4 && p[0].abs() < 0.3 && p[2].abs() < 0.3 {
+                    out.push((s, d));
+                }
+            });
+        }
+        assert!(changes > 20, "the bins changed on only {changes} steps");
+        out
+    };
+
+    let steady = run(None);
+    assert_eq!(steady.len(), 1, "{steady:?}");
+    assert_eq!(steady[0].1.on_solid, Some(1));
+
+    // Reindexed after it has rested a while but before it settles.
+    let (settle, _) = steady[0];
+    let at = settle - 20;
+    let moved = run(Some(at));
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0].1.on_solid, Some(3));
+    let restart = (SETTLE_TIME / DT).round() as usize;
+    assert!(
+        moved[0].0 + 1 >= at + restart,
+        "settled {} steps after the reindex, under SETTLE_TIME",
+        moved[0].0 - at
+    );
+}
+
+/// Drops raining onto crates, a moving hull and the ground settle in the same places,
+/// with the same velocities and on the same solids, at 1, 4 and 8 threads.
+#[test]
+fn settling_on_solids_is_bit_identical_at_any_thread_count() {
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut f = SphFluid::new(SphParams::blood(), 2048).unwrap();
+            for k in 0..1500usize {
+                let (i, j) = (k % 50, k / 50);
+                f.spawn(
+                    [
+                        -1.0 + 0.04 * i as f64,
+                        0.9 + 0.02 * (k % 7) as f64,
+                        -0.6 + 0.04 * j as f64,
+                    ],
+                    [0.1 * (k % 3) as f64, 0.0, -0.1 * (k % 5) as f64],
+                );
+            }
+            let settled = settle_run(&mut f, 360, flat, |s, solids| {
+                let x = -0.5 + (s + 1) as f64 * DT;
+                let v = [1.0, 0.0, 0.0];
+                solids.push_capsule([x, 0.35, -0.3], [x + 0.8, 0.35, 0.3], 0.2, v, v);
+                solids.push_box([-0.6, 0.2, 0.2], [0.2; 3], 0.4, [0.0; 3]);
+                solids.push_box([0.6, 0.15, -0.3], [0.3, 0.15, 0.2], -0.2, [0.0; 3]);
+            });
+            let mut on = [0usize; 4];
+            let mut bits = Vec::new();
+            for (s, d) in &settled {
+                on[d.on_solid.map_or(3, |i| i as usize)] += 1;
+                bits.push(*s as u64);
+                bits.extend(d.position.iter().chain(&d.velocity).map(|c| c.to_bits()));
+                bits.push(d.on_solid.map_or(u64::MAX, u64::from));
+            }
+            (bits, on)
+        })
+    };
+    let (one, on) = run(1);
+    assert!(
+        on[3] > 100 && on[0] + on[1] + on[2] > 20 && on[1] > 0 && on[2] > 0,
+        "settled on hull, crate, crate, ground: {on:?}"
+    );
+    for t in [4, 8] {
+        assert!(run(t).0 == one, "{t} threads settled differently from one");
+    }
+}

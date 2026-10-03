@@ -129,6 +129,17 @@
 //! ceiling cannot pass through a box one spacing thick or a blade. One contact a
 //! substep: a particle pushed from one solid into another meets the second next substep.
 //!
+//! **Settling.** A particle a solid's contact set on its surface, moving slower than
+//! the ground's settle speed relative to that surface (`SETTLE_SPEED`, the ground's own
+//! test seen from the surface's frame), is still on that solid; held for `SETTLE_TIME`
+//! on the same surface, it is drained by [`SphFluid::drain_settled`] with
+//! [`Settled::on_solid`] naming the solid's index in the set (capsules first, then
+//! boxes, so a set refilled in the same order keeps its indices). The ground, which runs
+//! after the solids, wins a particle that touched both, and a particle that comes to rest
+//! on another surface counts again. One known gap: the contact casts the particle's world
+//! displacement, so a drop carried along a moving surface meets it only every few
+//! substeps and does not settle on it (pinned by an ignored test in the solids tests).
+//!
 //! **The slope.** With solids the ground has a normal too: a particle in ground contact
 //! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
 //! only in contact, so a particle in flight pays nothing) and meets the ground along
@@ -378,7 +389,20 @@ pub struct Settled {
     /// landing straight down makes a round mark; one still carrying sideways speed
     /// smears along its travel. Without this the caller can only draw circles, which
     /// is exactly what a splash does not look like.
+    ///
+    /// World velocity, m/s. A drop that settled on a moving solid reports about the
+    /// solid's surface velocity where it rests (it was still relative to that surface,
+    /// not to the ground); subtract the surface's own velocity for the drop's motion
+    /// across it.
     pub velocity: [f64; 3],
+    /// What it came to rest on: the index of a solid in the [`SphSolids`] handed to the
+    /// last [`SphFluid::step_with_solids`] (capsules first, then boxes, in the order they
+    /// were pushed), or `None` for the ground.
+    ///
+    /// A drop on a hull, a corpse or a limb is still when its velocity relative to that
+    /// solid's surface is, so it settles riding a moving hull; the caller can parent its
+    /// stain to whatever that index named this frame. Added in 0.3.5.
+    pub on_solid: Option<u32>,
 }
 
 /// Wall time of each phase of the last [`SphFluid::step`], read with
@@ -485,6 +509,10 @@ pub struct SphFluid {
     /// once it has been still for a moment, so a drip that is briefly slow at the
     /// apex of a bounce is not mistaken for one that has stopped.
     still_for: Vec<f64>,
+    /// The surface each particle's `still_for` is counted against: the index of a solid
+    /// in the last step's [`SphSolids`], or [`NO_SOLID`] for the ground. A particle that
+    /// comes to rest on another surface starts its count again.
+    rest_on: Vec<u32>,
 
     params: SphParams,
     capacity: usize,
@@ -534,12 +562,32 @@ pub struct SphFluid {
     /// no memory, until the first step with solids.
     solid_bins: solids::SolidBins,
     solid_stats: SphSolidStats,
+    /// Per particle, in particle order, written by the move with solids: the solid whose
+    /// contact set it on its surface this substep, slower relative to that surface than
+    /// [`SETTLE_SPEED`], or [`NO_SOLID`]. Read by the ground pass.
+    still_on_solid: Vec<u32>,
 }
 
 /// Below this speed, and touching ground, a particle is considered to have landed.
+///
+/// On a solid the same number is applied to the particle's velocity relative to the
+/// surface it was set on (the contact's surface velocity at that point), not to its world
+/// velocity. That is the ground's own test seen from the surface: the ground is a surface
+/// at rest, and a speed relative to it is a world speed, so the ground's threshold moved
+/// into a moving surface's frame is this one, unchanged, and a drop riding a hull at
+/// 1 m/s is as still as one on the ground. What it admits is the same in both frames:
+/// held for [`SETTLE_TIME`], at most `SETTLE_SPEED * SETTLE_TIME` = 8.75 cm of creep
+/// across the surface, and a drop at rest on a solid sits far below it, since each
+/// substep's gravity, `g dt` (0.041 m/s at 240 Hz), is all the response leaves it after
+/// keeping `restitution` of the approach. A bounce that leaves it faster than this
+/// relative to the surface starts the count again, as a bounce on the ground does.
 const SETTLE_SPEED: f64 = 0.35;
 /// ...and it must stay that way for this long before it is retired.
 const SETTLE_TIME: f64 = 0.25;
+
+/// `rest_on` and `still_on_solid`: no solid, the ground. Solid indices stop short of it,
+/// since [`SphSolids`] holds fewer than `u32::MAX` solids.
+const NO_SOLID: u32 = u32::MAX;
 
 /// Buckets for `n` particles: about two a particle keeps collisions rare, and a power
 /// of two reduces the hash with a mask.
@@ -643,6 +691,7 @@ impl SphFluid {
             vz: f(),
             density: f(),
             still_for: f(),
+            rest_on: Vec::with_capacity(capacity),
             params,
             capacity,
             cell_x: c(),
@@ -673,6 +722,7 @@ impl SphFluid {
             times: SphPhaseTimes::default(),
             solid_bins: solids::SolidBins::default(),
             solid_stats: SphSolidStats::default(),
+            still_on_solid: Vec::with_capacity(capacity),
         })
     }
 
@@ -775,6 +825,7 @@ impl SphFluid {
         ] {
             v.clear();
         }
+        self.rest_on.clear();
     }
 
     /// Position of particle `i`, metres, as of the last completed substep.
@@ -1075,6 +1126,7 @@ impl SphFluid {
         self.vz.push(velocity[2]);
         self.density.push(self.params.rest_density);
         self.still_for.push(0.0);
+        self.rest_on.push(NO_SOLID);
         true
     }
 
@@ -1541,6 +1593,9 @@ impl SphFluid {
                 restitution,
                 friction_keep,
             );
+            let n = self.px.len();
+            self.still_on_solid.clear();
+            self.still_on_solid.resize(n, NO_SOLID);
             let counts = (
                 self.vx.par_chunks_mut(STREAM_CHUNK),
                 self.vy.par_chunks_mut(STREAM_CHUNK),
@@ -1550,9 +1605,10 @@ impl SphFluid {
                 self.pz.par_chunks_mut(STREAM_CHUNK),
                 self.slot_of.par_chunks(STREAM_CHUNK),
                 self.bucket_of.par_chunks(STREAM_CHUNK),
+                self.still_on_solid.par_chunks_mut(STREAM_CHUNK),
             )
                 .into_par_iter()
-                .map(|(vx, vy, vz, px, py, pz, slots, buckets)| {
+                .map(|(vx, vy, vz, px, py, pz, slots, buckets, still)| {
                     let (mut tested, mut moved) = (0usize, 0usize);
                     for i in 0..slots.len() {
                         let k = slots[i] as usize;
@@ -1575,7 +1631,13 @@ impl SphFluid {
                         let ids = contact.binned(buckets[i]);
                         if !ids.is_empty() {
                             tested += 1;
-                            moved += contact.resolve(ids, p0, &mut p, &mut v) as usize;
+                            if let Some((id, rel_sq)) = contact.resolve(ids, p0, &mut p, &mut v)
+                            {
+                                moved += 1;
+                                if rel_sq < SETTLE_SPEED * SETTLE_SPEED {
+                                    still[i] = id;
+                                }
+                            }
                         }
                         vx[i] = v[0];
                         vy[i] = v[1];
@@ -1587,7 +1649,7 @@ impl SphFluid {
                     (tested, moved)
                 })
                 .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-            self.ground(dt, ground_height, true, restitution, friction_keep);
+            self.ground(dt, ground_height, true, true, restitution, friction_keep);
             return counts;
         }
 
@@ -1620,7 +1682,7 @@ impl SphFluid {
                 }
             });
         let slope = solids.is_some();
-        self.ground(dt, ground_height, slope, restitution, friction_keep);
+        self.ground(dt, ground_height, slope, false, restitution, friction_keep);
         (0, 0)
     }
 
@@ -1639,11 +1701,18 @@ impl SphFluid {
     /// particle not in contact samples nothing extra, and where both differences are
     /// exactly zero the level response below runs unchanged, so level ground is
     /// bit-identical either way.
+    ///
+    /// Then each particle's stillness: on the ground, below [`SETTLE_SPEED`]; otherwise,
+    /// with `solids` (the move with solids ran), set on a solid this substep and below it
+    /// relative to that solid's surface (`still_on_solid`). The ground, which runs last,
+    /// wins a particle that touched both. A particle still on a different surface from
+    /// the one it was counting against starts its count again.
     fn ground<F>(
         &mut self,
         dt: f64,
         ground_height: &F,
         slope: bool,
+        solids: bool,
         restitution: f64,
         friction_keep: f64,
     ) where
@@ -1685,10 +1754,22 @@ impl SphFluid {
             }
 
             let speed_sq = self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i] + self.vz[i] * self.vz[i];
-            if on_ground && speed_sq < SETTLE_SPEED * SETTLE_SPEED {
-                self.still_for[i] += dt;
+            let still_on = if on_ground {
+                (speed_sq < SETTLE_SPEED * SETTLE_SPEED).then_some(NO_SOLID)
+            } else if solids && self.still_on_solid[i] != NO_SOLID {
+                Some(self.still_on_solid[i])
             } else {
-                self.still_for[i] = 0.0;
+                None
+            };
+            match still_on {
+                Some(surface) => {
+                    if self.rest_on[i] != surface {
+                        self.rest_on[i] = surface;
+                        self.still_for[i] = 0.0;
+                    }
+                    self.still_for[i] += dt;
+                }
+                None => self.still_for[i] = 0.0,
             }
 
             debug_assert!(
@@ -1731,10 +1812,12 @@ impl SphFluid {
             if self.still_for[i] < SETTLE_TIME {
                 continue;
             }
+            let on = self.rest_on[i];
             on_settled(Settled {
                 position: self.position(i),
                 mass,
                 velocity: self.velocity(i),
+                on_solid: (on != NO_SOLID).then_some(on),
             });
 
             // The previous positions are removed with the rest, which is the whole
@@ -1754,6 +1837,7 @@ impl SphFluid {
             ] {
                 v.swap_remove(i);
             }
+            self.rest_on.swap_remove(i);
         }
     }
 }
