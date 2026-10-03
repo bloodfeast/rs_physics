@@ -85,17 +85,29 @@ impl Live {
     }
 
     fn feed(&mut self) {
-        let Live { fx, rng, owed, rate } = self;
+        let Live {
+            fx,
+            rng,
+            owed,
+            rate,
+        } = self;
         Self::emit_owed(owed, *rate, rng, |burst, rng| fx.emit(burst, rng));
     }
 
     /// This pool's emission for one frame, into a GPU pool instead of its own.
     #[cfg(feature = "gpu")]
     fn feed_into(&mut self, pool: &mut rs_physics::gpu::GpuParticlePool) {
-        Self::emit_owed(&mut self.owed, self.rate, &mut self.rng, |burst, rng| pool.emit(burst, rng));
+        Self::emit_owed(&mut self.owed, self.rate, &mut self.rng, |burst, rng| {
+            pool.emit(burst, rng)
+        });
     }
 
-    fn emit_owed(owed: &mut [f32; 2], rate: [f32; 2], rng: &mut EffectRng, mut emit: impl FnMut(&Burst, &mut EffectRng)) {
+    fn emit_owed(
+        owed: &mut [f32; 2],
+        rate: [f32; 2],
+        rng: &mut EffectRng,
+        mut emit: impl FnMut(&Burst, &mut EffectRng),
+    ) {
         for c in 0..2 {
             owed[c] += rate[c] * DT;
             let whole = owed[c].floor();
@@ -302,7 +314,11 @@ fn gpu_pool(c: &mut Criterion) {
         eprintln!("gpu_pool: no adapter, skipped");
         return;
     };
-    if !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+    if !gpu
+        .device
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
         eprintln!("gpu_pool: no timestamp queries, skipped");
         return;
     }
@@ -341,7 +357,11 @@ fn gpu_pool(c: &mut Criterion) {
         }
         let mut field = swirl_field();
         let mut frame = 0usize;
-        let mut run = |frames: usize, timed: bool, pool: &mut GpuParticlePool, feed: &mut Live| -> (Duration, Duration) {
+        let mut run = |frames: usize,
+                       timed: bool,
+                       pool: &mut GpuParticlePool,
+                       feed: &mut Live|
+         -> (Duration, Duration) {
             let mut host = Duration::ZERO;
             let mut device_ns = 0.0f64;
             let mut done = 0;
@@ -360,7 +380,12 @@ fn gpu_pool(c: &mut Criterion) {
                     pool.encode_timed(
                         &mut encoder,
                         DT,
-                        timed.then_some(PoolTimestamps { query_set: &queries, field: None, emit: Some(base), integrate: Some(base + 2) }),
+                        timed.then_some(PoolTimestamps {
+                            query_set: &queries,
+                            field: None,
+                            emit: Some(base),
+                            integrate: Some(base + 2),
+                        }),
                     );
                     host += started.elapsed();
                     gpu.queue.submit([encoder.finish()]);
@@ -372,19 +397,26 @@ fn gpu_pool(c: &mut Criterion) {
                     gpu.queue.submit([encoder.finish()]);
                     let slice = read.slice(..);
                     slice.map_async(wgpu::MapMode::Read, |_| {});
-                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    gpu.device
+                        .poll(wgpu::PollType::wait_indefinitely())
+                        .unwrap();
                     {
                         let view = slice.get_mapped_range().unwrap();
                         let ticks: &[u64] = bytemuck::cast_slice(&view);
                         for f in 0..chunk {
                             for pass in [0, 2] {
-                                device_ns += ticks[4 * f + pass + 1].wrapping_sub(ticks[4 * f + pass]) as f64 * period;
+                                device_ns += ticks[4 * f + pass + 1]
+                                    .wrapping_sub(ticks[4 * f + pass])
+                                    as f64
+                                    * period;
                             }
                         }
                     }
                     read.unmap();
                 } else {
-                    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    gpu.device
+                        .poll(wgpu::PollType::wait_indefinitely())
+                        .unwrap();
                 }
                 done += chunk;
             }
@@ -405,7 +437,14 @@ fn gpu_pool(c: &mut Criterion) {
 }
 
 #[cfg(all(feature = "fluid_simulation", feature = "gpu"))]
-criterion_group!(benches, integrate, collide, air, air_with_plume_worker, gpu_pool);
+criterion_group!(
+    benches,
+    integrate,
+    collide,
+    air,
+    air_with_plume_worker,
+    gpu_pool
+);
 #[cfg(all(feature = "fluid_simulation", not(feature = "gpu")))]
 criterion_group!(benches, integrate, collide, air, air_with_plume_worker);
 #[cfg(all(not(feature = "fluid_simulation"), feature = "gpu"))]
