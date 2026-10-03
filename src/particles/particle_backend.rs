@@ -92,11 +92,21 @@ pub enum GpuResidency {
 /// times too early.
 const CPU_SEED_NS: f32 = 3.0;
 
-/// Fixed cost of getting onto and off the GPU: launch, plus a synchronise.
-const GPU_SEED_FIXED_NS: f32 = 60_000.0;
+/// Fixed cost of a frame on the GPU: the launches, and for a round trip a synchronise.
+///
+/// 10,000 is the resident pool's (`gpu::GpuParticlePool`): its emit and integrate passes
+/// on a near-empty pool, 9.7 us of device time a frame by timestamp queries
+/// (`examples/pool_gpu_bench.rs`, 2026-10-03, RTX 3090, beside another build). It was
+/// 60,000, a launch plus a synchronise, before a resident backend existed; a resident
+/// pool never synchronises on the frame path.
+const GPU_SEED_FIXED_NS: f32 = 10_000.0;
 
 /// Per-particle kernel cost once the data is already on the device.
-const GPU_SEED_NS: f32 = 0.4;
+///
+/// 0.1 is the resident pool's integrate on the live sparks-and-dust pool with the air
+/// at 20 Hz: 0.104 ns at 100k and 0.092 ns at 1M, the 1M figure at the card's memory
+/// bandwidth (72 bytes a particle). It was 0.4, an estimate.
+const GPU_SEED_NS: f32 = 0.1;
 
 /// Per-particle cost of moving a particle across PCIe and back. Ten `f32` fields
 /// each way over a bus an order of magnitude slower than device memory.
@@ -343,8 +353,9 @@ mod tests {
     /// population, because the crossover *moves* — that is the entire point of the
     /// design. An earlier version of this test hardcoded 10,000 and failed, and it
     /// was the test that was wrong: the seeded costs decide where the crossover sits
-    /// (about 23,000 for a resident pool since the CPU seed was re-measured, near
-    /// 4,000 before), and the test must follow them.
+    /// (about 3,400 for a resident pool since the GPU seeds were measured on the resident
+    /// pool; 23,000 before that, and near 4,000 before the CPU seed was re-measured), and
+    /// the test must follow them.
     #[test]
     fn populations_either_side_of_the_crossover_go_the_right_way() {
         let mut p = ready();
@@ -354,7 +365,7 @@ mod tests {
         assert_eq!(p.choose(crossover * 8), Backend::Gpu);
     }
 
-    /// A launch costs tens of microseconds no matter how little work it does, so
+    /// A frame's launches cost about ten microseconds no matter how little work they do, so
     /// there is always *some* population too small to be worth dispatching.
     #[test]
     fn a_handful_of_particles_is_never_worth_a_launch() {
