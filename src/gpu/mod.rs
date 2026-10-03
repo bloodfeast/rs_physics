@@ -80,4 +80,4 @@ pub use particle_pool::{
     FieldFormat, GpuParticlePool, GpuPoolConfig, GpuPoolCounts, GpuPoolError, GpuSlot,
     GroundHeights, PoolTimestamps, PoolWrite,
 };
-pub use particle_sim::{GpuParticle, GpuParticleSimulation};
+pub use particle_sim::{GpuParticleSimulation, GpuParticle};
