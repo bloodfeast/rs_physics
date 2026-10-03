@@ -12,7 +12,7 @@
 //!   over the same spread field.
 //!
 //! After the timed steps it prints a checksum of every particle's position and velocity
-//! bits and the last step's bin entries, so two builds can be compared for bit identity.
+//! bits, the last step's bin entries and contact tests and the contacts over the run, so two builds can be compared for bit identity.
 //! `sph_solids_binning [steps]`, default 200.
 
 use std::time::Duration;
@@ -119,12 +119,12 @@ fn far_solids() -> SphSolids {
     solids
 }
 
-/// A 4 m hull capsule of radius 0.5 m whose belly clears `y0` by 5 cm, centred on
+/// A 4 m hull capsule of radius 0.5 m whose belly sits at `y0`, centred on
 /// `(cx, cz)`, along x and turned 30 degrees, moving at 1 m/s along its axis.
 fn hull(cx: f64, y0: f64, cz: f64) -> SphSolids {
     let (s, c) = (0.5f64, 0.75f64.sqrt());
     let half = [2.0 * c, 0.0, 2.0 * s];
-    let y = y0 + 0.55;
+    let y = y0 + 0.5;
     let v = [c, 0.0, s];
     let mut solids = SphSolids::with_capacity(1, 0);
     solids.push_capsule(
@@ -207,6 +207,7 @@ fn main() {
     ];
     let mut binning = vec![Vec::with_capacity(steps); 4];
     let mut grid = vec![Vec::with_capacity(steps); 4];
+    let mut contacts = [0usize; 4];
     for _ in 0..steps {
         for k in 0..4 {
             let gravity = if k == 0 { 0.0 } else { 9.81 };
@@ -218,13 +219,14 @@ fn main() {
             let us = |d: Duration| d.as_secs_f64() * 1e6;
             binning[k].push(us(fluids[k].solid_stats().binning));
             grid[k].push(us(fluids[k].phase_times().grid));
+            contacts[k] += fluids[k].solid_stats().contacts;
         }
     }
     for k in 0..4 {
         let st = fluids[k].solid_stats();
         println!(
             "{:<14} n={:>5} solids={:>3}  binning median {:8.2} us  grid {:8.1} us  \
-             entries {:>6} ray-tested {:>6} contacts {:>5}  checksum {:016x}",
+             entries {:>6} ray-tested {:>6} contacts {:>6}  checksum {:016x}",
             names[k],
             fluids[k].len(),
             st.solids,
@@ -232,7 +234,7 @@ fn main() {
             median(&mut grid[k]),
             st.bin_entries,
             st.ray_tested,
-            st.contacts,
+            contacts[k],
             checksum(&fluids[k]),
         );
     }
