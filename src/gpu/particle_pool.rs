@@ -1,70 +1,4 @@
-//! The effect-particle pool resident on the GPU: [`ParticleEffects`] with its integrate
-//! in a compute shader and its particles in device buffers the renderer draws from.
-//!
-//! # Why
-//!
-//! The CPU pool's integrate costs about 3 ns a particle, and moving air costs more: at
-//! a 20 Hz field each particle re-samples a third of its frames, a 10 ns trilinear fetch
-//! each time, which puts [`ParticleEffects::integrate_in_air`] at 2.2 to 2.6 times
-//! [`ParticleEffects::integrate`]. On the GPU the fetch is one texture sample, so every
-//! particle samples the air every frame and the field can update as often as it likes
-//! at no per-particle CPU cost. The particles never come back: the renderer draws from
-//! the same buffers the integrate writes, and readback is confined to debug and test
-//! paths.
-//!
-//! The GPU is for presentation only. Nothing here is lockstep state.
-//!
-//! # A frame
-//!
-//! 1. The host calls [`GpuParticlePool::emit`] / [`GpuParticlePool::emit_one`] as it
-//!    would on the CPU pool. They append to a staging list; nothing touches the device.
-//! 2. When the field has a new frame (10 to 20 times a second), the host calls
-//!    [`GpuParticlePool::upload_field`] from the frame thread: one copy of the cells.
-//! 3. [`GpuParticlePool::encode`] writes one buffer (this frame's constants and every
-//!    staged particle, a single `write_buffer`) and records, into the host's encoder,
-//!    the placement of the new particles into free slots, a one-thread pass that
-//!    settles the counts, and one indirect dispatch of the integrate over the slots in
-//!    use.
-//! 4. The renderer draws from [`GpuParticlePool::positions`] and the others, with the
-//!    instance count from [`GpuParticlePool::draw_args`], and drains the landings.
-//!
-//! # Slots and the free list
-//!
-//! A particle keeps the slot it was placed in until it retires; a slot is live while
-//! its remaining life is above zero. Retired slots go on a free stack (an index buffer
-//! and an atomic count) in the integrate itself, and emission takes slots off its top.
-//! Every slot is either live or on the stack, exactly once. The integrate runs over the
-//! highest slot ever used (the high water), skipping dead slots with one 16-byte read.
-//!
-//! A free list rather than compaction because compaction needs a second copy of every
-//! array (or a prefix sum of several passes) and moves every particle every frame;
-//! the free list touches only the particles born or retired that frame (about 2.4% of
-//! the pool a frame in the live sparks-and-dust workload), and slots that do not move
-//! are what a renderer's per-particle state (a sort key, a trail) can hang off. Its
-//! cost is the dead slots under the high water, which the integrate skips.
-//!
-//! When the pool is full, new particles replace live ones at a rotating cursor, as the
-//! CPU pool replaces its oldest: the newest event is the one drawn whole. Within one
-//! frame's batch the newest particles take the free slots, and an older one whose turn
-//! of the cursor falls on a slot filled that same frame is dropped rather than replace
-//! a newer particle ([`GpuPoolCounts::dropped`]).
-//!
-//! # Memory
-//!
-//! 44 bytes a particle at capacity: position and remaining life (16), velocity and
-//! total lifetime (16), class and size (8), the free stack (4). 44 MB at a million. The
-//! CPU pool's 12-byte air sample has no counterpart, since every particle samples the
-//! field every frame. Fixed costs besides: the frame buffer (512 bytes plus 40 a staged
-//! particle at [`GpuPoolConfig::max_emit_per_frame`]), the landings (24 bytes each), the
-//! field texture (8 bytes a cell in `rgba16float`, 16 in `rgba32float`, plus a 16-byte
-//! staging cell for `rgba16float`). [`GpuParticlePool::bytes`] adds it up.
-//!
-//! # Determinism
-//!
-//! None promised. The order particles take free slots in, and the order landings are
-//! appended in, depend on the device's scheduling; positions differ from the CPU's by
-//! float reordering (the device may fuse a multiply and an add) and, with a filtered
-//! field, by the texture filter's precision. The tests bound both.
+//! The effect-particle pool resident on the GPU; see [`GpuParticlePool`].
 
 #![warn(missing_docs)]
 
@@ -319,7 +253,90 @@ struct AirBinding {
     staging: Option<(wgpu::Buffer, wgpu::BindGroup)>,
 }
 
-/// The effect-particle pool resident on the GPU. See the [module docs](self).
+/// The effect-particle pool resident on the GPU: [`ParticleEffects`] with its integrate
+/// in a compute shader and its particles in device buffers the renderer draws from.
+///
+/// # Why
+///
+/// The CPU pool's integrate costs about 3 ns a particle, and moving air costs more: at
+/// a 20 Hz field each particle re-samples a third of its frames, a 10 ns trilinear fetch
+/// each time, which puts [`ParticleEffects::integrate_in_air`] at 2.2 to 2.6 times
+/// [`ParticleEffects::integrate`]. On the GPU the fetch is one texture sample, so every
+/// particle samples the air every frame and the field can update as often as it likes
+/// at no per-particle CPU cost. The particles never come back: the renderer draws from
+/// the same buffers the integrate writes, and readback is confined to debug and test
+/// paths.
+///
+/// The GPU is for presentation only. Nothing here is lockstep state.
+///
+/// # A frame
+///
+/// 1. The host calls [`GpuParticlePool::emit`] / [`GpuParticlePool::emit_one`] as it
+///    would on the CPU pool. They append to a staging list; nothing touches the device.
+/// 2. When the field has a new frame (10 to 20 times a second), the host calls
+///    [`GpuParticlePool::upload_field`] from the frame thread: one copy of the cells.
+/// 3. [`GpuParticlePool::encode`] writes one buffer (this frame's constants and every
+///    staged particle, a single `write_buffer`) and records, into the host's encoder,
+///    the placement of the new particles into free slots, a one-thread pass that
+///    settles the counts, and one indirect dispatch of the integrate over the slots in
+///    use.
+/// 4. The renderer draws from [`GpuParticlePool::positions`] and the others, with the
+///    instance count from [`GpuParticlePool::draw_args`], and drains the landings.
+///
+/// # Slots and the free list
+///
+/// A particle keeps the slot it was placed in until it retires; a slot is live while
+/// its remaining life is above zero. Retired slots go on a free stack (an index buffer
+/// and an atomic count) in the integrate itself, and emission takes slots off its top.
+/// Every slot is either live or on the stack, exactly once. The integrate runs over the
+/// highest slot ever used (the high water), skipping dead slots with one 16-byte read.
+///
+/// A free list rather than compaction because compaction needs a second copy of every
+/// array (or a prefix sum of several passes) and moves every particle every frame;
+/// the free list touches only the particles born or retired that frame (about 2.4% of
+/// the pool a frame in the live sparks-and-dust workload), and slots that do not move
+/// are what a renderer's per-particle state (a sort key, a trail) can hang off. Its
+/// cost is the dead slots under the high water, which the integrate skips.
+///
+/// When the pool is full, new particles replace live ones at a rotating cursor, as the
+/// CPU pool replaces its oldest: the newest event is the one drawn whole. Within one
+/// frame's batch the newest particles take the free slots, and an older one whose turn
+/// of the cursor falls on a slot filled that same frame is dropped rather than replace
+/// a newer particle ([`GpuPoolCounts::dropped`]).
+///
+/// # Memory
+///
+/// 44 bytes a particle at capacity: position and remaining life (16), velocity and
+/// total lifetime (16), class and size (8), the free stack (4). 44 MB at a million. The
+/// CPU pool's 12-byte air sample has no counterpart, since every particle samples the
+/// field every frame. Fixed costs besides: the frame buffer (512 bytes plus 40 a staged
+/// particle at [`GpuPoolConfig::max_emit_per_frame`]), the landings (24 bytes each), the
+/// field texture (8 bytes a cell in `rgba16float`, 16 in `rgba32float`, plus a 16-byte
+/// staging cell for `rgba16float`). [`GpuParticlePool::bytes`] adds it up.
+///
+/// # Cost
+///
+/// Measured 2026-10-03 on an RTX 3090 (Vulkan, indirect-call validation off as the
+/// engine's release build runs it), beside another build, on the live sparks-and-dust pool
+/// of `benches/particle_effects.rs` with both classes on an `rgba16float` field updated at
+/// 20 Hz (`examples/pool_gpu_bench.rs`, timestamp queries, medians of 7 interleaved
+/// rounds): the integrate pass 4.5 us at 10k, 10.2 us at 100k and 90.8 us at 1M (0.092 ns
+/// a particle, the card's memory bandwidth at 72 bytes a particle); the emit pass 6.9 to
+/// 13.9 us. A frame is 9.7 us plus 0.096 ns a particle of device time, under the CPU's
+/// `integrate` (3 ns a particle) from about 3,300 particles. The field costs the integrate
+/// 4 to 19% over no field; the three [`FieldFormat`]s are within 12% of each other.
+///
+/// On the frame thread the pool costs the emission's random draws (as the CPU pool's
+/// `emit` does), one `write_buffer` a frame and one a field update. wgpu 30 allocates a
+/// fresh staging buffer for every `write_buffer`; beside a compiler that measured 150 to
+/// 260 us a call regardless of size.
+///
+/// # Determinism
+///
+/// None promised. The order particles take free slots in, and the order landings are
+/// appended in, depend on the device's scheduling; positions differ from the CPU's by
+/// float reordering (the device may fuse a multiply and an add) and, with a filtered
+/// field, by the texture filter's precision. The tests bound both.
 ///
 /// # Examples
 ///
@@ -920,7 +937,7 @@ impl GpuParticlePool {
     /// [`BackendPolicy::choose`] may return [`Backend::Gpu`](crate::particles::Backend::Gpu).
     ///
     /// The policy's GPU costs stay at their seeds until something records a GPU
-    /// timing; this pool never reads one back on its own (see the module docs).
+    /// timing; this pool never reads one back on its own (see [`GpuParticlePool`]).
     ///
     /// # Arguments
     ///
@@ -979,7 +996,7 @@ impl GpuParticlePool {
         self.config.capacity
     }
 
-    /// Device bytes a particle slot takes: 44 (see the module docs).
+    /// Device bytes a particle slot takes: 44 (see [`GpuParticlePool`]).
     ///
     /// # Returns
     ///
