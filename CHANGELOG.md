@@ -3,6 +3,16 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## Unreleased
+
+### Planned
+
+- Emission expanded on the device: burst descriptors uploaded instead of particles, and
+  each particle's draws taken on the device by xorshift32 jump-ahead (a GF(2) matrix
+  power), so the device keeps `EffectRng`'s exact sequence and a seed emits the same
+  particles on either backend. Its own package, after POOL-GPU. At a million particles
+  the CPU's draws are 770 us of the frame thread (contended).
+
 ## 0.3.3 (2026-10-03)
 
 The particle half of package TURB, and package POOL-GPU half A: the effect pool resident
@@ -27,6 +37,14 @@ old ones.
   `rgba32float` filtered (needs `FLOAT32_FILTERABLE`), and `rgba32float` with the CPU's
   fetch in `f32`. `upload_field` and `upload_plume` write a field once a field update,
   from the frame thread.
+- `GpuParticlePool::stage_frame_with` and `encode_staged`, `upload_field_with` and
+  `upload_plume_with`, and `gpu::PoolWrite`: the same frame and field uploads handed to a
+  host's own staging ring as bytes and a destination, in place of the pool's
+  `write_buffer` (wgpu allocates a staging buffer for each). The device contents are
+  bit-identical to `encode` and `upload_field`'s, which stay the default path.
+- The backend is decided once at startup, by whether an adapter exists; there is no
+  runtime switch between the CPU and GPU pools and no readback path (documented on
+  `GpuParticlePool` and `BackendPolicy`).
 - `GpuParticlePool::register` declares the pool to a `BackendPolicy` as a resident GPU
   backend, so `choose` can return `Backend::Gpu`; `adopt` moves a CPU pool's particles
   onto the device in the next frame's write.

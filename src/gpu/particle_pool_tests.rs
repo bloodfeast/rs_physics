@@ -742,3 +742,213 @@ fn a_shared_device_runs_the_pool_and_the_policy_can_choose_it() {
     assert!((slots[0].remaining - (3.0 - DT)).abs() < 1e-6);
     assert!(slots[0].position[0] > 0.0);
 }
+
+/// A host's staging ring in miniature: each write's bytes into a mapped buffer of its
+/// own, and the copy recorded onto the frame's encoder.
+fn ring_write(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    write: crate::gpu::PoolWrite<'_>,
+) {
+    let bytes = match write {
+        crate::gpu::PoolWrite::Buffer { bytes, .. }
+        | crate::gpu::PoolWrite::Texture { bytes, .. } => bytes,
+    };
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test ring"),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: true,
+    });
+    staging
+        .slice(..)
+        .get_mapped_range_mut()
+        .unwrap()
+        .copy_from_slice(bytes);
+    staging.unmap();
+    match write {
+        crate::gpu::PoolWrite::Buffer {
+            destination,
+            offset,
+            bytes,
+        } => encoder.copy_buffer_to_buffer(&staging, 0, destination, offset, bytes.len() as u64),
+        crate::gpu::PoolWrite::Texture {
+            destination,
+            layout,
+            size,
+            ..
+        } => encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            size,
+        ),
+    }
+}
+
+/// The two ways in -- the pool's own queue writes, and a host's ring through
+/// `stage_frame_with`, `encode_staged` and `upload_field_with` -- leave the device the
+/// same to the bit: every slot, the free stack, the counters and the landings. For the
+/// `rgba16float` field (a buffer write) and for the exact `rgba32float` one on a grid of
+/// 34 cells a row (a texture write whose rows are repacked to 256 bytes).
+#[test]
+fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
+    for (format, dims) in [
+        (FieldFormat::F16Filtered, 16usize),
+        (FieldFormat::F32Exact, 34),
+    ] {
+        let mut config = GpuPoolConfig::new(4_096);
+        config.field = format;
+        let mut queue_pool = GpuParticlePool::new(&gpu, config).unwrap();
+        let mut ring_pool = GpuParticlePool::new(&gpu, config).unwrap();
+        let mut fx = ParticleEffects::with_capacity(4_096);
+        set_classes(&mut fx, &mut queue_pool, true);
+        ring_pool.copy_classes_from(&fx);
+        // A sloped ground, so landings are written too.
+        let corners = [8u32, 8];
+        let heights: Vec<f32> = (0..64).map(|i| 1.0 + 0.3 * (i % 8) as f32).collect();
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&heights),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(32),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+        );
+        for pool in [&mut queue_pool, &mut ring_pool] {
+            pool.set_ground(Some(GroundHeights {
+                view: texture.create_view(&Default::default()),
+                min: [-16.0, -16.0],
+                cell: 4.0,
+                corners,
+            }));
+        }
+
+        let drive = TurbulenceDrive::new(3.0, 12.0).unwrap();
+        let mut field =
+            SwirlField::new([-16.0, 0.0, -16.0], [dims; 3], 32.0 / dims as f32, drive, 3).unwrap();
+        let mut a = Emitter::new(77);
+        let mut b = Emitter::new(77);
+        let mut scratch = ParticleEffects::with_capacity(4_096);
+        // Lives long enough that nothing retires for the first 12 frames, so slots are
+        // assigned in the same order on both; after that, retirement's atomic order may
+        // differ, and the particles are compared by identity.
+        for frame in 0..40 {
+            let n = if frame == 0 { 1_500 } else { 25 };
+            a.emit(n, &mut scratch, &mut queue_pool);
+            b.emit(n, &mut scratch, &mut ring_pool);
+            scratch.clear();
+            if frame % 3 == 0 {
+                field.advance(0.05);
+                queue_pool.upload_field(field.velocity());
+            }
+            queue_pool.step(DT);
+
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            if frame % 3 == 0 {
+                ring_pool.upload_field_with(field.velocity(), |w| {
+                    ring_write(&gpu.device, &mut encoder, w)
+                });
+            }
+            ring_pool.stage_frame_with(DT, |w| ring_write(&gpu.device, &mut encoder, w));
+            ring_pool.encode_staged(&mut encoder, None);
+            gpu.queue.submit([encoder.finish()]);
+
+            if frame == 11 {
+                let bits = |s: &crate::gpu::GpuSlot| {
+                    (
+                        s.position.map(f32::to_bits),
+                        s.remaining.to_bits(),
+                        s.velocity.map(f32::to_bits),
+                        s.lifetime.to_bits(),
+                        s.class,
+                        s.size.to_bits(),
+                    )
+                };
+                let (qs, rs) = (
+                    queue_pool.read_slots_blocking(),
+                    ring_pool.read_slots_blocking(),
+                );
+                assert_eq!(qs.len(), rs.len());
+                assert!(
+                    qs.iter().zip(&rs).all(|(q, r)| bits(q) == bits(r)),
+                    "{format:?}: slots differ"
+                );
+                assert_eq!(
+                    queue_pool.read_free_blocking(),
+                    ring_pool.read_free_blocking()
+                );
+            }
+        }
+        assert_eq!(
+            queue_pool.read_counts_blocking(),
+            ring_pool.read_counts_blocking()
+        );
+        let bits = |m: HashMap<u32, ([f32; 3], [f32; 3])>| -> HashMap<u32, ([u32; 3], [u32; 3])> {
+            m.into_iter()
+                .map(|(k, (p, v))| (k, (p.map(f32::to_bits), v.map(f32::to_bits))))
+                .collect()
+        };
+        let (q, r) = (bits(gpu_by_id(&queue_pool)), bits(gpu_by_id(&ring_pool)));
+        assert!(q.len() > 1_000);
+        assert_eq!(q, r, "{format:?}: particles differ");
+        let landing_bits = |pool: &GpuParticlePool| {
+            let mut v: Vec<_> = pool
+                .read_landings_blocking()
+                .iter()
+                .map(|l| {
+                    (
+                        l.size.to_bits(),
+                        l.position.map(f32::to_bits),
+                        l.impact_speed.to_bits(),
+                        l.class,
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let landed = landing_bits(&queue_pool);
+        println!(
+            "{format:?}: {} particles and {} landings identical",
+            q.len(),
+            landed.len()
+        );
+        assert_eq!(landed, landing_bits(&ring_pool));
+    }
+}

@@ -126,6 +126,14 @@ const EWMA_ALPHA: f32 = 0.15;
 const MIN_TRUSTWORTHY_NS: f32 = 2_000.0;
 
 /// Chooses a backend per frame from measured per-particle costs.
+///
+/// **With the resident GPU pool, the choice is made once, at startup.** A host that has
+/// `gpu::GpuParticlePool` (features `gpu` and `particles`) and an adapter runs its effect
+/// particles there for the whole run, and on a CPU `ParticleEffects` only when no adapter
+/// exists. It does not switch per frame: moving particles from the device back to the CPU
+/// needs a readback, which costs a frame, and no such path exists. The per-frame choice
+/// below serves hosts without a resident pool, and the costs it holds (the GPU's are
+/// seeded from the resident pool's measured figures) are what a HUD reports.
 #[derive(Debug, Clone)]
 pub struct BackendPolicy {
     mode: BackendMode,

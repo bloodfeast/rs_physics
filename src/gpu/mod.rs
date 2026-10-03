@@ -73,11 +73,11 @@ mod particle_pool;
 mod particle_pool_tests;
 
 pub use context::GpuContext;
-pub use particle_sim::{GpuParticleSimulation, GpuParticle};
 pub use nbody::{GpuNBodySimulation, NBodyParticle};
 pub use nbody_3d::{GpuNBody3DSimulation, NBody3DParticle};
 #[cfg(feature = "particles")]
 pub use particle_pool::{
-    FieldFormat, GpuParticlePool, GpuPoolConfig, GpuPoolCounts, GpuPoolError, GpuSlot, GroundHeights,
-    PoolTimestamps,
+    FieldFormat, GpuParticlePool, GpuPoolConfig, GpuPoolCounts, GpuPoolError, GpuSlot,
+    GroundHeights, PoolTimestamps, PoolWrite,
 };
+pub use particle_sim::{GpuParticle, GpuParticleSimulation};

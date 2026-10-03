@@ -243,6 +243,88 @@ pub struct GpuSlot {
     pub size: f32,
 }
 
+/// Bytes the pool needs in one of its own device resources, handed to a host that
+/// carries its uploads through a staging ring of its own
+/// ([`GpuParticlePool::stage_frame_with`], [`GpuParticlePool::upload_field_with`]).
+///
+/// The host copies `bytes` into its staging memory and records the copy (a
+/// `copy_buffer_to_buffer` or a `copy_buffer_to_texture` with exactly this layout) so
+/// that it executes before the pool's passes that read it: on the same command encoder
+/// ahead of [`GpuParticlePool::encode_staged`], or in an earlier submission. Every length
+/// and offset already meets wgpu's copy alignment (4 bytes for a buffer, 256-byte rows for
+/// a texture).
+#[derive(Debug, Clone, Copy)]
+pub enum PoolWrite<'a> {
+    /// Bytes for a buffer.
+    Buffer {
+        /// The pool's buffer to copy into.
+        destination: &'a wgpu::Buffer,
+        /// Byte offset in `destination`; a multiple of 4.
+        offset: u64,
+        /// The bytes; a multiple of 4 long.
+        bytes: &'a [u8],
+    },
+    /// Bytes for the whole of a 3D texture, from offset 0 of the source.
+    Texture {
+        /// The pool's texture to copy into, mip level 0, origin zero, all aspects.
+        destination: &'a wgpu::Texture,
+        /// The layout of `bytes`: `bytes_per_row` a multiple of 256, `rows_per_image` the
+        /// texture's height, `offset` 0 (add the staging offset when recording the copy).
+        layout: wgpu::TexelCopyBufferLayout,
+        /// The extent to copy: the whole texture.
+        size: wgpu::Extent3d,
+        /// The bytes, `bytes_per_row * height * depth` long.
+        bytes: &'a [u8],
+    },
+}
+
+impl PoolWrite<'_> {
+    /// Carry this write out through `queue` at once: `write_buffer` or `write_texture`.
+    /// What the pool's own [`GpuParticlePool::encode`] and
+    /// [`GpuParticlePool::upload_field`] amount to; for a host without a ring.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue` - the queue of the device the pool is on.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig};
+    /// let gpu = GpuContext::new().expect("a GPU");
+    /// let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
+    /// pool.stage_frame_with(1.0 / 60.0, |write| write.write_now(&gpu.queue));
+    /// let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    /// pool.encode_staged(&mut encoder, None);
+    /// gpu.queue.submit([encoder.finish()]);
+    /// ```
+    pub fn write_now(self, queue: &wgpu::Queue) {
+        match self {
+            PoolWrite::Buffer {
+                destination,
+                offset,
+                bytes,
+            } => queue.write_buffer(destination, offset, bytes),
+            PoolWrite::Texture {
+                destination,
+                layout,
+                size,
+                bytes,
+            } => queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: destination,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                layout,
+                size,
+            ),
+        }
+    }
+}
+
 /// The pool's device buffers and textures that depend on the field and the ground.
 struct AirBinding {
     texture: wgpu::Texture,
@@ -282,6 +364,24 @@ struct AirBinding {
 ///    use.
 /// 4. The renderer draws from [`GpuParticlePool::positions`] and the others, with the
 ///    instance count from [`GpuParticlePool::draw_args`], and drains the landings.
+///
+/// A host with a staging ring of its own replaces the pool's queue writes with copies
+/// from the ring: [`GpuParticlePool::stage_frame_with`] then
+/// [`GpuParticlePool::encode_staged`] in place of `encode`, and
+/// [`GpuParticlePool::upload_field_with`] in place of `upload_field`. Each hands the host
+/// the bytes and their destination as a [`PoolWrite`]; the device contents are the same
+/// to the bit either way. wgpu allocates a fresh staging buffer for every `write_buffer`,
+/// which is what a ring saves.
+///
+/// # Which backend: decided once, at startup
+///
+/// A host decides at startup, by whether an adapter exists, whether its effect particles
+/// live in this pool or in a CPU [`ParticleEffects`], and keeps that for the run. There
+/// is no switch between the two at run time: moving particles from the device back to
+/// the CPU would need a readback, which costs a frame, and the device's fixed cost (about
+/// 10 us a frame) makes it the cheaper home from a few thousand particles, which every
+/// scene that matters exceeds. [`GpuParticlePool::register`] still declares the pool to
+/// a [`BackendPolicy`] for hosts that report the policy's figures.
 ///
 /// # Slots and the free list
 ///
@@ -396,6 +496,12 @@ pub struct GpuParticlePool {
     /// The header's field words for the current field, `None` with no field.
     air_words: Option<[f32; 20]>,
     field_pending: bool,
+    /// The field's cells with each row padded to 256 bytes, for a texture copy from a
+    /// host's staging ring ([`GpuParticlePool::upload_field_with`]); empty until needed.
+    field_scratch: Vec<u8>,
+    /// A frame staged by [`GpuParticlePool::stage_frame_with`] and not yet encoded: its
+    /// step and the records it places.
+    prepared: Option<(f32, usize)>,
     last_plume_step: Option<u64>,
     ground: Option<GroundHeights>,
     ground_placeholder: wgpu::TextureView,
@@ -810,6 +916,8 @@ impl GpuParticlePool {
             air,
             air_words: None,
             field_pending: false,
+            field_scratch: Vec::new(),
+            prepared: None,
             last_plume_step: None,
             ground: None,
             ground_placeholder,
@@ -1270,9 +1378,9 @@ impl GpuParticlePool {
 
     /// Move every live particle of a CPU pool onto this one, and empty the CPU pool.
     ///
-    /// For a host switching backends when its [`BackendPolicy`] says so: the particles
-    /// keep their positions, velocities, remaining and total lifetimes, sizes and
-    /// classes, and are placed on the next [`Self::encode`] (over several frames if
+    /// For a host that started on the CPU pool and moves to this one once (the backend is
+    /// decided at startup; see [`GpuParticlePool`]): the particles keep their positions,
+    /// velocities, remaining and total lifetimes, sizes and classes, and are placed on the next [`Self::encode`] (over several frames if
     /// there are more than [`GpuPoolConfig::max_emit_per_frame`]). One upload, no
     /// readback. The class table is not copied; see [`Self::copy_classes_from`].
     ///
@@ -1348,12 +1456,8 @@ impl GpuParticlePool {
     /// assert!(pool.has_field());
     /// ```
     pub fn upload_field(&mut self, air: &VelocityGrid) {
+        self.prepare_field(air);
         let dims = air.dims();
-        if dims != self.air.dims {
-            self.air =
-                Self::air_binding(&self.device, &self.convert_layout, self.config.field, dims);
-            self.rebuild_air_group();
-        }
         let cells = bytemuck::cast_slice::<[f32; 4], u8>(air.cells());
         match &self.air.staging {
             Some((staging, _)) => {
@@ -1380,7 +1484,93 @@ impl GpuParticlePool {
                 },
             ),
         }
+    }
 
+    /// [`Self::upload_field`] through the host's staging ring: the pool hands `write` the
+    /// field's bytes and where they go, and the host copies them there (see
+    /// [`PoolWrite`]) before the next [`Self::encode`] or [`Self::encode_staged`]. The
+    /// device ends up with the same contents as [`Self::upload_field`] gives it.
+    ///
+    /// With [`FieldFormat::F16Filtered`] the write is a [`PoolWrite::Buffer`] into the
+    /// `f32` staging the conversion pass reads; with the `f32` formats it is a
+    /// [`PoolWrite::Texture`], its rows padded to 256 bytes (a repack, into memory the
+    /// pool keeps, only when a row of the grid is not already a multiple of 256 bytes:
+    /// `nz * 16`, so 32 cells is not repacked and a plume's 34 is).
+    ///
+    /// # Arguments
+    ///
+    /// * `air` - the air velocity, m/s.
+    /// * `write` - called once with the bytes and their destination.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig, PoolWrite};
+    /// use rs_physics::particles::VelocityGrid;
+    /// let gpu = GpuContext::new().expect("a GPU");
+    /// let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
+    /// let mut air = VelocityGrid::new([0.0; 3], 2.0, [32, 32, 32]).unwrap();
+    /// air.fill([1.0, 0.0, 0.0]);
+    /// pool.upload_field_with(&air, |write| match write {
+    ///     PoolWrite::Buffer { bytes, .. } => assert_eq!(bytes.len(), 32 * 32 * 32 * 16),
+    ///     PoolWrite::Texture { .. } => unreachable!("the default field is rgba16float"),
+    /// });
+    /// assert!(pool.has_field());
+    /// ```
+    pub fn upload_field_with<F: FnOnce(PoolWrite<'_>)>(&mut self, air: &VelocityGrid, write: F) {
+        self.prepare_field(air);
+        let dims = air.dims();
+        let cells = bytemuck::cast_slice::<[f32; 4], u8>(air.cells());
+        match &self.air.staging {
+            Some((staging, _)) => {
+                write(PoolWrite::Buffer {
+                    destination: staging,
+                    offset: 0,
+                    bytes: cells,
+                });
+                self.field_pending = true;
+            }
+            None => {
+                let row = dims[2] * 16;
+                let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+                let bytes: &[u8] = if padded == row {
+                    cells
+                } else {
+                    let rows = dims[0] * dims[1];
+                    self.field_scratch.clear();
+                    self.field_scratch.resize(rows * padded, 0);
+                    for (r, src) in cells.chunks_exact(row).enumerate() {
+                        self.field_scratch[r * padded..r * padded + row].copy_from_slice(src);
+                    }
+                    &self.field_scratch
+                };
+                write(PoolWrite::Texture {
+                    destination: &self.air.texture,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded as u32),
+                        rows_per_image: Some(dims[1] as u32),
+                    },
+                    size: wgpu::Extent3d {
+                        width: dims[2] as u32,
+                        height: dims[1] as u32,
+                        depth_or_array_layers: dims[0] as u32,
+                    },
+                    bytes,
+                });
+            }
+        }
+    }
+
+    /// The field's placement into the frame header, and the texture reallocated when the
+    /// grid's dimensions change: everything of an upload but the bytes.
+    fn prepare_field(&mut self, air: &VelocityGrid) {
+        let dims = air.dims();
+        if dims != self.air.dims {
+            self.air =
+                Self::air_binding(&self.device, &self.convert_layout, self.config.field, dims);
+            self.rebuild_air_group();
+        }
         let (o, h) = (air.origin(), air.cell_size());
         let n = dims.map(|d| d as f32);
         // Texture order is z, y, x.
@@ -1454,6 +1644,50 @@ impl GpuParticlePool {
         }
         self.last_plume_step = Some(frame.step());
         self.upload_field(frame.velocity());
+        true
+    }
+
+    /// [`Self::upload_plume`] through the host's staging ring, as
+    /// [`Self::upload_field_with`]: `write` is called only when the frame is new.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - the plume frame.
+    /// * `write` - called once with the bytes and their destination, when the frame is new.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the frame was new and `write` was called.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::fluid_dynamics::{PlumeField, PlumeRegion, PlumeSource};
+    /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig};
+    /// use rs_physics::particles::TurbulenceDrive;
+    /// let gpu = GpuContext::new().expect("a GPU");
+    /// let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
+    /// let region = PlumeRegion { origin: [0.0; 3], cells: [8, 8, 8], cell_size: 1.0 };
+    /// let source = PlumeSource {
+    ///     position: [4.0, 0.5, 4.0],
+    ///     drive: TurbulenceDrive::new(2.0, 3.0).unwrap(),
+    ///     smoke_rate: 1.0,
+    /// };
+    /// let (_plume, mut air) = PlumeField::new(region, source, [1.0, 0.0, 0.0], 1).unwrap();
+    /// assert!(pool.upload_plume_with(air.latest(), |write| write.write_now(&gpu.queue)));
+    /// assert!(!pool.upload_plume_with(air.latest(), |_| unreachable!("not a new frame")));
+    /// ```
+    #[cfg(feature = "fluid_simulation")]
+    pub fn upload_plume_with<F: FnOnce(PoolWrite<'_>)>(
+        &mut self,
+        frame: &crate::fluid_dynamics::PlumeFrame,
+        write: F,
+    ) -> bool {
+        if self.last_plume_step == Some(frame.step()) && self.air_words.is_some() {
+            return false;
+        }
+        self.last_plume_step = Some(frame.step());
+        self.upload_field_with(frame.velocity(), write);
         true
     }
 
@@ -1600,17 +1834,101 @@ impl GpuParticlePool {
         dt: f32,
         timestamps: Option<PoolTimestamps<'_>>,
     ) {
+        let queue = self.queue.clone();
+        self.stage_frame_with(dt, |write| write.write_now(&queue));
+        self.encode_staged(encoder, timestamps);
+    }
+
+    /// The first half of [`Self::encode`] for a host with a staging ring of its own: this
+    /// frame's constants and staged particles, as one [`PoolWrite::Buffer`] handed to
+    /// `write`, for the host to copy into the pool's frame buffer ahead of
+    /// [`Self::encode_staged`] (see [`PoolWrite`]). Together the two leave the device
+    /// exactly as [`Self::encode`] does, without the `write_buffer` and the staging buffer
+    /// wgpu allocates for it.
+    ///
+    /// Call it once per [`Self::encode_staged`]; a second call before it replaces the
+    /// first frame's constants, and its particles are placed with the second's.
+    ///
+    /// # Arguments
+    ///
+    /// * `dt` - the step, seconds; as [`Self::encode`].
+    /// * `write` - called once with the bytes (512 bytes of constants and 40 a particle
+    ///   placed) and the frame buffer they go to.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig, PoolWrite};
+    /// let gpu = GpuContext::new().expect("a GPU");
+    /// let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
+    /// pool.emit_one([0.0, 2.0, 0.0], [3.0, 0.0, 0.0], 1.0, 1.0, 0);
+    /// let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    /// pool.stage_frame_with(1.0 / 60.0, |write| {
+    ///     let PoolWrite::Buffer { destination, offset, bytes } = write else { unreachable!() };
+    ///     assert_eq!(bytes.len(), 512 + 40);
+    ///     // A host's ring: the bytes into mapped staging memory, the copy onto the encoder.
+    ///     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+    ///         label: None,
+    ///         size: bytes.len() as u64,
+    ///         usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+    ///         mapped_at_creation: true,
+    ///     });
+    ///     staging.slice(..).get_mapped_range_mut().unwrap().copy_from_slice(bytes);
+    ///     staging.unmap();
+    ///     encoder.copy_buffer_to_buffer(&staging, 0, destination, offset, bytes.len() as u64);
+    /// });
+    /// pool.encode_staged(&mut encoder, None);
+    /// gpu.queue.submit([encoder.finish()]);
+    /// ```
+    pub fn stage_frame_with<F: FnOnce(PoolWrite<'_>)>(&mut self, dt: f32, write: F) {
         let emit = self.staged().min(self.config.max_emit_per_frame as usize);
         self.write_header(dt, emit as u32);
-        self.queue.write_buffer(
-            &self.frame,
-            0,
-            bytes_of(&self.upload[..HEADER_WORDS + emit * RECORD_WORDS]),
-        );
+        write(PoolWrite::Buffer {
+            destination: &self.frame,
+            offset: 0,
+            bytes: bytes_of(&self.upload[..HEADER_WORDS + emit * RECORD_WORDS]),
+        });
         if emit > 0 {
             self.upload
                 .drain(HEADER_WORDS..HEADER_WORDS + emit * RECORD_WORDS);
         }
+        self.prepared = Some((dt, emit));
+    }
+
+    /// The second half of [`Self::encode`]: the passes of the frame
+    /// [`Self::stage_frame_with`] staged, recorded into `encoder`, with timestamps as
+    /// [`Self::encode_timed`]. The staged bytes must reach the frame buffer before these
+    /// passes run (see [`PoolWrite`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `encoder` - the frame's encoder.
+    /// * `timestamps` - where each pass writes its timestamps, or `None`.
+    ///
+    /// # Panics
+    ///
+    /// If no frame was staged since the last encode.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use rs_physics::gpu::{GpuContext, GpuParticlePool, GpuPoolConfig};
+    /// let gpu = GpuContext::new().expect("a GPU");
+    /// let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(64)).unwrap();
+    /// pool.stage_frame_with(1.0 / 60.0, |write| write.write_now(&gpu.queue));
+    /// let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    /// pool.encode_staged(&mut encoder, None);
+    /// gpu.queue.submit([encoder.finish()]);
+    /// ```
+    pub fn encode_staged(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamps: Option<PoolTimestamps<'_>>,
+    ) {
+        let (dt, emit) = self
+            .prepared
+            .take()
+            .expect("encode_staged needs a frame from stage_frame_with first");
 
         let writes = |pair: Option<u32>| {
             timestamps.and_then(|t| {
