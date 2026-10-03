@@ -131,7 +131,13 @@ fn first_difference(cpu: &[Bits], device: &[Bits]) -> String {
     let f = |b: &Bits| -> Vec<f32> { b[..9].iter().map(|&w| f32::from_bits(w)).collect() };
     for (a, b) in cpu.iter().zip(device) {
         if a != b {
-            return format!("cpu {:?} class {}\ndev {:?} class {}", f(a), a[9], f(b), b[9]);
+            return format!(
+                "cpu {:?} class {}\ndev {:?} class {}",
+                f(a),
+                a[9],
+                f(b),
+                b[9]
+            );
         }
     }
     format!("lengths {} and {}", cpu.len(), device.len())
@@ -179,7 +185,10 @@ fn bursts_expanded_on_the_device_are_the_cpus_to_the_bit() {
     let counts = pool.read_counts_blocking();
     assert_eq!(counts.placed as usize, born);
     assert_eq!(counts.retired as usize, retired_by_now);
-    assert!(retired_by_now > born / 2, "the run should retire most of what it emits");
+    assert!(
+        retired_by_now > born / 2,
+        "the run should retire most of what it emits"
+    );
     println!(
         "{born} particles born over 60 frames, {retired_by_now} retired, up to {most_live} live: every one bit-identical every frame"
     );
@@ -200,7 +209,11 @@ fn a_burst_cut_by_the_frame_bound_or_the_capacity_resumes_on_the_right_draw() {
     for frame in 0..12 {
         // 2,000 staged at once on the first frame: past the capacity, so the oldest 500
         // are dropped before they are placed, then 211 a frame.
-        let count = if frame == 0 { 2_000 } else { 37 + 50 * (frame % 3) as u32 };
+        let count = if frame == 0 {
+            2_000
+        } else {
+            37 + 50 * (frame % 3) as u32
+        };
         let burst = Burst {
             origin: [1.0, 2.0, 3.0],
             class: (frame % 8) as u8,
@@ -408,7 +421,14 @@ impl Prober {
 
     /// Runs `entry` over `count` threads with `inputs` (or, for the sine sweep, the
     /// first turn in `first`), returning `out_words` words.
-    fn run(&self, entry: &str, count: u32, first: u32, inputs: &[u32], out_words: usize) -> Vec<u32> {
+    fn run(
+        &self,
+        entry: &str,
+        count: u32,
+        first: u32,
+        inputs: &[u32],
+        out_words: usize,
+    ) -> Vec<u32> {
         use wgpu::util::DeviceExt;
         let device = &self.gpu.device;
         let jump_words = self.levels * DIGIT_TABLES as u32 * 1024;
@@ -418,7 +438,11 @@ impl Prober {
             self.levels,
             0,
             jump_words,
-            if inputs.is_empty() { first } else { self.tables.len() as u32 },
+            if inputs.is_empty() {
+                first
+            } else {
+                self.tables.len() as u32
+            },
             0,
             0,
         ];
@@ -567,7 +591,8 @@ fn the_device_sqrt_and_divide_are_correctly_rounded() {
     for _ in 0..1 << 20 {
         // Exponents over a wide band, both signs for the dividend.
         let x = f32::from_bits((rng.next_u32() & 0x807F_FFFF) | ((90 + rng.next_u32() % 70) << 23));
-        let y = f32::from_bits((rng.next_u32() & 0x007F_FFFF) | ((100 + rng.next_u32() % 50) << 23));
+        let y =
+            f32::from_bits((rng.next_u32() & 0x007F_FFFF) | ((100 + rng.next_u32() % 50) << 23));
         pairs.push((x, y));
     }
     for k in 0..1u32 << 16 {
@@ -575,13 +600,34 @@ fn the_device_sqrt_and_divide_are_correctly_rounded() {
         let y = -1.0 + 2.0 * ((k << 8) as f32 / 16_777_216.0);
         pairs.push((1.0 - y * y, 1.0 + y * y));
     }
-    for v in [1.0f32, 2.0, 4.0, 0.25, 1.0 - f32::EPSILON / 2.0, 1.0 + f32::EPSILON, 3.0, 1e-6, 0.0, -0.0, -1.0] {
+    for v in [
+        1.0f32,
+        2.0,
+        4.0,
+        0.25,
+        1.0 - f32::EPSILON / 2.0,
+        1.0 + f32::EPSILON,
+        3.0,
+        1e-6,
+        0.0,
+        -0.0,
+        -1.0,
+    ] {
         pairs.push((v, 1.0));
         pairs.push((v, 3.0));
         pairs.push((v, 1e-6));
     }
-    let inputs: Vec<u32> = pairs.iter().flat_map(|&(x, y)| [x.to_bits(), y.to_bits()]).collect();
-    let out = prober.run("probe_sqrt_div", pairs.len() as u32, 0, &inputs, 4 * pairs.len());
+    let inputs: Vec<u32> = pairs
+        .iter()
+        .flat_map(|&(x, y)| [x.to_bits(), y.to_bits()])
+        .collect();
+    let out = prober.run(
+        "probe_sqrt_div",
+        pairs.len() as u32,
+        0,
+        &inputs,
+        4 * pairs.len(),
+    );
     let mut checked = 0;
     for (k, &(x, y)) in pairs.iter().enumerate() {
         let (sq, q) = (x.abs().sqrt(), x / y.abs());

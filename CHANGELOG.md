@@ -5,13 +5,111 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
-### Planned
+## 0.3.4 (2026-10-03)
 
-- Emission expanded on the device: burst descriptors uploaded instead of particles, and
-  each particle's draws taken on the device by xorshift32 jump-ahead (a GF(2) matrix
-  power), so the device keeps `EffectRng`'s exact sequence and a seed emits the same
-  particles on either backend. Its own package, after POOL-GPU. At a million particles
-  the CPU's draws are 770 us of the frame thread (contended).
+Package POOL-GPU-RNG: the GPU pool expands a burst on the device, drawing each particle
+with `EffectRng`'s exact sequence, so a seed emits the same particles to the bit on the
+CPU pool and the GPU pool. No signature changes; one behaviour change, under Changed.
+
+### Added
+
+- `particles::sin_cos_turn(turn)` and `particles::TURN_BITS`: the sine and cosine of
+  `turn / 2^24` of a turn, in integer arithmetic (a quarter-wave table of 2^12 intervals
+  built at compile time, integer interpolation, quadrant symmetry by bit masks). The
+  same bits on every CPU and in the GPU pool's shader. At most `1.293 * 2^-24` from
+  `f64` over all 2^24 inputs; 4.7 ns a call against 21.0 ns for `f32::sin_cos`.
+- `EffectRng::jump(steps)`: skip any number of draws. xorshift32 is linear over GF(2), so
+  a jump is the product of precomputed matrix powers, byte-sliced (four loads and three
+  XORs each, at most 32 of them; 128 KB of tables built on first use).
+- `Burst::DRAWS_PER_PARTICLE` (5): the draws `emit` takes a particle, whatever the burst.
+- `GpuParticlePool::emit` stages a burst as a 64-byte descriptor (the stream's state,
+  origin, class, the three ranges and the lift, and a segment entry) whatever its count,
+  and moves the CPU's stream on with `jump`, leaving it exactly where
+  `ParticleEffects::emit` would. The placement passes expand it: particle `i` starts at
+  the state `5 i` draws in (one byte-sliced matrix per non-zero hex digit of `i`, the
+  powers `M^(5 d 16^k)` uploaded once at construction) and takes its five draws with the
+  CPU's arithmetic. Products that feed an add are forced to their own rounding (the
+  driver fuses them otherwise, and a velocity came out 1 ulp off on the first frame
+  without it). The square root and divide are the device's estimate settled by exact
+  integer comparisons, with digit-by-digit and long division as the fallback. The sine
+  and cosine come from `sin_cos_turn`. `emit_one`, `adopt` and a burst of one stay
+  40-byte records.
+
+### Changed
+
+- `EffectRng::hemisphere` takes the azimuth as a 24-bit fraction of a turn and its sine
+  and cosine from `sin_cos_turn`, no longer `f32::sin_cos` of `unit() * TAU`.
+  - Why: the platform's `sin_cos` is the maths library's. On Windows the UCRT is not
+    correctly rounded: 1 ulp off on 43,448 of the 2^24 azimuths, so no shader could
+    reproduce it, and glibc and macOS give other last bits again.
+  - Effect: the same draws in the same order, so `next_u32` sequences and draw counts are
+    unchanged, but a seed's directions differ from 0.3.3's: by up to 4.8e-7 in a
+    component of the unit direction (8 units of 2^-24, most of it the old path's own
+    rounding of the angle in `unit() * TAU`), 5.5e-7 rad in angle, over 2^22 draws.
+    Emission from a seed is now identical on Windows, Linux and macOS and in the GPU
+    pool. `examples/grid_checksum`'s particle checksum changes with it.
+- `GpuParticlePool`'s frame buffer carries a segment table and payloads after its
+  512-byte header: 16 bytes a segment, then 48 for a burst's descriptor or 40 a record.
+  It also holds the emission's tables after the emission region, written once: 60 KB a
+  hex digit of the largest particle index (240 KB at the default 65,536 a frame) and the
+  16 KB sine table. `PoolWrite` and `stage_frame_with` are unchanged in signature; the
+  bytes they hand over follow the new layout.
+- `GpuParticlePool` docs: an "Emission" section, and "Determinism" now says emission is
+  exact. With a power-of-two step, no field and no ground, the integrate is exact too.
+
+### Measured
+
+RTX 3090, Vulkan, wgpu 30, indirect-call validation off; `examples/pool_gpu_bench.rs`, 7
+interleaved rounds. No neighbour build was running at the start or the end of the run.
+The "before" is the 0.3.3 path, measured in the same process: every particle drawn on
+the CPU with `f32::sin_cos` and staged as a 40-byte record. The live sparks-and-dust
+pool at 10k, 100k and 1M live is about 240, 2,400 and 24,000 born a frame.
+
+| | 10k | 100k | 1M |
+|---|---|---|---|
+| staging the emission (frame thread), before | 9.8 us | 91 us | 862 us |
+| staging the emission, after | 0.9 us | 1.0 us | **1.6 us** |
+| the frame's buffer write, before | 10,168 B | 96,888 B | 964,008 B |
+| the frame's buffer write, after | 640 B | 640 B | 640 B |
+| `encode` (one `write_buffer` and the passes), before | 163 us | 156 us | 228 us |
+| `encode`, after | 154 us | 150 us | 154 us |
+| the emit pass (device), before | 7.4 us | 7.5 us | 14.3 us |
+| the emit pass, after | 9.9 us | 10.3 us | 17.7 us |
+
+- **Gate:** staging under 50 us at 1M. Met, at 1.6 us.
+- **The emit pass grows 2.5 to 3.4 us.** It is a short serial chain per new particle.
+  As first written it grew 7.7 us at 100k and 10 us at 1M. Two changes brought it down:
+  - Settling the device's square root and divide with six exact comparisons, in place
+    of a 25-step digit loop, saved 3.8 and 4.8 us.
+  - Taking the jump by hex digit, in place of by bit, saved 1.0 and 1.8 us.
+- **Records are staged in place after the header**, as 0.3.3 did, so `emit_one` and
+  `adopt` cost what they did.
+- **`f32::sin_cos` against `sin_cos_turn`, per call:** 21.0 ns against 4.7 ns. A
+  26-step CORDIC measured 42.6 ns, and a 2^11-interval table 4.7 ns.
+
+Bit identity (`src/gpu/particle_pool_emit_tests.rs`, all passing on the RTX 3090):
+
+- **Bursts against the CPU pool:** 28,620 particles born from 9 bursts a frame over 60
+  frames, covering:
+  - every class and one out of range;
+  - lift -0.5 to 3;
+  - equal, reversed and negative ranges;
+  - counts 0, 1, 2 and up.
+
+  16,975 of them retired. Every live particle's position, velocity, remaining and total
+  lifetime, size and class equals the CPU pool's to the bit after every frame, and the
+  two streams agree after every frame.
+- **A burst cut by the frame bound and by the capacity:** 211 a frame, with records
+  between the bursts. It equals the same particles staged as records, every frame.
+- **The jump:** on the device it equals sequential steps at 377 indices up to 2^24 - 1,
+  including every single hex digit at every position. On the CPU the same holds over a
+  sweep up to 5,000,000 steps, and a jump by the period is the identity.
+- **`sin_cos_turn`:** equal on the device and the CPU at all 2^24 turns, swept in 1.3 to
+  1.9 s.
+- **Square root and divide:** equal to the CPU's IEEE results on 1.1 million inputs,
+  both by the settled estimate and by the fallback loops alone.
+- **The contraction guard:** with it removed, the first frame already differs, by 1 ulp
+  in a velocity.
 
 ## 0.3.3 (2026-10-03)
 

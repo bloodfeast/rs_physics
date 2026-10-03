@@ -12,8 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::gpu::{FieldFormat, GpuContext, GpuParticlePool, GpuPoolConfig, GroundHeights};
 use crate::particles::{
     Backend, BackendPolicy, Burst, EffectRng, ParticleClass, ParticleEffects, SwirlField,
-    TurbulenceDrive,
-    VelocityGrid,
+    TurbulenceDrive, VelocityGrid,
 };
 
 const DT: f32 = 1.0 / 60.0;

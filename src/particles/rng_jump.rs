@@ -176,7 +176,11 @@ mod tests {
         ks.push(5_000_000);
         for seed in [1u32, 0xC0FFEE, 0x1234_5678, 0xFFFF_FFFF] {
             for &k in &ks {
-                assert_eq!(jump(seed, k), sequential(seed, k), "seed {seed:#x}, {k} steps");
+                assert_eq!(
+                    jump(seed, k),
+                    sequential(seed, k),
+                    "seed {seed:#x}, {k} steps"
+                );
             }
         }
     }
@@ -201,7 +205,19 @@ mod tests {
         assert_eq!(t.len(), 1024 * DIGIT_TABLES * digits);
         let seed = 0xC0FFEE;
         let mut indices: Vec<u32> = (0..40).collect();
-        indices.extend([63, 64, 65, 255, 256, 1000, 4095, 4096, 65_535, 1_000_000, (1 << 24) - 1]);
+        indices.extend([
+            63,
+            64,
+            65,
+            255,
+            256,
+            1000,
+            4095,
+            4096,
+            65_535,
+            1_000_000,
+            (1 << 24) - 1,
+        ]);
         for i in indices {
             let mut x = seed;
             for k in 0..digits {

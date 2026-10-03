@@ -508,7 +508,23 @@ struct AirBinding {
 /// field update. wgpu 30 allocates a fresh staging buffer for every `write_buffer`;
 /// beside a compiler that measured 150 to 260 us a call regardless of size.
 ///
-/// POOL_GPU_RNG_FIGURES
+/// Measured 2026-10-03 on the same machine, no neighbour build seen at the start or the
+/// end of the run (`examples/pool_gpu_bench.rs`, 7 interleaved rounds, the 0.3.3 path of
+/// drawing every particle on the CPU and staging it as a record measured in the same
+/// process as the comparison). At 10k, 100k and 1M live (about 240, 2,400 and 24,000
+/// born a frame):
+///
+/// | | 10k | 100k | 1M |
+/// |---|---|---|---|
+/// | staging the emission (CPU) | 0.9 us | 1.0 us | 1.6 us |
+/// | the same as records | 9.8 us | 91 us | 862 us |
+/// | the frame's buffer write | 640 B | 640 B | 640 B |
+/// | the same as records | 10 KB | 97 KB | 964 KB |
+/// | the emit pass (device) | 9.9 us | 10.3 us | 17.7 us |
+/// | the same as records | 7.4 us | 7.5 us | 14.3 us |
+///
+/// The emit pass grows by 2.5 to 3.4 us: each new particle's jump, integer sine and
+/// cosine and settled square roots and divides, a short serial chain per thread.
 ///
 /// # Determinism
 ///
@@ -756,7 +772,11 @@ impl GpuParticlePool {
         // jump tables (M^(5 d 16^k), byte-sliced) and the quarter-wave sine.
         let mut tables = stride_tables(Burst::DRAWS_PER_PARTICLE, jump_levels as usize);
         tables.extend(QUARTER_SINE.iter().map(|&v| v as u32));
-        queue.write_buffer(&frame, ((HEADER_WORDS + data_words) * 4) as u64, bytes_of(&tables));
+        queue.write_buffer(
+            &frame,
+            ((HEADER_WORDS + data_words) * 4) as u64,
+            bytes_of(&tables),
+        );
         // Zeroed at creation, so every slot starts dead.
         let pos_life = buffer("pool position and life", slots as u64 * 16, rw);
         let vel = buffer("pool velocity and lifetime", slots as u64 * 16, rw);
@@ -1582,7 +1602,10 @@ impl GpuParticlePool {
             .pending_count
             .saturating_sub(self.config.capacity as usize);
         while over > 0 {
-            let front = self.pending.front_mut().expect("pending_count counts pending");
+            let front = self
+                .pending
+                .front_mut()
+                .expect("pending_count counts pending");
             let (k, left) = match front {
                 Pending::Records(n) => {
                     let k = (*n).min(over);
@@ -2094,10 +2117,8 @@ impl GpuParticlePool {
         self.carry.clear();
         let (mut taken, mut records) = (0usize, 0usize);
         while taken < want {
-            let used = records * RECORD_WORDS
-                + self.payload.len()
-                + self.table.len()
-                + SEGMENT_WORDS;
+            let used =
+                records * RECORD_WORDS + self.payload.len() + self.table.len() + SEGMENT_WORDS;
             let Some(front) = self.pending.front_mut() else {
                 break;
             };
