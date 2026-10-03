@@ -71,6 +71,8 @@ mod nbody_3d;
 mod particle_pool;
 #[cfg(all(test, feature = "particles"))]
 mod particle_pool_tests;
+#[cfg(all(test, feature = "particles"))]
+mod particle_pool_emit_tests;
 
 pub use context::GpuContext;
 pub use nbody::{GpuNBodySimulation, NBodyParticle};

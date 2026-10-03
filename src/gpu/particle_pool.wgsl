@@ -9,7 +9,9 @@
 // the free stack, exactly once.
 //
 // The host prepends the air-sampling function and its bindings (group 1, bindings 0
-// and 1) for the field format it chose; see `particle_pool.rs`.
+// and 1) for the field format it chose, and appends `particle_pool_emit.wgsl`, which
+// expands the frame's emission (records and burst descriptors) into particles; see
+// `particle_pool.rs`.
 
 const WG: u32 = 64u;
 const MAX_CLASSES: u32 = 8u;
@@ -28,8 +30,6 @@ const BORN: u32 = 0x80000000u;
 const FLAG_AIR: u32 = 1u;
 const FLAG_GROUND: u32 = 2u;
 
-// Words per staged record: position 3, velocity 3, remaining, lifetime, size, class.
-const RECORD_WORDS: u32 = 10u;
 // Words per landing: position 3, impact speed, class, size.
 const LANDING_WORDS: u32 = 6u;
 
@@ -59,6 +59,19 @@ struct Frame {
     rows: array<vec4<f32>, 8>,
     // Per class restitution, packed four a vector.
     restitution: array<vec4<f32>, 2>,
+    // Emission: segments in the table at word 0 of `records`; the word in `records`
+    // where the jump tables start (the sine table follows them); hex digits the jump
+    // tables cover; and a zero the compiler cannot see, for `rounded`.
+    emit_segments: u32,
+    table_base: u32,
+    jump_levels: u32,
+    zero: u32,
+    // The word in `records` where the segment table starts (after the records and the
+    // burst descriptors it indexes).
+    segment_table: u32,
+    pad2: u32,
+    pad3: u32,
+    pad4: u32,
 }
 
 struct State {
@@ -88,16 +101,18 @@ struct State {
 // dispatch, [8..12) a non-indexed draw over the slots in use.
 @group(2) @binding(0) var<storage, read_write> args: array<u32>;
 
+fn emit_zero() -> u32 {
+    return frame.zero;
+}
+
+// The frame's particle `r` (0 the oldest) into `slot`.
 fn write_record(slot: u32, r: u32, born: u32) {
-    let b = r * RECORD_WORDS;
-    let p = vec3<f32>(bitcast<f32>(records[b]), bitcast<f32>(records[b + 1u]), bitcast<f32>(records[b + 2u]));
-    let v = vec3<f32>(bitcast<f32>(records[b + 3u]), bitcast<f32>(records[b + 4u]), bitcast<f32>(records[b + 5u]));
-    let remaining = bitcast<f32>(records[b + 6u]);
-    let lifetime = bitcast<f32>(records[b + 7u]);
-    pos_life[slot] = vec4<f32>(p, remaining);
-    vel[slot] = vec4<f32>(v, lifetime);
+    let jump_words = frame.jump_levels * DIGIT_TABLES * JUMP_TABLE_WORDS;
+    let p = emitted(r, frame.segment_table, frame.emit_segments, frame.table_base, frame.jump_levels, frame.table_base + jump_words);
+    pos_life[slot] = vec4<f32>(p.position, p.remaining);
+    vel[slot] = vec4<f32>(p.velocity, p.lifetime);
     // Class, then the size's bits.
-    class_size[slot] = vec2<u32>(records[b + 9u] | born, records[b + 8u]);
+    class_size[slot] = vec2<u32>(p.class_id | born, bitcast<u32>(p.size));
 }
 
 var<workgroup> wg_high: atomic<u32>;

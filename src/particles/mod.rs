@@ -5,6 +5,10 @@ mod particle_backend;
 #[cfg(feature = "particles")]
 mod particle_effects;
 #[cfg(feature = "particles")]
+mod turn_trig;
+#[cfg(feature = "particles")]
+mod rng_jump;
+#[cfg(feature = "particles")]
 mod swirl;
 #[cfg(feature = "particles")]
 mod particle_simulation;
@@ -25,6 +29,13 @@ pub use particle_backend::*;
 pub use particle_effects::*;
 #[cfg(all(feature = "particles", feature = "gpu"))]
 pub(crate) use particle_effects::for_each_in_burst;
+
+#[cfg(feature = "particles")]
+pub use turn_trig::*;
+#[cfg(all(feature = "particles", feature = "gpu"))]
+pub(crate) use turn_trig::QUARTER_SINE;
+#[cfg(all(feature = "particles", feature = "gpu"))]
+pub(crate) use rng_jump::{stride_tables, DIGIT_TABLES};
 
 #[cfg(feature = "particles")]
 pub use swirl::*;
