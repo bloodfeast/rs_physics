@@ -221,7 +221,7 @@ struct Emitted {
     remaining: f32,
     lifetime: f32,
     size: f32,
-    class: u32,
+    class_id: u32,
 }
 
 // Particle `j` of the burst whose payload starts at word `o`: its state before its first
@@ -250,7 +250,7 @@ fn burst_particle(o: u32, j: u32, tables: u32, levels: u32, sine: u32) -> Emitte
     out.remaining = life;
     out.lifetime = life;
     out.size = size;
-    out.class = records[w + 3u];
+    out.class_id = records[w + 3u];
     return out;
 }
 
@@ -262,7 +262,7 @@ fn record_particle(b: u32) -> Emitted {
     out.remaining = bitcast<f32>(records[b + 6u]);
     out.lifetime = bitcast<f32>(records[b + 7u]);
     out.size = bitcast<f32>(records[b + 8u]);
-    out.class = records[b + 9u];
+    out.class_id = records[b + 9u];
     return out;
 }
 

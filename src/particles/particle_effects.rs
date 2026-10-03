@@ -135,6 +135,35 @@ pub struct Burst {
     pub lift: f32,
 }
 
+impl Burst {
+    /// Draws [`ParticleEffects::emit`] takes from its [`EffectRng`] for each particle of a
+    /// burst, whatever the burst's class, ranges or lift: two for the direction
+    /// ([`EffectRng::hemisphere`]), then one each for the speed, the lifetime and the size.
+    /// A range whose ends are equal still draws. So particle `i` of a burst starts
+    /// `5 i` draws after the burst's first, which is how the GPU pool expands a burst on
+    /// the device ([`EffectRng::jump`]), and a burst of `n` leaves the stream `5 n` draws on.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::{Burst, EffectRng, ParticleEffects};
+    /// let burst = Burst {
+    ///     origin: [0.0; 3],
+    ///     class: 0,
+    ///     count: 40,
+    ///     speed: 1.0..2.0,
+    ///     lifetime: 1.0..1.0,
+    ///     size: 0.5..1.5,
+    ///     lift: 0.3,
+    /// };
+    /// let (mut a, mut b) = (EffectRng::new(3), EffectRng::new(3));
+    /// ParticleEffects::with_capacity(64).emit(&burst, &mut a);
+    /// b.jump(Burst::DRAWS_PER_PARTICLE as u64 * 40);
+    /// assert_eq!(a.next_u32(), b.next_u32());
+    /// ```
+    pub const DRAWS_PER_PARTICLE: u32 = 5;
+}
+
 /// A particle touching down on the ground, reported by
 /// [`ParticleEffects::collide_ground_with`].
 ///
@@ -1407,6 +1436,17 @@ where
 /// that -- a replay, a regression screenshot, or a lockstep game that wants both
 /// peers to see identical sparks. Callers that do not care simply never reuse a
 /// seed.
+///
+/// Emission from a seed is identical on Windows, Linux and macOS, and in the GPU pool
+/// ([`GpuParticlePool`](crate::gpu::GpuParticlePool), feature `gpu`): every draw is
+/// integer arithmetic or a correctly rounded `f32` add, multiply, divide or square root,
+/// and the one transcendental, the direction's sine and cosine, is
+/// [`sin_cos_turn`](crate::particles::sin_cos_turn), integer arithmetic too. (Until
+/// 0.3.4 it was the platform's `f32::sin_cos`, whose last bits differ between maths
+/// libraries.)
+///
+/// [`Self::jump`] skips ahead any number of draws in at most 32 table lookups of four
+/// loads each, which is how the GPU pool gives each particle of a burst its own draws.
 #[derive(Debug, Clone)]
 pub struct EffectRng(u32);
 
@@ -1498,11 +1538,52 @@ impl EffectRng {
         min + (max - min) * self.unit()
     }
 
+    /// Skip `steps` draws: the state [`Self::next_u32`] would leave after `steps` calls.
+    ///
+    /// xorshift32 is linear over GF(2), so `k` steps are the `k`-th power of its 32x32
+    /// bit matrix, applied as the product of the precomputed powers `M^(2^b)` for the set
+    /// bits of `k` (each byte-sliced: four loads and three XORs). The distance is reduced
+    /// by the period, `2^32 - 1`, first. The tables (128 KB) are built on the first call,
+    /// in about a millisecond.
+    ///
+    /// # Arguments
+    ///
+    /// * `steps` - draws to skip; any value, zero included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::particles::EffectRng;
+    /// let mut a = EffectRng::new(9);
+    /// let mut b = EffectRng::new(9);
+    /// for _ in 0..1_000 {
+    ///     a.next_u32();
+    /// }
+    /// b.jump(1_000);
+    /// assert_eq!(a.next_u32(), b.next_u32());
+    /// ```
+    pub fn jump(&mut self, steps: u64) {
+        self.0 = crate::particles::rng_jump::jump(self.0, steps);
+    }
+
+    /// The raw state: the value the last [`Self::next_u32`] returned (or the seed).
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub(crate) fn state(&self) -> u32 {
+        self.0
+    }
+
     /// A direction on the unit sphere, biased upward by `lift`.
     ///
     /// Samples `y` uniformly before taking the ring radius, which gives a genuinely
     /// uniform sphere. Sampling two angles instead clumps points at the poles, and
     /// a burst built that way visibly favours straight up and straight down.
+    ///
+    /// Two draws: the azimuth as a 24-bit fraction of a turn (`next_u32() >> 8`), whose
+    /// sine and cosine come from [`sin_cos_turn`](crate::particles::sin_cos_turn), then
+    /// `y = range(-1, 1)`. The rest is `f32` arithmetic in a fixed order with no
+    /// transcendental, so a seed gives the same bits on every platform and on the GPU.
+    /// Since 0.3.4; before, the azimuth's sine and cosine were `f32::sin_cos` of
+    /// `unit() * TAU`, and a seed's directions differ from those by a few ulp.
     ///
     /// # Arguments
     ///
@@ -1521,11 +1602,13 @@ impl EffectRng {
     /// assert!((len - 1.0).abs() < 1e-5);
     /// ```
     pub fn hemisphere(&mut self, lift: f32) -> [f32; 3] {
-        let azimuth = self.unit() * core::f32::consts::TAU;
+        // The azimuth as a fraction of a turn, the same 24 bits `unit` would take, so the
+        // direction's sine and cosine are integer arithmetic (see `sin_cos_turn`).
+        let azimuth = self.next_u32() >> 8;
         let y = self.range(-1.0, 1.0);
         let r = (1.0 - y * y).max(0.0).sqrt();
 
-        let (sin, cos) = azimuth.sin_cos();
+        let (sin, cos) = crate::particles::sin_cos_turn(azimuth);
         let mut dir = [r * cos, y + lift, r * sin];
 
         let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
