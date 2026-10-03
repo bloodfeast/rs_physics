@@ -1265,7 +1265,7 @@ impl SphFluid {
         let mut binning = Duration::ZERO;
         if let Some(solids) = solids {
             let tb = Instant::now();
-            self.bin_solids(solids);
+            self.bin_solids(solids, dt);
             binning = tb.elapsed();
         }
         let t1 = Instant::now();
@@ -1601,6 +1601,7 @@ impl SphFluid {
                 self.contact_radius(),
                 restitution,
                 friction_keep,
+                dt,
             );
             let n = self.px.len();
             self.still_on_solid.clear();
