@@ -32,8 +32,8 @@ result changes, and every existing test stands; the fluid steps bit-identically 
 - Kinematics only. How much a strike wets a surface is the caller's law; the `Contact`
   documentation points at the Weber number, `rho u^2 d / sigma`, as the usual input.
 - Structure-of-arrays and always on: two arrays reserved at the fluid's capacity (12
-  bytes a particle), written in the parallel move where the contact resolves, two
-  writes a particle the move visits; no allocation in the step.
+  bytes a particle), written in the parallel move where the contact resolves: one
+  write a particle the move visits and one more a contact; no allocation in the step.
 - Tests (`sph_contact_tests.rs`): a drop thrown at a capsule reports it with the
   throw's normal part as its approach speed, within 1%, on the step its path reaches the
   inflated surface; a drop passing half a contact radius clear reports nothing; a drop
@@ -46,6 +46,31 @@ result changes, and every existing test stands; the fluid steps bit-identically 
 - `examples/sph_contact_record.rs`: three resting pools (1,024, 4,096 and 16,384) with a
   hundred wading capsules each, timed by the solver's phase timers, with a checksum; on
   the 0.3.7 surface only, so the same file measures both sides.
+
+### Measured
+
+`examples/sph_contact_record 400`, release. Each figure is the median of 400 steps, in
+microseconds, taken from the solver's own phase timers. The scene is three resting pools
+of blood with a hundred capsules wading in each, stepped in turn. "Before" is 0.3.7
+(ff26755) with the example added (d8067fe). "After" is this change. There were eight runs,
+ordered before, after, after, before, before, after, after, before, and the table gives
+the range over each side's four runs. Every run of both builds printed the same checksums
+and contact counts.
+
+| particles | contacts a step | move before | move after | step before | step after |
+|---|---|---|---|---|---|
+| 1,024 | 264 | 252.9 to 255.1 | 254.2 to 256.8 | 672.0 to 675.0 | 677.8 to 683.6 |
+| 4,096 | 922 | 289.5 to 298.2 | 287.6 to 293.0 | 1,048.2 to 1,079.9 | 1,049.7 to 1,064.6 |
+| 16,384 | 2,198 | 357.1 to 369.6 | 353.0 to 358.6 | 2,250.2 to 2,286.9 | 2,245.9 to 2,272.2 |
+
+At 4k and 16k the two sides overlap in every phase. At 1k the move (where the record is
+written) differs by about 1.5 us, inside its run-to-run spread. The whole step's ranges do
+not overlap there: the after side is about 6 us (1%) slower. Most of that gap is in phases
+whose code this change does not touch. For example, the binning, which is byte-for-byte
+the same source, reads 38.8 to 39.0 after against 37.6 to 38.2 before. The 1k gap is
+therefore code layout in the rebuilt library, not the record's cost. That cost is one
+`u32` write for each particle the move visits, plus one `f64` write for each contact:
+about 1,300 writes at 1k.
 
 ### Changed
 
