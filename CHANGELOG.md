@@ -5,6 +5,53 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+## 0.3.8 (2026-10-04)
+
+Package SPH-CONTACT-OWNER: who a drop splashes against. Additive: no signature, type or
+result changes, and every existing test stands; the fluid steps bit-identically to 0.3.7.
+
+### Added
+
+- **The contact record.** After a `SphFluid::step_with_solids`, `SphFluid::contacts()`
+  lists every particle a solid's contact moved in that step as a `Contact`: the
+  particle's index, the solid's index (the indexing of `Settled::on_solid`: capsules
+  first, then boxes, in push order) and its approach speed, its velocity relative to the
+  surface along the inward normal before the response, in m/s (zero when it was not
+  moving into the surface). `SphFluid::contacts_len()` counts them without the walk, and
+  equals `SphSolidStats::contacts`. A drop that strikes a solid and bounces or runs off
+  never settles there, so `Settled` never named it; now the surface it struck can be
+  credited with the strike. A drop resting on a solid is listed every step, at about
+  `g dt`.
+- One contact a particle a step: the contact resolves a particle against one solid a
+  step (the nearest meeting, or the first it starts inside), so a particle touching two
+  reports the one it was resolved against.
+- The record is cleared at the start of every step: any `step`, a `step_with_solids`
+  with no solid in reach, and a step that refuses its `dt` or gravity leave it empty.
+  `spawn`, `drain_settled` (which moves the last particle's contact with its
+  `swap_remove`) and `clear` keep it at the particle indices.
+- Kinematics only. How much a strike wets a surface is the caller's law; the `Contact`
+  documentation points at the Weber number, `rho u^2 d / sigma`, as the usual input.
+- Structure-of-arrays and always on: two arrays reserved at the fluid's capacity (12
+  bytes a particle), written in the parallel move where the contact resolves, two
+  writes a particle the move visits; no allocation in the step.
+- Tests (`sph_contact_tests.rs`): a drop thrown at a capsule reports it with the
+  throw's normal part as its approach speed, within 1%, on the step its path reaches the
+  inflated surface; a drop passing half a contact radius clear reports nothing; a drop
+  at rest on a box reports the box every step at no more than `g dt` (blood, water,
+  napalm); the record is cleared by an empty set, a plain step, an unreachable set and
+  a refused `dt` or gravity; drops settled on two crates name the index their last
+  contact named; a regression that `step`, and `step_with_solids` with an empty set,
+  never record; and the record is bit-identical at 1, 3 and 8 threads, its count the
+  statistics' every step.
+- `examples/sph_contact_record.rs`: three resting pools (1,024, 4,096 and 16,384) with a
+  hundred wading capsules each, timed by the solver's phase timers, with a checksum; on
+  the 0.3.7 surface only, so the same file measures both sides.
+
+### Changed
+
+- Two earlier entries named the consumer whose build ran beside a measurement; they now
+  say a consumer build, so the changelog names no consumer.
+
 ## 0.3.7 (2026-10-03)
 
 Package SPH-SOLIDS-d: the sphere-cast contact, so a sliding drop gets friction every
@@ -128,7 +175,7 @@ solids and the ground are bit-identical to 0.3.5.
 `examples/sph_solids_binning 400`, release, medians of 400 steps, microseconds; before is
 0.3.5 with the example's new scenes (fd21248), after is this change: five before runs
 and three of the final build, interleaved with each other and with probe builds, with a
-Ridgeline build's `cargo` and `rustc` running beside them. Ranges over the runs:
+consumer build's `cargo` and `rustc` running beside them. Ranges over the runs:
 
 | scene | binning before | after | move before | after | step before | after |
 |---|---|---|---|---|---|---|
@@ -210,7 +257,7 @@ is bit-identical to 0.3.4's in every scene measured.
 
 `examples/sph_solids_binning`, release, medians of 400 steps of each scene's binning
 (`SphSolidStats::binning`); "before" is 0.3.4 with the example added, and the builds ran
-before, after, after, before. A Ridgeline
+before, after, after, before. A consumer
 build's `cargo` and `cargo-nextest` were running beside every run.
 
 | scene | before | after | |
