@@ -993,9 +993,11 @@ impl<'a> Contact<'a> {
     /// approaching normal part to `restitution` and its tangential part to that decay,
     /// and then takes the surface's velocity.
     ///
-    /// Returns, if a solid moved the particle, that solid's id and the square of the
-    /// particle's speed relative to the surface after the response, which is what its
-    /// stillness on the solid is judged by.
+    /// Returns, if a solid moved the particle, that solid's id, the square of the
+    /// particle's speed relative to the surface after the response (what its stillness
+    /// on the solid is judged by), and its approach speed: its speed relative to the
+    /// surface along the inward normal before the response, m/s, zero if it was not
+    /// moving into the surface. The last is what [`super::SphFluid::contacts`] reports.
     #[inline]
     pub(super) fn resolve(
         &self,
@@ -1003,7 +1005,7 @@ impl<'a> Contact<'a> {
         p0: [f64; 3],
         p1: &mut [f64; 3],
         v: &mut [f64; 3],
-    ) -> Option<(u32, f64)> {
+    ) -> Option<(u32, f64, f64)> {
         // The world ray, which every solid at rest casts, worked out at the first one: a
         // particle meeting only moving solids never needs it.
         let mut world: Option<Ray> = None;
@@ -1038,7 +1040,10 @@ impl<'a> Contact<'a> {
                 box_start(&self.solids.boxes[k - caps], ray.origin, r)
             };
             let s = match start {
-                Start::Inside(hit) => return Some((id, self.respond(hit, [0.0; 3], p1, v))),
+                Start::Inside(hit) => {
+                    let (rel_sq, approach) = self.respond(hit, [0.0; 3], p1, v);
+                    return Some((id, rel_sq, approach));
+                }
                 // `out` points away from the solid; only a cast into it meets it.
                 Start::Touching(out) => {
                     if !ray.moving || dot(ray.dir, out) >= 0.0 {
@@ -1077,7 +1082,7 @@ impl<'a> Contact<'a> {
         // What is left of the cast past the meeting, along the surface.
         let rest = scale(best_ray.dir, best_ray.len - best);
         let slide = sub(rest, scale(hit.normal, dot(rest, hit.normal)));
-        let rel_sq = self.respond(hit, slide, p1, v);
+        let (rel_sq, approach) = self.respond(hit, slide, p1, v);
         if slide != [0.0; 3] {
             // The slide runs along the tangent plane at the meeting, which a curved
             // surface falls away from by the slide's square over twice its radius: set
@@ -1089,14 +1094,16 @@ impl<'a> Contact<'a> {
             };
             *p1 = add(end.point, scale(end.normal, r));
         }
-        Some((best_id, rel_sq))
+        Some((best_id, rel_sq, approach))
     }
 
     /// Set the particle on the surface, a contact radius out, carry it `slide` along the
     /// surface at the decayed tangential velocity, and apply the response. Returns the
-    /// square of its speed relative to the surface after it.
+    /// square of its speed relative to the surface after it, and its approach speed
+    /// before it (its relative speed along the inward normal, zero if it was not moving
+    /// into the surface).
     #[inline]
-    fn respond(&self, hit: Hit, slide: [f64; 3], p: &mut [f64; 3], v: &mut [f64; 3]) -> f64 {
+    fn respond(&self, hit: Hit, slide: [f64; 3], p: &mut [f64; 3], v: &mut [f64; 3]) -> (f64, f64) {
         let on = add(hit.point, scale(hit.normal, self.contact_radius));
         *p = add(on, scale(slide, self.friction_keep));
         let n = hit.normal;
@@ -1108,7 +1115,7 @@ impl<'a> Contact<'a> {
         let normal = if vn < 0.0 { -vn * self.restitution } else { vn };
         let kept = add(scale(tangential, self.friction_keep), scale(n, normal));
         *v = add(hit.velocity, kept);
-        dot(kept, kept)
+        (dot(kept, kept), (-vn).max(0.0))
     }
 }
 

@@ -2,7 +2,7 @@
 name = "rs_physics"
 authors = ["Brandon White"]
 description = "A simple physics library written in Rust"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
@@ -113,6 +113,10 @@ required-features = ["fluid_simulation"]
 
 [[example]]
 name = "sph_solids_binning"
+required-features = ["fluid_simulation"]
+
+[[example]]
+name = "sph_contact_record"
 required-features = ["fluid_simulation"]
 
 [[example]]

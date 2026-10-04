@@ -5,6 +5,78 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+## 0.3.8 (2026-10-04)
+
+Package SPH-CONTACT-OWNER: who a drop splashes against. Additive: no signature, type or
+result changes, and every existing test stands; the fluid steps bit-identically to 0.3.7.
+
+### Added
+
+- **The contact record.** After a `SphFluid::step_with_solids`, `SphFluid::contacts()`
+  lists every particle a solid's contact moved in that step as a `Contact`: the
+  particle's index, the solid's index (the indexing of `Settled::on_solid`: capsules
+  first, then boxes, in push order) and its approach speed, its velocity relative to the
+  surface along the inward normal before the response, in m/s (zero when it was not
+  moving into the surface). `SphFluid::contacts_len()` counts them without the walk, and
+  equals `SphSolidStats::contacts`. A drop that strikes a solid and bounces or runs off
+  never settles there, so `Settled` never named it; now the surface it struck can be
+  credited with the strike. A drop resting on a solid is listed every step, at about
+  `g dt`.
+- One contact a particle a step: the contact resolves a particle against one solid a
+  step (the nearest meeting, or the first it starts inside), so a particle touching two
+  reports the one it was resolved against.
+- The record is cleared at the start of every step: any `step`, a `step_with_solids`
+  with no solid in reach, and a step that refuses its `dt` or gravity leave it empty.
+  `spawn`, `drain_settled` (which moves the last particle's contact with its
+  `swap_remove`) and `clear` keep it at the particle indices.
+- Kinematics only. How much a strike wets a surface is the caller's law; the `Contact`
+  documentation points at the Weber number, `rho u^2 d / sigma`, as the usual input.
+- Structure-of-arrays and always on: two arrays reserved at the fluid's capacity (12
+  bytes a particle), written in the parallel move where the contact resolves: one
+  write a particle the move visits and one more a contact; no allocation in the step.
+- Tests (`sph_contact_tests.rs`): a drop thrown at a capsule reports it with the
+  throw's normal part as its approach speed, within 1%, on the step its path reaches the
+  inflated surface; a drop passing half a contact radius clear reports nothing; a drop
+  at rest on a box reports the box every step at no more than `g dt` (blood, water,
+  napalm); the record is cleared by an empty set, a plain step, an unreachable set and
+  a refused `dt` or gravity; drops settled on two crates name the index their last
+  contact named; a regression that `step`, and `step_with_solids` with an empty set,
+  never record; and the record is bit-identical at 1, 3 and 8 threads, its count the
+  statistics' every step.
+- `examples/sph_contact_record.rs`: three resting pools (1,024, 4,096 and 16,384) with a
+  hundred wading capsules each, timed by the solver's phase timers, with a checksum; on
+  the 0.3.7 surface only, so the same file measures both sides.
+
+### Measured
+
+`examples/sph_contact_record 400`, release. Each figure is the median of 400 steps, in
+microseconds, taken from the solver's own phase timers. The scene is three resting pools
+of blood with a hundred capsules wading in each, stepped in turn. "Before" is 0.3.7
+(ff26755) with the example added (d8067fe). "After" is this change. There were eight runs,
+ordered before, after, after, before, before, after, after, before, and the table gives
+the range over each side's four runs. Every run of both builds printed the same checksums
+and contact counts.
+
+| particles | contacts a step | move before | move after | step before | step after |
+|---|---|---|---|---|---|
+| 1,024 | 264 | 252.9 to 255.1 | 254.2 to 256.8 | 672.0 to 675.0 | 677.8 to 683.6 |
+| 4,096 | 922 | 289.5 to 298.2 | 287.6 to 293.0 | 1,048.2 to 1,079.9 | 1,049.7 to 1,064.6 |
+| 16,384 | 2,198 | 357.1 to 369.6 | 353.0 to 358.6 | 2,250.2 to 2,286.9 | 2,245.9 to 2,272.2 |
+
+At 4k and 16k the two sides overlap in every phase. At 1k the move (where the record is
+written) differs by about 1.5 us, inside its run-to-run spread. The whole step's ranges do
+not overlap there: the after side is about 6 us (1%) slower. Most of that gap is in phases
+whose code this change does not touch. For example, the binning, which is byte-for-byte
+the same source, reads 38.8 to 39.0 after against 37.6 to 38.2 before. The 1k gap is
+therefore code layout in the rebuilt library, not the record's cost. That cost is one
+`u32` write for each particle the move visits, plus one `f64` write for each contact:
+about 1,300 writes at 1k.
+
+### Changed
+
+- Two earlier entries named the consumer whose build ran beside a measurement; they now
+  say a consumer build, so the changelog names no consumer.
+
 ## 0.3.7 (2026-10-03)
 
 Package SPH-SOLIDS-d: the sphere-cast contact, so a sliding drop gets friction every
@@ -128,7 +200,7 @@ solids and the ground are bit-identical to 0.3.5.
 `examples/sph_solids_binning 400`, release, medians of 400 steps, microseconds; before is
 0.3.5 with the example's new scenes (fd21248), after is this change: five before runs
 and three of the final build, interleaved with each other and with probe builds, with a
-Ridgeline build's `cargo` and `rustc` running beside them. Ranges over the runs:
+consumer build's `cargo` and `rustc` running beside them. Ranges over the runs:
 
 | scene | binning before | after | move before | after | step before | after |
 |---|---|---|---|---|---|---|
@@ -210,7 +282,7 @@ is bit-identical to 0.3.4's in every scene measured.
 
 `examples/sph_solids_binning`, release, medians of 400 steps of each scene's binning
 (`SphSolidStats::binning`); "before" is 0.3.4 with the example added, and the builds ran
-before, after, after, before. A Ridgeline
+before, after, after, before. A consumer
 build's `cargo` and `cargo-nextest` were running beside every run.
 
 | scene | before | after | |

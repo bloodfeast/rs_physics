@@ -103,6 +103,23 @@ fn main() {
 - Buoyant force calculation
 - Pressure drop in pipes
 
+### SPH Fluid (feature `fluid_simulation`)
+
+- `SphFluid`: smoothed-particle hydrodynamics, liquid that holds itself together and
+  breaks into droplets; structure-of-arrays, parallel and bit-identical at any thread
+  count, allocation-free once warm
+- `SphSolids`: capsules and yawed boxes, given each step at their end pose with a
+  surface velocity, that push the liquid (one way: the liquid never pushes back)
+- `Settled`: a drop that has come to rest, drained from the solver with where it
+  stopped, how it arrived and which solid it rests on
+- `Contact`: every particle a solid met in the last step, with the solid's index and
+  the approach speed into its surface, so a surface a splash strikes can be credited
+  with the strike and not only with what settles on it
+
+The solver reports kinematics and leaves the look to the caller: how much a strike wets
+a surface (a smear, a spray, nothing) is the caller's law, usually a threshold on the
+Weber number from the reported approach speed.
+
 ### Constraint Solvers
 
 - `Joint`: Struct for rigid connections between objects

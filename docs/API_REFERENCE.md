@@ -11,9 +11,10 @@ Complete reference of public functions, structs, and enums in rs_physics.
 5. [Shape Types](#shape-types)
 6. [Collision Functions](#collision-functions)
 7. [Interaction Functions](#interaction-functions)
-8. [Vector Utilities](#vector-utilities)
-9. [Error Types](#error-types)
-10. [Constants](#constants)
+8. [SPH Fluid](#sph-fluid)
+9. [Vector Utilities](#vector-utilities)
+10. [Error Types](#error-types)
+11. [Constants](#constants)
 
 ---
 
@@ -731,6 +732,44 @@ pub fn sphere_collision_normal(
 ```
 
 ---
+
+## SPH Fluid
+
+Behind the `fluid_simulation` feature, in `rs_physics::fluid_dynamics`. Every item is
+documented in the source with a complete example; this is the map.
+
+```rust
+use rs_physics::fluid_dynamics::{Contact, Settled, SphFluid, SphParams, SphSolids};
+
+let mut blood = SphFluid::new(SphParams::blood(), 4096)?;   // capacity, particles
+blood.spawn([0.0, 1.0, 0.0], [2.0, 0.0, 0.0]);              // metres, m/s
+let mut solids = SphSolids::new();                          // refilled every step
+solids.push_capsule(a, b, radius, velocity_a, velocity_b);  // end-of-substep pose
+solids.push_box(centre, half_extents, yaw, velocity);
+blood.step_with_solids(1.0 / 240.0, 9.81, |x, z| ground(x, z), &solids);
+for c in blood.contacts() { /* c.particle, c.solid, c.approach_speed (m/s) */ }
+blood.drain_settled(|s: Settled| { /* s.position, s.mass, s.velocity, s.on_solid */ });
+```
+
+### Contacts (0.3.8)
+
+- `SphFluid::contacts(&self) -> impl Iterator<Item = Contact>`: every particle a
+  solid's contact moved in the last `step_with_solids`, in particle order. Cleared at
+  the start of every step; any `step` leaves it empty. One contact a particle a step:
+  a particle touching two solids reports the one it was resolved against.
+- `SphFluid::contacts_len(&self) -> usize`: their count, without the walk; equal to
+  `SphSolidStats::contacts`.
+- `Contact { particle: usize, solid: u32, approach_speed: f64 }`: `particle` as
+  `SphFluid::position` takes it; `solid` the index in the step's `SphSolids` (capsules
+  first, then boxes, in push order), the indexing of `Settled::on_solid`;
+  `approach_speed` the velocity relative to the surface along its inward normal before
+  the response, m/s, zero when not moving into it.
+
+The record is kinematics only. A caller deciding how much a strike wets a surface
+usually thresholds the Weber number, `We = rho u^2 d / sigma`: `rho` the
+`SphParams::rest_density`, `u` the approach speed, `d` the drop's diameter
+(`(6 m / (pi rho))^(1/3)` for a particle of mass `m`), `sigma` the liquid's surface
+tension, which the solver does not carry.
 
 ## Vector Utilities
 
