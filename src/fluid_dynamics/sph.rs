@@ -199,6 +199,17 @@
 //! the ceiling every substep; they slip back along it and do not settle (pinned by an
 //! ignored test in the solids tests).
 //!
+//! **The contact record.** A drop that strikes a solid and bounces or runs off never
+//! settles on it, so [`Settled::on_solid`] never names it. The move therefore records,
+//! for every particle a solid's contact moved in the step, the solid's index (the same
+//! indexing) and the particle's approach speed, its speed relative to the surface along
+//! the inward normal before the response, read through [`SphFluid::contacts`] (and
+//! counted by [`SphFluid::contacts_len`]) until the next step clears it. Two arrays at
+//! the particle count, written in the parallel move where the contact resolves, so it
+//! costs two writes a particle the move visits and nothing else: always on, no option.
+//! It is kinematics only; how much a strike wets a surface is the caller's law (the
+//! Weber number is the usual input; see [`Contact`]).
+//!
 //! **The slope.** With solids the ground has a normal too: a particle in ground contact
 //! samples `ground_height` a rest spacing along +x and along +z (two extra calls, and
 //! only in contact, so a particle in flight pays nothing) and meets the ground along
@@ -220,7 +231,8 @@
 //! solids) plus 12 bytes an entry and 4 a touched bucket, and 28 bytes a solid in reach
 //! for its clipped box; the scan's block grid is 4 bytes a block plus 4 a block a box
 //! lists, its size picked each step by cost (one block for a lone hull). All kept at
-//! their high-water marks.
+//! their high-water marks. The contact record is 12 bytes a particle, reserved at the
+//! fluid's capacity in [`SphFluid::new`].
 //!
 //! # Examples
 //!
@@ -465,6 +477,58 @@ pub struct Settled {
     pub on_solid: Option<u32>,
 }
 
+/// A particle that met a solid in the last [`SphFluid::step_with_solids`], read with
+/// [`SphFluid::contacts`].
+///
+/// [`Settled`] names the solid a drop came to rest on; a drop that strikes a solid and
+/// bounces or runs off never settles there, so it leaves no settled record. This is the
+/// other half: every particle a solid's contact moved in the step, with how hard it
+/// came in. It is the kinematics only. How much liquid a strike leaves on the surface
+/// (a smear, a spray, nothing) is the caller's law: the usual input is the Weber number,
+/// `We = rho u^2 d / sigma`, from the liquid's density `rho` (the fluid's
+/// [`SphParams::rest_density`]), this `approach_speed` as `u`, the drop's diameter `d`
+/// (a particle stands for `particle_mass / rest_density` of liquid, a sphere of
+/// diameter `(6 m / (pi rho))^(1/3)`) and the liquid's surface tension `sigma`, which
+/// the solver does not carry.
+///
+/// # Examples
+///
+/// ```
+/// use rs_physics::fluid_dynamics::{SphFluid, SphParams, SphSolids};
+///
+/// // A drop thrown at a post at 2 m/s strikes it.
+/// let mut fluid = SphFluid::new(SphParams::blood(), 8).unwrap();
+/// fluid.spawn([-0.1, 1.0, 0.0], [2.0, 0.0, 0.0]);
+/// let mut solids = SphSolids::new();
+/// solids.push_capsule([0.0, 0.0, 0.0], [0.0, 2.0, 0.0], 0.05, [0.0; 3], [0.0; 3]);
+/// let mut strikes = Vec::new();
+/// for _ in 0..24 {
+///     fluid.step_with_solids(1.0 / 240.0, 9.81, |_, _| -1.0, &solids);
+///     strikes.extend(fluid.contacts());
+/// }
+/// let first = strikes[0];
+/// assert_eq!((first.particle, first.solid), (0, 0));
+/// assert!((first.approach_speed - 2.0).abs() < 0.02);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Contact {
+    /// The particle's index, as [`SphFluid::position`] takes it: valid until the next
+    /// [`SphFluid::step`], [`SphFluid::step_with_solids`] or [`SphFluid::drain_settled`]
+    /// (which compacts with `swap_remove`).
+    pub particle: usize,
+    /// The solid it met: its index in the [`SphSolids`] handed to the step (capsules
+    /// first, then boxes, in the order they were pushed), the same indexing as
+    /// [`Settled::on_solid`].
+    pub solid: u32,
+    /// Its speed into the solid's surface when it met it, m/s: its velocity relative to
+    /// the surface there, along the surface's inward normal, before the contact's
+    /// response (after the step's forces, gravity and speed cap). Zero for a particle
+    /// that was not moving into the surface (one a moving solid swept onto from behind
+    /// its motion and pushed out). A drop resting on a solid reads about one substep's
+    /// gravity, `g dt`.
+    pub approach_speed: f64,
+}
+
 /// Wall time of each phase of the last [`SphFluid::step`], read with
 /// [`SphFluid::phase_times`].
 ///
@@ -627,6 +691,16 @@ pub struct SphFluid {
     /// contact set it on its surface this substep, slower relative to that surface than
     /// [`SETTLE_SPEED`], or [`NO_SOLID`]. Read by the ground pass.
     still_on_solid: Vec<u32>,
+    /// Per particle, in particle order: the solid whose contact moved it in the last
+    /// step, or [`NO_SOLID`]. Kept at the particle count by `spawn`, `drain_settled` and
+    /// `clear`, written whole by the move with solids, and cleared by any other step that
+    /// follows one with contacts. Read by [`SphFluid::contacts`].
+    contact_solid: Vec<u32>,
+    /// Per particle: the approach speed of its contact, m/s, where `contact_solid` names
+    /// one; stale elsewhere.
+    contact_speed: Vec<f64>,
+    /// How many entries of `contact_solid` name a solid.
+    contact_count: usize,
 }
 
 /// Below this speed, and touching ground, a particle is considered to have landed.
@@ -784,6 +858,9 @@ impl SphFluid {
             solid_bins: solids::SolidBins::default(),
             solid_stats: SphSolidStats::default(),
             still_on_solid: Vec::with_capacity(capacity),
+            contact_solid: Vec::with_capacity(capacity),
+            contact_speed: f(),
+            contact_count: 0,
         })
     }
 
@@ -883,10 +960,13 @@ impl SphFluid {
             &mut self.vz,
             &mut self.density,
             &mut self.still_for,
+            &mut self.contact_speed,
         ] {
             v.clear();
         }
         self.rest_on.clear();
+        self.contact_solid.clear();
+        self.contact_count = 0;
     }
 
     /// Position of particle `i`, metres, as of the last completed substep.
@@ -1188,6 +1268,8 @@ impl SphFluid {
         self.density.push(self.params.rest_density);
         self.still_for.push(0.0);
         self.rest_on.push(NO_SOLID);
+        self.contact_solid.push(NO_SOLID);
+        self.contact_speed.push(0.0);
         true
     }
 
@@ -1308,6 +1390,7 @@ impl SphFluid {
         F: Fn(f64, f64) -> f64,
     {
         if !(dt > 0.0 && dt.is_finite() && gravity.is_finite()) || self.is_empty() {
+            self.clear_contacts();
             return;
         }
         let t0 = Instant::now();
@@ -1664,18 +1747,25 @@ impl SphFluid {
             self.still_on_solid.clear();
             self.still_on_solid.resize(n, NO_SOLID);
             let counts = (
-                self.vx.par_chunks_mut(STREAM_CHUNK),
-                self.vy.par_chunks_mut(STREAM_CHUNK),
-                self.vz.par_chunks_mut(STREAM_CHUNK),
-                self.px.par_chunks_mut(STREAM_CHUNK),
-                self.py.par_chunks_mut(STREAM_CHUNK),
-                self.pz.par_chunks_mut(STREAM_CHUNK),
-                self.slot_of.par_chunks(STREAM_CHUNK),
-                self.bucket_of.par_chunks(STREAM_CHUNK),
-                self.still_on_solid.par_chunks_mut(STREAM_CHUNK),
+                (
+                    self.vx.par_chunks_mut(STREAM_CHUNK),
+                    self.vy.par_chunks_mut(STREAM_CHUNK),
+                    self.vz.par_chunks_mut(STREAM_CHUNK),
+                    self.px.par_chunks_mut(STREAM_CHUNK),
+                    self.py.par_chunks_mut(STREAM_CHUNK),
+                    self.pz.par_chunks_mut(STREAM_CHUNK),
+                ),
+                (
+                    self.slot_of.par_chunks(STREAM_CHUNK),
+                    self.bucket_of.par_chunks(STREAM_CHUNK),
+                    self.still_on_solid.par_chunks_mut(STREAM_CHUNK),
+                    self.contact_solid.par_chunks_mut(STREAM_CHUNK),
+                    self.contact_speed.par_chunks_mut(STREAM_CHUNK),
+                ),
             )
                 .into_par_iter()
-                .map(|(vx, vy, vz, px, py, pz, slots, buckets, still)| {
+                .map(|(state, (slots, buckets, still, met, speed))| {
+                    let (vx, vy, vz, px, py, pz) = state;
                     let (mut tested, mut moved) = (0usize, 0usize);
                     for i in 0..slots.len() {
                         let k = slots[i] as usize;
@@ -1696,11 +1786,15 @@ impl SphFluid {
                         // The particle's bucket is its cell at the start of the substep,
                         // where its ray starts.
                         let ids = contact.binned(buckets[i]);
+                        met[i] = NO_SOLID;
                         if !ids.is_empty() {
                             tested += 1;
-                            if let Some((id, rel_sq)) = contact.resolve(ids, p0, &mut p, &mut v)
+                            if let Some((id, rel_sq, approach)) =
+                                contact.resolve(ids, p0, &mut p, &mut v)
                             {
                                 moved += 1;
+                                met[i] = id;
+                                speed[i] = approach;
                                 if rel_sq < SETTLE_SPEED * SETTLE_SPEED {
                                     still[i] = id;
                                 }
@@ -1716,8 +1810,16 @@ impl SphFluid {
                     (tested, moved)
                 })
                 .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+            self.contact_count = counts.1;
             self.ground(dt, ground_height, true, true, restitution, friction_keep);
             return counts;
+        }
+
+        // No contact this step: `clear_contacts`, on the fields, since the acceleration
+        // is borrowed.
+        if self.contact_count > 0 {
+            self.contact_solid.fill(NO_SOLID);
+            self.contact_count = 0;
         }
 
         (
@@ -1847,6 +1949,117 @@ impl SphFluid {
         }
     }
 
+    /// Every particle a solid's contact moved in the last step, and how hard it came in.
+    ///
+    /// The record of [`Self::step_with_solids`]: a particle cast against the solids in
+    /// its bin and met one (swept onto its surface, touching it and moving into it, or
+    /// inside it and pushed out) is listed once, with the solid's index in that step's
+    /// [`SphSolids`] and its approach speed (see [`Contact`]). It is listed whether it
+    /// then bounced, ran along the surface or came to rest there, so a surface a splash
+    /// strikes is credited with the strike, not only with what settles on it: a drop at
+    /// rest on a solid is listed every step it stays, at an approach speed of about
+    /// `g dt`.
+    ///
+    /// **One contact a particle a step.** The contact resolves each particle against one
+    /// solid a step: the nearest it meets along its path, or the first in bin order it
+    /// starts inside. A particle that touches two solids in the step reports the one it
+    /// was resolved against; it meets the other on a later step, if it still does then.
+    ///
+    /// The record is cleared at the start of every step: a step with no solid in reach,
+    /// and any [`Self::step`], leaves it empty, as does a `dt` or gravity the step
+    /// refuses. [`Self::spawn`] adds a particle with no contact; [`Self::drain_settled`]
+    /// removes a drained particle's contact with it and moves the last particle's to
+    /// its index, so indices stay those of [`Self::position`]. Read the record before
+    /// draining to see a drop's last strike beside its [`Settled`] report.
+    ///
+    /// Written by the move with two array writes a contact; reading it walks the
+    /// particle array (nothing at all when the step had no contact) and allocates
+    /// nothing. Particles are listed in index order.
+    ///
+    /// # Returns
+    ///
+    /// An iterator over the last step's contacts, [`Self::contacts_len`] of them, in
+    /// particle order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams, SphSolids};
+    ///
+    /// // A drop at rest on a crate's lid strikes it every step, at about g dt.
+    /// let mut fluid = SphFluid::new(SphParams::water(), 8).unwrap();
+    /// let mut solids = SphSolids::new();
+    /// solids.push_box([0.0, 0.25, 0.0], [0.25; 3], 0.0, [0.0; 3]);
+    /// fluid.spawn([0.0, 0.5 + fluid.contact_radius(), 0.0], [0.0; 3]);
+    /// let dt = 1.0 / 240.0;
+    /// for _ in 0..10 {
+    ///     fluid.step_with_solids(dt, 9.81, |_, _| 0.0, &solids);
+    ///     let contact = fluid.contacts().next().unwrap();
+    ///     assert_eq!((contact.particle, contact.solid), (0, 0));
+    ///     assert!(contact.approach_speed <= 9.81 * dt * 1.000_001);
+    /// }
+    /// // A plain step clears it.
+    /// fluid.step(dt, 9.81, |_, _| 0.0);
+    /// assert_eq!(fluid.contacts().count(), 0);
+    /// ```
+    pub fn contacts(&self) -> impl Iterator<Item = Contact> + '_ {
+        let n = if self.contact_count == 0 {
+            0
+        } else {
+            self.contact_solid.len()
+        };
+        self.contact_solid[..n]
+            .iter()
+            .zip(&self.contact_speed[..n])
+            .enumerate()
+            .filter(|(_, (&solid, _))| solid != NO_SOLID)
+            .map(|(particle, (&solid, &approach_speed))| Contact {
+                particle,
+                solid,
+                approach_speed,
+            })
+    }
+
+    /// How many particles a solid's contact moved in the last step: the length of
+    /// [`Self::contacts`], without walking it.
+    ///
+    /// Equal to [`SphSolidStats::contacts`] after a [`Self::step_with_solids`] that ran
+    /// (until a [`Self::drain_settled`] removes a particle that had one), and zero after
+    /// any other step. A step on an empty fluid, or one that refuses its `dt` or gravity,
+    /// does nothing and leaves the statistics as they were; it empties the record.
+    ///
+    /// # Returns
+    ///
+    /// The count, at most [`Self::len`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::fluid_dynamics::{SphFluid, SphParams, SphSolids};
+    ///
+    /// let mut fluid = SphFluid::new(SphParams::water(), 8).unwrap();
+    /// fluid.spawn([0.0, 1.0, 0.0], [0.0; 3]);
+    /// fluid.spawn([5.0, 1.0, 0.0], [0.0; 3]);
+    /// let mut solids = SphSolids::new();
+    /// solids.push_box([0.0, 1.0, 0.0], [0.1; 3], 0.0, [0.0; 3]);
+    /// fluid.step_with_solids(1.0 / 240.0, 9.81, |_, _| 0.0, &solids);
+    /// // The drop inside the box is pushed out; the one five metres off is not met.
+    /// assert_eq!(fluid.contacts_len(), 1);
+    /// assert_eq!(fluid.contacts_len(), fluid.solid_stats().contacts);
+    /// ```
+    pub fn contacts_len(&self) -> usize {
+        self.contact_count
+    }
+
+    /// Empty the contact record, if the last step left one: a step that does not run the
+    /// move with solids leaves no contact.
+    fn clear_contacts(&mut self) {
+        if self.contact_count > 0 {
+            self.contact_solid.fill(NO_SOLID);
+            self.contact_count = 0;
+        }
+    }
+
     /// Remove every particle that has come to rest and report where it stopped.
     ///
     /// This is the seam between the fluid and whatever it leaves behind: the solver
@@ -1902,10 +2115,14 @@ impl SphFluid {
                 &mut self.vz,
                 &mut self.density,
                 &mut self.still_for,
+                &mut self.contact_speed,
             ] {
                 v.swap_remove(i);
             }
             self.rest_on.swap_remove(i);
+            if self.contact_solid.swap_remove(i) != NO_SOLID {
+                self.contact_count -= 1;
+            }
         }
     }
 }
@@ -3043,3 +3260,7 @@ mod regression_tests;
 #[cfg(test)]
 #[path = "sph_solids_tests.rs"]
 mod solids_tests;
+
+#[cfg(test)]
+#[path = "sph_contact_tests.rs"]
+mod contact_tests;

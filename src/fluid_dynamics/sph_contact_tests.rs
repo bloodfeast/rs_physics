@@ -35,10 +35,19 @@ fn post(solids: &mut SphSolids) {
 }
 
 /// Every step's contacts, with the record's own count checked against the walk and the
-/// solids' statistics on the way.
+/// solids' statistics on the way. A step on an empty fluid does nothing and leaves the
+/// statistics as they were, so they are compared only while there is fluid.
 fn record(f: &SphFluid) -> Vec<Contact> {
     let contacts: Vec<Contact> = f.contacts().collect();
-    assert_eq!(contacts.len(), f.contacts_len(), "the walk and the count disagree");
+    assert_eq!(
+        contacts.len(),
+        f.contacts_len(),
+        "the walk and the count disagree"
+    );
+    if f.is_empty() {
+        assert!(contacts.is_empty(), "an empty fluid recorded {contacts:?}");
+        return contacts;
+    }
     assert_eq!(
         f.contacts_len(),
         f.solid_stats().contacts,
@@ -95,7 +104,7 @@ fn a_drop_that_misses_reports_nothing() {
     let mut solids = SphSolids::new();
     post(&mut solids);
     let mut tested = 0;
-    for s in 0..24 {
+    for s in 0..36 {
         f.step_with_solids(DT, G, far_below, &solids);
         assert!(record(&f).is_empty(), "step {s}: {:?}", record(&f));
         tested += f.solid_stats().ray_tested;
@@ -153,7 +162,11 @@ fn the_record_is_cleared_between_steps() {
         // Inside the post: pushed out on the first step.
         f.spawn([0.0, 1.0, 0.01], [0.0; 3]);
         f.step_with_solids(DT, G, far_below, &solids);
-        assert_eq!(record(&f).len(), 1, "case {k}: the push-out was not recorded");
+        assert_eq!(
+            record(&f).len(),
+            1,
+            "case {k}: the push-out was not recorded"
+        );
         clear(&mut f);
         assert_eq!(f.contacts_len(), 0, "case {k}");
         assert_eq!(f.contacts().count(), 0, "case {k}");
@@ -166,7 +179,7 @@ fn the_record_is_cleared_between_steps() {
 fn the_record_indexes_solids_as_settled_on_solid_does() {
     let mut f = SphFluid::new(SphParams::blood(), 16).unwrap();
     for k in 0..4 {
-        let o = 0.1 * k as f64 - 0.15;
+        let o = 0.05 * k as f64 - 0.075;
         f.spawn([-1.0 + o, 0.7, o], [0.0; 3]);
         f.spawn([1.0 + o, 0.5, 0.5 - o], [0.0; 3]);
     }
@@ -255,7 +268,11 @@ fn the_record_is_bit_identical_at_any_thread_count() {
                 solids.push_box([0.3, 0.05, 0.1], [0.05; 3], 0.2, [0.0; 3]);
                 f.step_with_solids(DT, G, flat, &solids);
                 for c in record(&f) {
-                    out.push([c.particle as u64, c.solid as u64, c.approach_speed.to_bits()]);
+                    out.push([
+                        c.particle as u64,
+                        c.solid as u64,
+                        c.approach_speed.to_bits(),
+                    ]);
                 }
             }
             out
