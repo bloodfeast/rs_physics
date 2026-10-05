@@ -185,6 +185,18 @@ The library includes a comprehensive test suite. To run the tests, use:
 cargo test
 ```
 
+CI runs the whole crate with every feature, doctests included: `cargo test --features all`.
+Each doctest is compiled and linked as its own program against the crate and all of its
+dependencies (wgpu under `gpu`), about 0.55 GB of commit apiece on Windows, so
+`.cargo/config.toml` caps rustdoc at 8 doctest compiles at once with
+`rustdocflags = ["--test-args", "--test-threads=8"]`; unit and integration tests keep one
+thread per core. If doctests fail to compile with `E0786 found invalid metadata files`,
+`E0462 found staticlib`, `LNK1102 out of memory` or `os error 1455` (the paging file is too
+small) while the same code builds in a unit test, the machine ran out of commit, not the
+code: rerun with a lower cap, `RUSTDOCFLAGS="--test-args --test-threads=4"` (which replaces
+the config value), or give Windows a paging file. Do not delete, hide or ignore a doctest
+to make the suite pass.
+
 ## WebAssembly Build
 
 To build the WebAssembly module, navigate to the `rs_physics_wasm` directory and run:

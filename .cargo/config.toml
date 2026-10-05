@@ -1,3 +1,9 @@
 
 [build]
 rustflags = ["-C", "target-feature=+avx"]
+# Every doctest is its own rustc and link.exe of the crate and all its dependencies,
+# wgpu included under `gpu`: about 0.55 GB of commit each, measured on Windows. rustdoc
+# runs one per core by default, and 36 at once exhausted a 64 GB machine with no paging
+# file (os error 1455, misreported as E0786 / E0462). Cap the doctest compiles only;
+# unit and integration tests keep their parallelism. RUSTDOCFLAGS replaces this.
+rustdocflags = ["--test-args", "--test-threads=8"]
