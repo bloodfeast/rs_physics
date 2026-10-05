@@ -3,14 +3,45 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
-## Unreleased
+## 0.3.9 (2026-10-05)
 
+Package RSP-DOC-WARNINGS: the docs build warning-free, and the SPH spread guard counts
+work instead of timing it. No signature, visibility or behaviour changes.
+
+### Fixed
+
+- **Doc links.** `cargo doc --features all --no-deps` reported 96 rustdoc warnings: 66
+  `private_intra_doc_links` and 30 `broken_intra_doc_links`. Public docs in `articulated`
+  that named solver internals now name them as code rather than linking a private page,
+  and the two that pointed at private defaults (`Skeleton::default`,
+  `Skeleton::set_rolling_resistance`) state the value and its reason instead. The
+  `SceneLayout` and `terrain_rect_bytes` docs link `GpuAcoustics::pack_scene` and
+  `GpuAcoustics::pack_terrain_rect`, the public surface of the private packers. The
+  `FilmFlow` links in the blood docs carry their path. `acoustics`, `atmosphere` and
+  `particles::analytic` had an outer doc in their parent as well as their own inner
+  one, which made rustdoc resolve the inner one's links from the parent; the outer doc
+  is folded into the inner one and every link resolves.
 - Doctests under `--features all` no longer fail to compile on Windows machines with many
   cores and little commit headroom. rustdoc compiled one doctest per core, each a full rustc
   and link.exe against wgpu at about 0.55 GB, and 36 at once ran a 64 GB machine with no
   paging file out of commit (os error 1455, reported as E0786, E0462 and LNK1102).
   `.cargo/config.toml` now caps doctest compiles at 8 with `rustdocflags`; unit and
   integration tests are unaffected. Config only: no source, API or doctest changes.
+
+### Changed
+
+- `spreading_particles_across_a_map_does_not_blow_up_the_cost` counts work instead of
+  timing five steps, so it no longer trips under load. Over five steps of 256 particles it
+  reads the grid each step built: the buckets binned, which must be exactly
+  `table_size(n)` a build whatever the spread (the table is sized by count; a dense grid
+  over a 100 m bounding box is the regression it guards), and the candidates the
+  neighbour runs cover, which spread over 100 m must not exceed the clustered count,
+  because spreading can only remove true neighbours from a particle's 27 cells.
+
+### CI
+
+- The workflow builds the docs with `RUSTDOCFLAGS=-D warnings`, so a broken or private
+  doc link fails the build.
 
 ## 0.3.8 (2026-10-04)
 

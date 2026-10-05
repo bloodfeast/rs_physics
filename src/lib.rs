@@ -143,15 +143,7 @@ pub mod rotational_dynamics;
 pub mod fluid_dynamics;
 pub mod thermodynamics;
 pub mod materials;
-/// Sound as a physical quantity: propagation, absorption, reflection and direction.
 pub mod acoustics;
-/// The state of the air, and the closed-form results for wind near the ground.
-///
-/// Owns [`atmosphere::Air`], which is the crate's single description of air — density,
-/// viscosity, speed of sound and acoustic absorption all derive from the same three
-/// numbers. Also holds [`atmosphere::boundary_layer`]: the logarithmic wind profile,
-/// Jackson–Hunt speed-up over a rise, and the Cionco canopy profile. Not feature-gated,
-/// because [`acoustics`] is not and depends on it.
 pub mod atmosphere;
 pub mod models;
 pub mod particles;
