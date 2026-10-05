@@ -5,6 +5,13 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+- Doctests under `--features all` no longer fail to compile on Windows machines with many
+  cores and little commit headroom. rustdoc compiled one doctest per core, each a full rustc
+  and link.exe against wgpu at about 0.55 GB, and 36 at once ran a 64 GB machine with no
+  paging file out of commit (os error 1455, reported as E0786, E0462 and LNK1102).
+  `.cargo/config.toml` now caps doctest compiles at 8 with `rustdocflags`; unit and
+  integration tests are unaffected. Config only: no source, API or doctest changes.
+
 ## 0.3.8 (2026-10-04)
 
 Package SPH-CONTACT-OWNER: who a drop splashes against. Additive: no signature, type or
