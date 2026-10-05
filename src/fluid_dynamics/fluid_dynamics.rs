@@ -194,8 +194,8 @@ impl Fluid {
     /// [`blood_apparent_viscosity`]. A test asserts the two agree, so this is a
     /// derived figure with a source rather than a plausible one. 300 s⁻¹ is the
     /// middle of the range a film of spilt blood on ground actually runs at — see
-    /// [`FilmFlow::shear_rate`], and the test that pins the whole plausible range of
-    /// film depths to within a few percent of this value.
+    /// [`FilmFlow::shear_rate`](super::FilmFlow::shear_rate), and the test that pins
+    /// the whole plausible range of film depths to within a few percent of this value.
     ///
     /// Use this `Fluid` where the shear rate is high: drag, Reynolds numbers,
     /// buoyancy, and the thin-film flow in [`crate::fluid_dynamics::FilmFlow`]. Do
@@ -320,7 +320,8 @@ pub const BLOOD_SURFACE_TENSION: f64 = 0.056;
 /// shear rate it means. This is that declaration, and it is not arbitrary: a film of
 /// spilt blood between a fifth of a millimetre and five millimetres deep, on grades
 /// from a gentle slope to a steep one, runs at wall shear rates of roughly one to
-/// eight hundred per second ([`FilmFlow::shear_rate`]). 300 s⁻¹ is the middle of that.
+/// eight hundred per second ([`FilmFlow::shear_rate`](super::FilmFlow::shear_rate)).
+/// 300 s⁻¹ is the middle of that.
 pub const BLOOD_REFERENCE_SHEAR_RATE: f64 = 300.0;
 
 /// Apparent viscosity of whole blood at a given shear rate, Pa·s — the Casson model.
@@ -348,7 +349,8 @@ pub const BLOOD_REFERENCE_SHEAR_RATE: f64 = 300.0;
 /// a fluid with a yield stress has *infinite* apparent viscosity at zero shear, and
 /// returning `f64::INFINITY` would hand a value that poisons every arithmetic
 /// expression downstream to a caller who only wanted to know if it moves. Ask
-/// [`FilmFlow::arrest_thickness`] that question instead.
+/// [`FilmFlow::arrest_thickness`](super::FilmFlow::arrest_thickness) that question
+/// instead.
 ///
 /// # Examples
 /// ```
@@ -393,8 +395,8 @@ pub fn blood_apparent_viscosity(shear_rate: f64) -> Result<f64, PhysicsError> {
 /// one, and it comes from the fluid rather than from how it looked.
 ///
 /// The result is a *depth*, not a criterion for motion on a slope. For that see
-/// [`FilmFlow::arrest_thickness`], which is the yield-stress condition and a much
-/// smaller number.
+/// [`FilmFlow::arrest_thickness`](super::FilmFlow::arrest_thickness), which is the
+/// yield-stress condition and a much smaller number.
 ///
 /// # Arguments
 ///

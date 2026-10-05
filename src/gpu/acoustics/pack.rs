@@ -88,7 +88,8 @@ pub struct GridRect {
 /// Where everything goes in the scene buffer, and how big it is.
 ///
 /// Returned by [`GpuAcoustics::scene_bytes`](super::GpuAcoustics::scene_bytes); pass it to
-/// [`pack_scene`] and to [`GpuAcoustics::encode_scene`](super::GpuAcoustics::encode_scene).
+/// [`GpuAcoustics::pack_scene`](super::GpuAcoustics::pack_scene) and to
+/// [`GpuAcoustics::encode_scene`](super::GpuAcoustics::encode_scene).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SceneLayout {
     pub(crate) header: [u32; HEADER_WORDS as usize],
@@ -97,7 +98,8 @@ pub struct SceneLayout {
 }
 
 impl SceneLayout {
-    /// Bytes [`pack_scene`] writes and the caller stages.
+    /// Bytes [`GpuAcoustics::pack_scene`](super::GpuAcoustics::pack_scene) writes and the
+    /// caller stages.
     ///
     /// # Returns
     ///
@@ -488,7 +490,8 @@ pub(crate) fn pack_scene(
     Ok(())
 }
 
-/// Bytes [`pack_terrain_rect`] writes for a rect: a 16-byte header and the heights.
+/// Bytes [`GpuAcoustics::pack_terrain_rect`](super::GpuAcoustics::pack_terrain_rect) writes
+/// for a rect: a 16-byte header and the heights.
 ///
 /// # Arguments
 ///

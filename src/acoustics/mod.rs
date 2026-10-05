@@ -1,5 +1,3 @@
-//! # Acoustics
-//!
 //! Sound as a physical quantity: how fast it travels, what the air takes out of it on the
 //! way, what a surface does to it, and where a listener hears it from.
 //!

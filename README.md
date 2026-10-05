@@ -197,6 +197,9 @@ code: rerun with a lower cap, `RUSTDOCFLAGS="--test-args --test-threads=4"` (whi
 the config value), or give Windows a paging file. Do not delete, hide or ignore a doctest
 to make the suite pass.
 
+The docs check denies warnings, in CI and locally: `RUSTDOCFLAGS="-D warnings" cargo doc
+--features all --no-deps` must exit 0.
+
 ## WebAssembly Build
 
 To build the WebAssembly module, navigate to the `rs_physics_wasm` directory and run:

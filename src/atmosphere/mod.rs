@@ -1,6 +1,8 @@
-//! # Atmosphere
-//!
 //! The state of the air, and what that state does to anything moving through it.
+//!
+//! Owns [`Air`], the crate's single description of air, and [`boundary_layer`], the
+//! closed-form results for wind near the ground. Not feature-gated, because
+//! [`crate::acoustics`] is not and depends on it.
 //!
 //! ## Why this module exists
 //!

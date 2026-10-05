@@ -2756,11 +2756,41 @@ mod tests {
     /// measured at 274 us clustered against 268,000 us spread over 100 m, with the
     /// scratch buffer staying resident at that size afterwards. This is the guard
     /// against anyone reintroducing that.
+    ///
+    /// It counts work rather than timing it, so it cannot trip on a loaded machine. A
+    /// grid build costs one bucket for every cell of its table (the counting sort clears,
+    /// counts into and prefix-sums every one), and the neighbour walk costs one candidate
+    /// for every particle in the runs of buckets its 27 cells cover. Both are read off
+    /// the grid the step built, five steps running, the way the walk itself reads them.
     #[test]
     fn spreading_particles_across_a_map_does_not_blow_up_the_cost() {
-        use std::time::Instant;
+        /// Buckets in the table and candidates the runs cover, for the grid as built.
+        fn grid_work(fluid: &SphFluid) -> (usize, usize) {
+            let h = fluid.params.smoothing_radius;
+            let grid = Grid {
+                x: &fluid.sx,
+                y: &fluid.sy,
+                z: &fluid.sz,
+                cx: &fluid.s_cell_x,
+                cy: &fluid.s_cell_y,
+                cz: &fluid.s_cell_z,
+                start: &fluid.bucket_start,
+                mask: fluid.table_mask,
+                h,
+                h2: h * h,
+            };
+            let mut runs = Runs::default();
+            let mut candidates = 0usize;
+            for k in 0..fluid.len() {
+                grid.build_runs([grid.cx[k], grid.cy[k], grid.cz[k]], &mut runs);
+                for &(s, e) in &runs.slots[..runs.count] {
+                    candidates += (e - s) as usize;
+                }
+            }
+            (fluid.bucket_start.len() - 1, candidates)
+        }
 
-        fn one_step(spread: f64) -> f64 {
+        fn five_steps(spread: f64) -> (usize, usize, usize) {
             let mut fluid = SphFluid::new(SphParams::blood(), 512).unwrap();
             let mut seed = 7u32;
             let mut rand = || {
@@ -2770,28 +2800,48 @@ mod tests {
                 (seed >> 8) as f64 / ((1u32 << 24) as f64) - 0.5
             };
             for _ in 0..256 {
-                fluid.spawn([rand() * spread, 1.0 + rand() * 0.2, rand() * spread], [0.0; 3]);
+                fluid.spawn(
+                    [rand() * spread, 1.0 + rand() * 0.2, rand() * spread],
+                    [0.0; 3],
+                );
             }
-            // One warm step so allocation is not being timed.
-            fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
-
-            let start = Instant::now();
+            let (mut buckets, mut candidates) = (0, 0);
             for _ in 0..5 {
                 fluid.step(1.0 / 240.0, 9.81, |_, _| 0.0);
+                let (b, c) = grid_work(&fluid);
+                buckets += b;
+                candidates += c;
             }
-            start.elapsed().as_secs_f64() / 5.0
+            (fluid.len(), buckets, candidates)
         }
 
-        let clustered = one_step(0.2);
-        let scattered = one_step(100.0);
+        let (n, clustered_buckets, clustered_candidates) = five_steps(0.2);
+        let (scattered_n, scattered_buckets, scattered_candidates) = five_steps(100.0);
+        assert_eq!(n, scattered_n, "both fields must hold the same particles");
 
-        // Scattered is legitimately *cheaper* (fewer neighbours each), so the only
-        // thing being asserted is that it is not dramatically worse. A generous
-        // bound: the failure this catches was three orders of magnitude.
+        // The binning: the table is sized by the particle count and nothing else, so five
+        // builds of the same count bin into exactly five tables of `table_size(n)` buckets
+        // however far apart the particles lie. A grid over the bounding box at 100 m would
+        // hold at least (100 / h)^2 cells, which is the cliff this guards.
+        assert_eq!(
+            scattered_buckets,
+            5 * table_size(n),
+            "spreading {n} particles over 100 m binned into {scattered_buckets} buckets over \
+             five steps, not {} -- the binning is scaling with map size again",
+            5 * table_size(n)
+        );
+        assert_eq!(scattered_buckets, clustered_buckets);
+
+        // The walk: a particle's runs cover its 27 cells. Clustered, those cells hold its
+        // real neighbours and whatever shares their buckets; spread over 100 m they hold
+        // no neighbour at all, only far particles that share a bucket, so spreading can
+        // only take candidates away. Scattered is legitimately *cheaper*, and the bound
+        // is the clustered count itself, not a ratio on it.
         assert!(
-            scattered < clustered * 4.0,
-            "spreading particles over 100 m cost {scattered:.6} s against {clustered:.6} s \
-             clustered -- the neighbour search is scaling with map size again"
+            scattered_candidates <= clustered_candidates,
+            "spreading {n} particles over 100 m walked {scattered_candidates} candidates \
+             over five steps against {clustered_candidates} clustered -- the neighbour \
+             search is scaling with map size again"
         );
     }
 

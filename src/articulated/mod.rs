@@ -57,7 +57,7 @@
 //! disjointness was always for, and doing anything else gives it away: an earlier version
 //! computed a colour's corrections into a buffer and applied them from one thread
 //! afterwards, and on a heap of ten thousand bodies the buffer cost more than the
-//! arithmetic did. See [`scatter`], which holds the measurement and the safety argument.
+//! arithmetic did. See `scatter`, which holds the measurement and the safety argument.
 //!
 //! # Going parallel is not free, and below a size it is a loss
 //!
@@ -72,9 +72,9 @@
 //! seventeen-element sweep to a thread pool costs more in scheduling than the sweep costs
 //! to run, and a solver is usually called on one skeleton at a time.
 //!
-//! So each sweep goes parallel only above [`PARALLEL_FLOOR`], and runs on the calling
+//! So each sweep goes parallel only above `PARALLEL_FLOOR`, and runs on the calling
 //! thread below it. The solve has its own floor, on the whole pass rather than on each
-//! colour, for the reason [`crew::PASS_FLOOR`] gives.
+//! colour, for the reason `crew::PASS_FLOOR` gives.
 //!
 //! **And a fork is dearer than it looks.** Measured on a twenty-four core machine, one
 //! `par_iter` over a few thousand items with an empty body costs 26 to 72 us before any
@@ -87,7 +87,7 @@
 //!
 //! **And then the last of it: the solve asks once per pass, not once per colour.** A fork
 //! per colour was the floor of the previous structure and it was most of what a pass
-//! cost. [`crew`] replaces it with one broadcast for the whole pass and a barrier between
+//! cost. `crew` replaces it with one broadcast for the whole pass and a barrier between
 //! colours -- 46 us once, plus 15 us a colour, against 46 us a colour -- which also means
 //! a colour too small to be worth its own fork is no longer too small to be worth
 //! anything. Measured end to end on the heap, a pass went from 5.5 ms to 1.3 ms and the
@@ -95,7 +95,7 @@
 //!
 //! # Contacts, and the two laws that turned out to be needed
 //!
-//! [`contacts`] adds capsule-versus-capsule and capsule-versus-ground constraints to the
+//! `contacts` adds capsule-versus-capsule and capsule-versus-ground constraints to the
 //! same solve: found once a step from the predicted positions, coloured the same way the
 //! joints are, and solved in the same passes. Three things there were not obvious, and
 //! each of them was a measurement rather than a guess.
@@ -105,7 +105,7 @@
 //!   out of an overlap it was already in reads back as speed: bodies spawned inside one
 //!   another leave at metres a second, and a heap dropped in as a heap detonates on its
 //!   first frame. Separating the two at the source costs a second pair of fields on
-//!   [`Correction`] and needs no rate limit, no clamp and no tuning.
+//!   `Correction` and needs no rate limit, no clamp and no tuning.
 //! * **Coulomb's limit is a budget for the step, not for each pass.** Spending it per
 //!   pass multiplies friction by the iteration count -- a slope that should have let go
 //!   at twenty-seven degrees held past forty -- and dividing it between the passes fails
@@ -115,14 +115,14 @@
 //!   thirty-two. What is carried is a **cone on the resultant**, not a running total of
 //!   magnitude: the friction direction reverses between passes, and charging both
 //!   directions against one total spends the coefficient to produce no net impulse. See
-//!   [`contacts::Spent`].
+//!   `contacts::Spent`.
 //! * **A contact patch is not a point, and the difference is a couple.** Friction acts at
 //!   the surface, below the centre of mass, so it tips a body forward over its contact.
 //!   For a body touching at one point that is the whole story and it should tip. A body
 //!   resting on a patch moves its normal load within the patch instead and does not tip,
 //!   and modelling it as a point makes a resting body ratchet itself clear of the plane
 //!   over the passes until its contacts report no depth and friction stops acting. See
-//!   [`contacts::patch_arm`].
+//!   `contacts::patch_arm`.
 //! * **Friction does not resist rolling, so a heap of capsules rolls apart.** The contact
 //!   point of a rolling body is instantaneously still, so there is nothing for Coulomb to
 //!   act on. Measured, a pile of forty settled onto the ground perfectly happily and then
@@ -132,22 +132,22 @@
 //! # Sleeping, which is the removal of the solve rather than an optimisation of it
 //!
 //! `iterations` multiplies every joint and every contact, and none of that arithmetic
-//! changes anything for a body that has stopped moving. [`sleep`] takes settled bodies
+//! changes anything for a body that has stopped moving. `sleep` takes settled bodies
 //! out of the step entirely -- an awake bitset walked a word at a time, islands over
 //! joints plus contacts as the unit that *sleeps* -- and a step where nothing is awake
 //! returns before it touches memory. Measured on ten thousand capsules resting on the
 //! ground in stacks of three: **4.5 to 6.5 ms a step down to nothing measurable**, the
 //! spread being what a shared machine does to a twenty-step timing. With nothing asleep it
 //! costs nothing that can be told from the noise, which is what the translation-only early
-//! exit in [`Skeleton::settle`] is for.
+//! exit in `Skeleton::settle` is for.
 //!
 //! **The island is not the unit that wakes**, and reading it as one cost more than
 //! anything else sleeping saved on the workload sleeping is for. A settled field is one
 //! island, so the first thing to touch any of it woke all of it: four contacts woke four
 //! hundred bodies, and a step that cost nothing went to milliseconds. What wakes a body is
 //! now that something *moving* came within reach of it, or that something touched it --
-//! [`Skeleton::find_pairs`] and [`Skeleton::wake_touched`], with the whole argument and the
-//! measurements in [`sleep`]. Measured on a field of two thousand with one heavy body
+//! `Skeleton::find_pairs` and `Skeleton::wake_touched`, with the whole argument and the
+//! measurements in `sleep`. Measured on a field of two thousand with one heavy body
 //! ploughing through it, halfway down: 2049 of 2049 awake at 2.88 to 3.09 ms a step
 //! becomes 346 of 2049 at 1.80 to 2.43 ms, against a *higher* contact count.
 //!
@@ -233,8 +233,8 @@
 //!
 //! **The patch against the plane now carries its own anchor** -- where it stuck, and the
 //! Coulomb budget it stuck under -- so the slip a step fails to take off is asked for again
-//! next step instead of being written off. See [`contacts::Anchor`] for what bounds it and
-//! [`Skeleton::anchor_ground`] for when it is dropped. Measured over eight draws a part in
+//! next step instead of being written off. See `contacts::Anchor` for what bounds it and
+//! `Skeleton::anchor_ground` for when it is dropped. Measured over eight draws a part in
 //! a hundred thousand million apart, the median body's surface drift over four hundred and
 //! eighty steps and the straightness of that travel:
 //!
@@ -256,7 +256,7 @@
 //! millimetres a second depending only on how long it was, while turning by nothing at
 //! all; a sphere did not move. That was a contact patch sampled at each end and solved
 //! one stage after the other, and it is fixed where it was caused rather than downstream
-//! -- see [`contacts::solve_ground`], and the four corrections that each fixed one case
+//! -- see `contacts::solve_ground_normal`, and the four corrections that each fixed one case
 //! and broke another are recorded there too.
 //!
 //! ```text
@@ -270,7 +270,7 @@
 //! settling to asleep at step 1319, and a settled pile of twenty from covering 0.275 of a
 //! body's reach in eight seconds to 0.094.
 //!
-//! The same change one level up -- [`contacts::capsule_contact`] emitting the two ends of
+//! The same change one level up -- `contacts::capsule_contact` emitting the two ends of
 //! a *pair* patch as one constraint rather than two -- has been built and measured and is
 //! not merged. It buys what it was meant to (two capsules stacked go from drifting at
 //! 2.3 mm a second to nothing measurable, a ten-high stack from settling in 1866 steps to
@@ -422,8 +422,8 @@
 //! position. The loop shakes the rig, the ground's friction rectifies the shake into
 //! travel, and nothing ever asks for the travel back. **So the patch against the plane now
 //! remembers**: where it stuck, the piece of its own surface that is stuck, and the Coulomb
-//! budget it stuck under. [`contacts::Anchor`] is the whole of what is remembered and why
-//! each part of it has to be there; [`Skeleton::anchor_ground`] decides who is stuck.
+//! budget it stuck under. `contacts::Anchor` is the whole of what is remembered and why
+//! each part of it has to be there; `Skeleton::anchor_ground` decides who is stuck.
 //!
 //! Three bounds, and every one of them was measured rather than chosen. Take any of them
 //! away and something a solver must do stops working:
@@ -497,7 +497,7 @@
 //! of three then goes from settling at step 381 on every draw to between 421 and 4452, and
 //! a column of eight stops settling. Pooling them -- one memory for the pair, at the point
 //! its load stands, with the budget the weakest its ends reported, which is exactly the
-//! shape [`contacts::solve_ground`] gives the ground patch -- recovers all of that. So the
+//! shape `contacts::solve_ground_normal` gives the ground patch -- recovers all of that. So the
 //! four bounds do change the answer, and the earlier report that a relative memory is
 //! hopeless was a report about the wrong granularity.
 //!
@@ -568,12 +568,12 @@
 //! sub-passes over the same coloured stage list -- every normal correction, then every
 //! tangential one -- and friction acts on a configuration the normals have already agreed
 //! on. Nothing else about the pass changes: the colours are the colours, so a lane's slice
-//! of a stage is disjoint in exactly the way [`scatter`] requires, and the second traversal
+//! of a stage is disjoint in exactly the way `scatter` requires, and the second traversal
 //! is checked by the same `check_colours_are_disjoint`.
 //!
 //! **The tangential half is the whole tangential half**, friction and rolling resistance
 //! together, and it is gated on the normal impulse the step has spent rather than on the
-//! overlap that is left -- see [`contacts::solve_contact_friction`], which is where that
+//! overlap that is left -- see `contacts::solve_contact_friction`, which is where that
 //! argument is, because getting it wrong makes friction stop acting entirely.
 //!
 //! Measured against the chaos spread rather than single runs. The rig is the seventeen-bone
@@ -721,7 +721,7 @@
 //! body and lets the step read the move back as speed; `Correction::free_translation` moves
 //! it and hides the move, by shifting where it came from as well. Neither can change a
 //! velocity without changing a position. The third kind moves where the body came from
-//! *instead* of where it is -- see [`Charge`] and [`scatter::Bodies::apply_velocity`] --
+//! *instead* of where it is -- see `Charge` and `scatter::Bodies::apply_velocity` --
 //! and it is the only thing in the module that can take momentum out and leave the solve's
 //! answer standing. That is the sink the section above says does not exist; it exists now.
 //!
@@ -738,7 +738,7 @@
 //!   part the contact actually handed the bodies as momentum -- the *driven* share, which
 //!   is the overlap the step itself made and the only share charged as velocity. Take more
 //!   and the pair is being pulled together, which a unilateral constraint may never do.
-//!   [`contacts::Spent::driven`] is that total; it is the same "budget for the step" shape
+//!   `contacts::Spent::driven` is that total; it is the same "budget for the step" shape
 //!   Coulomb's cone already has, one law over.
 //! * **Coulomb at the velocity level, out of the same cone.** The tangential half asks for
 //!   the impulse that stops the slip and adds it to the resultant the positional passes
@@ -766,11 +766,11 @@
 //! runs **before** the pass as well as after: the first gives it the velocities, the second
 //! delivers what it decided. Nothing rewrites those arrays while the pass is running, so
 //! the answer does not depend on which contact was visited first, and determinism is
-//! unaffected -- within a colour the bodies are disjoint exactly as [`scatter`] requires,
+//! unaffected -- within a colour the bodies are disjoint exactly as `scatter` requires,
 //! and across colours the barrier order is fixed.
 //!
 //! What a simultaneous pass costs is that a body named by three contacts is asked for three
-//! full corrections at once. [`Skeleton::velocity_share`] is the mean that answers it, and
+//! full corrections at once. `Skeleton::velocity_share` is the mean that answers it, and
 //! **both ends of a pair take the same one** -- the smaller of the two -- because the share
 //! of an impulse that is momentum exchange cannot be one figure for the body receiving it
 //! and another for the body giving it. Charging each end against its own is the mistake
@@ -847,7 +847,7 @@
 //! propagates a correction exactly one contact deep, and in a heap a body's velocity
 //! depends on its neighbours' through the contacts it shares. The obvious next move is to
 //! sweep it two or three times, and the obvious expectation is that the draws which fail
-//! to sleep -- close rather than badly wrong -- come over. [`VELOCITY_SWEEPS`] is the
+//! to sleep -- close rather than badly wrong -- come over. `VELOCITY_SWEEPS` is the
 //! count, the sweeps share one step's budget so that N of them cannot spend the
 //! coefficient N times, and the whole of it was measured:
 //!
@@ -898,11 +898,11 @@
 //! Where there are contacts it costs about a fifth to a quarter, and `arriving` is too
 //! noisy to say more than that its two ranges touch.
 //!
-//! **And two more vectors on [`Correction`] cost more than the pass does** -- taking it
+//! **And two more vectors on `Correction` cost more than the pass does** -- taking it
 //! from 120 bytes to 176 was worth 30 to 40 per cent on its own, with the pass itself
 //! unchanged, because every joint and every contact in the positional solve carries one
 //! whether it has anything velocity-level to say or not. That is why the third correction
-//! kind shares the first's fields rather than adding its own. See [`Charge`].
+//! kind shares the first's fields rather than adding its own. See `Charge`.
 //!
 //! # What was left is one bone, and it was a contact that existed on alternate steps
 //!
@@ -927,7 +927,7 @@
 //! even step the narrow phase finds the pair clear -- by **thirty-two microns** -- emits
 //! nothing, and the bone is unconstrained for the whole step: it falls 1.36 mm and turns
 //! 0.0231 rad about its joint, which is 5.7 mm of surface against the 3.7 mm
-//! [`sleep::STILL_FRACTION`] allows it. It misses by half as much again, every other step,
+//! `sleep::STILL_FRACTION` allows it. It misses by half as much again, every other step,
 //! for ever, while nothing else in the rig moves at all.
 //!
 //! **Three facts compose into that, and none of them is wrong on its own.** The positional
@@ -954,9 +954,9 @@
 //!
 //! **Speculative contacts.** Give the pair a constraint while it is still clear, by as much
 //! as one step of gravity's sag -- `|g| dt^2`, which the module already derives as
-//! [`contacts::Anchor`]'s `anchor_reach` and which is exactly the distance a resting pair
+//! `contacts::Anchor`'s `anchor_reach` and which is exactly the distance a resting pair
 //! can close in a step. It costs nothing while the gap is open, because
-//! [`contacts::solve_contact_normal`] returns on `depth <= 0`, and it catches the joints'
+//! `contacts::solve_contact_normal` returns on `depth <= 0`, and it catches the joints'
 //! push in the same step they make it. Confined to the crossed branch of the narrow phase --
 //! a near-parallel pair touching at one end already has its patch, and speculation is about
 //! a pair with no contact at all -- it leaves a settled stack of three **bit-identical** and
@@ -987,7 +987,7 @@
 //!
 //! **The velocity share taken over the loaded constraints only.** The arithmetically exact
 //! reading of a simultaneous pass, and measured worse on its own. See
-//! [`Skeleton::share_velocity`], which carries the numbers.
+//! `Skeleton::share_velocity`, which carries the numbers.
 //!
 //! # What closed it: a contact outlives the step it stopped being needed in
 //!
@@ -1001,9 +1001,9 @@
 //! positions at the top of the next step, which is exactly as fresh as every other
 //! contact's and is not a frozen frame spent later.
 //!
-//! So [`contacts::capsule_contact`] takes one more argument: whether this pair was carrying
+//! So `contacts::capsule_contact` takes one more argument: whether this pair was carrying
 //! normal impulse last step. If it was, it keeps its contact whether or not the surfaces
-//! still overlap. [`Skeleton::persist_contacts`] is the list, rebuilt from scratch every
+//! still overlap. `Skeleton::persist_contacts` is the list, rebuilt from scratch every
 //! step out of the contacts that spent anything, so a pair is kept for exactly one step
 //! past the last one it did work in.
 //!
@@ -1014,7 +1014,7 @@
 //! renews a contact is that the contact *did work* -- so the set is causally derived from
 //! what was actually loaded, a pair that has never touched is never given one, and a pair
 //! flung apart loses its own after a single inert step. And a revived contact is provably
-//! free while the gap is open: [`contacts::solve_contact_normal`] returns on `depth <= 0`
+//! free while the gap is open: `contacts::solve_contact_normal` returns on `depth <= 0`
 //! and every other half returns on `spent.normal <= 0`, so the only behaviour it can change
 //! is a gap that closes *during* the step, which is the case it exists for.
 //!
@@ -1088,7 +1088,7 @@
 //! ```
 //!
 //! **A workload with no contacts pays exactly nothing**, and that is arithmetic rather than
-//! a measurement: [`Skeleton::persist_contacts`] walks a contact list that is empty and the
+//! a measurement: `Skeleton::persist_contacts` walks a contact list that is empty and the
 //! narrow phase searches a list that is empty, so `joints_only`'s two figures are one figure
 //! plus this machine's noise. Where a scene is settling the change pays for itself -- `one`
 //! and `pile` are both faster, because a rig that goes to sleep and a pile that settles
@@ -1103,7 +1103,7 @@
 //!
 //! ## And one thing it moves that is worth recording
 //!
-//! [`VELOCITY_SWEEPS`] is one, and the count above it was already known to be a coefficient
+//! `VELOCITY_SWEEPS` is one, and the count above it was already known to be a coefficient
 //! rather than an iteration -- good at one, catastrophic at two, best at three, useless at
 //! four. Revived contacts move *which* counts are which: at four sweeps, where the rig used
 //! to be the stillest it had ever been at 0.004 to 0.013 m/s, it now thrashes at 2.5 m/s.
@@ -1154,7 +1154,7 @@
 //!
 //! ## The fix, which is one line and a bit of bookkeeping
 //!
-//! [`contacts::Contact::revived`] says the narrow phase found this pair clear. A revived
+//! `contacts::Contact::revived` says the narrow phase found this pair clear. A revived
 //! contact charges velocity on the **first pass that finds it loaded** and none on any pass
 //! after that. The first pass sees the closing the bodies and their joints actually made;
 //! every pass after it sees only what the earlier passes failed to remove, which is the
@@ -1186,7 +1186,7 @@
 //! against two thousand seven hundred, and the sleeping the section above bought is kept --
 //! sixteen of sixteen at eight passes at 131 steps, where it was 148 to 297, and twelve to
 //! sixteen everywhere else where it was nought to sixteen. It costs a `bool` on
-//! [`contacts::Contact`], 112 bytes to 120, and one test per contact per pass. Timed on ten
+//! `contacts::Contact`, 112 bytes to 120, and one test per contact per pass. Timed on ten
 //! thousand two hundred bodies as prebuilt binaries run alternately, the two builds settle
 //! into different scenes -- 21,100 contacts against 15,450 at the same step -- so the
 //! per-step totals are not comparable and the per-contact figures are: 1.53 to 2.42 us
@@ -1196,8 +1196,8 @@
 //!
 //! The obvious guard on a revived contact is a margin -- revive only a pair clear by less
 //! than the furthest a step can close it, which this module already derives as
-//! [`contacts::Anchor`]'s `anchor_reach`. It was built, and it is **worse than either
-//! extreme**: see [`contacts::capsule_contact`] for the table. A bound is not a weaker
+//! `contacts::Anchor`'s `anchor_reach`. It was built, and it is **worse than either
+//! extreme**: see `contacts::capsule_contact` for the table. A bound is not a weaker
 //! revival, it is an **intermittent** one -- the constraint appears and disappears as the
 //! gap crosses the margin -- and this page has now recorded four separate occasions on
 //! which an intermittent constraint is what a rig walks on. Reviving always, or never, is
@@ -1314,7 +1314,7 @@
 //!
 //! An inverted hinge still holds a single axis *line*, which is most of what a hinge looks
 //! like from outside, and that is why nothing caught it: `a_hinge_stays_inside_its_range`
-//! measures the swing with [`hinge_angle`], which reads the angle from a reference carried
+//! measures the swing with `hinge_angle`, which reads the angle from a reference carried
 //! in each body's own frame -- so on an inverted joint it asks the same wrong question the
 //! solver does and gets a consistent answer. What is actually lost is the *zero and the
 //! sign* of the range. `min: -0.1, max: 2.2` is then enforced on a number that is not the
@@ -1436,7 +1436,7 @@
 //! represent. There is no threshold in here and there may not be one.
 //!
 //! **The quantity already existed, and only one of the two totals is it.**
-//! [`contacts::Spent`] separates `normal`, the whole normal impulse, from `driven`, the
+//! `contacts::Spent` separates `normal`, the whole normal impulse, from `driven`, the
 //! part the step itself drove and so the only part charged to the bodies as momentum. A
 //! body recovering from a careless spawn is separated by an enormous `normal` while
 //! nothing whatever presses on it; `driven` reads zero through the same separation. Using
@@ -1455,7 +1455,7 @@
 //! **It costs nothing in the inner loop.** Every contact and every ground patch already
 //! carries its `Spent` across the passes, because Coulomb's cone needs the step's totals
 //! and the velocity pass needs to know what it is allowed to take back. So the load is
-//! already computed when the step ends, and [`Skeleton::gather_normal_load`] is one pass
+//! already computed when the step ends, and `Skeleton::gather_normal_load` is one pass
 //! over two lists that are still in cache rather than a write inside eight passes over
 //! them. It runs *after* the velocity pass, so what it reports is the net the step handed
 //! the body rather than the gross the positional passes applied before some of it was
@@ -1636,7 +1636,7 @@
 //! which is the opposite of what a settling fix does.
 //!
 //! **A limit that dissipates was the obvious next idea and it was built.** Charging the
-//! cone's correction as [`Charge::Free`] turns the limb back inside its range and turns the
+//! cone's correction as `Charge::Free` turns the limb back inside its range and turns the
 //! orientation it came from with it, so the step reads back no spin from the move -- which
 //! is what a ligament does at the end of its travel, where a spring gives the energy back.
 //! Measured against the ordinary cone:
@@ -1845,7 +1845,7 @@
 //!
 //! # And the rocking is the shape, which this module already says somewhere else
 //!
-//! [`contacts::capsule_contact`] carries the diagnosis in its own doc comment: *"two
+//! `contacts::capsule_contact` carries the diagnosis in its own doc comment: *"two
 //! cylinders lying against each other touch along a line, and a single point taken from
 //! the middle of it leaves them free to rotate about that point: a pile of parallel limbs
 //! then rocks forever instead of resting, however many solver iterations it is given."*
@@ -1854,7 +1854,7 @@
 //!
 //! **It reaches one per cent of a pile.** Of the three hundred and five touching pairs in
 //! the heap above, three got a patch and three hundred and two got a single point, because
-//! the patch is only offered to pairs within [`contacts::PARALLEL_SINE`] of parallel -- a
+//! the patch is only offered to pairs within `contacts::PARALLEL_SINE` of parallel -- a
 //! little under three degrees -- and a heap is not parallel:
 //!
 //! ```text
@@ -2945,9 +2945,11 @@ pub struct Skeleton {
 }
 
 impl Default for Skeleton {
-    /// Empty, and with [`DEFAULT_FRICTION`] between its bodies. Written out rather than
-    /// derived because a derived one would start at zero friction, and a pile with no
-    /// friction slides flat without anything reporting an error.
+    /// Empty, and with a Coulomb friction coefficient of 0.5 between its bodies: the
+    /// measured static coefficient for cloth on cloth, which [`Skeleton::set_friction`]
+    /// changes. Written out rather than derived because a derived one would start at zero
+    /// friction, and a pile with no friction slides flat without anything reporting an
+    /// error.
     fn default() -> Self {
         Skeleton {
             position: Vec::new(),
@@ -3054,8 +3056,9 @@ impl Skeleton {
     }
 
     /// Rolling resistance between bodies, as a fraction of the contact radius. Zero lets
-    /// a capsule roll like the ideal cylinder it is; see [`DEFAULT_ROLLING_RESISTANCE`]
-    /// for why that is not what a pile wants.
+    /// a capsule roll like the ideal cylinder it is, and that is not what a pile wants: a
+    /// heap of ideal capsules converts its sliding into rolling and rolls apart for ever.
+    /// The default is 0.25, the band measured for soft bodies on soft ground.
     pub fn set_rolling_resistance(&mut self, resistance: f64) {
         self.rolling_resistance = resistance.max(0.0);
         self.wake_all();
@@ -3092,7 +3095,7 @@ impl Skeleton {
     /// -- net travel over a hundred and sixty steps is 0.99 of the path it walked getting
     /// there -- at twenty to forty millimetres a second, for as long as it is watched.
     ///
-    /// That is what keeps a rig out of [`sleep`], and it is nothing else: it is the same
+    /// That is what keeps a rig out of `sleep`, and it is nothing else: it is the same
     /// at eight, thirty-two and sixty-four iterations, with and without friction, with and
     /// without rolling resistance, with hinges and with balls, and with the hinge limits
     /// taken off. The bodies of a rig with every relative velocity and every spin zeroed
@@ -3121,7 +3124,7 @@ impl Skeleton {
     /// # Why the narrower rejection already in here is not enough
     ///
     /// Bodies either side of one joint have never collided, because their capsules overlap
-    /// by construction -- see [`broadphase::Jointed`]. Widening that to two joints was
+    /// by construction -- see `broadphase::Jointed`. Widening that to two joints was
     /// measured and is not the answer: the self-contacts that a settled rig cannot shed
     /// sit two, three, four and six joints apart, at penetrations of 0.3 to 2.1 mm, and a
     /// two-joint rejection fixes three of the thirteen rigs above and breaks a fourth that
@@ -3182,7 +3185,7 @@ impl Skeleton {
 
     /// Adds a body and returns its index, which is what joints are written against.
     /// Orientations are normalised on the way in, and that is load-bearing rather than
-    /// tidy: the solver's rotation is the unit-quaternion form (see [`rotate`]), which is
+    /// tidy: the solver's rotation is the unit-quaternion form (see `rotate`), which is
     /// only the right answer for a quaternion of length one. This and
     /// [`Skeleton::set_body`] are the only places one can arrive from outside; everything
     /// the solver itself writes is already unit.
@@ -3330,7 +3333,7 @@ impl Skeleton {
     ///
     /// # Which impulse, and why the other one is wrong
     ///
-    /// [`contacts::Spent`] distinguishes two totals, and only one of them is a load.
+    /// `contacts::Spent` distinguishes two totals, and only one of them is a load.
     /// `normal` is the whole normal impulse a contact applied, which includes the solver
     /// lifting the bodies out of an overlap they were **already** in when the step began;
     /// `driven` is the part the step itself drove, and so the only part the bodies were
@@ -3341,7 +3344,7 @@ impl Skeleton {
     /// an enormous `normal` while nothing whatever is pressing on it, and reading that
     /// would make a spawn look like an impact. `driven` reads near zero through the same
     /// separation, because the overlap was inherited rather than made. See
-    /// [`contacts::solve_contact_normal`], where the split is taken, and
+    /// `contacts::solve_contact_normal`, where the split is taken, and
     /// `an_overlapping_spawn_is_not_a_crushed_body`, which is the guard on it.
     ///
     /// # What the number is, dimensionally
@@ -3407,7 +3410,7 @@ impl Skeleton {
     ///
     /// A smashed bone that still anchors its neighbours is wrong: retiring a hip has to
     /// let the leg come away. So every joint naming the body is removed, which is the one
-    /// thing the incremental colouring cannot absorb -- see [`Skeleton::recolour_joints`],
+    /// thing the incremental colouring cannot absorb -- see `Skeleton::recolour_joints`,
     /// which is paid here because retirement is rare.
     ///
     /// **Joint indices shift.** [`Skeleton::joints`] is a vector and removing from the
@@ -3427,15 +3430,15 @@ impl Skeleton {
     /// There is no "is it retired" branch anywhere in the step. Two facts already in the
     /// solver do the whole of it, and each of them is load-bearing:
     ///
-    /// * **No radius means no broad phase and no plane.** [`broadphase::Grid::rebuild`]
+    /// * **No radius means no broad phase and no plane.** `broadphase::Grid::rebuild`
     ///   puts a body in the grid only if `radius > 0`, so a retired body is neither an
     ///   outer body of the scan nor a candidate in anybody else's neighbourhood; and
-    ///   [`contacts::ground_contacts`] returns on the same test. It can therefore take no
+    ///   `contacts::ground_contacts` returns on the same test. It can therefore take no
     ///   contact of any kind, and appears in no contact colour and in no ground colour.
     /// * **No mass means never awake.** [`Skeleton::wake`] sets the awake bit only for a
     ///   body with `inv_mass > 0` and [`Skeleton::wake_all`] clears it again for one
     ///   without, which is how a *pinned* body is already kept out of every sweep. So a
-    ///   retired body is permanently unready as well: [`Skeleton::settle`] only ever looks
+    ///   retired body is permanently unready as well: `Skeleton::settle` only ever looks
     ///   at awake bodies, so it can never be marked still, never join an island, and never
     ///   be woken by a neighbour.
     ///
@@ -3461,7 +3464,7 @@ impl Skeleton {
     /// island is thawed -- which is what wakes a sleeping stack it was part of -- and then
     /// everything jointed to it and everything the broad phase last paired it with. The
     /// broad phase's pairs rather than the narrow phase's contacts, for the reason
-    /// [`Skeleton::settle`] gives: two bodies resting exactly against one another overlap
+    /// `Skeleton::settle` gives: two bodies resting exactly against one another overlap
     /// by nothing and have no contact, and the better the solve gets the more often that
     /// is true.
     #[must_use = "a body that refused to retire is still in the solve, and nothing else \
@@ -3560,7 +3563,7 @@ impl Skeleton {
     /// workers take no lane and return from the broadcast at once, then spend the pass
     /// looking for work that is not there, a couple of hundred times a step. And within a
     /// given pool, fewer lanes is plainly worse -- halving them costs a third. More lanes
-    /// is better up to the pool size, which is what [`crew::lanes_for`] already said.
+    /// is better up to the pool size, which is what `crew::lanes_for` already said.
     ///
     /// So the thing a caller should not do is hand this crate a rayon pool larger than the
     /// machine can run, and that is a property of the pool rather than anything this crate
@@ -3611,10 +3614,10 @@ impl Skeleton {
     /// promise is that the answer does not depend on how many threads computed it, and the
     /// law that states it ran a heap of forty bodies at one, two and eight threads and
     /// compared the results. That heap's widest pass is about two hundred constraints
-    /// against a [`crew::PASS_FLOOR`] of five hundred and twelve, so every one of those
+    /// against a `crew::PASS_FLOOR` of five hundred and twelve, so every one of those
     /// runs took the serial path: the law was comparing single-threaded output with
     /// single-threaded output and could not have failed. The parallel writes it was
-    /// written to police are the raw-pointer scatter in [`scatter`], so it was the guard on
+    /// written to police are the raw-pointer scatter in `scatter`, so it was the guard on
     /// the unsafe as well.
     ///
     /// A fixture can drift under a floor without anybody noticing, and no amount of care
@@ -5525,9 +5528,9 @@ impl Skeleton {
     /// asleep for the broad phase to reach.
     ///
     /// Its *contact* neighbours are woken only if the disturbance actually reaches them:
-    /// [`Skeleton::find_pairs`] wakes what a **moving** body comes within reach of, and
-    /// [`Skeleton::wake_touched`] wakes what anything touches. Waking the whole island that
-    /// way is what this used to do, and [`sleep`] holds the measurement that says what it
+    /// `Skeleton::find_pairs` wakes what a **moving** body comes within reach of, and
+    /// `Skeleton::wake_touched` wakes what anything touches. Waking the whole island that
+    /// way is what this used to do, and `sleep` holds the measurement that says what it
     /// cost.
     ///
     /// **A joint is the one edge neither of those rules can cross**, which is why it is
@@ -5539,7 +5542,7 @@ impl Skeleton {
     /// between read `awake` as false at every step, and the one next to the stirred bone
     /// was **dragged 1.56 m while asleep** by the joint's own correction, because a live
     /// joint moves both its ends. `a_joint_carries_a_disturbance_into_a_sleeping_body` is
-    /// the guard, and [`Skeleton::settle`] is the mirror of this: the unit that wakes
+    /// the guard, and `Skeleton::settle` is the mirror of this: the unit that wakes
     /// together is the unit that has to sleep together.
     ///
     /// **The walk stops at a body with no mass**, pinned or retired, for the reason such a
