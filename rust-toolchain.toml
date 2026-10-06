@@ -1,0 +1,15 @@
+# **Pinned, and pinned to a version rather than a channel.**
+#
+# rs_physics is consumed by lockstep simulations that pin their compiler for bit-exact
+# float arithmetic, and a consumer building this crate under one compiler while its
+# tests here run under another would be testing a different library. One named version
+# for the crate and its consumers keeps those the same binary code.
+#
+# 1.99.0 (2026-10-06), chosen for its build times. Until this file the crate built on
+# whatever `stable` a machine had (1.92.0 on the development machine).
+#
+# Pinned here rather than by changing the default toolchain, so every other project on
+# a developer's machine is untouched: `rustup` resolves this per directory.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
