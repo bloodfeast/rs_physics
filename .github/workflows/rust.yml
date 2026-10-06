@@ -16,10 +16,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install Nightly
-      run: rustup toolchain install nightly
-    - name: Nightly
-      run: rustup default nightly
+    # The compiler is the one rust-toolchain.toml names; rustup installs it on first use.
+    - name: Toolchain
+      run: rustup toolchain install
     - name: Build
       run: cargo build --verbose
     - name: Run tests

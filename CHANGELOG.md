@@ -3,6 +3,17 @@
 Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the git log and
 `development_log/`.
 
+## Unreleased
+
+### Changed
+
+- **The compiler is pinned to Rust 1.99.0** by a new `rust-toolchain.toml`; the crate built on
+  whatever `stable` a machine had (1.92.0 here). One named compiler for the crate and the
+  lockstep consumers that pin theirs. `cargo test --features all --no-run` with 4 jobs: clean
+  95.2 s on 1.92.0, 84.1 s on 1.99.0; after touching `src/lib.rs` 14.0 s and 13.5 s. No new
+  warnings, and `RUSTDOCFLAGS=-D warnings cargo doc --features all --no-deps` stays clean. The
+  CI workflow installs the pinned toolchain instead of switching to nightly.
+
 ## 0.3.9 (2026-10-05)
 
 Package RSP-DOC-WARNINGS: the docs build warning-free, and the SPH spread guard counts
