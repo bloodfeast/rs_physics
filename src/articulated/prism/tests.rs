@@ -90,6 +90,9 @@ fn a_face_contact_has_a_real_arm() {
     // The second laid the same way, resting on the first's upper face.
     let b = lying((0.0, 2.0 * inradius - 0.01, 0.0), R, 0.5, 8, 0.0);
     let hit = touch(&a, &b).expect("one prism lying on another is a contact");
+    // Every candidate here is at one depth give or take 3e-16 m, so this is also the guard
+    // on how `deepest_two` breaks that tie: by depth alone it followed the last bit of
+    // `sin(pi / 4)`, and Linux's maths library put both points at one end (0.07 m).
     let (first, _) = hit.points[0].expect("a contact has a point");
     let (second, _) = hit.points[1].expect("a face contact has two");
     let arm = length(sub(first, second));

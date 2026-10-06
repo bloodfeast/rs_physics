@@ -3194,6 +3194,11 @@ fn a_flat_field_is_exactly_the_plane_it_describes() {
                 // resolves -- the same fixture's own settling tolerance is a millimetre --
                 // and seven orders above the 3e-16 m this actually measures. It is there to
                 // catch the field describing a *different* plane, not to pin the rounding.
+                // It holds on every platform only because a patch at the friction limit is
+                // called slipping to within the rounding (`SATURATED`): compared exactly,
+                // this fixture's bottom capsule sat on the cone at `1.5e-16` relative, one
+                // route read it stuck and the other slipping, and on Linux the two ended
+                // 0.52 mm apart.
                 assert!(
                     gap < 1e-9,
                     "body {i} on a field describing the plane at {tilt:.2} rad came to rest \

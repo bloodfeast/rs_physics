@@ -1492,6 +1492,21 @@ fn settling_on_solids_is_bit_identical_at_any_thread_count() {
 /// sphere cast changes it: a drop sliding on a solid meets it on every substep instead
 /// of about one in ten, and every contact carries the particle on along the surface for
 /// the rest of its substep.
+///
+/// # Hashed on a grid, not on the bits
+///
+/// The bits are not the same on every platform. `f64::powi` is not correctly rounded and
+/// its result is the target's: `0.04f64.powi(9)` and `.powi(6)`, the kernel normalisations
+/// at blood's smoothing radius, come out one unit in the last place apart between the
+/// Windows (MSVC) and Linux (GNU) builds, and every step after the first differs in the
+/// last bits from there. Measured over this whole run, the 800 drained records agree in
+/// step, solid and count exactly, in position to `2.7e-15` m and in velocity to
+/// `3.3e-16` m/s at most. So each position
+/// and velocity is hashed rounded to `GRID`, nine orders above that drift and four below
+/// the 2 cm the particles are spaced at; the chance that a drift of that size
+/// carries any of the 4,800 rounded values across a grid line is about `3e-5`. The step,
+/// the solid and the count are discrete and hashed exactly.
+/// Recorded on the grid at `0x9f8b_ee79_d882_4f9d`, the same on both builds.
 #[test]
 fn a_static_scene_steps_to_its_recorded_checksum() {
     let slope = |x: f64, z: f64| 0.08 * x - 0.05 * z;
@@ -1527,18 +1542,25 @@ fn a_static_scene_steps_to_its_recorded_checksum() {
     for _ in 0..60 {
         f.step_with_solids(DT, 9.81, slope, &solids);
     }
+    /// The rounding grid, in metres for a position and metres a second for a velocity.
+    const GRID: f64 = 1e-6;
+    let on_grid = |c: f64| (c / GRID).round() as i64 as u64;
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut eat = |v: u64| {
         h ^= v;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
-    for v in bits(&f) {
-        eat(v);
+    // Whatever is still in flight, which is nothing in this scene: every drop drains.
+    eat(f.len() as u64);
+    for i in 0..f.len() {
+        for c in f.position(i).iter().chain(f.velocity(i).iter()) {
+            eat(on_grid(*c));
+        }
     }
     for (s, d) in &settled {
         eat(*s as u64);
         for c in d.position.iter().chain(&d.velocity) {
-            eat(c.to_bits());
+            eat(on_grid(*c));
         }
         eat(d.on_solid.map_or(u64::MAX, u64::from));
     }
@@ -1549,7 +1571,7 @@ fn a_static_scene_steps_to_its_recorded_checksum() {
     );
     assert_eq!(
         h,
-        0xa768_fcfb_039f_9def,
+        0x9f8b_ee79_d882_4f9d,
         "checksum {h:#018x} over {} drained",
         settled.len()
     );
@@ -1597,3 +1619,4 @@ fn a_blade_faster_than_the_speed_ceiling_sweeps_the_pool_ahead_of_it() {
     }
     assert!(swept > 100, "the blade swept only {swept} particles");
 }
+
