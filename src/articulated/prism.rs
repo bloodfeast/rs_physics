@@ -699,35 +699,25 @@ fn clipped(
 /// Both prisms are searched rather than only the incident one, because a face resting on
 /// an edge has its deep points on one body and a face resting on a face has them on both,
 /// and telling those apart costs more than looking at twice as many corners.
+///
+/// # Depths that tie are chosen between by the arm
+///
+/// A face resting flat on a face has every corner of the shared region at the same depth,
+/// and in floating point "the same" is a spread of a few units in the last place. Ranked by
+/// depth alone, the second point is then whichever corner the rounding favoured, and that
+/// can be the first one's neighbour across the narrow side of the face rather than the
+/// corner at the far end of it: measured on two octagons of circumradius 0.3 lying along
+/// each other, the eight candidates spread over 3e-16 m and the pick moved between a 1.0 m
+/// arm and a 0.07 m one with one unit in the last place of `sin(pi / 4)`, which is what
+/// separates two platforms' maths libraries. So depths within [`FLUSH`] of the deepest are
+/// one depth -- the same tolerance on the arithmetic that admits a flush corner -- and
+/// among them the second point is the one furthest from the first, because the arm is
+/// what the pair exists for. Outside that band the ranking is by depth, as before.
 fn deepest_two(
     a: &Shape,
     b: &Shape,
     normal: (f64, f64, f64),
 ) -> [Option<((f64, f64, f64), f64)>; 2] {
-    let mut best: [Option<((f64, f64, f64), f64)>; 2] = [None, None];
-    let mut offer = |point: (f64, f64, f64), depth: f64| {
-        if depth <= 0.0 {
-            return;
-        }
-        match best {
-            [None, _] => best[0] = Some((point, depth)),
-            [Some((_, first)), None] => {
-                if depth > first {
-                    best = [Some((point, depth)), best[0]];
-                } else {
-                    best[1] = Some((point, depth));
-                }
-            }
-            [Some((_, first)), Some((_, second))] => {
-                if depth > first {
-                    best = [Some((point, depth)), best[0]];
-                } else if depth > second {
-                    best[1] = Some((point, depth));
-                }
-            }
-        }
-    };
-
     // The region the two share, taken from each side. `a` as the reference finds a face
     // of `b` lying on `a`; `b` as the reference finds the other way round; and an edge
     // across a face is only seen from one of them, so both are asked.
@@ -735,16 +725,64 @@ fn deepest_two(
     let back = scale(normal, -1.0);
     let front_b = b.reach_along(back);
 
+    let mut found = [((0.0, 0.0, 0.0), 0.0); 2 * CLIPPED];
+    let mut count = 0usize;
     let mut region = [(0.0, 0.0, 0.0); CLIPPED];
-    let count = clipped(a, b, normal, &mut region);
-    for point in region.iter().take(count) {
-        offer(*point, front_a - dot(sub(*point, a.at), normal));
+    let n = clipped(a, b, normal, &mut region);
+    for point in region.iter().take(n) {
+        let depth = front_a - dot(sub(*point, a.at), normal);
+        if depth > 0.0 {
+            found[count] = (*point, depth);
+            count += 1;
+        }
     }
-    let count = clipped(b, a, back, &mut region);
-    for point in region.iter().take(count) {
-        offer(*point, front_b - dot(sub(*point, b.at), back));
+    let n = clipped(b, a, back, &mut region);
+    for point in region.iter().take(n) {
+        let depth = front_b - dot(sub(*point, b.at), back);
+        if depth > 0.0 {
+            found[count] = (*point, depth);
+            count += 1;
+        }
     }
-    best
+    if count == 0 {
+        return [None, None];
+    }
+
+    // The deepest, the first of equals in the order offered.
+    let mut first = 0usize;
+    for k in 1..count {
+        if found[k].1 > found[first].1 {
+            first = k;
+        }
+    }
+    let (anchor, deepest) = found[first];
+    let tied = |depth: f64| depth >= deepest - FLUSH;
+    let reach = |point: (f64, f64, f64)| {
+        let d = sub(point, anchor);
+        dot(d, d)
+    };
+    let mut second: Option<usize> = None;
+    for k in 0..count {
+        if k == first {
+            continue;
+        }
+        let better = match second {
+            None => true,
+            Some(s) => {
+                let (here, held) = (found[k], found[s]);
+                match (tied(here.1), tied(held.1)) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    (true, true) => reach(here.0) > reach(held.0),
+                    (false, false) => here.1 > held.1,
+                }
+            }
+        };
+        if better {
+            second = Some(k);
+        }
+    }
+    [Some(found[first]), second.map(|k| found[k])]
 }
 
 /// **The contact or contacts between two prisms**, in the form the solve takes.

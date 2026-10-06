@@ -2062,6 +2062,14 @@ const NARROW_CHUNK: usize = 1024;
 const SWEEP_WORDS: usize = 16;
 const SWEEP_BLOCK: usize = SWEEP_WORDS * 64;
 
+/// How close to the friction budget a ground patch's tangential impulse has to be to count
+/// as on the cone, relative to the budget.
+///
+/// The rounding [`contacts::cone`]'s rescale and the length read back after it can leave
+/// is `2.5 * EPSILON` either side (see `anchor_ground`); four is that with headroom.
+/// The measured case it was written for sat at `0.7 * EPSILON`.
+const SATURATED: f64 = 4.0 * f64::EPSILON;
+
 /// Coulomb friction between two bodies, unless a caller says otherwise.
 ///
 /// Not tuned against how a pile looks: it is the measured static coefficient for cloth on
@@ -5298,7 +5306,18 @@ impl Skeleton {
             let (normal, distance) = (self.ground_contacts[k].normal, self.ground_contacts[k].distance);
             let spent = self.ground_impulse[k].spent;
             let budget = self.friction * spent.normal;
-            if spent.normal <= 0.0 || length(spent.tangential) >= budget {
+            // **A patch on the cone is slipping, and "on" is to within the arithmetic.**
+            // [`contacts::cone`] puts a saturated total back on the cone by scaling it by
+            // `limit / size`, and reading its length back here rounds again: the quotient,
+            // the three products, the squares, two adds and the square root leave the
+            // length within `2.5 * EPSILON` of the budget, either side. Compared exactly, a
+            // patch sliding at full friction is called stuck whenever that rounding lands
+            // low, which is a coin toss on the last bit: measured, one sliding capsule on a
+            // 0.15 rad slope read `budget * (1 - 1.5e-16)` on one route to the same plane
+            // and `budget * (1 + 1.5e-16)` on the other, and the two came to rest 0.52 mm
+            // apart. `SATURATED` is that bound with headroom, and it is a relative one
+            // because the budget is.
+            if spent.normal <= 0.0 || length(spent.tangential) >= budget * (1.0 - SATURATED) {
                 continue;
             }
             // The piece of surface that is stuck has to still be against the plane. A body

@@ -75,8 +75,11 @@
 //!
 //! `parallel_steps_are_bit_identical_at_any_thread_count` asserts it at 1, 3 and 8
 //! threads. No hash iteration and no transcendentals in the inner loops, so the
-//! solver is deterministic on one machine; across machines it is as deterministic as
-//! `f64` `sqrt` and division, which IEEE 754 fixes.
+//! solver is deterministic on one machine. **Across platforms it is not bit-identical**:
+//! the kernel normalisations are taken with `f64::powi`, which is not correctly rounded
+//! and differs by a unit in the last place between the Windows (MSVC) and Linux (GNU)
+//! builds at blood's smoothing radius, so runs agree there to rounding (about `1e-15` m
+//! over a 360-step settle) rather than to the bit.
 //!
 //! # Solids
 //!

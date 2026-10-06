@@ -14,6 +14,28 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
   warnings, and `RUSTDOCFLAGS=-D warnings cargo doc --features all --no-deps` stays clean. The
   CI workflow installs the pinned toolchain instead of switching to nightly.
 
+### Fixed
+
+- **Three tests that passed on Windows and failed on Linux CI** (package RSP-CI-EPSILON), each
+  traced to one call that rounds differently by platform, and fixed where the rounding was
+  being read as a decision. Windows' `sin(FRAC_PI_4)` is one ulp above glibc's, and
+  `0.04f64.powi(9)` and `.powi(6)` are one ulp apart between the MSVC and GNU builds.
+  - Ground friction: a patch at the friction limit is now called slipping when its tangential
+    impulse is within `4 * EPSILON` of the budget (`SATURATED`), the rounding `cone`'s rescale
+    and the length read back can leave. Compared exactly it was a coin toss on the last bit,
+    and `a_flat_field_is_exactly_the_plane_it_describes` ended 0.52 mm apart on Linux.
+  - Prism manifold: `deepest_two` treats depths within `FLUSH` of the deepest as one depth and
+    takes the second point furthest from the first. Face on face every corner ties, and by
+    depth alone the pick followed the last bit: `a_face_contact_has_a_real_arm` got a 0.07 m
+    arm on Linux where the face is a metre long.
+  - `a_static_scene_steps_to_its_recorded_checksum` hashes positions and velocities rounded to
+    a 1e-6 grid (metres, metres a second); measured drift between the two builds is `2.7e-15` m and
+    `3.3e-16` m/s with every drained step and solid equal. New literal `0x9f8b_ee79_d882_4f9d`,
+    the same on both. The SPH header no longer claims cross-machine bit identity.
+  - Swept for other platform-recorded hashes and exact float comparisons across libm routes:
+    none. The remaining checksums compare runs within one process (thread counts), and the
+    remaining exact comparisons take one route on both sides.
+
 ## 0.3.9 (2026-10-05)
 
 Package RSP-DOC-WARNINGS: the docs build warning-free, and the SPH spread guard counts
