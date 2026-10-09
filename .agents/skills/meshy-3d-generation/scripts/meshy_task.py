@@ -76,11 +76,11 @@ def load_api_key():
 
 
 def _require_key():
-    """Load API key, print first-8-char confirmation, exit if missing."""
+    """Load API key, confirm it loaded without printing any of it, exit if missing."""
     key = load_api_key()
     if not key:
         sys.exit("ERROR: MESHY_API_KEY not set. Run your skill's API key setup step.")
-    print(f"API key loaded: {key[:8]}...", file=sys.stderr)
+    print("API key loaded", file=sys.stderr)
     return key
 
 
