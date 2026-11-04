@@ -7,6 +7,16 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ### Changed
 
+- **`particles::MAX_CLASSES` is 16, was 8**, on the CPU pool and the resident GPU pool alike,
+  so a game can give each effect its own gravity, drag, restitution and swirl instead of
+  sharing a slot between two looks. An index past the cap is a caller bug: it fails a debug
+  assert at the setters and at emission, and a release build still clamps it to the last
+  slot. The WGSL `Frame` uniform grows from 336 to 496 bytes (16 class rows, 4 restitution
+  vectors), still inside its 512-byte header, and the host now writes it from offsets derived
+  from `MAX_CLASSES`; `the_frame_layout_matches_the_shader` reads the struct out of the shader and
+  checks them. The CPU integrate's per-step class table is 256 bytes, was 128. Class ids were
+  already a `u8` on the host and a `u32` word on the device, so no particle grows.
+
 - **The compiler is pinned to Rust 1.99.0** by a new `rust-toolchain.toml`; the crate built on
   whatever `stable` a machine had (1.92.0 here). One named compiler for the crate and the
   lockstep consumers that pin theirs. `cargo test --features all --no-run` with 4 jobs: clean

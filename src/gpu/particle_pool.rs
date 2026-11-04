@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::gpu::GpuContext;
-use crate::particles::{for_each_in_burst, stride_tables, DIGIT_TABLES, QUARTER_SINE};
+use crate::particles::{class_slot, for_each_in_burst, stride_tables, DIGIT_TABLES, QUARTER_SINE};
 use crate::particles::{
     BackendPolicy, Burst, EffectRng, GpuResidency, Landing, ParticleClass, ParticleEffects,
     VelocityGrid, MAX_CLASSES,
@@ -15,10 +15,16 @@ use crate::particles::{
 const WG: u32 = 64;
 
 /// Words of the frame header at the front of the frame buffer: the WGSL `Frame` struct
-/// is 84 words; the emission data starts at 512 bytes, a storage-binding offset every
-/// device accepts.
+/// is [`FRAME_WORDS`] words; the emission data starts at 512 bytes, a storage-binding
+/// offset every device accepts.
 const HEADER_WORDS: usize = 128;
-const FRAME_WORDS: usize = 84;
+/// Where the WGSL `Frame` struct's per-class rows start (one `vec4` a class), then its
+/// restitution (one word a class, four to a `vec4`), then the emission words.
+const ROWS_AT: usize = 36;
+const RESTITUTION_AT: usize = ROWS_AT + 4 * MAX_CLASSES;
+const TAIL_AT: usize = RESTITUTION_AT + MAX_CLASSES;
+const FRAME_WORDS: usize = TAIL_AT + 8;
+const _: () = assert!(FRAME_WORDS <= HEADER_WORDS && MAX_CLASSES % 4 == 0);
 
 /// Words a staged particle takes: position 3, velocity 3, remaining, lifetime, size,
 /// class.
@@ -1286,7 +1292,8 @@ impl GpuParticlePool {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot, `0..MAX_CLASSES`; larger values are clamped to the last.
+    /// * `index` - the class slot, `0..MAX_CLASSES`; a larger value fails a debug assert and
+    ///   is clamped to the last slot in release.
     /// * `class` - gravity in m/s^2, drag in 1/s and ground restitution as a fraction.
     ///
     /// # Examples
@@ -1300,7 +1307,7 @@ impl GpuParticlePool {
     /// assert_eq!(pool.class(2).drag, 3.4);
     /// ```
     pub fn set_class(&mut self, index: u8, class: ParticleClass) {
-        self.classes[(index as usize).min(MAX_CLASSES - 1)] = class;
+        self.classes[class_slot(index) as usize] = class;
     }
 
     /// The behaviour of class `index`.
@@ -1333,7 +1340,8 @@ impl GpuParticlePool {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot; larger values are clamped to the last.
+    /// * `index` - the class slot; a larger value fails a debug assert and is clamped to
+    ///   the last slot in release.
     /// * `fraction` - 0 to 1; values outside are clamped, and NaN is 0.
     ///
     /// # Examples
@@ -1346,7 +1354,7 @@ impl GpuParticlePool {
     /// assert_eq!(pool.swirl(1), 1.0);
     /// ```
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
-        self.swirl[(index as usize).min(MAX_CLASSES - 1)] = fraction.max(0.0).min(1.0);
+        self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
     }
 
     /// The fraction of the moving air class `index` takes on.
@@ -1496,7 +1504,7 @@ impl GpuParticlePool {
                     f(burst.origin[0]),
                     f(burst.origin[1]),
                     f(burst.origin[2]),
-                    burst.class.min((MAX_CLASSES - 1) as u8) as u32,
+                    class_slot(burst.class) as u32,
                     f(burst.speed.start),
                     f(burst.speed.end),
                     f(burst.lifetime.start),
@@ -1523,7 +1531,7 @@ impl GpuParticlePool {
     /// * `velocity` - initial velocity, m/s.
     /// * `lifetime` - seconds before it retires; values below `f32::EPSILON` are raised to it.
     /// * `size` - the renderer's per-particle scalar.
-    /// * `class` - class slot; out-of-range values are clamped.
+    /// * `class` - class slot; out of range fails a debug assert and clamps in release.
     ///
     /// # Examples
     ///
@@ -1549,7 +1557,7 @@ impl GpuParticlePool {
             life,
             life,
             size,
-            class.min((MAX_CLASSES - 1) as u8),
+            class_slot(class),
         );
         self.bound_staging();
     }
@@ -2340,16 +2348,16 @@ impl GpuParticlePool {
                 if class.gravity == 0.0 { 1.0 } else { 0.0 },
                 self.swirl[c] * k.max(0.0),
             ];
-            for (slot, w) in h[36 + 4 * c..40 + 4 * c].iter_mut().zip(row) {
+            for (slot, w) in h[ROWS_AT + 4 * c..ROWS_AT + 4 * c + 4].iter_mut().zip(row) {
                 *slot = f(w);
             }
-            h[68 + c] = f(class.restitution);
+            h[RESTITUTION_AT + c] = f(class.restitution);
         }
-        h[76] = segments;
-        h[77] = self.data_words as u32;
-        h[78] = self.jump_levels;
-        // h[79] stays 0: the shader's opaque zero.
-        h[80] = table_at;
+        h[TAIL_AT] = segments;
+        h[TAIL_AT + 1] = self.data_words as u32;
+        h[TAIL_AT + 2] = self.jump_levels;
+        // h[TAIL_AT + 3] stays 0: the shader's opaque zero.
+        h[TAIL_AT + 4] = table_at;
     }
 
     // -- What the renderer reads --
@@ -2763,5 +2771,62 @@ impl GpuParticlePool {
                 ]
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// Word offsets of the WGSL `Frame` struct's fields, in order, read from the shader
+    /// source: a scalar is one word, a `vec4` four, an `array<vec4<_>, N>` 4 N.
+    fn frame_fields() -> Vec<(String, usize)> {
+        let body = POOL_SHADER
+            .split("struct Frame {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("the shader declares Frame");
+        let mut at = 0;
+        let mut out = Vec::new();
+        for line in body.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
+            let Some((name, ty)) = line.strip_suffix(',').and_then(|l| l.split_once(':')) else {
+                continue;
+            };
+            let ty = ty.trim();
+            let words = if let Some(n) = ty.strip_prefix("array<vec4<") {
+                let n = n.rsplit(',').next().unwrap().trim_end_matches('>').trim();
+                4 * n.parse::<usize>().unwrap()
+            } else if ty.starts_with("vec4<") {
+                4
+            } else {
+                assert!(matches!(ty, "u32" | "f32" | "i32"), "field {name}: {ty}");
+                1
+            };
+            if words >= 4 {
+                assert_eq!(at % 4, 0, "{name} is not 16-byte aligned");
+            }
+            out.push((name.trim().to_string(), at));
+            at += words;
+        }
+        out.push(("end".to_string(), at));
+        out
+    }
+
+    /// The host writes the header by word offset; the shader reads it by field. The two
+    /// must agree for every class slot, so this reads the layout out of the shader.
+    #[test]
+    fn the_frame_layout_matches_the_shader() {
+        let fields = frame_fields();
+        let at = |name: &str| fields.iter().find(|(n, _)| n == name).map(|f| f.1);
+        assert_eq!(at("rows"), Some(ROWS_AT));
+        assert_eq!(at("restitution"), Some(RESTITUTION_AT));
+        assert_eq!(at("emit_segments"), Some(TAIL_AT));
+        assert_eq!(at("segment_table"), Some(TAIL_AT + 4));
+        assert_eq!(at("end"), Some(FRAME_WORDS));
+        let wgsl = format!("const MAX_CLASSES: u32 = {MAX_CLASSES}u;");
+        assert!(
+            POOL_SHADER.contains(&wgsl),
+            "the shader's MAX_CLASSES is not {MAX_CLASSES}"
+        );
     }
 }

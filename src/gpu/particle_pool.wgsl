@@ -14,7 +14,9 @@
 // `particle_pool.rs`.
 
 const WG: u32 = 64u;
-const MAX_CLASSES: u32 = 8u;
+// Must match `rs_physics::particles::MAX_CLASSES`: the host lays `Frame` out from it,
+// and `the_frame_layout_matches_the_shader` checks the two agree.
+const MAX_CLASSES: u32 = 16u;
 // A quarter of an f32 spacing, relative to the power of two below a value: 2^-25.
 const ROUNDS_AWAY: f32 = 2.98023224e-8;
 const MIN_POSITIVE: f32 = 1.17549435e-38;
@@ -56,9 +58,9 @@ struct Frame {
     ground_last: vec4<i32>,
     // Per class: gravity * dt, damping 1 - min(drag dt, 1), 1 where y only decays,
     // the air's share swirl * max(min(drag dt, 1), 0).
-    rows: array<vec4<f32>, 8>,
+    rows: array<vec4<f32>, 16>,
     // Per class restitution, packed four a vector.
-    restitution: array<vec4<f32>, 2>,
+    restitution: array<vec4<f32>, 4>,
     // Emission: segments in the table at word 0 of `records`; the word in `records`
     // where the jump tables start (the sine table follows them); hex digits the jump
     // tables cover; and a zero the compiler cannot see, for `rounded`.

@@ -79,11 +79,26 @@ use crate::particles::swirl::VelocityGrid;
 /// How many distinct behaviours a single [`ParticleEffects`] pool can hold.
 ///
 /// A small fixed count rather than a `Vec` of classes: the integration loop reads
-/// the class table per particle, and a fixed-size array keeps it in registers and
-/// lets the bounds check fold away. Eight covers sparks, embers, dust, smoke,
-/// debris and blood with room spare; if a project needs more, it wants a second
-/// pool rather than a bigger table.
-pub const MAX_CLASSES: usize = 8;
+/// the class table per particle, and a fixed-size array keeps it L1-resident and
+/// lets the bounds check fold away. Sixteen lets each effect keep its own physics
+/// (sparks, vent and fire embers, dust, smoke, debris, blood, muzzle and track
+/// particles) with room spare, and the per-step table is still 256 bytes, four
+/// cache lines; if a project needs more, it wants a second pool rather than a
+/// bigger table. A power of two, so a class index masks into the table.
+pub const MAX_CLASSES: usize = 16;
+
+const _: () = assert!(MAX_CLASSES.is_power_of_two() && MAX_CLASSES <= 256);
+
+/// The table slot for class `index`, at every setter and emission entry: an index past
+/// the cap is a caller bug, so it fails a debug assert, and a release build clamps it
+/// to the last slot rather than reading past the table.
+pub(crate) fn class_slot(index: u8) -> u8 {
+    debug_assert!(
+        (index as usize) < MAX_CLASSES,
+        "class {index} is past MAX_CLASSES ({MAX_CLASSES})"
+    );
+    index.min((MAX_CLASSES - 1) as u8)
+}
 
 /// Per-class physical behaviour.
 ///
@@ -330,7 +345,8 @@ impl ParticleEffects {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot, `0..MAX_CLASSES`; larger values are clamped to the last.
+    /// * `index` - the class slot, `0..MAX_CLASSES`; a larger value fails a debug assert and
+    ///   is clamped to the last slot in release.
     /// * `class` - gravity in m/s^2, drag in 1/s and ground restitution as a fraction.
     ///
     /// # Examples
@@ -342,8 +358,7 @@ impl ParticleEffects {
     /// assert_eq!(fx.class(2).drag, 3.4);
     /// ```
     pub fn set_class(&mut self, index: u8, class: ParticleClass) {
-        let index = (index as usize).min(MAX_CLASSES - 1);
-        self.classes[index] = class;
+        self.classes[class_slot(index) as usize] = class;
     }
 
     /// The behaviour of class `index`.
@@ -381,7 +396,8 @@ impl ParticleEffects {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot, `0..MAX_CLASSES`; larger values are clamped to the last.
+    /// * `index` - the class slot, `0..MAX_CLASSES`; a larger value fails a debug assert and
+    ///   is clamped to the last slot in release.
     /// * `fraction` - 0 to 1; values outside are clamped, and NaN is 0.
     ///
     /// # Examples
@@ -394,9 +410,8 @@ impl ParticleEffects {
     /// assert_eq!(fx.swirl(0), 0.0);
     /// ```
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
-        let index = (index as usize).min(MAX_CLASSES - 1);
         // `max` then `min`, so NaN lands on 0.
-        self.swirl[index] = fraction.max(0.0).min(1.0);
+        self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
     }
 
     /// The fraction of the moving air class `index` takes on; see [`Self::set_swirl`].
@@ -548,7 +563,7 @@ impl ParticleEffects {
     /// * `velocity` - initial velocity, m/s.
     /// * `lifetime` - seconds before it retires; values below `f32::EPSILON` are raised to it.
     /// * `size` - the renderer's per-particle scalar; the simulation does not read it.
-    /// * `class` - class slot; out-of-range values are clamped.
+    /// * `class` - class slot; out of range fails a debug assert and clamps in release.
     ///
     /// # Examples
     ///
@@ -571,7 +586,7 @@ impl ParticleEffects {
             velocity,
             lifetime.max(f32::EPSILON),
             size,
-            class.min((MAX_CLASSES - 1) as u8),
+            class_slot(class),
         );
     }
 
@@ -1410,7 +1425,7 @@ pub(crate) fn for_each_in_burst<F>(burst: &Burst, rng: &mut EffectRng, mut f: F)
 where
     F: FnMut([f32; 3], [f32; 3], f32, f32, u8),
 {
-    let class = burst.class.min((MAX_CLASSES - 1) as u8);
+    let class = class_slot(burst.class);
 
     for _ in 0..burst.count {
         let dir = rng.hemisphere(burst.lift);
@@ -1881,5 +1896,82 @@ mod tests {
                 assert!(fx.velocity(i).iter().all(|c| c.is_finite()));
             }
         }
+    }
+
+    /// The last slot is its own class; an index past the cap lands in it and never
+    /// past the table, on the setters, the getters and emission alike. Release only:
+    /// a debug build fails the assert instead, as the tests below check.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn the_last_class_slot_is_its_own_and_an_index_past_it_clamps_to_it() {
+        let last = (MAX_CLASSES - 1) as u8;
+        let mut fx = ParticleEffects::with_capacity(8);
+        let class_of = |c: u8| ParticleClass {
+            gravity: 4.0 + c as f32,
+            drag: 0.1 * c as f32,
+            restitution: 0.05 * c as f32,
+        };
+        for c in 0..=last {
+            fx.set_class(c, class_of(c));
+            fx.set_swirl(c, c as f32 / last as f32);
+        }
+        assert_eq!(fx.class(last), class_of(last));
+        assert_ne!(fx.class(last - 1), fx.class(last));
+        assert_eq!(fx.class(last + 1), class_of(last));
+        assert_eq!(fx.class(u8::MAX), class_of(last));
+        assert_eq!(fx.swirl(last + 1), 1.0);
+
+        // Same start, classes last - 1, last and last + 1.
+        for (id, c) in [(1.0, last - 1), (2.0, last), (3.0, last + 1)] {
+            fx.emit_one([0.0, 10.0, 0.0], [1.0, 2.0, 0.0], 5.0, id, c);
+        }
+        assert_eq!(
+            fx.class_of(2),
+            last,
+            "an index past the cap is stored as the last"
+        );
+        for _ in 0..30 {
+            fx.integrate(1.0 / 60.0);
+        }
+        assert_eq!(fx.position(1), fx.position(2));
+        assert_eq!(fx.velocity(1), fx.velocity(2));
+        assert_ne!(fx.position(0), fx.position(1));
+
+        // Writing past the cap writes the last slot and nothing else.
+        let other = ParticleClass {
+            gravity: 1.0,
+            drag: 0.0,
+            restitution: 0.0,
+        };
+        fx.set_class(last + 1, other);
+        assert_eq!(fx.class(last), other);
+        assert_eq!(fx.class(last - 1), class_of(last - 1));
+    }
+
+    /// In a debug build an index past the cap is a caller bug at each setter and at
+    /// emission, not a silent clamp.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "past MAX_CLASSES")]
+    fn a_debug_build_rejects_a_class_past_the_cap_at_set_class() {
+        let mut fx = ParticleEffects::with_capacity(8);
+        fx.set_class(MAX_CLASSES as u8, ParticleClass::default());
+    }
+
+    /// As above, for the swirl setter.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "past MAX_CLASSES")]
+    fn a_debug_build_rejects_a_class_past_the_cap_at_set_swirl() {
+        ParticleEffects::with_capacity(8).set_swirl(MAX_CLASSES as u8, 1.0);
+    }
+
+    /// As above, for emission.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "past MAX_CLASSES")]
+    fn a_debug_build_rejects_a_class_past_the_cap_at_emission() {
+        let mut fx = ParticleEffects::with_capacity(8);
+        fx.emit_one([0.0; 3], [0.0; 3], 1.0, 1.0, MAX_CLASSES as u8);
     }
 }

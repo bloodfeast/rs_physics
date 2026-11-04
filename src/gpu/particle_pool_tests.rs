@@ -27,6 +27,43 @@ fn gpu(features: wgpu::Features) -> Option<GpuContext> {
     gpu
 }
 
+/// An `R32Float` heights texture of `corners` corners, row-major from `heights`, for a
+/// [`GroundHeights`] view.
+fn heights_texture(gpu: &GpuContext, corners: [u32; 2], heights: &[f32]) -> wgpu::Texture {
+    assert_eq!(heights.len(), (corners[0] * corners[1]) as usize);
+    let size = wgpu::Extent3d {
+        width: corners[0],
+        height: corners[1],
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test heights"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(heights),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(corners[0] * 4),
+            rows_per_image: None,
+        },
+        size,
+    );
+    texture
+}
+
 /// Sparks and dust on the air, as the bench's live pool, and a heavy class that
 /// ignores it.
 fn classes(swirl: bool) -> [(ParticleClass, f32); 3] {
@@ -467,39 +504,7 @@ fn landings_match_the_cpu_in_count_and_position() {
         let bottom = at(ix, iz + 1) * (1.0 - fx) + at(ix + 1, iz + 1) * fx;
         top * (1.0 - fz) + bottom * fz
     };
-    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("test heights"),
-        size: wgpu::Extent3d {
-            width: corners[0],
-            height: corners[1],
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    gpu.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytemuck::cast_slice(&heights),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(corners[0] * 4),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: corners[0],
-            height: corners[1],
-            depth_or_array_layers: 1,
-        },
-    );
+    let texture = heights_texture(&gpu, corners, &heights);
 
     let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(4_096)).unwrap();
     let mut fx = ParticleEffects::with_capacity(4_096);
@@ -817,39 +822,7 @@ fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
         // A sloped ground, so landings are written too.
         let corners = [8u32, 8];
         let heights: Vec<f32> = (0..64).map(|i| 1.0 + 0.3 * (i % 8) as f32).collect();
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&heights),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(32),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width: 8,
-                height: 8,
-                depth_or_array_layers: 1,
-            },
-        );
+        let texture = heights_texture(&gpu, corners, &heights);
         for pool in [&mut queue_pool, &mut ring_pool] {
             pool.set_ground(Some(GroundHeights {
                 view: texture.create_view(&Default::default()),
@@ -984,4 +957,107 @@ fn a_hosts_staging_ring_gives_the_same_device_contents_as_the_queue() {
         );
         assert_eq!(landed, landing_bits(&ring_pool));
     }
+}
+
+/// Every class slot up to the cap carries its own gravity, drag and restitution through
+/// the device's frame header, flight and bounce alike. In release a class past the
+/// cap is clamped to the last slot (as on the CPU) rather than reaching a seventeenth;
+/// a debug build fails the assert there instead, so only release emits it.
+#[test]
+fn every_class_to_the_cap_integrates_and_bounces_as_the_cpu() {
+    use crate::particles::MAX_CLASSES;
+    let Some(gpu) = gpu(wgpu::Features::empty()) else {
+        return;
+    };
+    let texture = heights_texture(&gpu, [2, 2], &[0.0; 4]);
+
+    let mut pool = GpuParticlePool::new(&gpu, GpuPoolConfig::new(256)).unwrap();
+    let mut fx = ParticleEffects::with_capacity(256);
+    let class_of = |c: usize| ParticleClass {
+        gravity: 4.0 + c as f32,
+        drag: 0.05 * c as f32,
+        restitution: 0.04 * c as f32,
+    };
+    for c in 0..MAX_CLASSES {
+        fx.set_class(c as u8, class_of(c));
+    }
+    pool.copy_classes_from(&fx);
+    assert_eq!(pool.class(MAX_CLASSES as u8 - 1), class_of(MAX_CLASSES - 1));
+    assert_eq!(
+        pool.class(MAX_CLASSES as u8),
+        pool.class(MAX_CLASSES as u8 - 1)
+    );
+    pool.set_ground(Some(GroundHeights {
+        view: texture.create_view(&Default::default()),
+        min: [-64.0, -64.0],
+        cell: 128.0,
+        corners: [2, 2],
+    }));
+
+    // Four particles a class, the same four starts in every class, so the class is
+    // the only thing that differs; ids carry (class, k) as 8 c + k + 1.
+    let start = |k: usize| {
+        let s = k as f32;
+        (
+            [s - 1.5, 1.0 + 0.5 * s, 0.5 * s],
+            [1.0 - 0.5 * s, -1.0 - s, 0.25 * s],
+        )
+    };
+    let past_cap = !cfg!(debug_assertions);
+    let emitted = MAX_CLASSES + past_cap as usize;
+    for c in 0..emitted {
+        for k in 0..4 {
+            let (p, v) = start(k);
+            let id = (8 * c + k + 1) as f32;
+            fx.emit_one(p, v, 10.0, id, c as u8);
+            pool.emit_one(p, v, 10.0, id, c as u8);
+        }
+    }
+    let flat = |_: f32, _: f32| 0.0f32;
+    let frames = 90;
+    let (mut landed_cpu, mut landed_gpu, mut worst, mut p_max) = (0usize, 0usize, 0.0f32, 0.0f32);
+    for _ in 0..frames {
+        fx.integrate(DT);
+        fx.collide_ground_with(flat, |_| landed_cpu += 1);
+        pool.step(DT);
+        landed_gpu += pool.read_landings_blocking().len();
+        let cpu = cpu_by_id(&fx);
+        let device = gpu_by_id(&pool);
+        assert_eq!(cpu.len(), device.len());
+        for (id, (p, v)) in &cpu {
+            let (dp, dv) = device[id];
+            p_max = p_max.max(max_abs(*p));
+            worst = worst.max(distance(*p, dp)).max(distance(*v, dv));
+        }
+    }
+    let slots = pool.read_slots_blocking();
+    let at = |id: usize| {
+        slots
+            .iter()
+            .find(|s| s.remaining > 0.0 && s.size as usize == id)
+            .unwrap()
+    };
+    for k in 0..4 {
+        let last = at(8 * (MAX_CLASSES - 1) + k + 1);
+        assert_eq!(last.class as usize, MAX_CLASSES - 1);
+        if past_cap {
+            let past = at(8 * MAX_CLASSES + k + 1);
+            assert_eq!(past.class as usize, MAX_CLASSES - 1, "a class past the cap");
+            assert_eq!(last.position, past.position);
+            assert_eq!(last.velocity, past.velocity);
+        }
+        // Each slot below the cap flies its own constants: neighbours part.
+        let below = at(8 * (MAX_CLASSES - 2) + k + 1);
+        assert_ne!(below.position, last.position);
+    }
+    // As `landings_match_the_cpu_in_count_and_position`: no air, so positions differ
+    // only by a fused `p + v dt`, through each bounce's scaling unchanged.
+    let bound = trajectory_bound(frames, 0.0, 0.0, p_max, 0.0) + 4.0 * U * p_max;
+    println!("every class: {landed_cpu} landings on the CPU, {landed_gpu} on the device; worst {worst:.3e} (bound {bound:.3e})");
+    assert!(
+        landed_cpu >= 4 * emitted,
+        "every class should land at least once"
+    );
+    assert_eq!(landed_cpu, landed_gpu);
+    assert!(worst <= bound, "position or velocity {worst} past {bound}");
 }
