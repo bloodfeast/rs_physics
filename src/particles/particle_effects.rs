@@ -80,10 +80,14 @@ use crate::particles::swirl::VelocityGrid;
 ///
 /// A small fixed count rather than a `Vec` of classes: the integration loop reads
 /// the class table per particle, and a fixed-size array keeps it in registers and
-/// lets the bounds check fold away. Eight covers sparks, embers, dust, smoke,
-/// debris and blood with room spare; if a project needs more, it wants a second
-/// pool rather than a bigger table.
-pub const MAX_CLASSES: usize = 8;
+/// lets the bounds check fold away. Sixteen lets each effect keep its own physics
+/// (sparks, vent and fire embers, dust, smoke, debris, blood, muzzle and track
+/// particles) with room spare, and the per-step table is still 256 bytes, four
+/// cache lines; if a project needs more, it wants a second pool rather than a
+/// bigger table. A power of two, so a class index masks into the table.
+pub const MAX_CLASSES: usize = 16;
+
+const _: () = assert!(MAX_CLASSES.is_power_of_two() && MAX_CLASSES <= 256);
 
 /// Per-class physical behaviour.
 ///
@@ -1881,5 +1885,53 @@ mod tests {
                 assert!(fx.velocity(i).iter().all(|c| c.is_finite()));
             }
         }
+    }
+
+    /// The last slot is its own class; an index past the cap lands in it and never
+    /// past the table, on the setters, the getters and emission alike.
+    #[test]
+    fn the_last_class_slot_is_its_own_and_an_index_past_it_clamps_to_it() {
+        let last = (MAX_CLASSES - 1) as u8;
+        let mut fx = ParticleEffects::with_capacity(8);
+        let class_of = |c: u8| ParticleClass {
+            gravity: 4.0 + c as f32,
+            drag: 0.1 * c as f32,
+            restitution: 0.05 * c as f32,
+        };
+        for c in 0..=last {
+            fx.set_class(c, class_of(c));
+            fx.set_swirl(c, c as f32 / last as f32);
+        }
+        assert_eq!(fx.class(last), class_of(last));
+        assert_ne!(fx.class(last - 1), fx.class(last));
+        assert_eq!(fx.class(last + 1), class_of(last));
+        assert_eq!(fx.class(u8::MAX), class_of(last));
+        assert_eq!(fx.swirl(last + 1), 1.0);
+
+        // Same start, classes last - 1, last and last + 1.
+        for (id, c) in [(1.0, last - 1), (2.0, last), (3.0, last + 1)] {
+            fx.emit_one([0.0, 10.0, 0.0], [1.0, 2.0, 0.0], 5.0, id, c);
+        }
+        assert_eq!(
+            fx.class_of(2),
+            last,
+            "an index past the cap is stored as the last"
+        );
+        for _ in 0..30 {
+            fx.integrate(1.0 / 60.0);
+        }
+        assert_eq!(fx.position(1), fx.position(2));
+        assert_eq!(fx.velocity(1), fx.velocity(2));
+        assert_ne!(fx.position(0), fx.position(1));
+
+        // Writing past the cap writes the last slot and nothing else.
+        let other = ParticleClass {
+            gravity: 1.0,
+            drag: 0.0,
+            restitution: 0.0,
+        };
+        fx.set_class(last + 1, other);
+        assert_eq!(fx.class(last), other);
+        assert_eq!(fx.class(last - 1), class_of(last - 1));
     }
 }
