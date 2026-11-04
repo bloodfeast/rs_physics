@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::gpu::GpuContext;
-use crate::particles::{for_each_in_burst, stride_tables, DIGIT_TABLES, QUARTER_SINE};
+use crate::particles::{class_slot, for_each_in_burst, stride_tables, DIGIT_TABLES, QUARTER_SINE};
 use crate::particles::{
     BackendPolicy, Burst, EffectRng, GpuResidency, Landing, ParticleClass, ParticleEffects,
     VelocityGrid, MAX_CLASSES,
@@ -1292,7 +1292,8 @@ impl GpuParticlePool {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot, `0..MAX_CLASSES`; larger values are clamped to the last.
+    /// * `index` - the class slot, `0..MAX_CLASSES`; a larger value fails a debug assert and
+    ///   is clamped to the last slot in release.
     /// * `class` - gravity in m/s^2, drag in 1/s and ground restitution as a fraction.
     ///
     /// # Examples
@@ -1306,7 +1307,7 @@ impl GpuParticlePool {
     /// assert_eq!(pool.class(2).drag, 3.4);
     /// ```
     pub fn set_class(&mut self, index: u8, class: ParticleClass) {
-        self.classes[(index as usize).min(MAX_CLASSES - 1)] = class;
+        self.classes[class_slot(index) as usize] = class;
     }
 
     /// The behaviour of class `index`.
@@ -1339,7 +1340,8 @@ impl GpuParticlePool {
     ///
     /// # Arguments
     ///
-    /// * `index` - the class slot; larger values are clamped to the last.
+    /// * `index` - the class slot; a larger value fails a debug assert and is clamped to
+    ///   the last slot in release.
     /// * `fraction` - 0 to 1; values outside are clamped, and NaN is 0.
     ///
     /// # Examples
@@ -1352,7 +1354,7 @@ impl GpuParticlePool {
     /// assert_eq!(pool.swirl(1), 1.0);
     /// ```
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
-        self.swirl[(index as usize).min(MAX_CLASSES - 1)] = fraction.max(0.0).min(1.0);
+        self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
     }
 
     /// The fraction of the moving air class `index` takes on.
@@ -1502,7 +1504,7 @@ impl GpuParticlePool {
                     f(burst.origin[0]),
                     f(burst.origin[1]),
                     f(burst.origin[2]),
-                    burst.class.min((MAX_CLASSES - 1) as u8) as u32,
+                    class_slot(burst.class) as u32,
                     f(burst.speed.start),
                     f(burst.speed.end),
                     f(burst.lifetime.start),
@@ -1529,7 +1531,7 @@ impl GpuParticlePool {
     /// * `velocity` - initial velocity, m/s.
     /// * `lifetime` - seconds before it retires; values below `f32::EPSILON` are raised to it.
     /// * `size` - the renderer's per-particle scalar.
-    /// * `class` - class slot; out-of-range values are clamped.
+    /// * `class` - class slot; out of range fails a debug assert and clamps in release.
     ///
     /// # Examples
     ///
@@ -1555,7 +1557,7 @@ impl GpuParticlePool {
             life,
             life,
             size,
-            class.min((MAX_CLASSES - 1) as u8),
+            class_slot(class),
         );
         self.bound_staging();
     }

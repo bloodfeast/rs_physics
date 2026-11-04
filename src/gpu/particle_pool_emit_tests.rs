@@ -36,10 +36,10 @@ fn classes() -> [ParticleClass; 8] {
     })
 }
 
-/// Bursts covering every option the draws read: each class (and one out of range,
-/// clamped), lift from below zero to well past one, equal, reversed and negative
-/// ranges (a negative lifetime is raised to `f32::EPSILON`), zero speed, and counts of
-/// 0, 1 (the record path), 2 and up.
+/// Bursts covering every option the draws read: each class (and, in release, one out of
+/// range, clamped; a debug build fails its assert), lift from below zero to well past
+/// one, equal, reversed and negative ranges (a negative lifetime is raised to
+/// `f32::EPSILON`), zero speed, and counts of 0, 1 (the record path), 2 and up.
 fn bursts(frame: usize) -> Vec<Burst> {
     let f = frame as f32;
     let mut out = Vec::new();
@@ -48,7 +48,7 @@ fn bursts(frame: usize) -> Vec<Burst> {
         let k = class as usize + frame;
         out.push(Burst {
             origin: [f * 0.25 - 3.0, 20.0 + class as f32, -1.5 * class as f32],
-            class: if class == 8 { 200 } else { class },
+            class: if class == 8 && !cfg!(debug_assertions) { 200 } else { class },
             count: [0u32, 1, 2, 3, 17, 64, 131, 250, 9][k % 9],
             speed: match k % 4 {
                 0 => 6.0..15.0,
