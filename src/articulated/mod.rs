@@ -1910,7 +1910,7 @@
 //! The chest itself carries nothing. More passes help and do not close it: 92 per cent at
 //! thirty-two, 97 at a hundred and twenty-eight, against 82 at eight.
 //!
-//! Two things were built against it and measured on the ensemble. Neither is here.
+//! Three things were built against it and measured on the ensemble. None of them is here.
 //!
 //! * **Leaving out the self-contacts near the shared joint.** Pairs with a common jointed
 //!   neighbour, which is every pair above: 132 of 160, unchanged. Everything within three
@@ -1936,6 +1936,40 @@
 //!   against about two hundred before. A term that buys a lone rig and costs a pile
 //!   moves the defect rather than closing it, and the spread across its own count is the
 //!   shape this page has learned to read as a coefficient rather than a cure.
+//! * **Solving the loop as one constraint.** The pair above and the two joints that hold
+//!   it to the chest close a loop, and a coloured Gauss-Seidel pass converges slowly round
+//!   a loop. Worse, it charges the two halves of the fight differently: the contact's push
+//!   out of an inherited overlap is free, and the joints' pull back is moving, so the loop
+//!   hands the bodies momentum every step. So every self-contact whose bodies share a
+//!   jointed neighbour was made a block with that neighbour and both joints, blocks merged
+//!   where they share a body, and each block solved directly once a pass: the joint point
+//!   as three rows, hinge alignment as two, cones, ranges and contact normals as one-sided
+//!   rows under a drop-only active set, `J M^-1 J^T` factored densely, and the moving and
+//!   free shares solved separately on the same factor, so that the free share removes the
+//!   overlap *while keeping the joints*. Nothing tuned: the only number is the precision
+//!   floor a dependent row is dropped at. It does what it says on a loop by itself -- 13
+//!   to 25 mm of inherited overlap between a neck and an arm closed in one step, the joints
+//!   exact, 0.01 to 0.06 rad/s left over -- and it hardly moves the laws:
+//!
+//! ```text
+//!                                   before   block
+//!   ensemble, of 160                   132     140
+//!   median step to rest                742     786
+//!   at rest by step 240, of 160         36      14
+//!   ensemble at 4 / 16 passes    110 / 146  103 / 150
+//!   field, of 160                      113     119
+//!   field at rest by step 240           20      14
+//!   heap of 16, of 8                     2       0
+//! ```
+//!
+//!   The heaps end with 68 to 204 of their 272 bodies awake, against mostly 204 before,
+//!   and none of the eight comes to rest. What holds the remaining rigs awake is half the
+//!   same loops, now fighting the ground and the joints outside the block, and half pairs
+//!   three or more joints apart -- pelvis against a hand, a forearm against a thigh --
+//!   which a rule about shared neighbours does not reach. The rigs that do not stop are
+//!   moving at a tenth to a quarter of a metre a second, which is not a residual a sharper
+//!   solve of one loop takes out. The block is kept on the branch `ragdoll-block-solve`
+//!   for whoever comes next; it is not a fix.
 //!
 //! # The GPU question, which double precision answers
 //!
