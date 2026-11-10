@@ -1894,6 +1894,49 @@
 //!   mode to watch for is that flats have metastable states of their own: eight faces is
 //!   eight resting orientations to flip between.
 //!
+//! # Every landing pose, and two more things that are not the fix
+//!
+//! The rest defect is now held by three laws in `tests/articulated_laws.rs`, all red:
+//! `a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose` (132 of 160 samples come
+//! to rest inside sixty seconds, median step 742), the same over a rolling height field (113
+//! of 160, median 929), and `a_heap_of_rigs_that_touch_themselves_comes_to_rest` (2 heaps of
+//! 8). With self-collision off the landing-pose ensemble is 160 of 160 at a median of 126.
+//!
+//! **What holds the last rigs awake is one pair, and it is most often the same pair.**
+//! At sixty seconds, the deepest overlap between two bones of a rig that has not stopped,
+//! over the twenty-eight such samples: neck or upper spine against an upper arm in
+//! seventeen -- three bodies all jointed to the chest -- at 0.5 to 10 mm, carrying 300 to 600
+//! N on bones that weigh 39 to 59 N, the overlap cycling with a period of two to four steps.
+//! The chest itself carries nothing. More passes help and do not close it: 92 per cent at
+//! thirty-two, 97 at a hundred and twenty-eight, against 82 at eight.
+//!
+//! Two things were built against it and measured on the ensemble. Neither is here.
+//!
+//! * **Leaving out the self-contacts near the shared joint.** Pairs with a common jointed
+//!   neighbour, which is every pair above: 132 of 160, unchanged. Everything within three
+//!   joints: 159 of 160 -- and a forearm then passes through the other upper arm and one
+//!   thigh through the other, which is the one thing self-collision exists to stop. The
+//!   module's earlier finding stands: the joint graph does not say which pairs may part.
+//! * **Repairing a joint's inherited error without momentum.** Post-stabilisation, in the
+//!   sense of split impulses: joint passes run on the positions before the step copies
+//!   them, so the error last step left in a joint is put right without being read back as
+//!   velocity. On lone rigs it is the largest single improvement this defect has seen, and
+//!   the settling time falls by a factor of three to six; it is not monotone in its own
+//!   pass count and it ruins a heap:
+//!
+//! ```text
+//!   joint passes before the step      0     1     2     3     4     8
+//!   ensemble, of 160                132   153   146   160   157   142
+//!   median step to rest             742   190   225   125   363   180
+//!   field, of 160                   113   143                       143
+//!   heap of 16, of 8                  2     0                         0
+//! ```
+//!
+//!   At eight passes six heaps of eight finish with every one of their 272 bodies awake,
+//!   against about two hundred before. A term that buys a lone rig and costs a pile
+//!   moves the defect rather than closing it, and the spread across its own count is the
+//!   shape this page has learned to read as a coefficient rather than a cure.
+//!
 //! # The GPU question, which double precision answers
 //!
 //! A graph-coloured constraint solve is a GPU-shaped workload: a colour is thousands of
