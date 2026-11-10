@@ -63,7 +63,7 @@
 //! tells them apart.
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use rs_physics::articulated::{Body, Joint, Skeleton};
+use rs_physics::articulated::{Body, Field, Joint, Skeleton};
 
 const DT: f64 = 1.0 / 60.0;
 const G: (f64, f64, f64) = (0.0, -9.80665, 0.0);
@@ -1097,8 +1097,131 @@ fn roller() -> Body {
     body
 }
 
+/// Rig counts [`rigs_on_a_field`] times: a squad's worth, a skirmish's and a battle's.
+const FIELD_RIGS: [usize; 3] = [16, 64, 200];
+
+/// Vertices a side of [`rolling_heights`] and their spacing in metres: a field 31.5 m
+/// across, which holds the largest grid of rigs with room for it to spread.
+const ROLLING_SIDE: usize = 64;
+const ROLLING_CELL: f64 = 0.5;
+const ROLLING_ORIGIN: (f64, f64) = (-6.0, -6.0);
+
+/// The steps [`rigs_on_a_field`] runs before it times one: two seconds, which is a heap
+/// folding onto itself and the ground, and sixty, which is as settled as the scene gets.
+const FIELD_ARRIVING: usize = 120;
+const FIELD_SETTLED: usize = 3600;
+
+/// Gently rolling ground, the same as the law's: two long swells and a cross-ripple, no
+/// slope past about six degrees.
+fn rolling_heights() -> Vec<f64> {
+    let mut h = vec![0.0; ROLLING_SIDE * ROLLING_SIDE];
+    for row in 0..ROLLING_SIDE {
+        for column in 0..ROLLING_SIDE {
+            let x = ROLLING_ORIGIN.0 + column as f64 * ROLLING_CELL;
+            let z = ROLLING_ORIGIN.1 + row as f64 * ROLLING_CELL;
+            h[row * ROLLING_SIDE + column] =
+                0.3 * (x / 3.0).sin() * (z / 4.0).cos() + 0.1 * (0.7 * x + 1.3 * z).sin();
+        }
+    }
+    h
+}
+
+/// `count` rigs dropped upright on a 0.7 m grid over `field`, close enough to land on one
+/// another, each with its lowest surface 0.55 m above the ground under it.
+fn dropped_on(count: usize, field: Field<'_>, self_collision: bool) -> Skeleton {
+    let mut s = Skeleton::new();
+    s.set_self_collision(self_collision);
+    // On the calling thread, as a game stepping its ragdolls on a thread of their own runs
+    // them: the pool is somebody else's there.
+    s.set_lanes(1);
+    let side = (count as f64).sqrt().ceil() as usize;
+    for i in 0..count {
+        let (x, z) = ((i % side) as f64 * 0.7, (i / side) as f64 * 0.7);
+        let start = s.len();
+        // Built at y = 0 and lifted. Every body is upright, so its lowest surface is its
+        // centre less its half-length and radius.
+        corpse(&mut s, x, z, 0.0);
+        let lowest = (start..s.len())
+            .map(|b| {
+                let body = s.body(b);
+                body.position.1 - body.half_length - body.radius
+                    - field.height_at(body.position.0, body.position.2)
+            })
+            .fold(f64::INFINITY, f64::min);
+        for b in start..s.len() {
+            let mut body = s.body(b);
+            body.position.1 += 0.55 - lowest;
+            s.set_body(b, body);
+        }
+    }
+    s
+}
+
+/// **Rigs on a height field, which is the scene a game drops its dead into**, at three
+/// sizes, with self-collision on and off, while arriving and once settled.
+///
+/// The numbers a consumer prices its ragdolls from rather than a measurement of the
+/// solver's arithmetic: eight passes on one lane, the rigs dropped together on a 0.7 m
+/// grid so that they heap, timed one step from a named state through [`steady`].
+/// "Settled" is after sixty seconds, and with self-collision on that is not asleep -- the
+/// module header and `a_heap_of_rigs_that_touch_themselves_comes_to_rest` say why -- so
+/// the line printed with each state carries its awake count, which is the half of the
+/// number the time cannot be read without.
+///
+/// Criterion medians, one run with no other heavy job on the machine, a step:
+///
+/// ```text
+///   rigs   self-collision   arriving    settled    awake when settled
+///     16        on          2.65 ms     2.76 ms      272 of  272
+///     16        off         1.86        1.17         153 of  272
+///     64        on          11.4        11.9        1088 of 1088
+///     64        off         8.11        7.51         952 of 1088
+///    200        on          35.9        38.7        3400 of 3400
+///    200        off         25.0        24.2        3060 of 3400
+/// ```
+///
+/// About ten microseconds a body a step with self-collision on and seven without, flat
+/// across the sizes, and nothing asleep while it is on.
+fn rigs_on_a_field(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/field_rigs");
+    group.sample_size(10);
+    let heights = rolling_heights();
+    let field = Field::new(&heights, ROLLING_SIDE, ROLLING_SIDE, ROLLING_CELL, ROLLING_ORIGIN)
+        .expect("the bench's field is a valid grid");
+    for count in FIELD_RIGS {
+        for self_collision in [true, false] {
+            let mut s = dropped_on(count, field, self_collision);
+            let mut done = 0;
+            for (state, at) in [("arriving", FIELD_ARRIVING), ("settled", FIELD_SETTLED)] {
+                while done < at {
+                    s.step_over(DT, G, 8, Some(field));
+                    done += 1;
+                }
+                let name = format!(
+                    "{count}/{}/{state}",
+                    if self_collision { "self" } else { "noself" }
+                );
+                println!(
+                    "  field_rigs {name}: {} bodies, {} contacts, {} of {} awake",
+                    s.len(),
+                    s.contact_count(),
+                    s.awake_count(),
+                    s.len(),
+                );
+                group.bench_function(name, |b| {
+                    steady(b, &s, |s| {
+                        s.step_over(black_box(DT), black_box(G), black_box(8), Some(field));
+                    });
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    rigs_on_a_field,
     one_skeleton,
     joints_only,
     the_pile,
