@@ -619,18 +619,18 @@ fn touching(
 /// now rather than the one measured before anything had been applied. The slide is
 /// measured against the transforms the step *began* with, which the solve never writes
 /// to, so every pass sees the whole of it rather than the part left over.
-struct Surfaces {
-    ra: (f64, f64, f64),
-    rb: (f64, f64, f64),
+pub(super) struct Surfaces {
+    pub ra: (f64, f64, f64),
+    pub rb: (f64, f64, f64),
     /// Positive when the surfaces have passed through one another along the normal. See
     /// the module header for why the normal is the one frozen at generation.
-    depth: f64,
+    pub depth: f64,
     /// How far `a`'s surface point has moved relative to `b`'s since the step began.
-    slid: (f64, f64, f64),
+    pub slid: (f64, f64, f64),
 }
 
 #[inline]
-fn surfaces(contact: &Contact, first: &Gathered, second: &Gathered) -> Surfaces {
+pub(super) fn surfaces(contact: &Contact, first: &Gathered, second: &Gathered) -> Surfaces {
     let ra = rotate(first.now.orientation, contact.local_a);
     let rb = rotate(second.now.orientation, contact.local_b);
     let surface_a = add(first.now.position, ra);

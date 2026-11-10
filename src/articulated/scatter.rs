@@ -192,6 +192,19 @@ impl<'a, T: Copy> Cells<'a, T> {
         debug_assert!(i < self.len, "body {i} is outside the {} there are", self.len);
         *self.at.add(i) = value;
     }
+
+    /// Elements `range` as one mutable slice, for scratch that one lane owns for the whole
+    /// of a constraint. See [`super::block`], which gives every block its own region.
+    ///
+    /// # Safety
+    /// `range` must be in bounds, and no other thread may touch any element of it while
+    /// the slice lives.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(super) unsafe fn region(&self, range: std::ops::Range<usize>) -> &'a mut [T] {
+        debug_assert!(range.start <= range.end && range.end <= self.len);
+        std::slice::from_raw_parts_mut(self.at.add(range.start), range.end - range.start)
+    }
 }
 
 /// The four arrays a correction writes, bundled so a colour's closure carries one value.
