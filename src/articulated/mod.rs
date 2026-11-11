@@ -1970,6 +1970,53 @@
 //!   moving at a tenth to a quarter of a metre a second, which is not a residual a sharper
 //!   solve of one loop takes out. The block is kept on the branch `ragdoll-block-solve`
 //!   for whoever comes next; it is not a fix.
+//! * **Solving each rig whole.** If the loop is the trouble because it is cut off from the
+//!   rest of the rig, the next thing is not to cut it off: every joint-connected rig made
+//!   one block, and its joint rows, its violated cones and ranges, both ends of every
+//!   ground patch of every one of its bodies and every one of its self-contacts solved
+//!   together once a pass -- the same dense `J M^-1 J^T` and one-sided active set as the
+//!   loop above, the joints factored once as the head and the one-sided rows as a Schur
+//!   complement refactored over the active set alone. A seventeen-bone rig is about a
+//!   hundred rows. Contacts between two rigs stay in the coloured pass after the blocks,
+//!   and friction stays where it was. Nothing tuned again, and the lanes still give the
+//!   same bits at any count. It is the first thing on this page that makes a lone rig
+//!   settle *sooner*, and not only more often:
+//!
+//! ```text
+//!                                   before   block   whole
+//!   ensemble, of 160                   132     140     149
+//!   median step to rest                742     786     258
+//!   at rest by step 240, of 160         36      14      68
+//!   ensemble at 4 / 16 passes    110 / 146  103 / 150  129 / 159
+//!   field, of 160                      113     119     109
+//!   field at rest by step 240           20      14      20
+//!   heap of 16, of 8                     2       0       0
+//! ```
+//!
+//!   And it ruins a heap outright: all eight finish with every one of their 272 bodies
+//!   awake. Each rig is solved exactly and the contacts between rigs are then solved
+//!   after it by Gauss-Seidel, so every pass the exact answer for one rig is undone by its
+//!   neighbours and redone in the next -- the fight has moved from inside a rig to between
+//!   rigs, where nothing sleeps. On the field it is no better than before. And it costs
+//!   what a dense solve was predicted to cost, measured on `field_rigs` with the bench in
+//!   the order A B B A:
+//!
+//! ```text
+//!   ms a step, medians            before          whole
+//!   16 rigs arriving         2.54 / 2.58   14.63 / 15.09
+//!   16 rigs settled          2.77 / 2.90    4.95 /  5.10
+//!   64 rigs arriving        11.72 / 11.36  53.91 / 58.03
+//!   200 rigs arriving       37.29 / 38.92  164.6 / 178.5
+//!   200 rigs settled        41.05 / 41.54  67.59 / 74.99
+//!   200 rigs, no self       25.50 / 26.02  23.62 / 25.95
+//! ```
+//!
+//!   Four and a half times the step at two hundred rigs arriving, against the factor of
+//!   two this was allowed. (The settled scenes are cheaper than that only because they
+//!   sleep under the block where they did not before: 714 of 3400 bodies awake, against
+//!   all of them.) The code is kept on the branch `ragdoll-whole-solve`, with the
+//!   counters it was measured with still in it; it is not a fix, and an exact solve of
+//!   one rig at a time is not the shape of one while a heap is many rigs.
 //!
 //! # The GPU question, which double precision answers
 //!
