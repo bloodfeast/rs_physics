@@ -134,12 +134,12 @@ fn run(s1: &Shape3D, p1: V, q1: Quaternion, s2: &Shape3D, p2: V, q2: Quaternion)
     (hit, epa_contact_points_ex(s1, p1, q1, s2, p2, q2, &g))
 }
 
-/// Sphere (shape 1) against `make`'s shape (shape 2) placed near contact at random poses.
-/// Returns human-readable failures: missed overlap, missing contact, wrong depth, NaN, panic.
 /// A shape's exact depth and normal against a sphere, given the sphere's centre, the
 /// shape's centre and the shape's orientation.
 type Oracle = Box<dyn Fn(V, V, Quaternion) -> (f64, V)>;
 
+/// Sphere (shape 1) against `make`'s shape (shape 2) placed near contact at random poses.
+/// Returns human-readable failures: missed overlap, missing contact, wrong depth, NaN, panic.
 fn sphere_vs_oracle_failures(
     seed: u64,
     n: usize,

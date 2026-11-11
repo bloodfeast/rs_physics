@@ -332,7 +332,6 @@ fn test_simulation_performance() {
 
     // Print performance info
     println!("Time to simulate 10 steps with 100 objects: {:?}", duration);
-
 }
 
 #[test]

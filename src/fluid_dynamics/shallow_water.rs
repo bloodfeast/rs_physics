@@ -826,7 +826,6 @@ impl ShallowWater {
                 .map(|(j, ((h, hu), hv))| update.row(j, h, hu, hv))
                 .reduce(|| true, |a, b| a && b)
         } else {
-            // Every row is updated, so this must not short-circuit as `all` would.
             #[allow(clippy::unnecessary_fold, reason = "each row's update is a side effect; `all` would stop at the first false")]
             let all_rows = self.h
                 .chunks_mut(nx)
