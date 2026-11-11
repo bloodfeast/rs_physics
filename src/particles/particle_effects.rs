@@ -870,7 +870,13 @@ impl ParticleEffects {
         // scalar loop's operations below, in the same order, so the results are the
         // same to the bit (the tests compare a class with `swirl` 0 against
         // `integrate`).
-        let mut start = 0;
+        //
+        // Where the scalar loop starts: after the SIMD lanes on x86-64, at 0 elsewhere.
+        let start: usize;
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            start = 0;
+        }
         // Eight at a time where the build has AVX (this crate's own `.cargo/config.toml`
         // turns it on): the same lanes, twice as wide, with the eight class rows paired
         // into 256-bit registers before the same 4 x 4 transpose in each half.

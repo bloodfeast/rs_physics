@@ -673,10 +673,12 @@ impl TurbulenceDrive {
 #[derive(Debug, Clone)]
 struct Octave {
     /// Lattice spacing, cells: 2, 4 or 8.
+    #[allow(dead_code, reason = "read only by the cfg(test) accessor lattice_spacing")]
     spacing: usize,
     /// Eddy size, metres: `spacing * h`.
     scale: f32,
     /// Its eddy speed and turnover time from the drive.
+    #[allow(dead_code, reason = "read only by the cfg(test) accessor octave_law")]
     speed: f32,
     turnover: f32,
     /// What multiplies a unit-variance lattice so the octave's rms speed is `speed`.

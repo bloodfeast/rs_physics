@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use rayon::prelude::*;
-use log::info;
 use crate::models::{PhysicalObject3D, Quaternion, Shape3D};
 use crate::utils::PhysicsConstants;
 use crate::interactions::shape_collisions_3d::apply_gravity;
@@ -2203,27 +2202,6 @@ impl PhysicsWorld {
             bp.radius[j],
             bp.orientations[i],
             bp.orientations[j],
-        )
-    }
-
-    /// Detect collision between a pair, reading live object state.
-    ///
-    /// The sequential path mutates objects as it goes, so the packed arrays go
-    /// stale mid-loop; it reads through here instead. Only used for small
-    /// worlds, where the layout advantage would not have paid anyway.
-    fn detect_collision_pair_live(&self, i: usize, j: usize) -> Option<CollisionData> {
-        let obj1 = &self.objects[i];
-        let obj2 = &self.objects[j];
-
-        self.detect_collision_with(
-            i,
-            j,
-            (obj1.object.position.x, obj1.object.position.y, obj1.object.position.z),
-            (obj2.object.position.x, obj2.object.position.y, obj2.object.position.z),
-            obj1.shape.bounding_radius(),
-            obj2.shape.bounding_radius(),
-            Quaternion::from_euler(obj1.orientation.roll, obj1.orientation.pitch, obj1.orientation.yaw),
-            Quaternion::from_euler(obj2.orientation.roll, obj2.orientation.pitch, obj2.orientation.yaw),
         )
     }
 

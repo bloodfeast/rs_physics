@@ -192,6 +192,7 @@ impl WorldConstraint {
     /// * `objects` - Map from ObjectId to index in objects vector
     /// * `object_data` - The objects vector
     /// * `dt` - Timestep in seconds
+    ///
     /// Advances this constraint by one step.
     ///
     /// `gravity` is a positive-downward magnitude, as elsewhere in this module.
