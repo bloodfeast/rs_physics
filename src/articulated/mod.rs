@@ -2037,11 +2037,14 @@ use rayon::prelude::*;
 
 use crate::models::Quaternion;
 
+mod block;
 mod broadphase;
 mod contacts;
 mod crew;
 mod field;
 pub use field::Field;
+#[doc(hidden)]
+pub use block::probe as block_probe;
 mod prism;
 mod scatter;
 mod sleep;
@@ -2742,6 +2745,9 @@ enum Stage {
     /// The joints colouring could not place. Empty unless a body carries more than
     /// sixty-four joints; see [`Skeleton::add_joint`].
     JointOverflow,
+    /// The first `upto` rigs: each a rig's joints, self-contacts and ground solved as one
+    /// constraint, and no two naming the same body. See [`block`].
+    Blocks { upto: u32 },
     Ground { half: Half },
 }
 
@@ -2828,6 +2834,9 @@ pub struct Skeleton {
     /// generation can skip them. Rebuilt with the colouring. See [`Jointed`].
     jointed_start: Vec<u32>,
     jointed_to: Vec<u32>,
+    /// The rigs found this step while self-collision is on, each solved as one
+    /// constraint with its self-contacts and its ground. See [`block`].
+    blocks: block::Blocks,
     /// Which skeleton each body belongs to, as the smallest body index its joints can
     /// reach. Filled only while [`Skeleton::set_self_collision`] is off, and empty
     /// otherwise, which is what the broad phase tests.
@@ -3057,6 +3066,7 @@ impl Default for Skeleton {
             prev_orientation: Vec::new(),
             jointed_start: Vec::new(),
             jointed_to: Vec::new(),
+            blocks: block::Blocks::default(),
             jointed_component: Vec::new(),
             self_collision: true,
             pairs: Vec::new(),
@@ -4419,6 +4429,7 @@ impl Skeleton {
             awake,
             background,
             any_background,
+            blocks,
             ..
         } = self;
         live_joints.resize_with(colours.len(), Vec::new);
@@ -4433,6 +4444,10 @@ impl Skeleton {
                 for &k in set.iter() {
                     let (a, b) = joints[k].bodies();
                     if !awake.get(a) && !awake.get(b) {
+                        continue;
+                    }
+                    // A block solves this joint this step. See [`block`].
+                    if blocks.joint_in[k] {
                         continue;
                     }
                     if *any_background && (background.get(a) && background.get(b)) != pass {
@@ -4737,6 +4752,31 @@ impl Skeleton {
         self.wake_touched();
         self.build_ground_contacts(ground);
         self.colour_contacts();
+        // Before the live joints, which leave out every joint a rig has taken.
+        {
+            let Skeleton {
+                blocks,
+                contacts,
+                joints,
+                ground_contacts,
+                awake,
+                self_collision,
+                background,
+                any_background,
+                position,
+                ..
+            } = self;
+            blocks.find(
+                position.len(),
+                *self_collision,
+                joints,
+                awake,
+                contacts,
+                ground_contacts,
+                background,
+                *any_background,
+            );
+        }
         self.find_live_joints();
         #[cfg(debug_assertions)]
         self.check_no_joint_straddles_the_awake_set();
@@ -4983,6 +5023,22 @@ impl Skeleton {
             self.plan.push(Stage::JointOverflow);
             self.plan_near.push(Stage::JointOverflow);
         }
+        // **The blocks, after every joint colour and before any contact normal.** A block
+        // carries joint rows and contact normal rows and nothing tangential, so this keeps
+        // every normal ahead of every friction. One stage, because blocks share no body.
+        let blocks = self.blocks.len();
+        if blocks > 0 {
+            self.plan.push(Stage::Blocks {
+                upto: blocks as u32,
+            });
+            self.plan_work += blocks;
+        }
+        if self.blocks.near > 0 {
+            self.plan_near.push(Stage::Blocks {
+                upto: self.blocks.near as u32,
+            });
+            self.plan_near_work += self.blocks.near;
+        }
         // **Every normal half, and then every tangential half.** The two groups are
         // built by the same loop run twice rather than interleaved, because that ordering
         // is the point: see the module header. Nothing else about the stage list changes
@@ -5138,6 +5194,28 @@ impl Skeleton {
         );
         let contact_impulse = scatter::Cells::of(&mut self.contact_impulse);
         let ground_impulse = scatter::Cells::of(&mut self.ground_impulse);
+        let blocks = block::View {
+            bodies: &self.blocks.bodies,
+            body_start: &self.blocks.body_start,
+            joints: &self.blocks.joints,
+            joint_start: &self.blocks.joint_start,
+            contacts: &self.blocks.contacts,
+            contact_start: &self.blocks.contact_start,
+            grounds: &self.blocks.grounds,
+            ground_start: &self.blocks.ground_start,
+        };
+        let contact_block: &[u32] = &self.blocks.contact_block;
+        let ground_block: &[u32] = &self.blocks.ground_block;
+        let joint_in: &[bool] = &self.blocks.joint_in;
+        // The rigs this plan solves, from the front; a coloured normal stage leaves a
+        // contact or a patch alone exactly when its rig is one of them. A reduced pass
+        // leaves the background rigs out, and their ground with the plane's own stage,
+        // which is never reduced.
+        let blocks_upto = match which {
+            Which::Full => self.blocks.len() as u32,
+            Which::Near => self.blocks.near as u32,
+            Which::Velocity => 0,
+        };
 
         let (plan, work) = match which {
             Which::Full => (&self.plan, self.plan_work),
@@ -5208,6 +5286,12 @@ impl Skeleton {
         //   four [`scatter::Bodies`] already covers. Running it more than once changes
         //   nothing here: a sweep is a pass, and a pass is what this argument is about.
         // * `Stage::Overflow` is run by a single lane, so nothing in it is shared at all.
+        // * **`Stage::Blocks` is a colour whose members are rigs.** No body is in two rigs
+        //   (a rig is a whole joint-connected set, and `check_colours_are_disjoint` asserts
+        //   it), a pair contact or a ground patch is in at most one rig and its running
+        //   impulse is indexed by the constraint, and each rig's scratch is owned by the
+        //   thread solving it. A lane takes a slice of the rigs and solves each wholly, so
+        //   every argument above carries over with "constraint" read as "rig".
         let run = |lane: crew::Lane| unsafe {
             match plan[lane.stage] {
                 Stage::Joints { colour, upto } => {
@@ -5225,13 +5309,30 @@ impl Skeleton {
                         for &k in joint_overflow.iter() {
                             let joint = joints[k];
                             let (a, b) = joint.bodies();
-                            if !awake.get(a) && !awake.get(b) {
+                            if (!awake.get(a) && !awake.get(b)) || joint_in[k] {
                                 continue;
                             }
                             let first = bodies.pose(a, inv_mass, inv_inertia);
                             let second = bodies.pose(b, inv_mass, inv_inertia);
                             bodies.apply(solve_joint(joint, &first, &second));
                         }
+                    }
+                }
+                Stage::Blocks { upto } => {
+                    for k in lane.span(upto as usize) {
+                        block::solve(
+                            k,
+                            &blocks,
+                            joints,
+                            contacts,
+                            ground_contacts,
+                            &bodies,
+                            &contact_impulse,
+                            &ground_impulse,
+                            inv_mass,
+                            inv_inertia,
+                            radius,
+                        );
                     }
                 }
                 Stage::Contacts { colour, upto, half } => {
@@ -5252,6 +5353,8 @@ impl Skeleton {
                         velocity,
                         angular_velocity,
                         velocity_share,
+                        contact_block,
+                        blocks_upto,
                     );
                 }
                 Stage::Overflow { half } => {
@@ -5271,12 +5374,19 @@ impl Skeleton {
                             velocity,
                             angular_velocity,
                             velocity_share,
+                            contact_block,
+                            blocks_upto,
                         );
                     }
                 }
                 Stage::Ground { half } => {
                     let set = ground_colours;
                     for &k in &set[lane.span(set.len())] {
+                        // A rig in this plan has already solved this patch's normal half
+                        // this pass, with its joints. See [`block`].
+                        if half == Half::Normal && ground_block[k] < blocks_upto {
+                            continue;
+                        }
                         let contact = ground_contacts[k];
                         // The plane this contact was built against, which against a height
                         // field is this body's own. See [`contacts::GroundContact::normal`]
@@ -5558,6 +5668,13 @@ impl Skeleton {
                     .flat_map(|&k| [self.contacts[k].a, self.contacts[k].b]),
             );
         }
+        // Every block against every other, as one set: they are one stage, so no body may be
+        // in two of them. See [`block`].
+        scatter::disjoint(
+            bodies,
+            "block",
+            self.blocks.bodies.iter().map(|&i| i as usize),
+        );
         scatter::disjoint(
             bodies,
             "ground",
@@ -6220,8 +6337,16 @@ unsafe fn solve_some_contacts(
     velocity: &[(f64, f64, f64)],
     angular_velocity: &[(f64, f64, f64)],
     velocity_share: &[f64],
+    block_of: &[u32],
+    blocks_upto: u32,
 ) {
     for &k in set {
+        // A rig has already solved this contact's positional normal this pass, together
+        // with its joints and its ground. Its tangential and velocity halves are still this
+        // colour's. See [`block`].
+        if half == Half::Normal && block_of[k] < blocks_upto {
+            continue;
+        }
         let contact = contacts[k];
         let first = bodies.gather(contact.a, inv_mass, inv_inertia, radius);
         let second = bodies.gather(contact.b, inv_mass, inv_inertia, radius);

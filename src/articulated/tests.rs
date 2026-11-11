@@ -2567,6 +2567,104 @@ fn crowd_after(count: usize, steps: usize, lanes: Option<usize>) -> Vec<(u64, u6
         .collect()
 }
 
+/// **And for rigs that are each solved whole.** While self-collision is on, every rig is one
+/// constraint, and a lane takes a slice of the rigs rather than of a colour. Thirty-two of
+/// the seventeen-bone rigs laid on the plane, close enough to land on each other and enough
+/// of them that the pass is split, solved at five lane budgets: every position has to land on
+/// the same bits.
+#[test]
+fn the_lane_budget_does_not_change_the_answer_for_rigs_solved_whole() {
+    let reference = rigs_after(1);
+    for lanes in [2usize, 3, 8, 64] {
+        let got = rigs_after(lanes);
+        assert_eq!(
+            got, reference,
+            "the same rigs solved whole in {lanes} lanes landed on different bits from the \
+             same rigs solved in one, so how the rigs were divided reached the result",
+        );
+    }
+}
+
+/// Thirty-two rigs on the plane, stepped sixty times at eight passes with a budget of
+/// `lanes`, read back as bits.
+fn rigs_after(lanes: usize) -> Vec<(u64, u64, u64)> {
+    let mut s = Skeleton::new();
+    floor(&mut s, 0.0);
+    let flat = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
+    for k in 0..32 {
+        let start = s.len();
+        whole_rig(&mut s);
+        let at = ((k % 8) as f64 * 0.45, (k / 8) as f64 * 1.1);
+        for i in start..s.len() {
+            let mut body = s.body(i);
+            let p = flat.rotate_point(body.position);
+            body.position = (p.0 + at.0, p.1 + 0.25 + 0.03 * (k % 3) as f64, p.2 + at.1);
+            body.orientation = flat.multiply(&body.orientation);
+            s.set_body(i, body);
+        }
+    }
+    assert!(s.self_collision(), "this is about rigs that may touch themselves");
+    s.set_lanes(lanes);
+    let mut parallel = false;
+    for _ in 0..60 {
+        s.step(DT, G, 8);
+        parallel |= s.solved_in_parallel();
+    }
+    assert!(
+        lanes == 1 || parallel,
+        "{lanes} lanes were asked for and the pass never split, so this compared nothing",
+    );
+    (0..s.len())
+        .map(|i| {
+            let p = s.position(i);
+            (p.0.to_bits(), p.1.to_bits(), p.2.to_bits())
+        })
+        .collect()
+}
+
+/// The laws' seventeen-bone rig, standing at the origin: a pelvis, a spine of four up to a
+/// head, and four limbs of three -- shoulders and hips as balls, elbows and knees as hinges
+/// with a range.
+fn whole_rig(into: &mut Skeleton) {
+    let base = into.len();
+    let pelvis = into.add_body(Body::capsule(8.0, 0.1, 0.16, (0.0, 0.0, 0.0)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, 0.2 + 0.2 * i as f64, 0.0)));
+        assert!(into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0))));
+        up = link;
+    }
+    for limb in 0..4 {
+        let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
+        let side_z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            let body = into.add_body(Body::capsule(
+                4.0,
+                0.06,
+                0.25,
+                (0.0, side * 0.25 * segment as f64, side_z),
+            ));
+            let joint = if segment == 0 {
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            assert!(into.add_joint(joint));
+            previous = body;
+        }
+    }
+}
+
 /// **A step that is handed nonsense does nothing, and NaN is nonsense.**
 ///
 /// The guard is written `!(dt > 0.0)` rather than `dt <= 0.0` because every comparison
