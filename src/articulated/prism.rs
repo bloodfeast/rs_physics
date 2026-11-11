@@ -758,7 +758,7 @@ fn deepest_two(
 /// The `span` both contacts carry is the arm between them, which is what tells the
 /// friction solve how far this patch reaches. For a prism that is not a guess: it is the
 /// distance between the two clipped points, which is a real length on a real face.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 pub(super) fn prism_contact(
     a: usize,
     b: usize,

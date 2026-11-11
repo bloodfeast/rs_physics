@@ -426,7 +426,7 @@ impl Grid {
     /// it replaced, which is what
     /// `the_grid_finds_every_pair_the_quadratic_search_would` checks by passing an
     /// all-set frontier.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the grid's inputs and outputs for one sweep; a struct would only be built to be taken apart")]
     pub(super) fn pairs(
         &mut self,
         position: &[(f64, f64, f64)],
@@ -503,7 +503,7 @@ impl Grid {
     /// Outlier against outlier is quadratic and may be: [`oversize_cap`] bounds the count
     /// at the point where the quadratic is smaller than a pass over the population, and in
     /// a set that has an outlier at all the count is one or two.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the same arguments as pairs, passed through; a struct would only be built to be taken apart")]
     fn sweep_oversized(
         &self,
         position: &[(f64, f64, f64)],
@@ -667,7 +667,7 @@ impl Grid {
     }
 
     /// The neighbourhood scan for one run of the shaped list.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the same arguments as pairs plus the run's bounds; a struct would only be built to be taken apart")]
     fn scan(
         &self,
         from: usize,

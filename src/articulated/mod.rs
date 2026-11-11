@@ -6133,7 +6133,7 @@ impl Skeleton {
 /// Every body named by `set` must be owned by the calling lane for the duration: within a
 /// colour that is the colouring plus [`crew::Lane::span`], and for the overflow it is the
 /// single lane that runs it. See [`Skeleton::solve_pass`] for the argument in full.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "the lane's view of the solver's per-body slices; a struct would only be built to be taken apart")]
 #[inline]
 unsafe fn solve_some_contacts(
     set: &[usize],
@@ -6623,7 +6623,7 @@ fn turn_by(into: &mut Correction, body: &Pose, impulse: (f64, f64, f64)) {
 /// relative`, the energy the pair loses is `mu |relative|^2 f (f/2 - 1)` with
 /// `mu = 1/total`, which is negative for every `f` below two whatever the two tensors are.
 /// That is why this shape and not the other one.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn damp_joint(
     joint: Joint,
     first: &Pose,
@@ -6764,7 +6764,7 @@ fn turned_since(now: Quaternion, before: Quaternion) -> (f64, f64, f64) {
 /// is a body spinning on the spot, which is a different effect with a different arm.
 /// `b` is `None` when the other side of the contact is the ground, which does not turn
 /// and takes none of the correction.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
 fn resist_rolling(
     out: &mut [Correction; 2],
     a: &Gathered,
