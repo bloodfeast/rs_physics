@@ -608,7 +608,7 @@ impl FluidGrid3D {
     /// fluid passes through a wall. At the other four walls it is copied under
     /// free-slip and negated under no-slip ([`SolverConfig::wall`]). Density and
     /// pressure are copied (no flux).
-    fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut Vec<f64>) {
+    fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut [f64]) {
         let wall = self.solver_config.wall;
         let flip_front_back = boundary_type.flips_at_wall(BoundaryType::VelocityZ, wall);
         let flip_top_bottom = boundary_type.flips_at_wall(BoundaryType::VelocityY, wall);
@@ -839,8 +839,8 @@ impl FluidGrid3D {
     }
 
     /// Performs semi-Lagrangian advection in 3D.
-    fn advect(&self, boundary_type: BoundaryType, d: &mut Vec<f64>, d0: &Vec<f64>,
-              velocity_x: &Vec<f64>, velocity_y: &Vec<f64>, velocity_z: &Vec<f64>) {
+    fn advect(&self, boundary_type: BoundaryType, d: &mut [f64], d0: &[f64],
+              velocity_x: &[f64], velocity_y: &[f64], velocity_z: &[f64]) {
         let dt0 = self.dt * self.width as f64;
 
         for i in 1..self.width-1 {

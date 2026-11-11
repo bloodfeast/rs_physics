@@ -496,6 +496,7 @@ fn flip_toi_result(result: ToiResult) -> ToiResult {
 }
 
 /// Calculate advancement amount for conservative advancement
+#[allow(clippy::too_many_arguments, reason = "scalar inputs to one formula; a struct would only be built to be taken apart")]
 fn calculate_advancement_amount(
     dist_estimate: f64,
     vel1: (f64, f64, f64),
@@ -663,6 +664,7 @@ pub fn calculate_sphere_sphere_toi(
 }
 
 /// Calculates time of impact for sphere-cuboid collision
+#[allow(clippy::too_many_arguments, reason = "scalar inputs to one formula; a struct would only be built to be taken apart")]
 fn calculate_sphere_cuboid_toi(
     sphere_pos: (f64, f64, f64),
     sphere_vel: (f64, f64, f64),
@@ -1728,6 +1730,7 @@ pub fn apply_simple_collision_response(
 }
 
 /// Helper function to validate collision response results (for testing)
+#[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
 pub fn validate_collision_response(
     v1_before: (f64, f64, f64),
     v2_before: (f64, f64, f64),

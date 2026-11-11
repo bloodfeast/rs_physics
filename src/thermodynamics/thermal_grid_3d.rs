@@ -479,6 +479,7 @@ impl ThermalGrid3D {
     }
 
     /// Sets a cubic region to a specific temperature
+    #[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
     pub fn set_region(
         &mut self,
         x_start: usize,

@@ -234,6 +234,7 @@ pub fn sample_density_3d(grid: &FluidGrid3D, x: f64, y: f64, z: f64) -> f64 {
 
 /// Helper function for trilinear interpolation.
 #[inline]
+#[allow(clippy::too_many_arguments, reason = "scalar inputs to one formula; a struct would only be built to be taken apart")]
 fn trilinear_interp(
     v000: f64, v100: f64, v010: f64, v110: f64,
     v001: f64, v101: f64, v011: f64, v111: f64,

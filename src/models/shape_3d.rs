@@ -988,6 +988,7 @@ pub struct PhysicalObject3D {
 
 impl PhysicalObject3D {
     /// Creates a new physical object with the given parameters
+    #[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
     pub fn new(
         mass: f64,
         velocity: (f64, f64, f64),
@@ -1016,6 +1017,7 @@ impl PhysicalObject3D {
     }
 
     /// Creates a new die (standard six-sided die) with the given parameters
+    #[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
     pub fn new_die(
         mass: f64,
         size: f64,

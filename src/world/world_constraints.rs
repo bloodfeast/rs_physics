@@ -164,6 +164,7 @@ impl WorldRope3D {
 
 /// All constraint types that can be added to the physics world.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant, reason = "public enum; boxing the hinge changes its layout and adds an allocation per constraint")]
 pub enum WorldConstraint {
     /// Distance constraint (joint)
     Joint(WorldJoint3D),
