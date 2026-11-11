@@ -418,7 +418,7 @@ pub struct SphSolidStats {
 
 /// How [`SphFluid::bin_solids_by`] finds the solids' occupied cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code, reason = "only tests build Cells and Particles; the library always asks for Measured"))]
 pub(super) enum BinPath {
     /// Whichever is cheaper for the step's solids: the cell walk while their clipped
     /// boxes hold at most a [`SCAN_CROSSOVER`]th of the particle count in cells between

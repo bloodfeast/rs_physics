@@ -972,7 +972,7 @@ impl FluidGrid {
     ///
     /// The arithmetic of the `sign = -1` pass is [`FluidGrid::advect`]'s, operation
     /// for operation, so MacCormack's forward value is the first-order value exactly.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
     fn trace_pass(
         &self,
         d: &mut [f64],
@@ -1014,7 +1014,7 @@ impl FluidGrid {
     /// forward pass, a reverse pass from its result, half the round trip's error
     /// added back, and each cell clamped to the range of the cells its forward pass
     /// read. `back`, `low` and `high` are scratch.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
     fn advect_maccormack(
         &self,
         boundary_type: BoundaryType,

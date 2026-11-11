@@ -430,7 +430,7 @@ fn solve_joint(
 /// Velocity half of a distance constraint: cancel the relative velocity along
 /// `n` (only the separating part when `unilateral`), with the inverse-mass
 /// weighting of an impulse, so momentum is conserved.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn remove_relative_velocity_along(
     object1: Option<ObjectId>,
     idx2: usize,

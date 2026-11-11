@@ -275,7 +275,7 @@ impl Hinge3D {
     }
 
     /// Returns the current world-space anchor point for object2.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "kept: stale, calculate_error now calls this; dropping it is outside an attribute-only pass")]
     fn anchor_world_2(&self) -> (f64, f64, f64) {
         (
             self.object2.position.x + self.local_anchor2.0,

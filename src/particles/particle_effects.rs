@@ -1589,7 +1589,7 @@ impl EffectRng {
     }
 
     /// The raw state: the value the last [`Self::next_u32`] returned (or the seed).
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code, reason = "read only by the gpu particle pool"))]
     pub(crate) fn state(&self) -> u32 {
         self.0
     }

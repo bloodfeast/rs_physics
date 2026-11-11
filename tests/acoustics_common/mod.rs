@@ -1,7 +1,7 @@
 //! Shared by the acoustics oracles: a device, staging, readback, and scenes.
 //!
 //! Tests may block and poll; the library may not (oracle L8 scans it).
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test crates, each of which uses only part of it")]
 
 use rs_physics::gpu::acoustics::*;
 

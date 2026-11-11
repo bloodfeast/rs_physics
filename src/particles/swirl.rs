@@ -473,7 +473,7 @@ impl VelocityGrid {
 
     /// [`Self::sample`] in plain Rust, for targets without SSE2 and as the reference
     /// the SSE version is tested against.
-    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code))]
+    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code, reason = "x86_64 takes the SSE path; there only the tests call the portable one"))]
     #[inline(always)]
     fn sample_portable(&self, p: [f32; 3]) -> [f32; 3] {
         let mut base = [0usize; 3];

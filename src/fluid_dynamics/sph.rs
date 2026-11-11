@@ -2394,7 +2394,7 @@ impl Sorted<'_> {
 
     /// Four neighbours' pressure, viscosity and cohesion on `i`, added lane by lane.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
     fn block(
         &self,
         i: usize,

@@ -233,7 +233,7 @@ pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
 
 /// Vector utility: normalization
 #[inline]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused private helper; removing it is outside an attribute-only pass")]
 fn normalize_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
     let mag = crate::interactions::vector_magnitude(v);
     if mag > 1e-10 {

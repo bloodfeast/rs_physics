@@ -947,7 +947,7 @@ impl FluidGrid3D {
 
     /// MacCormack advection of `d0` into `d` ([`AdvectionScheme::MacCormack`]); see
     /// the 2D grid's `advect_maccormack`. `back`, `low` and `high` are scratch.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
     fn advect_maccormack(
         &self,
         boundary_type: BoundaryType,

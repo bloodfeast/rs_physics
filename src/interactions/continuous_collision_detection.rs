@@ -44,7 +44,7 @@ const EPSILON: f64 = 1e-6;
 const TINY_EPSILON: f64 = 1e-10;
 
 /// Minimum velocity for restitution to apply (prevents micro-bounces)
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: read only by calculate_collision_impulse, itself unused")]
 const MIN_VELOCITY_FOR_RESTITUTION: f64 = 0.1;
 
 /// Separation distance for position correction
@@ -307,7 +307,7 @@ pub fn transform_collision_to_world(
 }
 
 /// Helper function to check collision along a single axis of cuboids
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused legacy collision-response helper; removing it is outside an attribute-only pass")]
 fn check_axis_collision(
     pos1_comp: f64,
     pos2_comp: f64,
@@ -1261,7 +1261,7 @@ pub fn check_continuous_collision(
 //==============================================================================
 
 /// Calculate point velocity based on linear and angular velocity
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused legacy collision-response helper; removing it is outside an attribute-only pass")]
 fn calculate_point_velocity(
     linear_vel: (f64, f64, f64),
     angular_vel: (f64, f64, f64),
@@ -1283,7 +1283,7 @@ fn calculate_point_velocity(
 
 /// Calculate collision impulse for a collision response
 /// Normal must point from obj2 to obj1
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused legacy collision-response helper; removing it is outside an attribute-only pass")]
 fn calculate_collision_impulse(
     obj1: &PhysicalObject3D,
     obj2: &PhysicalObject3D,
@@ -1326,7 +1326,7 @@ fn calculate_collision_impulse(
 
 /// Apply collision impulse to objects
 /// Normal must point from obj2 to obj1
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused legacy collision-response helper; removing it is outside an attribute-only pass")]
 fn apply_collision_impulse(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,
@@ -1381,7 +1381,7 @@ fn apply_collision_impulse(
 }
 
 /// Apply position correction after collision
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused legacy collision-response helper; removing it is outside an attribute-only pass")]
 fn apply_position_correction(
     obj1: &mut PhysicalObject3D,
     obj2: &mut PhysicalObject3D,

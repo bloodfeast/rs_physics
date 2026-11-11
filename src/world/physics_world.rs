@@ -2206,7 +2206,7 @@ impl PhysicsWorld {
     }
 
     /// Shared narrow-phase body for both detection entry points.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
     fn detect_collision_with(
         &self,
         i: usize,
