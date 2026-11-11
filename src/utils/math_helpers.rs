@@ -2,10 +2,10 @@
 #[inline]
 pub fn fast_atan(x: f32) -> f32 {
     // Constants for the approximation
-    const A: f32 = 0.0776509570923569;
-    const B: f32 = -0.287434475393028;
-    const C: f32 = 0.995354526943123;
-    const D: f32 = -0.211410230597758;
+    const A: f32 = 0.077_650_96;
+    const B: f32 = -0.287_434_5;
+    const C: f32 = 0.995_354_53;
+    const D: f32 = -0.211_410_22;
 
     let abs_x = x.abs();
     let z = if abs_x > 1.0 { 1.0 / abs_x } else { abs_x };

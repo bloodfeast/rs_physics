@@ -409,6 +409,7 @@ impl ParticleEffects {
     /// assert_eq!(fx.swirl(1), 1.0);
     /// assert_eq!(fx.swirl(0), 0.0);
     /// ```
+    #[allow(clippy::manual_clamp, reason = "max then min maps NaN to 0.0; clamp would return NaN")]
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
         // `max` then `min`, so NaN lands on 0.
         self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);

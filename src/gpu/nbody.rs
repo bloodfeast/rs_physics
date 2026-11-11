@@ -286,6 +286,7 @@ impl GpuNBodySimulation {
             }
 
             // Dispatch enough workgroups to cover all particles
+            #[allow(clippy::manual_div_ceil, reason = "div_ceil cannot overflow where this sum can; kept as it was")]
             let num_workgroups = (self.num_particles + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(num_workgroups, 1, 1);
         }

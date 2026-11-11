@@ -232,7 +232,7 @@ fn pipeline(
 }
 
 fn check_staged(staged: &Staged<'_>, len: u64) -> Result<(), AcousticsError> {
-    if staged.offset % 4 != 0 || staged.len % 4 != 0 {
+    if !staged.offset.is_multiple_of(4) || !staged.len.is_multiple_of(4) {
         return Err(AcousticsError::Misaligned);
     }
     if staged.len != len {

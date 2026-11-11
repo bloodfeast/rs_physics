@@ -2505,7 +2505,7 @@ impl PhysicsWorld {
             // DEBUG: Log friction values (rate-limited to once per second at 240Hz)
             static DEBUG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count % 240 == 0 && tangent_speed > 0.01 {
+            if count.is_multiple_of(240) && tangent_speed > 0.01 {
                 log::info!(
                     "[FRICTION] µ1={:.2} µ2={:.2} µ={:.2} | j={:.4} weight={:.4} max_fric={:.4} | tan_spd={:.3} fric_j={:.4} | ω=({:.2},{:.2},{:.2})",
                     friction1, friction2, friction,

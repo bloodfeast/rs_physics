@@ -24,7 +24,7 @@ const ROWS_AT: usize = 36;
 const RESTITUTION_AT: usize = ROWS_AT + 4 * MAX_CLASSES;
 const TAIL_AT: usize = RESTITUTION_AT + MAX_CLASSES;
 const FRAME_WORDS: usize = TAIL_AT + 8;
-const _: () = assert!(FRAME_WORDS <= HEADER_WORDS && MAX_CLASSES % 4 == 0);
+const _: () = assert!(FRAME_WORDS <= HEADER_WORDS && MAX_CLASSES.is_multiple_of(4));
 
 /// Words a staged particle takes: position 3, velocity 3, remaining, lifetime, size,
 /// class.
@@ -1353,6 +1353,7 @@ impl GpuParticlePool {
     /// pool.set_swirl(1, 1.0);
     /// assert_eq!(pool.swirl(1), 1.0);
     /// ```
+    #[allow(clippy::manual_clamp, reason = "max then min maps NaN to 0.0; clamp would return NaN")]
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
         self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
     }
