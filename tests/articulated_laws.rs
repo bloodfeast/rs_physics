@@ -719,6 +719,7 @@ fn a_rig_that_touches_itself_comes_to_rest() {
     const CAP: usize = 2000;
 
     let mut slept = Vec::new();
+    #[allow(unused_assignments, reason = "every draw sets it; the 0 is only there because a loop is not known to run")]
     let mut bones = 0;
     for draw in 0..DRAWS {
         let mut s = Skeleton::new();
@@ -1072,12 +1073,12 @@ fn a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass() {
     let total: f64 = mass.iter().sum();
     let centre = |s: &Skeleton| {
         let mut c = (0.0, 0.0, 0.0);
-        for i in 0..s.len() {
+        for (i, &m) in mass[..s.len()].iter().enumerate() {
             let p = s.position(i);
             c = (
-                c.0 + p.0 * mass[i] / total,
-                c.1 + p.1 * mass[i] / total,
-                c.2 + p.2 * mass[i] / total,
+                c.0 + p.0 * m / total,
+                c.1 + p.1 * m / total,
+                c.2 + p.2 * m / total,
             );
         }
         c
@@ -1090,12 +1091,12 @@ fn a_skeleton_left_to_itself_does_not_move_its_own_centre_of_mass() {
     }
 
     let mut worked = 0.0f64;
-    for i in 0..s.len() {
+    for (i, was) in placed[..s.len()].iter().enumerate() {
         let now = s.position(i);
         worked = worked.max(speed((
-            now.0 - placed[i].0,
-            now.1 - placed[i].1,
-            now.2 - placed[i].2,
+            now.0 - was.0,
+            now.1 - was.1,
+            now.2 - was.2,
         )));
     }
     assert!(
@@ -1312,7 +1313,7 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
     let mut up = pelvis;
     for i in 0..4 {
         let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, y + 0.2 + 0.2 * i as f64, 0.0)));
-        into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
+        let _ = into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
         up = link;
     }
     for limb in 0..4 {
@@ -1341,7 +1342,7 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
                     max: 2.2,
                 }
             };
-            into.add_joint(joint);
+            let _ = into.add_joint(joint);
             previous = body;
         }
     }
@@ -1612,10 +1613,10 @@ fn ploughed_heap_state(steps: usize) -> Vec<(u64, u64, u64, u64, u64, u64, usize
     for step in 0..steps {
         s.step(DT, G, 8);
         ever_parallel |= s.solved_in_parallel();
-        for i in 0..s.len() {
+        for (i, at) in retired_at[..s.len()].iter_mut().enumerate() {
             if !s.is_retired(i) && s.normal_load(i) > CRUSHED {
                 assert!(s.retire(i), "a live body refused to be retired");
-                retired_at[i] = step;
+                *at = step;
             }
         }
     }

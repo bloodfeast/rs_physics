@@ -66,6 +66,7 @@ struct Rig {
 }
 
 impl Rig {
+    #[allow(clippy::approx_constant, reason = "6.28 is the draw range the recorded scenes were made with, not TAU")]
     fn new() -> Option<Rig> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());

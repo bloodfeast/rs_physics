@@ -106,6 +106,7 @@ fn median(v: &mut [f64]) -> f64 {
     v[v.len() / 2]
 }
 
+#[allow(clippy::needless_range_loop, reason = "the step indexes the inner dimension of a per-scale table")]
 fn main() {
     let steps: usize = std::env::args()
         .nth(1)

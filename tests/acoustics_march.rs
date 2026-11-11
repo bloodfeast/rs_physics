@@ -477,8 +477,8 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
                         edges[i].excess_m[3],
                         edges[i].probe_excess_m,
                     ];
-                    for b in 0..5 {
-                        let (g, want) = (gpu_e[b] as f64, cpu.edges[b]);
+                    for (b, &ge) in gpu_e.iter().enumerate() {
+                        let (g, want) = (ge as f64, cpu.edges[b]);
                         if want == f64::MIN {
                             assert_eq!(
                                 g,
@@ -531,6 +531,7 @@ fn l2_l3_the_march_finds_the_edge_and_the_blocked_flag_agrees() {
 /// cells hold more than the 512-entry queue and the overflow is tested inline. Every band
 /// still matches the CPU, and field rays through the crowd still hit the nearest face.
 #[test]
+#[allow(clippy::approx_constant, reason = "3.14 is the draw range, not PI; changing it changes the draws")]
 fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
     let Some(gpu) = gpu() else { return };
     let air = Air::standard();
@@ -603,8 +604,8 @@ fn l3_a_crowded_cell_overflows_the_queue_and_loses_nothing() {
             edges[i].excess_m[3],
             edges[i].probe_excess_m,
         ];
-        for b in 0..5 {
-            let (g, want) = (gpu_e[b] as f64, cpu.edges[b]);
+        for (b, &ge) in gpu_e.iter().enumerate() {
+            let (g, want) = (ge as f64, cpu.edges[b]);
             let bound = 16.0 * U * (2.0 * len + want.abs() + 2.0 * mag)
                 + 8.0 * U * mag
                 + 2.0 * len * cpu.dt;

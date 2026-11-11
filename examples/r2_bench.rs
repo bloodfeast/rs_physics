@@ -96,7 +96,7 @@ impl Live {
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let m = v.len() / 2;
-    if v.len() % 2 == 0 { (v[m - 1] + v[m]) / 2.0 } else { v[m] }
+    if v.len().is_multiple_of(2) { (v[m - 1] + v[m]) / 2.0 } else { v[m] }
 }
 
 /// ns a particle for one integrate, median over `reps` calls.
