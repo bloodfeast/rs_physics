@@ -4567,10 +4567,20 @@ impl Skeleton {
         // bodies, which is the sweep's own loop again and did not show.
         let wide = self.awake.count() >= PARALLEL_FLOOR;
 
-        let predict = |((((p, v), q), &inv_m), w): (
-            (((&mut (f64, f64, f64), &mut (f64, f64, f64)), &mut Quaternion), &f64),
-            &(f64, f64, f64),
-        )| {
+        // One body's slots, as the zipped sweep below hands them over, and a block of
+        // bodies' slices with the awake words that cover them.
+        type PredictBody<'a> = (
+            (((&'a mut (f64, f64, f64), &'a mut (f64, f64, f64)), &'a mut Quaternion), &'a f64),
+            &'a (f64, f64, f64),
+        );
+        type PredictBlock<'a> = (
+            (
+                (&'a mut [(f64, f64, f64)], &'a mut [(f64, f64, f64)]),
+                &'a mut [Quaternion],
+            ),
+            ((&'a [f64], &'a [(f64, f64, f64)]), &'a [u64]),
+        );
+        let predict = |((((p, v), q), &inv_m), w): PredictBody<'_>| {
             if inv_m > 0.0 {
                 *v = add(*v, scale(g, dt));
             }
@@ -4583,13 +4593,7 @@ impl Skeleton {
         // which is the shape a settled heap has; a word of ones runs a straight loop with
         // no bit arithmetic in it, so a skeleton where nothing sleeps runs what it ran
         // before. Only the ragged edge between them pays for the `trailing_zeros`.
-        let block = |(((p, v), q), ((inv_m, w), words)): (
-            (
-                (&mut [(f64, f64, f64)], &mut [(f64, f64, f64)]),
-                &mut [Quaternion],
-            ),
-            ((&[f64], &[(f64, f64, f64)]), &[u64]),
-        )| {
+        let block = |(((p, v), q), ((inv_m, w), words)): PredictBlock<'_>| {
             // A chunk with nothing asleep in it runs the zipped sweep it always ran.
             // Walking it by index instead costs a bounds check on five slices a body, and
             // measured on a heap where nothing sleeps that was most of what sleeping cost
@@ -4767,13 +4771,22 @@ impl Skeleton {
         // And one sweep to read both velocities back, for the same reason the predict is
         // one.
         let inv_dt = 1.0 / dt;
-        let read_back = |((((v, w), p), prev_p), (q, prev_q)): (
+        // One body's slots and a block's slices, as for the predict.
+        type ReadBackBody<'a> = (
             (
-                ((&mut (f64, f64, f64), &mut (f64, f64, f64)), &(f64, f64, f64)),
-                &(f64, f64, f64),
+                ((&'a mut (f64, f64, f64), &'a mut (f64, f64, f64)), &'a (f64, f64, f64)),
+                &'a (f64, f64, f64),
             ),
-            (&Quaternion, &Quaternion),
-        )| {
+            (&'a Quaternion, &'a Quaternion),
+        );
+        type ReadBackBlock<'a> = (
+            (
+                (&'a mut [(f64, f64, f64)], &'a mut [(f64, f64, f64)]),
+                &'a [(f64, f64, f64)],
+            ),
+            ((&'a [(f64, f64, f64)], (&'a [Quaternion], &'a [Quaternion])), &'a [u64]),
+        );
+        let read_back = |((((v, w), p), prev_p), (q, prev_q)): ReadBackBody<'_>| {
             *v = scale(sub(*p, *prev_p), inv_dt);
             // The rotation that happened, as an axis-angle, divided by the step. The
             // `w < 0` flip keeps the short way round: a quaternion and its negation are
@@ -4785,13 +4798,7 @@ impl Skeleton {
         };
 
         // Awake bodies only, in blocks of sixty-four, for the same reason the predict is.
-        let block = |(((v, w), p), ((prev_p, (q, prev_q)), words)): (
-            (
-                (&mut [(f64, f64, f64)], &mut [(f64, f64, f64)]),
-                &[(f64, f64, f64)],
-            ),
-            ((&[(f64, f64, f64)], (&[Quaternion], &[Quaternion])), &[u64]),
-        )| {
+        let block = |(((v, w), p), ((prev_p, (q, prev_q)), words)): ReadBackBlock<'_>| {
             // See the predict sweep: a chunk with nothing asleep in it runs the zipped
             // form, and only a ragged one pays for the bits.
             if words.iter().all(|&word| word == u64::MAX) {

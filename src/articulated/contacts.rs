@@ -852,6 +852,10 @@ pub(super) struct GroundContact {
 /// rocking it instead of resting it. Against a plane a lying capsule gets a contact at
 /// each end and settles in a handful of passes. A capsule stood on one end still gets
 /// one contact, and still topples, which is correct.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one body's pose, shape and the plane, read in the solver's hot loop; a struct would only be built to be taken apart"
+)]
 pub(super) fn ground_contacts(
     body: usize,
     position: (f64, f64, f64),
@@ -884,7 +888,6 @@ pub(super) fn ground_contacts(
 }
 
 /// What one ground contact wants done. Reads only; the caller applies.
-#[allow(clippy::too_many_arguments)]
 /// **The whole of one body's contact with the plane, solved as one thing.**
 ///
 /// # Why this is one constraint and was two
@@ -1303,6 +1306,10 @@ pub(super) fn solve_contact_velocity_normal(
 /// Measured, resisting it takes the seventeen-bone rig from no draw of twenty-four
 /// travelling past the jostling allowance to six of them, the worst at 4.4 of a reach --
 /// the articulation being braked at the contacts and the rig rocking on what is left.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two gathered bodies and the pair's coefficients, read in the solver's hot loop; a struct would only be built to be taken apart"
+)]
 pub(super) fn solve_contact_velocity_friction(
     contact: Contact,
     first: &Gathered,
