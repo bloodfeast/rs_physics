@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception, reason = "the test module predates the file it lives in; renaming it only churns test paths")]
 mod continuous_collision_detection_tests {
     use crate::models::{
         Axis3D,

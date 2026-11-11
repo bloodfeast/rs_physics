@@ -61,6 +61,7 @@
 //! - **EPA precision**: May have numerical issues for nearly-touching objects
 //! - **CCD iterations**: May miss very fast tunneling if iterations are too low
 
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod interactions;
 mod interactions_2d;
 mod interactions_3d;
