@@ -12,46 +12,46 @@ pub fn bench_atan(c: &mut Criterion) {
     let test_values: Vec<f32> = (-100..=100).map(|i| i as f32 / 10.0).collect();
 
     group.bench_function("truth", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
+        let mut _sum = 0.0_f32;
         for _ in 0..ITERATIONS {
             for &x in &test_values {
-                sum += x.atan();
+                _sum += x.atan();
             }
         }
     }));
 
     group.bench_function("fast_atan", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
+        let mut _sum = 0.0_f32;
         for _ in 0..ITERATIONS {
             for &x in &test_values {
-                sum += fast_atan(x);
+                _sum += fast_atan(x);
             }
         }
     }));
 
     group.bench_function("fastest_atan", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
+        let mut _sum = 0.0_f32;
         for _ in 0..ITERATIONS {
             for &x in &test_values {
-                sum += fastest_atan(x);
+                _sum += fastest_atan(x);
             }
         }
     }));
 
     group.bench_function("minimax_atan", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
+        let mut _sum = 0.0_f32;
         for _ in 0..ITERATIONS {
             for &x in &test_values {
-                sum += minimax_atan(x);
+                _sum += minimax_atan(x);
             }
         }
     }));
 
     group.bench_function("lookup_atan", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
+        let mut _sum = 0.0_f32;
         for _ in 0..ITERATIONS {
             for &x in &test_values {
-                sum += lookup_table.atan(x);
+                _sum += lookup_table.atan(x);
             }
         }
     }));
@@ -67,19 +67,19 @@ pub fn bench_atan2(c: &mut Criterion) {
     let test_values_x: Vec<f32> = (-1000..=1000).map(|i| i as f32 / 10.0).rev().collect();
 
     group.bench_function("truth", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
-        for i in 0..ITERATIONS {
+        let mut _sum = 0.0_f32;
+        for &xv in &test_values_x[..ITERATIONS] {
             for &y in &test_values {
-                sum += y.atan2(test_values_x[i]);
+                _sum += y.atan2(xv);
             }
         }
     }));
 
     group.bench_function("fast_atan2", |b| b.iter(|| {
-        let mut sum = 0.0_f32;
-        for i in 0..ITERATIONS {
+        let mut _sum = 0.0_f32;
+        for &xv in &test_values_x[..ITERATIONS] {
             for &y in &test_values {
-                sum += fast_atan2(y, test_values_x[i]);
+                _sum += fast_atan2(y, xv);
             }
         }
     }));

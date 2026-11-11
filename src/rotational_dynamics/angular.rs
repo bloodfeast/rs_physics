@@ -265,7 +265,7 @@ pub fn effective_inverse_mass(
 // are now re-exported from crate::utils::vector3
 
 #[cfg(test)]
-#[allow(deprecated)] // These tests pin what the deprecated accumulator does, on purpose.
+#[allow(deprecated, reason = "these tests pin what the deprecated accumulator does, on purpose")]
 mod tests {
     use super::*;
 

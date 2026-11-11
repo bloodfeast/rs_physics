@@ -481,6 +481,7 @@ impl Material {
     /// * Specific heat capacity is not positive
     /// * Yield strength is negative
     /// * Ultimate strength is less than yield strength
+    #[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
     pub fn new(
         density: f64,
         youngs_modulus: f64,

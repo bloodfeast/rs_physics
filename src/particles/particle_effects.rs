@@ -409,6 +409,7 @@ impl ParticleEffects {
     /// assert_eq!(fx.swirl(1), 1.0);
     /// assert_eq!(fx.swirl(0), 0.0);
     /// ```
+    #[allow(clippy::manual_clamp, reason = "max then min maps NaN to 0.0; clamp would return NaN")]
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
         // `max` then `min`, so NaN lands on 0.
         self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
@@ -869,7 +870,13 @@ impl ParticleEffects {
         // scalar loop's operations below, in the same order, so the results are the
         // same to the bit (the tests compare a class with `swirl` 0 against
         // `integrate`).
-        let mut start = 0;
+        //
+        // Where the scalar loop starts: after the SIMD lanes on x86-64, at 0 elsewhere.
+        let start: usize;
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            start = 0;
+        }
         // Eight at a time where the build has AVX (this crate's own `.cargo/config.toml`
         // turns it on): the same lanes, twice as wide, with the eight class rows paired
         // into 256-bit registers before the same 4 x 4 transpose in each half.
@@ -1582,7 +1589,7 @@ impl EffectRng {
     }
 
     /// The raw state: the value the last [`Self::next_u32`] returned (or the seed).
-    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code, reason = "read only by the gpu particle pool"))]
     pub(crate) fn state(&self) -> u32 {
         self.0
     }

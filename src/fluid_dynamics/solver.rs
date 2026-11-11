@@ -424,10 +424,10 @@ impl PcgWorkspace {
 /// The order is fixed, so the result is the same on every run and thread count.
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut lanes = [0.0f64; 8];
-    let chunks_a = a.chunks_exact(8);
-    let chunks_b = b.chunks_exact(8);
-    let tail: f64 = chunks_a.remainder().iter().zip(chunks_b.remainder()).map(|(x, y)| x * y).sum();
-    for (ca, cb) in chunks_a.zip(chunks_b) {
+    let (chunks_a, rest_a) = a.as_chunks::<8>();
+    let (chunks_b, rest_b) = b.as_chunks::<8>();
+    let tail: f64 = rest_a.iter().zip(rest_b).map(|(x, y)| x * y).sum();
+    for (ca, cb) in chunks_a.iter().zip(chunks_b) {
         for lane in 0..8 {
             lanes[lane] += ca[lane] * cb[lane];
         }

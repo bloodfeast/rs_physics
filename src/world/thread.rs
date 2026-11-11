@@ -268,7 +268,8 @@ fn physics_thread_main(
         world.step();
         tick_counter += 1;
 
-        if tick_counter % broadcast_rate == 0 {
+        // `broadcast_rate` is at least 1 (`spawn_physics_thread` clamps it).
+        if tick_counter.is_multiple_of(broadcast_rate) {
             let state = world.get_state();
 
             // Optional per-tick feed. Bounded, so a subscriber that stops

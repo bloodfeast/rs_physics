@@ -1066,6 +1066,7 @@ mod tests {
     /// total in a release one, and this asserts whichever applies rather than testing only
     /// the configuration it happens to be run in.
     #[test]
+    #[allow(clippy::assertions_on_constants, reason = "cfg!(debug_assertions) is the point: each arm holds only in one build")]
     fn a_nan_slope_is_loud_in_debug_and_flat_in_release() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));

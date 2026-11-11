@@ -401,7 +401,7 @@ impl ToObjectIn3D for ObjectIn2D {
             velocity: self.velocity.to_3d(),
             position: self.position.to_3d(),
             forces: self.forces.to_owned(),
-            material: self.material.clone(),
+            material: self.material,
         }
     }
 }
@@ -566,7 +566,7 @@ mod tests {
         obj.integrate_angular(3.0);
         // Should wrap to (-π, π] range
         let angle = obj.angle();
-        assert!(angle >= -PI && angle <= PI);
+        assert!((-PI..=PI).contains(&angle));
     }
 
     #[test]
@@ -695,10 +695,12 @@ mod tests {
 
     #[test]
     fn test_object2d_to_3d_conversion() {
-        let mut obj = ObjectIn2D::default();
-        obj.mass = 5.0;
-        obj.position = Axis2D { x: 1.0, y: 2.0 };
-        obj.velocity = Velocity2D { x: 3.0, y: 4.0 };
+        let obj = ObjectIn2D {
+            mass: 5.0,
+            position: Axis2D { x: 1.0, y: 2.0 },
+            velocity: Velocity2D { x: 3.0, y: 4.0 },
+            ..Default::default()
+        };
 
         let obj3d = obj.to_3d();
         assert!((obj3d.mass - 5.0).abs() < 1e-10);

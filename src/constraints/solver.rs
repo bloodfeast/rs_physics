@@ -165,9 +165,7 @@ impl UnifiedSolver2D {
     /// Call this when constraints have changed significantly
     /// or when starting a new simulation.
     pub fn reset_warm_start(&mut self) {
-        for lambda in &mut self.lambda_cache {
-            *lambda = 0.0;
-        }
+        self.lambda_cache.fill(0.0);
         for constraint in &mut self.constraints {
             constraint.set_lambda(0.0);
         }
@@ -341,9 +339,7 @@ impl UnifiedSolver3D {
     /// Call this when constraints have changed significantly
     /// or when starting a new simulation.
     pub fn reset_warm_start(&mut self) {
-        for lambda in &mut self.lambda_cache {
-            *lambda = 0.0;
-        }
+        self.lambda_cache.fill(0.0);
         for constraint in &mut self.constraints {
             constraint.set_lambda(0.0);
         }

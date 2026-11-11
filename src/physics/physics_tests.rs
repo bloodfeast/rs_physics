@@ -10,7 +10,7 @@ fn assert_float_eq(a: f64, b: f64, epsilon: f64) {
 }
 
 thread_local! {
-    static LOG_MESSAGES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    static LOG_MESSAGES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ThreadLocalLogger;

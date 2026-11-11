@@ -2288,14 +2288,14 @@ impl Grid<'_> {
             for b in 0..blocks {
                 let o = b * 4;
                 let mut r2 = [0.0f64; 4];
-                for l in 0..4 {
+                for (l, r) in r2.iter_mut().enumerate() {
                     let (dx, dy, dz) = (x - xs[o + l], y - ys[o + l], z - zs[o + l]);
-                    r2[l] = dx * dx + dy * dy + dz * dz;
+                    *r = dx * dx + dy * dy + dz * dz;
                 }
-                for l in 0..4 {
+                for (l, &r) in r2.iter().enumerate() {
                     let j = s + o + l;
                     slots[hits] = j as u32;
-                    hits += ((r2[l] <= h2) & (j != k)) as usize;
+                    hits += ((r <= h2) & (j != k)) as usize;
                 }
             }
             for o in blocks * 4..e - s {
@@ -2322,13 +2322,13 @@ impl Grid<'_> {
             d * d * d
         };
         let mut acc = [0.0f64; 4];
-        let mut blocks = nbrs.chunks_exact(4);
-        for block in &mut blocks {
+        let (blocks, rest) = nbrs.as_chunks::<4>();
+        for block in blocks {
             for l in 0..4 {
                 acc[l] += term(block[l]);
             }
         }
-        for (l, &j) in blocks.remainder().iter().enumerate() {
+        for (l, &j) in rest.iter().enumerate() {
             acc[l] += term(j);
         }
         (acc[0] + acc[1]) + (acc[2] + acc[3])
@@ -2376,12 +2376,11 @@ impl Sorted<'_> {
         let mut fx = [0.0f64; 4];
         let mut fy = [0.0f64; 4];
         let mut fz = [0.0f64; 4];
-        let mut blocks = nbrs.chunks_exact(4);
-        for b in &mut blocks {
+        let (blocks, rest) = nbrs.as_chunks::<4>();
+        for b in blocks {
             let js = [b[0] as usize, b[1] as usize, b[2] as usize, b[3] as usize];
             self.block(i, js, k, &mut fx, &mut fy, &mut fz);
         }
-        let rest = blocks.remainder();
         if !rest.is_empty() {
             let mut js = [i; 4];
             for (l, &j) in rest.iter().enumerate() {
@@ -2395,7 +2394,7 @@ impl Sorted<'_> {
 
     /// Four neighbours' pressure, viscosity and cohesion on `i`, added lane by lane.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
     fn block(
         &self,
         i: usize,
@@ -2643,8 +2642,8 @@ mod tests {
             let n = fluid.len() as f64;
             let mut centre = [0.0; 3];
             for i in 0..fluid.len() {
-                for a in 0..3 {
-                    centre[a] += fluid.position(i)[a] / n;
+                for (a, c) in centre.iter_mut().enumerate() {
+                    *c += fluid.position(i)[a] / n;
                 }
             }
             let mut spread = 0.0;

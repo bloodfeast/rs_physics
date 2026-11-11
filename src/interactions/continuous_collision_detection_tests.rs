@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception, reason = "the test module predates the file it lives in; renaming it only churns test paths")]
 mod continuous_collision_detection_tests {
     use crate::models::{
         Axis3D,
@@ -11,8 +12,7 @@ mod continuous_collision_detection_tests {
         Velocity3D
     };
     use std::f64::consts::PI;
-    use std::ops::Deref;
-    use crate::interactions::continuous_collision_detection::{apply_continuous_collision_response, apply_simple_collision_response, calculate_cuboid_collision_point, calculate_sphere_sphere_toi, check_continuous_collision, is_relative_motion_significant, transform_collision_to_world, update_physics_with_ccd, update_physics_with_ccd_simple, validate_collision_response, CcdCollisionResult};
+    use crate::interactions::continuous_collision_detection::{apply_continuous_collision_response, apply_simple_collision_response, calculate_cuboid_collision_point, calculate_sphere_sphere_toi, check_continuous_collision, is_relative_motion_significant, transform_collision_to_world, update_physics_with_ccd, validate_collision_response, CcdCollisionResult};
     use crate::utils::PhysicsConstants;
 
     // Helper to create a sphere object

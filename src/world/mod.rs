@@ -53,7 +53,7 @@ mod world_constraints;
 pub use state::{ObjectId, ObjectState, StateBuffer, WorldState};
 pub use config::WorldConfig;
 pub use physics_world::{PhysicsWorld, ForceId, ContinuousForce};
-pub use handle::{PhysicsHandle, PhysicsCommand};
+pub use handle::{PhysicsHandle, PhysicsCommand, WorldClosed};
 pub use thread::{spawn_physics_thread, STATE_CHANNEL_CAPACITY};
 
 #[cfg(feature = "constraints")]

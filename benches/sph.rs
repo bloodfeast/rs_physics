@@ -144,6 +144,7 @@ fn wading_shin(fluid: &SphFluid, s: u64, solids: &mut SphSolids) {
 /// interleaved, so heat drift shows as a gap between a scene's two rounds rather than as
 /// a difference between scenes. Then the phase timers, scene after scene a step at a
 /// time, with the fraction of particles that ran the contact test.
+#[allow(clippy::needless_range_loop, reason = "the step indexes the inner dimension of a per-scene table")]
 fn solids(c: &mut Criterion) {
     let mut group = c.benchmark_group("sph/solids");
     let far = far_solids();

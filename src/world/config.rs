@@ -108,8 +108,8 @@ pub struct WorldConfig {
     /// Default: `None`, because colliders should be the colliders.
     ///
     /// This used to be an unconditional clamp at y = 0. If a scene's ground
-    /// collider had its top face at exactly y = 0 - the obvious place to put it
-    /// - the clamp parked every object at precisely zero penetration, which GJK
+    /// collider had its top face at exactly y = 0 - the obvious place to put it -
+    /// the clamp parked every object at precisely zero penetration, which GJK
     /// correctly reports as no collision. The real ground collider was starved
     /// of contact and never ran, so the main play surface had no friction and
     /// applied no torque: balls slid across it without ever rolling. An implicit

@@ -186,7 +186,7 @@ impl Cpu {
     /// One frame; returns the integrate's ns.
     fn frame_ns(&mut self) -> f64 {
         self.feed.feed(&mut self.fx);
-        if self.period > 0 && self.frame % self.period == 0 {
+        if self.period > 0 && self.frame.is_multiple_of(self.period) {
             self.field.advance(self.period as f32 * DT);
         }
         self.frame += 1;
@@ -272,7 +272,7 @@ impl Gpu {
             }
             stage.push(started.elapsed().as_nanos() as f64);
             if let Some(field) = &mut self.field {
-                if self.frame % 3 == 0 {
+                if self.frame.is_multiple_of(3) {
                     field.advance(3.0 * DT);
                     let started = Instant::now();
                     self.pool.upload_field(field.velocity());

@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use rayon::prelude::*;
-use log::info;
 use crate::models::{PhysicalObject3D, Quaternion, Shape3D};
 use crate::utils::PhysicsConstants;
 use crate::interactions::shape_collisions_3d::apply_gravity;
@@ -1790,7 +1789,9 @@ impl PhysicsWorld {
         let mut to_remove = Vec::new();
 
         // Collect force computations first (to avoid borrow issues)
-        let mut force_updates: Vec<(ForceId, ObjectId, (f64, f64, f64), bool)> = Vec::new();
+        // The force, the object it acts on, the force vector, and whether it is spent.
+        type ForceUpdate = (ForceId, ObjectId, (f64, f64, f64), bool);
+        let mut force_updates: Vec<ForceUpdate> = Vec::new();
 
         for (&force_id, force) in &mut self.continuous_forces {
             match force {
@@ -1885,7 +1886,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Attract { target, point, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];
@@ -1908,7 +1909,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Repel { target, point, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];
@@ -1952,7 +1953,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Vortex { target, center, axis, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];
@@ -2204,29 +2205,8 @@ impl PhysicsWorld {
         )
     }
 
-    /// Detect collision between a pair, reading live object state.
-    ///
-    /// The sequential path mutates objects as it goes, so the packed arrays go
-    /// stale mid-loop; it reads through here instead. Only used for small
-    /// worlds, where the layout advantage would not have paid anyway.
-    fn detect_collision_pair_live(&self, i: usize, j: usize) -> Option<CollisionData> {
-        let obj1 = &self.objects[i];
-        let obj2 = &self.objects[j];
-
-        self.detect_collision_with(
-            i,
-            j,
-            (obj1.object.position.x, obj1.object.position.y, obj1.object.position.z),
-            (obj2.object.position.x, obj2.object.position.y, obj2.object.position.z),
-            obj1.shape.bounding_radius(),
-            obj2.shape.bounding_radius(),
-            Quaternion::from_euler(obj1.orientation.roll, obj1.orientation.pitch, obj1.orientation.yaw),
-            Quaternion::from_euler(obj2.orientation.roll, obj2.orientation.pitch, obj2.orientation.yaw),
-        )
-    }
-
     /// Shared narrow-phase body for both detection entry points.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
     fn detect_collision_with(
         &self,
         i: usize,
@@ -2503,7 +2483,7 @@ impl PhysicsWorld {
             // DEBUG: Log friction values (rate-limited to once per second at 240Hz)
             static DEBUG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count % 240 == 0 && tangent_speed > 0.01 {
+            if count.is_multiple_of(240) && tangent_speed > 0.01 {
                 log::info!(
                     "[FRICTION] µ1={:.2} µ2={:.2} µ={:.2} | j={:.4} weight={:.4} max_fric={:.4} | tan_spd={:.3} fric_j={:.4} | ω=({:.2},{:.2},{:.2})",
                     friction1, friction2, friction,

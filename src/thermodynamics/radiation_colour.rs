@@ -215,7 +215,6 @@ mod tests {
     }
 
     /// The sequence everyone recognises: cool things are red, hot things are white,
-
     /// very hot things are blue-white. If this inverts, so does every fire drawn
     /// with it.
     #[test]

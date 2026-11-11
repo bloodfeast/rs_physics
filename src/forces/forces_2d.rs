@@ -122,6 +122,7 @@ impl PhysicsSystem2D {
     /// system.update(0.1);
     /// assert_eq!(system.get_object(0).unwrap().position.x, 0.5);
     /// ```
+    #[allow(clippy::assign_op_pattern, reason = "`*=` would swap the operands of the restitution multiply")]
     pub fn update(&mut self, time_step: f64) {
         self.objects.par_iter_mut().for_each(|object| {
             // Sum forces as vectors.

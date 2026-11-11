@@ -319,7 +319,7 @@ impl ThermalGrid3D {
         if let ThermalBoundaryCondition::Dirichlet(temp) = self.boundary_conditions[0] {
             for z in 0..depth {
                 for y in 0..height {
-                    let idx = z * width * height + y * width + 0;
+                    let idx = z * width * height + y * width;
                     self.temperature[idx] = temp;
                 }
             }
@@ -339,7 +339,7 @@ impl ThermalGrid3D {
         if let ThermalBoundaryCondition::Dirichlet(temp) = self.boundary_conditions[2] {
             for z in 0..depth {
                 for x in 0..width {
-                    let idx = z * width * height + 0 * width + x;
+                    let idx = z * width * height + x;
                     self.temperature[idx] = temp;
                 }
             }
@@ -359,7 +359,7 @@ impl ThermalGrid3D {
         if let ThermalBoundaryCondition::Dirichlet(temp) = self.boundary_conditions[4] {
             for y in 0..height {
                 for x in 0..width {
-                    let idx = 0 * width * height + y * width + x;
+                    let idx = y * width + x;
                     self.temperature[idx] = temp;
                 }
             }
@@ -411,12 +411,8 @@ impl ThermalGrid3D {
 
     /// Resets the grid to a uniform temperature
     pub fn reset(&mut self, initial_temp: f64) {
-        for t in &mut self.temperature {
-            *t = initial_temp;
-        }
-        for t in &mut self.prev_temperature {
-            *t = initial_temp;
-        }
+        self.temperature.fill(initial_temp);
+        self.prev_temperature.fill(initial_temp);
     }
 
     /// Extracts an XY slice at specified Z coordinate
@@ -479,6 +475,7 @@ impl ThermalGrid3D {
     }
 
     /// Sets a cubic region to a specific temperature
+    #[allow(clippy::too_many_arguments, reason = "public signature; grouping the arguments would break every caller")]
     pub fn set_region(
         &mut self,
         x_start: usize,

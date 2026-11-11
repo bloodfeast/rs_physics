@@ -103,6 +103,7 @@
 //! Requires the `materials` feature flag.
 
 #[cfg(feature = "materials")]
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod materials;
 #[cfg(feature = "materials")]
 pub use materials::*;

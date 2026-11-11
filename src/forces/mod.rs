@@ -67,6 +67,7 @@
 //! - Drag is linear (not quadratic like real air resistance at high speeds)
 //! - No collision detection or response (see `interactions` module)
 
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod forces;
 mod forces_2d;
 
