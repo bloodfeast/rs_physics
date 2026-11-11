@@ -2292,10 +2292,10 @@ impl Grid<'_> {
                     let (dx, dy, dz) = (x - xs[o + l], y - ys[o + l], z - zs[o + l]);
                     *r = dx * dx + dy * dy + dz * dz;
                 }
-                for l in 0..4 {
+                for (l, &r) in r2.iter().enumerate() {
                     let j = s + o + l;
                     slots[hits] = j as u32;
-                    hits += ((r2[l] <= h2) & (j != k)) as usize;
+                    hits += ((r <= h2) & (j != k)) as usize;
                 }
             }
             for o in blocks * 4..e - s {

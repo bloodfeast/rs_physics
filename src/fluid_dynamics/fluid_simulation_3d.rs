@@ -395,10 +395,10 @@ impl FluidGrid3D {
     /// pressure solve ran.
     fn project(
         &self,
-        velocity_x: &mut Vec<f64>,
-        velocity_y: &mut Vec<f64>,
-        velocity_z: &mut Vec<f64>,
-        pressure: &mut Vec<f64>,
+        velocity_x: &mut [f64],
+        velocity_y: &mut [f64],
+        velocity_z: &mut [f64],
+        pressure: &mut [f64],
         ws: &mut SolveScratch,
     ) -> usize {
         match self.solver_config.pressure_solver {
@@ -464,7 +464,7 @@ impl FluidGrid3D {
         }
     }
 
-    fn subtract_pressure_gradient(&self, velocity_x: &mut Vec<f64>, velocity_y: &mut Vec<f64>, velocity_z: &mut Vec<f64>, p: &[f64]) {
+    fn subtract_pressure_gradient(&self, velocity_x: &mut [f64], velocity_y: &mut [f64], velocity_z: &mut [f64], p: &[f64]) {
         let h = 1.0 / self.width as f64;
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
@@ -951,7 +951,7 @@ impl FluidGrid3D {
     fn advect_maccormack(
         &self,
         boundary_type: BoundaryType,
-        d: &mut Vec<f64>,
+        d: &mut [f64],
         d0: &[f64],
         velocity: [&[f64]; 3],
         back: &mut Vec<f64>,
