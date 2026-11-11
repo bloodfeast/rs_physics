@@ -13,6 +13,12 @@ pub struct Simplex {
     pub points: Vec<SupportPoint>,
 }
 
+impl Default for Simplex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Simplex {
     pub fn new() -> Self {
         Self { points: Vec::with_capacity(4) }

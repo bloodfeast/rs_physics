@@ -144,12 +144,18 @@ pub struct AtanLookupTable {
     table: [f32; 1024],
 }
 
+impl Default for AtanLookupTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtanLookupTable {
     pub fn new() -> Self {
         let mut table = [0.0; 1024];
-        for i in 0..1024 {
+        for (i, slot) in table.iter_mut().enumerate() {
             let x = i as f32 / 1023.0;
-            table[i] = x.atan();
+            *slot = x.atan();
         }
         Self { table }
     }

@@ -1389,8 +1389,8 @@ fn box_offset(b: &YawBox, l: [f64; 3]) -> [f64; 3] {
 fn box_inside_local(b: &YawBox, l: [f64; 3]) -> Option<Hit> {
     let mut axis = 0;
     let mut depth = f64::INFINITY;
-    for a in 0..3 {
-        let d = b.half[a] - l[a].abs();
+    for (a, &la) in l.iter().enumerate() {
+        let d = b.half[a] - la.abs();
         if d <= 0.0 {
             return None;
         }
@@ -1430,8 +1430,8 @@ fn box_surface(b: &YawBox, q: [f64; 3]) -> Hit {
 fn box_surface_face(b: &YawBox, l: [f64; 3]) -> Hit {
     let mut axis = 0;
     let mut out = f64::NEG_INFINITY;
-    for a in 0..3 {
-        let o = l[a].abs() - b.half[a];
+    for (a, &la) in l.iter().enumerate() {
+        let o = la.abs() - b.half[a];
         if o > out {
             out = o;
             axis = a;

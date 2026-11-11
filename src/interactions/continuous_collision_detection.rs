@@ -136,12 +136,18 @@ fn calculate_half_dimensions(dims: (f64, f64, f64)) -> (f64, f64, f64) {
     (dims.0 / 2.0, dims.1 / 2.0, dims.2 / 2.0)
 }
 
+/// A cuboid face as its centre and its outward normal, in the cuboid's frame.
+type CuboidFace = ((f64, f64, f64), (f64, f64, f64));
+
+/// An impact as its time, the contact normal and the contact point.
+type FaceImpact = (f64, (f64, f64, f64), (f64, f64, f64));
+
 /// Helper function to get the faces of a cuboid
 fn get_cuboid_faces(
     half_width: f64,
     half_height: f64,
     half_depth: f64
-) -> [((f64, f64, f64), (f64, f64, f64)); 6] {
+) -> [CuboidFace; 6] {
     [
         ((half_width, 0.0, 0.0), (1.0, 0.0, 0.0)),     // Right face
         ((-half_width, 0.0, 0.0), (-1.0, 0.0, 0.0)),   // Left face
@@ -161,7 +167,7 @@ fn calculate_face_impact(
     face_normal: (f64, f64, f64),
     half_dims: (f64, f64, f64),
     dt: f64
-) -> Option<(f64, (f64, f64, f64), (f64, f64, f64))> {
+) -> Option<FaceImpact> {
     // Distance from sphere center to the face plane
     let dist_to_plane = dot_product(
         (
@@ -267,6 +273,9 @@ fn calculate_face_impact(
     None
 }
 
+/// A world-space vector or point, as the collision helpers pass them.
+type Vector3 = (f64, f64, f64);
+
 /// Helper function to transform collision data to world space
 pub fn transform_collision_to_world(
     local_collision_normal: (f64, f64, f64),
@@ -275,7 +284,7 @@ pub fn transform_collision_to_world(
     sphere_pos_at_impact: (f64, f64, f64),
     cuboid_pos_at_impact: (f64, f64, f64),
     sphere_radius: f64
-) -> ((f64, f64, f64), (f64, f64, f64), (f64, f64, f64)) {
+) -> (Vector3, Vector3, Vector3) {
     // Transform collision normal to world space
     let world_normal = orientation.rotate_point(local_collision_normal);
 
@@ -337,7 +346,7 @@ fn check_axis_collision(
     let direction = dist.signum();
 
     // If entry time is within time step
-    if entry_time >= 0.0 && entry_time <= 1.0 {
+    if (0.0..=1.0).contains(&entry_time) {
         return Some((entry_time, direction));
     }
 
@@ -696,7 +705,7 @@ fn calculate_sphere_cuboid_toi(
 
     // Check each face for collision
     let mut min_toi = dt + 1.0;
-    let mut best_collision: Option<(f64, (f64, f64, f64), (f64, f64, f64))> = None;
+    let mut best_collision: Option<FaceImpact> = None;
 
     for (face_center, face_normal) in get_cuboid_faces(half_dims.0, half_dims.1, half_dims.2) {
         if let Some((toi, normal, point)) = calculate_face_impact(
@@ -1011,23 +1020,23 @@ fn calculate_conservative_advancement_toi(
     let mut curr_time = 0.0;
     let mut curr_pos1 = pos1;
     let mut curr_pos2 = pos2;
-    let mut curr_orient1 = orient1.clone();
-    let mut curr_orient2 = orient2.clone();
+    let mut curr_orient1 = orient1;
+    let mut curr_orient2 = orient2;
 
     // Main advancement loop
     for iteration in 0..MAX_ITERATIONS {
         // Check for collision at current state
         let collision = crate::interactions::gjk_collision_3d::gjk_collision_detection(
-            &obj1.shape, curr_pos1, curr_orient1.clone(),
-            &obj2.shape, curr_pos2, curr_orient2.clone()
+            &obj1.shape, curr_pos1, curr_orient1,
+            &obj2.shape, curr_pos2, curr_orient2
         );
 
-        if collision.is_some() {
+        if let Some(simplex) = collision {
             // Get contact information
             let contact = crate::interactions::gjk_collision_3d::epa_contact_points(
-                &obj1.shape, curr_pos1, curr_orient1.clone(),
-                &obj2.shape, curr_pos2, curr_orient2.clone(),
-                &collision.unwrap()
+                &obj1.shape, curr_pos1, curr_orient1,
+                &obj2.shape, curr_pos2, curr_orient2,
+                &simplex
             );
 
             if let Some(contact_info) = contact {
@@ -1101,8 +1110,8 @@ fn calculate_conservative_advancement_toi(
         curr_pos2 = calculate_position_at_time(pos2, vel2, curr_time);
 
         // Reset orientations and update from start
-        curr_orient1 = orient1.clone();
-        curr_orient2 = orient2.clone();
+        curr_orient1 = orient1;
+        curr_orient2 = orient2;
         update_orientation(&mut curr_orient1, ang_vel1, curr_time);
         update_orientation(&mut curr_orient2, ang_vel2, curr_time);
     }
@@ -1312,9 +1321,7 @@ fn calculate_collision_impulse(
     };
 
     // Calculate impulse magnitude
-    let impulse = -(1.0 + effective_restitution) * vel_along_normal / denominator;
-
-    impulse
+    -(1.0 + effective_restitution) * vel_along_normal / denominator
 }
 
 /// Apply collision impulse to objects

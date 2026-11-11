@@ -735,9 +735,9 @@ impl GpuParticlePool {
         let data_words = config.max_emit_per_frame as usize * RECORD_WORDS + DATA_SLACK_WORDS;
         let table_words =
             jump_levels as usize * DIGIT_TABLES * JUMP_TABLE_WORDS + QUARTER_SINE.len();
-        if (slots as u64) * 16 > limits.max_storage_buffer_binding_size as u64
+        if (slots as u64) * 16 > limits.max_storage_buffer_binding_size
             || ((data_words + table_words) as u64) * 4
-                > limits.max_storage_buffer_binding_size as u64
+                > limits.max_storage_buffer_binding_size
         {
             return Err(GpuPoolError::Limit(
                 "arrays past the device's storage binding size",
@@ -2168,7 +2168,7 @@ impl GpuParticlePool {
             self.pending_count -= k;
         }
         let record_words = records * RECORD_WORDS;
-        for entry in self.table.chunks_exact_mut(SEGMENT_WORDS) {
+        for entry in self.table.as_chunks_mut::<SEGMENT_WORDS>().0 {
             if entry[2] == SEGMENT_BURST {
                 entry[3] += record_words as u32;
             }

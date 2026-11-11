@@ -414,8 +414,7 @@ impl Shape3D {
                 let corner_segments = 4; // Number of segments for each corner
                 let mut corner_vertices_indices = Vec::new();
 
-                // c_idx may be useful in the future
-                for (_c_idx, &(cx, cy, cz)) in corners.iter().enumerate() {
+                for &(cx, cy, cz) in corners.iter() {
                     // Direction vectors from corner to center
                     let dx = if cx < 0.0 { 1.0 } else { -1.0 };
                     let dy = if cy < 0.0 { 1.0 } else { -1.0 };
@@ -556,7 +555,9 @@ impl Shape3D {
                 // Each face is a flat surface with rounded edges
 
                 // Define the 6 faces with their center positions and normals
-                let faces_data: [((f64, f64, f64), (f64, f64, f64)); 6] = [
+                // A face as its centre and its outward normal.
+                type Face = ((f64, f64, f64), (f64, f64, f64));
+                let faces_data: [Face; 6] = [
                     ((0.0, -h2, 0.0), (0.0, -1.0, 0.0)), // Bottom face (y-)
                     ((0.0, h2, 0.0), (0.0, 1.0, 0.0)),   // Top face (y+)
                     ((w2, 0.0, 0.0), (1.0, 0.0, 0.0)),   // Right face (x+)

@@ -448,12 +448,8 @@ impl ThermalGrid {
 
     /// Resets all temperatures to a uniform value
     pub fn reset(&mut self, temperature: f64) {
-        for t in &mut self.temperature {
-            *t = temperature;
-        }
-        for t in &mut self.prev_temperature {
-            *t = temperature;
-        }
+        self.temperature.fill(temperature);
+        self.prev_temperature.fill(temperature);
     }
 
     /// Sets a rectangular region to a uniform temperature

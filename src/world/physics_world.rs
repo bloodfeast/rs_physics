@@ -1790,7 +1790,9 @@ impl PhysicsWorld {
         let mut to_remove = Vec::new();
 
         // Collect force computations first (to avoid borrow issues)
-        let mut force_updates: Vec<(ForceId, ObjectId, (f64, f64, f64), bool)> = Vec::new();
+        // The force, the object it acts on, the force vector, and whether it is spent.
+        type ForceUpdate = (ForceId, ObjectId, (f64, f64, f64), bool);
+        let mut force_updates: Vec<ForceUpdate> = Vec::new();
 
         for (&force_id, force) in &mut self.continuous_forces {
             match force {
@@ -1885,7 +1887,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Attract { target, point, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];
@@ -1908,7 +1910,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Repel { target, point, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];
@@ -1952,7 +1954,7 @@ impl PhysicsWorld {
 
                 ContinuousForce::Vortex { target, center, axis, strength, duration, elapsed } => {
                     *elapsed += dt;
-                    if duration.map_or(false, |d| *elapsed >= d) {
+                    if duration.is_some_and(|d| *elapsed >= d) {
                         to_remove.push(force_id);
                     } else if let Some(&idx) = self.object_ids.get(target) {
                         let obj = &self.objects[idx];

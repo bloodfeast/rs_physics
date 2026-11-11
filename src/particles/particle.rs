@@ -143,30 +143,27 @@ impl Particle {
         let mut current_speed = (vx * vx + vy * vy).sqrt();
 
         // If drag parameters are provided, calculate air resistance and apply deceleration.
-        match drag {
-            Some((drag_coefficient, cross_sectional_area)) => {
-                let drag_force = constants.calculate_air_resistance(current_speed, drag_coefficient, cross_sectional_area)?;
-                let drag_acceleration = drag_force / self.mass;
-                let drag_velocity = drag_acceleration * dt;
+        if let Some((drag_coefficient, cross_sectional_area)) = drag {
+            let drag_force = constants.calculate_air_resistance(current_speed, drag_coefficient, cross_sectional_area)?;
+            let drag_acceleration = drag_force / self.mass;
+            let drag_velocity = drag_acceleration * dt;
 
-                let speed_before_drag = current_speed;
-                current_speed = if current_speed > drag_velocity {
-                    current_speed - drag_velocity
-                } else {
-                    0.0
-                };
+            let speed_before_drag = current_speed;
+            current_speed = if current_speed > drag_velocity {
+                current_speed - drag_velocity
+            } else {
+                0.0
+            };
 
-                // Scale the post-gravity velocity. Rebuilding it from the pre-gravity
-                // `self.direction` would throw away the turn gravity just gave it.
-                let scale = if speed_before_drag > 0.0 {
-                    current_speed / speed_before_drag
-                } else {
-                    0.0
-                };
-                vx *= scale;
-                vy *= scale;
-            }
-            None => {}
+            // Scale the post-gravity velocity. Rebuilding it from the pre-gravity
+            // `self.direction` would throw away the turn gravity just gave it.
+            let scale = if speed_before_drag > 0.0 {
+                current_speed / speed_before_drag
+            } else {
+                0.0
+            };
+            vx *= scale;
+            vy *= scale;
         }
 
         self.position.0 += vx * dt;

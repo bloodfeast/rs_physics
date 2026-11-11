@@ -411,12 +411,8 @@ impl ThermalGrid3D {
 
     /// Resets the grid to a uniform temperature
     pub fn reset(&mut self, initial_temp: f64) {
-        for t in &mut self.temperature {
-            *t = initial_temp;
-        }
-        for t in &mut self.prev_temperature {
-            *t = initial_temp;
-        }
+        self.temperature.fill(initial_temp);
+        self.prev_temperature.fill(initial_temp);
     }
 
     /// Extracts an XY slice at specified Z coordinate

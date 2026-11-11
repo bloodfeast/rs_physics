@@ -624,7 +624,7 @@ impl GpuAcoustics {
         over("terrain rows", rows, self.limits.terrain_rows)?;
         over("statics", layout.statics(), self.limits.statics)?;
         let need = layout.resident_bytes();
-        if need > self.device.limits().max_storage_buffer_binding_size as u64 {
+        if need > self.device.limits().max_storage_buffer_binding_size {
             return Err(AcousticsError::Device(
                 "the scene exceeds one storage binding",
             ));
