@@ -771,8 +771,8 @@ mod tests {
     #[test]
     fn test_second_law_efficiency() {
         // If actual = 30% and Carnot = 50%, second law = 60%
-        let eta_II = second_law_efficiency(0.30, 600.0, 300.0).unwrap();
-        assert!((eta_II - 0.6).abs() < 1e-10);
+        let eta_ii = second_law_efficiency(0.30, 600.0, 300.0).unwrap();
+        assert!((eta_ii - 0.6).abs() < 1e-10);
     }
 
     #[test]

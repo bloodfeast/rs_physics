@@ -1,19 +1,9 @@
 use crate::interactions::shape_collisions_3d;
-use crate::interactions::gjk_collision_3d::gjk_collision_detection;
 use crate::materials::Material;
-use crate::models::{PhysicalObject3D, Shape3D, Quaternion};
+use crate::models::{PhysicalObject3D, Shape3D};
 use crate::utils::DEFAULT_PHYSICS_CONSTANTS;
 use std::f64::consts::PI;
 use std::time::Instant;
-
-// Testing helpers that replace removed functions
-fn check_collision(shape1: &Shape3D, pos1: (f64, f64, f64), shape2: &Shape3D, pos2: (f64, f64, f64)) -> bool {
-    // Create quaternions for neutral orientation
-    let orientation = Quaternion::identity();
-
-    // Use GJK to detect collision
-    gjk_collision_detection(shape1, pos1, orientation, shape2, pos2, orientation).is_some()
-}
 
 #[test]
 fn test_calculate_impact_point() {
@@ -343,8 +333,6 @@ fn test_simulation_performance() {
     // Print performance info
     println!("Time to simulate 10 steps with 100 objects: {:?}", duration);
 
-    // Make sure simulation completes
-    assert!(true);
 }
 
 #[test]

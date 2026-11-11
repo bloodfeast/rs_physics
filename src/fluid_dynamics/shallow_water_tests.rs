@@ -52,11 +52,11 @@ fn a_lake_at_rest_over_rough_ground_stays_at_rest() {
     for _ in 0..300 {
         lake.step(0.1).unwrap();
     }
-    for k in 0..nx * nz {
+    for (k, &b) in bed[..nx * nz].iter().enumerate() {
         let (i, j) = (k % nx, k / nx);
         let [u, v] = lake.velocity(i, j);
         assert!(u.abs() < 1e-10 && v.abs() < 1e-10, "cell ({i}, {j}) moved at ({u}, {v})");
-        if bed[k] >= level {
+        if b >= level {
             assert_eq!(lake.depth(i, j), 0.0, "island cell ({i}, {j}) got wet");
         } else {
             let error = lake.surface(i, j) - level;

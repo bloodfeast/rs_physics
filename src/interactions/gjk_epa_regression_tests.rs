@@ -108,9 +108,9 @@ fn obb_obb_sat(ca: V, qa: Quaternion, ha: V, cb: V, qb: Quaternion, hb: V) -> (f
     let (hav, hbv) = ([ha.0, ha.1, ha.2], [hb.0, hb.1, hb.2]);
     let t = sub(cb, ca);
     let mut cands: Vec<V> = vec![a[0], a[1], a[2], b[0], b[1], b[2]];
-    for i in 0..3 {
-        for j in 0..3 {
-            let c = cross(a[i], b[j]);
+    for &ai in &a {
+        for &bj in &b {
+            let c = cross(ai, bj);
             if len(c) > 1e-9 { cands.push(norm(c)); }
         }
     }
@@ -136,11 +136,15 @@ fn run(s1: &Shape3D, p1: V, q1: Quaternion, s2: &Shape3D, p2: V, q2: Quaternion)
 
 /// Sphere (shape 1) against `make`'s shape (shape 2) placed near contact at random poses.
 /// Returns human-readable failures: missed overlap, missing contact, wrong depth, NaN, panic.
+/// A shape's exact depth and normal against a sphere, given the sphere's centre, the
+/// shape's centre and the shape's orientation.
+type Oracle = Box<dyn Fn(V, V, Quaternion) -> (f64, V)>;
+
 fn sphere_vs_oracle_failures(
     seed: u64,
     n: usize,
     scale_s: f64,
-    make: &dyn Fn(&mut Rng) -> (Shape3D, Box<dyn Fn(V, V, Quaternion) -> (f64, V)>),
+    make: &dyn Fn(&mut Rng) -> (Shape3D, Oracle),
 ) -> Vec<String> {
     let mut rng = Rng(seed);
     let mut failures = Vec::new();
@@ -404,9 +408,11 @@ fn beveled_die_hovering_above_table_is_not_in_contact() {
 // ---------------------------------------------------------------------------
 
 fn zero_g_world() -> PhysicsWorld {
-    let mut cfg = WorldConfig::default();
-    cfg.gravity = (0.0, 0.0, 0.0);
-    cfg.aerodynamic_drag = false;
+    let cfg = WorldConfig {
+        gravity: (0.0, 0.0, 0.0),
+        aerodynamic_drag: false,
+        ..Default::default()
+    };
     PhysicsWorld::new(cfg)
 }
 

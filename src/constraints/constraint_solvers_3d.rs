@@ -417,7 +417,7 @@ mod tests {
     fn test_joint_3d_diagonal_xyz() {
         let obj1 = make_object_at(0.0, 0.0, 0.0);
         let obj2 = make_object_at(2.0, 2.0, 1.0); // Distance = 3
-        let mut joint = Joint3D::new(obj1, obj2, 3.0).unwrap();
+        let joint = Joint3D::new(obj1, obj2, 3.0).unwrap();
 
         let error = joint.calculate_error();
         assert!(error < 1e-10, "Error should be near zero when at constraint distance");

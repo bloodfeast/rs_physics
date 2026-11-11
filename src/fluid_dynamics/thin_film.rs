@@ -1828,7 +1828,7 @@ mod tests {
         for _ in 0..3000 {
             grid.step(&flow, dt);
             for &h in grid.thickness() {
-                assert!(h.is_finite() && h >= 0.0 && h < 0.02, "depth blew up to {}", h);
+                assert!(h.is_finite() && (0.0..0.02).contains(&h), "depth blew up to {}", h);
             }
         }
         // Deeper liquid means a smaller allowable step, quadratically.

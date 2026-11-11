@@ -525,8 +525,8 @@ mod tests {
     #[test]
     fn test_thermal_conductivities_ordering() {
         // Copper > Water > Air (typical ordering)
-        assert!(COPPER_THERMAL_CONDUCTIVITY > WATER_THERMAL_CONDUCTIVITY);
-        assert!(WATER_THERMAL_CONDUCTIVITY > AIR_THERMAL_CONDUCTIVITY);
+        const { assert!(COPPER_THERMAL_CONDUCTIVITY > WATER_THERMAL_CONDUCTIVITY) };
+        const { assert!(WATER_THERMAL_CONDUCTIVITY > AIR_THERMAL_CONDUCTIVITY) };
     }
 
     #[test]
