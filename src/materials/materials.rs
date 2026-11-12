@@ -1,7 +1,7 @@
 // src/materials.rs
 
 use crate::utils::PhysicsError;
-use crate::materials::{Finish, Wetting};
+use crate::materials::{Finish, Structure, Wetting};
 
 /// Represents different types of material failure.
 ///
@@ -804,7 +804,7 @@ impl Material {
         // about 0.6 to 0.7 of its volume (Hearle, Grosberg and Backer, "Structural
         // Mechanics of Fibers, Yarns, and Fabrics", 1969), so about 0.35 is open space
         // between fibres that natural fibre wicks full; cellulose's mean index 1.53.
-        .wetted(Wetting { open_porosity: 0.35, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+        .wetted(Wetting { open_porosity: 0.35, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
     }
 
     /// Heavy cotton canvas (cotton duck): tents, tarpaulins, covers.
@@ -863,7 +863,7 @@ impl Material {
         ).expect("Failed to create canvas material")
         // Wetting: 1 - 600 / 1540 = 0.61 open; scoured cotton spreads water (0 degrees);
         // cellulose's mean index 1.53.
-        .wetted(Wetting { open_porosity: 0.61, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+        .wetted(Wetting { open_porosity: 0.61, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
         // Cellulose, as wood's fuel but thin: it lights sooner and leaves less char.
         .burning(Combustion {
             ignition_temperature: 528.0,      // ~255 C piloted, cotton fabric
@@ -891,6 +891,10 @@ impl Material {
     /// * Specific heat capacity: 1700 J/(kg·K)
     /// * Yield strength: 40 MPa
     /// * Ultimate strength: 70 MPa
+    /// * Wetting: open porosity 0.53, contact angle 60 degrees, cellulose n 1.53,
+    ///   [`Structure::Consolidated`]: wet wood takes the film alone, which is what was
+    ///   measured (Baar and others 2019: oak's luminance falls to 0.67 of dry on a short
+    ///   submersion; the preset's body gives the citation).
     ///
     /// # Examples
     ///
@@ -914,7 +918,17 @@ impl Material {
             70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
         // Wetting: 1 - 700 / 1500, the cell wall's density about 1500 kg/m3; sanded wood 40 to 80 degrees; cellulose n 1.53.
-        .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse })
+        // Structure::Consolidated, the film alone: wood's cells are bonded into a solid, and
+        // the measured darkening is the film's size. A short submersion took 2.5 to 14.4 off
+        // L* over 14 species, oak 64.6 to 54.5, a luminance ratio of 0.67 (Baar, Paschova,
+        // Cermak and Wimmer, "Color changes of various wood species in response to
+        // moisture", Wood and Fiber Science 51(2): 119-131, 2019); the film law gives about
+        // 0.6 at that albedo. Wood chips at HSL lightness 54 at 54 % surface moisture
+        // against 68.5 at 26 % (US patent 7,778,786 B2) are the same size. The paper also
+        // reports that water in the cell lumens scatters forward and that the darkening
+        // about doubles under vacuum impregnation, but it tabulates no lightness for that
+        // state, so no pore term is taken here: a rained-on board is the submersion case.
+        .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Consolidated })
         // Softwood, as measured in a cone calorimeter. The residue fraction is why a
         // wood fire ends as embers and a charred stump rather than as bare ground.
         .burning(Combustion {
@@ -1160,7 +1174,10 @@ impl Material {
             40.0e6,             // ultimate strength (Pa) - compressive
         ).expect("Failed to create concrete material")
         // Wetting: porosity from a 5 % by mass water absorption (ASTM C642 range 4 to 6 %) x 2400 / 998; cement paste wets; quartz aggregate n 1.55.
-        .wetted(Wetting { open_porosity: 0.12, contact_angle_deg: 30.0, solid_index: 1.55, finish: Finish::Diffuse })
+        // A consolidated solid: it takes water in and darkens as a film darkens a rough top
+        // (Lekner and Dorf 1988 name concrete for the film theory; Levinson and Akbari 2001
+        // measure 0.41 dry to 0.24 wet over 32 mixes, and the film law gives 0.25).
+        .wetted(Wetting { open_porosity: 0.12, contact_angle_deg: 30.0, solid_index: 1.55, finish: Finish::Diffuse, structure: Structure::Consolidated })
     }
 
     /// Creates a new Material instance with properties of glass (soda-lime).
@@ -1206,7 +1223,7 @@ impl Material {
         ).expect("Failed to create glass material")
         // Wetting: soda-lime float glass in ordinary air: 20 to 30 degrees; n 1.52; smooth,
         // so a film adds a reflection and darkens nothing.
-        .wetted(Wetting { open_porosity: 0.0, contact_angle_deg: 25.0, solid_index: 1.52, finish: Finish::Smooth })
+        .wetted(Wetting { open_porosity: 0.0, contact_angle_deg: 25.0, solid_index: 1.52, finish: Finish::Smooth, structure: Structure::Consolidated })
     }
 
     /// Creates a new Material instance with properties of brass (70/30).
@@ -1343,6 +1360,47 @@ impl Material {
         ).expect("Failed to create stainless steel material")
         // Wetting: passive chromium oxide, as received: 70 to 80 degrees typical.
         .wetted(Wetting::sealed(75.0).with_finish(Finish::Smooth))
+    }
+
+    /// Mild steel under a coat of paint: panels, hulls, frames.
+    ///
+    /// **Steel's body, the paint's surface.** The coat is a fraction of a millimetre, so
+    /// every mechanical and thermal number is [`Material::steel`]'s; what changes is how
+    /// water takes to it. Paint binders are polymers that water wets partly: the mean
+    /// equilibrium and advancing contact angle of water is 76.3 degrees on epoxy and 70.9
+    /// on poly(methyl methacrylate), the acrylic binder (Diversified Enterprises, "Critical
+    /// Surface Tension and Contact Angle with Water for Various Polymers", the Accu Dyne
+    /// Test polymer table), so 75 degrees here. A binder's refractive index is about 1.5
+    /// (PMMA 1.49, epoxy 1.55 to 1.57).
+    ///
+    /// The coat is sealed, so rain leaves a film on it and never soaks in. The finish is
+    /// [`Finish::Diffuse`], a matt or satin coat whose pigment scatters at its top, so a
+    /// film darkens it a little; a gloss coat is optically smooth on top and only gains
+    /// gloss in the rain: give it `.with_finish(Finish::Smooth)`.
+    ///
+    /// # Returns
+    ///
+    /// [`Material::steel`] with the paint's wetting: sealed, 75 degrees, n 1.5, diffuse.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{Finish, Material};
+    ///
+    /// let panel = Material::paint_steel();
+    /// let paint = panel.wetting.unwrap();
+    /// assert_eq!(panel.density, Material::steel().density);
+    /// assert!(!paint.soaks() && !paint.beads());
+    /// assert_eq!(paint.finish, Finish::Diffuse);
+    /// ```
+    pub fn paint_steel() -> Self {
+        Self::steel().wetted(Wetting {
+            open_porosity: 0.0,
+            contact_angle_deg: 75.0,
+            solid_index: 1.5,
+            finish: Finish::Diffuse,
+            structure: Structure::Consolidated,
+        })
     }
 
     /// Calculates the shear modulus of the material.

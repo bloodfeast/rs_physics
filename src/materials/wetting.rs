@@ -22,7 +22,8 @@
 //! case.
 //!
 //! **The pores** (Twomey, Bohren and Mergenthaler, "Reflectance and albedo differences
-//! between wet and dry surfaces", *Applied Optics* 25(3), 1986). A porous material scatters
+//! between wet and dry surfaces", *Applied Optics* 25(3), 1986). A finely divided material
+//! (fibres, grains: cloth, rope, sand) scatters
 //! light at every boundary between its solid and the air in its pores. Fill the pores
 //! with water and each boundary's index step shrinks (cellulose against air is 1.53 to
 //! 1.00; against water it is 1.53 to 1.33), so the material scatters far less per unit
@@ -30,17 +31,31 @@
 //! soaked cotton is several times darker, not a few percent: [`pore_filled_albedo`]
 //! takes it through the Kubelka-Munk two-flux model.
 //!
+//! **Which one a porous material takes** is its [`Structure`]. Lekner and Dorf (1988,
+//! section IV) draw the line: "Angstrom's theory would seem to apply best to rough solid
+//! surfaces, such as blackboards, asphalt, or concrete. The TBM theory, based on the idea of
+//! enhanced forward scattering when the interstitial space in the medium is filled with
+//! liquid, would seem to apply best to finely divided media, such as sand. An intermediate
+//! case is that of clothing fabric." So a [`Structure::Consolidated`] solid (concrete, stone,
+//! brick) takes the film alone, however porous, and a [`Structure::Divided`] one fills its
+//! pores as well. Measured: Portland cement concrete loses 0.17 of solar reflectance wet,
+//! 0.41 to 0.24 as the mean of 32 mixes (Levinson and Akbari, "Effects of composition and
+//! exposure on the solar reflectance of Portland cement concrete", LBNL-48334, 2001); the
+//! film law alone gives 0.25 from 0.41. The pore term on concrete would give 0.05.
+//!
 //! ## Model limits
 //!
 //! - Albedos are linear reflectances (linear light), for one wavelength band at a time;
 //!   call per channel for colour. The pore term is nonlinear in the albedo, so an
 //!   sRGB-encoded value gives a wrong answer: decode it first.
-//! - Open porosity is a gate, not a quantity in the albedo: any open porosity that water
-//!   wets gives the full pore-filling collapse at saturation 1. In the Twomey, Bohren and
-//!   Mergenthaler picture a porous material scatters at its pore boundaries, and filling
-//!   them changes every boundary's index step however many there are; the porosity sets
-//!   how much water the material holds ([`Wetting::saturation_water_content`]), not how
-//!   dark it gets. A sealed coat with a few cracks is better described as sealed.
+//! - Open porosity is the water the material holds
+//!   ([`Wetting::saturation_water_content`]), not a scale on the albedo. No published law
+//!   scales the darkening by porosity: where the soil literature measures it, the darkening
+//!   follows the degree of saturation and the porosity cancels. What decides the albedo is
+//!   the [`Structure`]: a divided medium that water wets takes the full pore-filling
+//!   collapse at saturation 1 whatever its porosity (every boundary's index step changes,
+//!   however many there are), and a consolidated one takes none. A sealed coat with a few
+//!   cracks is better described as sealed.
 //! - The pore term scales the scattering by the normal-incidence Fresnel reflectance of
 //!   one boundary, a proxy for the scattering strength of a random pore network. It is
 //!   a ratio, so the material's own absolute scattering never enters.
@@ -203,6 +218,22 @@ pub enum Finish {
     Smooth,
 }
 
+/// **How a porous material is built**, which decides what water in it does to the light
+/// (Lekner and Dorf 1988, section IV; the module's notes quote it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Structure {
+    /// Finely divided: fibres or grains with air between them (cloth, rope, sand). Its
+    /// scattering is at the solid-to-pore boundaries, so water in the pores collapses it
+    /// ([`pore_filled_albedo`]).
+    Divided,
+    /// A consolidated solid with pores in it: concrete, stone, brick, fired tile, and wood
+    /// (its cells are bonded; a short submersion darkens it by the film's size, Baar and
+    /// others 2019, cited at [`Material::wood`](super::Material::wood)). Its scattering is
+    /// in the solid, which water does not reach; water darkens it as a film over a rough
+    /// top does ([`film_albedo`]) and no further.
+    Consolidated,
+}
+
 /// **How water takes to a material**: whether it soaks in, and what it does to the light.
 ///
 /// Mechanical and thermal properties say what a material does when struck or heated; this
@@ -230,10 +261,14 @@ pub struct Wetting {
     pub solid_index: f64,
     /// The finish of the top boundary: whether a film over it darkens it.
     pub finish: Finish,
+    /// How the material is built: whether water in its pores collapses its scattering.
+    /// Unused when the material has no open porosity.
+    pub structure: Structure,
 }
 
 impl Wetting {
-    /// Creates a wetting description with a [`Finish::Diffuse`] top, checked.
+    /// Creates a wetting description with a [`Finish::Diffuse`] top and a
+    /// [`Structure::Divided`] build, checked.
     ///
     /// # Arguments
     ///
@@ -265,7 +300,7 @@ impl Wetting {
         if !solid_index.is_finite() || solid_index < 1.0 {
             return Err(PhysicsError::CalculationError("Solid refractive index must be finite and at least 1".to_string()));
         }
-        Ok(Self { open_porosity, contact_angle_deg, solid_index, finish: Finish::Diffuse })
+        Ok(Self { open_porosity, contact_angle_deg, solid_index, finish: Finish::Diffuse, structure: Structure::Divided })
     }
 
     /// A sealed solid: no open pores, water stays on the surface at `contact_angle_deg`.
@@ -287,7 +322,72 @@ impl Wetting {
             contact_angle_deg: contact_angle_deg.clamp(0.0, 180.0),
             solid_index: 1.5,
             finish: Finish::Diffuse,
+            structure: Structure::Consolidated,
         }
+    }
+
+    /// **Sclerotised arthropod cuticle** (chitin fibres in a tanned protein matrix under a wax
+    /// layer: a beetle's wing case, a carapace plate).
+    ///
+    /// Sealed: the cuticle is a waterproof barrier, so water stays on it. The contact angle
+    /// is 78 degrees, the middle of the 47.5 to 109.1 degrees measured as static angles on
+    /// the native wing cases of 11 beetle species (Sun, Liang, Watson, Watson, Zheng and
+    /// Jiang, "Compound microstructures and wax layer of beetle elytral surfaces and their
+    /// influence on wetting properties", *PLoS ONE* 7(10): e46710, 2012), which that paper
+    /// calls hydrophilic to weakly hydrophobic: most species spread a film, a few bead. A
+    /// species at the top of the range is better described by `Wetting::sealed(105.0)`.
+    ///
+    /// The finish is [`Finish::Diffuse`], the matt, microsculptured case; a polished cuticle
+    /// (a smooth wax layer over the pigment) is `with_finish(Finish::Smooth)` and only gains
+    /// gloss. That microstructure is the same paper's subject, and it varies by species.
+    ///
+    /// Wetting alone, not a [`crate::materials::Material`]: the cuticle's stiffness (1 to
+    /// 20 GPa sclerotised) and density (1000 to 1300 kg/m3) are published (Vincent and
+    /// Wegst, "Design and mechanical properties of insect cuticle", *Arthropod Structure
+    /// and Development* 33(3):187-199, 2004), but no measured friction, restitution or
+    /// thermal values were found, and a preset does not make numbers up.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{film_albedo, Wetting};
+    ///
+    /// let plate = Wetting::chitin();
+    /// assert!(!plate.soaks() && !plate.beads());
+    /// assert_eq!(plate.wet_albedo(0.3, 1.0), film_albedo(0.3));
+    /// ```
+    pub fn chitin() -> Self {
+        Self::sealed(78.0)
+    }
+
+    /// **Bare skin** (the horny outer layer of a mammal's hide, unwashed, with its lipids).
+    ///
+    /// Sealed for the light: the outer layer takes up water slowly and swells, but it is a
+    /// barrier, not a pore network that fills, so rain sits on it as a film. Diffuse: the
+    /// surface is a matt microrelief.
+    ///
+    /// **The contact angle is pending.** 85 degrees is the middle of the 80 to 91 degrees a
+    /// review reports for water on the human inner forearm, attributed to Mavon et al.,
+    /// *Colloids and Surfaces B: Biointerfaces* 8:147-155, 1997; the primary paper was not
+    /// read, so the figure is second hand until it is. Oilier skin is reported lower (57 to
+    /// 73 degrees on the forehead, also second hand). Across the whole reported range it
+    /// spreads rather than soaks, so the film law holds; only a value of 90 or more would
+    /// change what [`Wetting::beads`] answers.
+    ///
+    /// Wetting alone, not a [`crate::materials::Material`], for the reason
+    /// [`Wetting::chitin`] gives: no mechanical or thermal values were confirmed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Wetting;
+    ///
+    /// let hide = Wetting::skin();
+    /// assert!(!hide.soaks() && !hide.beads());
+    /// assert!(hide.wet_albedo(0.4, 1.0) < 0.4);
+    /// ```
+    pub fn skin() -> Self {
+        Self::sealed(85.0)
     }
 
     /// The same description with its top boundary's finish replaced.
@@ -303,6 +403,23 @@ impl Wetting {
     /// ```
     pub fn with_finish(self, finish: Finish) -> Self {
         Self { finish, ..self }
+    }
+
+    /// The same description with its build replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{film_albedo, Structure, Wetting};
+    ///
+    /// // A porous stone: the film alone, where the same numbers as a fibre mat collapse.
+    /// let mat = Wetting::new(0.2, 30.0, 1.55).unwrap();
+    /// let stone = mat.with_structure(Structure::Consolidated);
+    /// assert_eq!(stone.wet_albedo(0.4, 1.0), film_albedo(0.4));
+    /// assert!(mat.wet_albedo(0.4, 1.0) < 0.5 * stone.wet_albedo(0.4, 1.0));
+    /// ```
+    pub fn with_structure(self, structure: Structure) -> Self {
+        Self { structure, ..self }
     }
 
     /// Water held by a cubic metre of the material at saturation, kg: the open pores full.
@@ -354,7 +471,8 @@ impl Wetting {
     /// Each filled pore's boundary scatters as the Fresnel step from the solid to water
     /// rather than to air, so the filled share scatters `r` times as much, with
     /// `r = R(n_s, n_water) / R(n_s, 1)`: 0.108 for cellulose. 1 for a material that
-    /// does not soak.
+    /// does not soak, and for a [`Structure::Consolidated`] one, whose scattering is in the
+    /// solid.
     ///
     /// # Examples
     ///
@@ -364,9 +482,10 @@ impl Wetting {
     /// let canvas = Material::canvas().wetting.unwrap();
     /// assert!(canvas.pore_scattering_ratio(1.0) < 0.15);
     /// assert_eq!(canvas.pore_scattering_ratio(0.0), 1.0);
+    /// assert_eq!(Material::concrete().wetting.unwrap().pore_scattering_ratio(1.0), 1.0);
     /// ```
     pub fn pore_scattering_ratio(&self, saturation: f64) -> f64 {
-        if !self.soaks() {
+        if !self.soaks() || self.structure == Structure::Consolidated {
             return 1.0;
         }
         let dry = normal_reflectance(self.solid_index, 1.0);
@@ -378,7 +497,7 @@ impl Wetting {
     }
 
     /// **The diffuse albedo of the material wet**, at `saturation` (0 dry, 1 soaked with
-    /// a film over it): the pores filled ([`pore_filled_albedo`]), then, on a
+    /// a film over it): a [`Structure::Divided`] material's pores filled ([`pore_filled_albedo`]), then, on a
     /// [`Finish::Diffuse`] top only, the film ([`film_albedo`]) blended in by the
     /// saturation. A [`Finish::Smooth`] material that does not soak (metal, glass, gloss
     /// paint) keeps its albedo: water adds gloss, a mirror term for the renderer, not a

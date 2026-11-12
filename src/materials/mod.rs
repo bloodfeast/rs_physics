@@ -9,7 +9,7 @@
 //! ## Features
 //!
 //! - **Predefined materials**: Steel, stainless steel, aluminum, copper, titanium,
-//!   brass, concrete, glass, rubber, polyurethane, wood, canvas, ice
+//!   brass, painted steel, concrete, glass, rubber, polyurethane, wood, canvas, ice
 //! - **Wetting**: open porosity, water contact angle and the wet albedo law
 //!   ([`Wetting`]: why canvas soaks darker in the rain and steel only gains gloss;
 //!   linear albedos)
