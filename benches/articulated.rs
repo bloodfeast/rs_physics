@@ -1219,9 +1219,53 @@ fn rigs_on_a_field(c: &mut Criterion) {
     group.finish();
 }
 
+/// The burst [`a_burst_with_and_without_the_pair_patch`] prices: about the most rigs a
+/// game's melee scene had alive at once.
+const BURST_RIGS: usize = 70;
+
+/// **What `Skeleton::set_contact_patch` costs at a burst**: [`BURST_RIGS`] rigs arriving on
+/// the field of [`rigs_on_a_field`], self-collision on, eight passes on one lane, timed
+/// with the patch off, on and off again.
+///
+/// Criterion runs one group's functions in order and cannot interleave them, so the two
+/// off arms are the bracket: they are the same scene stepped by the same build, so their
+/// gap is how far the machine drifted across the run, and a difference between off and on
+/// smaller than that gap is not a difference. Each arm arrives under its own setting, so
+/// what it times is the step a game would be paying for, and the line printed with it
+/// carries its pair-contact and awake counts, without which the time cannot be read.
+fn a_burst_with_and_without_the_pair_patch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/patch_burst");
+    group.sample_size(10);
+    let heights = rolling_heights();
+    let field = Field::new(&heights, ROLLING_SIDE, ROLLING_SIDE, ROLLING_CELL, ROLLING_ORIGIN)
+        .expect("the bench's field is a valid grid");
+    for (arm, patch) in [("off", false), ("on", true), ("off_again", false)] {
+        let mut s = dropped_on(BURST_RIGS, field, true);
+        s.set_contact_patch(patch);
+        for _ in 0..FIELD_ARRIVING {
+            s.step_over(DT, G, 8, Some(field));
+        }
+        let name = format!("{BURST_RIGS}/self/arriving/patch_{arm}");
+        println!(
+            "  patch_burst {name}: {} bodies, {} pair contacts, {} of {} awake",
+            s.len(),
+            s.contact_count(),
+            s.awake_count(),
+            s.len(),
+        );
+        group.bench_function(name, |b| {
+            steady(b, &s, |s| {
+                s.step_over(black_box(DT), black_box(G), black_box(8), Some(field));
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     rigs_on_a_field,
+    a_burst_with_and_without_the_pair_patch,
     one_skeleton,
     joints_only,
     the_pile,

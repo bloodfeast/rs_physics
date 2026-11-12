@@ -98,6 +98,8 @@ struct Dials {
     damping: f64,
     self_collision: bool,
     sleeping: bool,
+    /// `Skeleton::set_contact_patch`: a crossed pair held by the two ends of its patch.
+    patch: bool,
 }
 
 impl Dials {
@@ -109,6 +111,7 @@ impl Dials {
         damping: 0.0,
         self_collision: true,
         sleeping: true,
+        patch: true,
     };
 
     fn awake(self) -> Dials {
@@ -121,6 +124,7 @@ impl Dials {
         s.set_joint_damping(self.damping);
         s.set_self_collision(self.self_collision);
         s.set_sleeping(self.sleeping);
+        s.set_contact_patch(self.patch);
     }
 }
 
@@ -825,34 +829,7 @@ fn a_one_body_on_flat_ground() {
             text += &report(&name, &[asleep], &[awake]);
         }
         for (pose, lean) in [("crossed at the end", None), ("leaning at 15 deg", Some(15.0_f64)), ("leaning at 22 deg", Some(22.0))] {
-            let build = move |s: &mut Skeleton| {
-                // The body underneath lies along z. Leant on, it is ten times the weight of
-                // a limb, so that it is the leaning body that is being asked to hold and
-                // not the one under it being asked not to roll away.
-                let mut under = Body::prism(if lean.is_some() { 40.0 } else { 4.0 }, 0.06, 0.25, facets, (0.0, 0.06, 0.0));
-                under.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
-                let a = s.add_body(under);
-                let over = match lean {
-                    None => {
-                        let mut over = limb(facets, (0.11, 0.20, 0.0));
-                        over.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2);
-                        over
-                    }
-                    Some(degrees) => {
-                        // Half a metre long, one end on the plane and its side against the
-                        // body underneath, a millimetre clear of both: statically it holds
-                        // at either angle on a coefficient of 0.5, its weight falling between the two.
-                        let angle = degrees.to_radians();
-                        let foot = (-(0.12 + 0.001) / angle.sin(), 0.06 + 0.001, 0.0);
-                        let along = (angle.cos(), angle.sin(), 0.0);
-                        let mut over = Body::prism(4.0, 0.06, 0.5, facets, add(foot, scale(along, 0.25)));
-                        over.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), angle - std::f64::consts::FRAC_PI_2);
-                        over
-                    }
-                };
-                let b = s.add_body(over);
-                vec![a..a + 1, b..b + 1]
-            };
+            let build = move |s: &mut Skeleton| two_bodies(s, facets, lean);
             let name = format!("a2 {} {pose}", shape_name(facets));
             let asleep = run(&name, Floor::FLAT, Dials::PLAIN, STEPS, &build);
             let awake = run(&format!("{name} awake"), Floor::FLAT, Dials::PLAIN.awake(), STEPS, &build);
@@ -860,6 +837,38 @@ fn a_one_body_on_flat_ground() {
         }
     }
     emit("a", &text);
+}
+
+/// The two-body scenes of (a): a limb dropped across another at its end, or, with `lean`,
+/// leaning on a heavy one at that many degrees. The same scene as the leaning law in
+/// `articulated_laws.rs`.
+fn two_bodies(s: &mut Skeleton, facets: u32, lean: Option<f64>) -> Vec<Range<usize>> {
+    // The body underneath lies along z. Leant on, it is ten times the weight of a limb, so
+    // that it is the leaning body that is being asked to hold and not the one under it
+    // being asked not to roll away.
+    let mut under = Body::prism(if lean.is_some() { 40.0 } else { 4.0 }, 0.06, 0.25, facets, (0.0, 0.06, 0.0));
+    under.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
+    let a = s.add_body(under);
+    let over = match lean {
+        None => {
+            let mut over = limb(facets, (0.11, 0.20, 0.0));
+            over.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2);
+            over
+        }
+        Some(degrees) => {
+            // Half a metre long, one end on the plane and its side against the body
+            // underneath, a millimetre clear of both: statically it holds at either angle
+            // on a coefficient of 0.5, its weight falling between the two.
+            let angle = degrees.to_radians();
+            let foot = (-(0.12 + 0.001) / angle.sin(), 0.06 + 0.001, 0.0);
+            let along = (angle.cos(), angle.sin(), 0.0);
+            let mut over = Body::prism(4.0, 0.06, 0.5, facets, add(foot, scale(along, 0.25)));
+            over.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), angle - std::f64::consts::FRAC_PI_2);
+            over
+        }
+    };
+    let b = s.add_body(over);
+    vec![a..a + 1, b..b + 1]
 }
 
 // -- (b) one body on a tilted plane -----------------------------------------------------
@@ -1252,4 +1261,42 @@ fn heaps_under_each_dial(kit: Kit, scene: &str) {
         }
     }
     emit(scene, &text);
+}
+
+// -- (p) the pair patch, off and on ---------------------------------------------------------
+
+/// The rungs the pair patch is judged on, with `Skeleton::set_contact_patch` off and then on
+/// in the same build: the two-body scenes of (a), the rolling-hold scene of (b), the lone
+/// untangled rig of (c) and the untangled heap of eight of (e), at the landing poses.
+#[test]
+#[ignore = "diagnostic ladder: prints a table and asserts nothing; a few minutes"]
+fn p_the_pair_patch_off_and_on() {
+    let mut text = String::from("(p) the pair patch, off and on\n");
+    for patch in [false, true] {
+        let dials = Dials { patch, ..Dials::PLAIN };
+        let which = if patch { "patch on" } else { "patch off" };
+        for (pose, lean) in [("crossed at the end", None), ("leaning at 15 deg", Some(15.0_f64)), ("leaning at 22 deg", Some(22.0))] {
+            let build = move |s: &mut Skeleton| two_bodies(s, 0, lean);
+            let name = format!("p a2 capsule {pose}, {which}");
+            let asleep = run(&name, Floor::FLAT, dials, STEPS, &build);
+            let awake = run(&format!("{name} awake"), Floor::FLAT, dials.awake(), STEPS, &build);
+            text += &report(&name, &[asleep], &[awake]);
+        }
+        let rolling = Dials { rolling: 0.25, ..dials };
+        let name = format!("p b2 capsule across the slope, 10 deg, rolling 0.25, {which}");
+        let (travel, _, _, asleep) = on_a_slope(&name, 0, 10.0, true, rolling);
+        let (free_travel, _, _, awake) = on_a_slope(&format!("{name} awake"), 0, 10.0, true, rolling.awake());
+        text += &report(&name, &[asleep], &[awake]);
+        let _ = writeln!(text, "    rolling    : predicted holds; travelled {travel:.3e} m asleep-able, {free_travel:.3e} m awake");
+
+        let name = format!("p c Untangled, self-collision on, {which}");
+        let (asleep, awake) = lone(&name, Kit::Untangled, POSES, Floor::FLAT, dials);
+        text += &report(&name, &asleep, &awake);
+
+        let heap = Heap { kit: Kit::Untangled, rigs: 8, turned: true, arrangement: Arrangement::Together };
+        let name = format!("p e {}, together, {which}", heap_name(heap));
+        let (asleep, awake) = heaps(&name, heap, dials);
+        text += &report(&name, &asleep, &awake);
+    }
+    emit("p", &text);
 }
