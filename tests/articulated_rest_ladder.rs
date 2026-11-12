@@ -821,7 +821,7 @@ fn a_one_body_on_flat_ground() {
                 let mut body = limb(facets, (0.0, height, 0.0));
                 body.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), tilt - std::f64::consts::FRAC_PI_2);
                 let i = s.add_body(body);
-                vec![i..i + 1]
+                std::iter::once(i..i + 1).collect()
             };
             let name = format!("a {} {pose}", shape_name(facets));
             let asleep = run(&name, Floor::FLAT, Dials::PLAIN, STEPS, &build);
@@ -893,7 +893,7 @@ fn on_a_slope(label: &str, facets: u32, degrees: f64, across: bool, dials: Dials
         Quaternion::from_axis_angle((0.0, 0.0, 1.0), angle - std::f64::consts::FRAC_PI_2)
     };
     let i = s.add_body(body);
-    let mut recorder = Recorder::new(&s, vec![i..i + 1], STEPS);
+    let mut recorder = Recorder::new(&s, std::iter::once(i..i + 1).collect(), STEPS);
     let (mut settled, mut speed, mut early) = ((0.0, 0.0, 0.0), 0.0, 0.0);
     for step in 1..=STEPS {
         s.step(DT, G, dials.passes);
