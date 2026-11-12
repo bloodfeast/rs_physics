@@ -24,3 +24,5 @@ jobs:
       run: cargo doc --features all --no-deps
       env:
         RUSTDOCFLAGS: -D warnings
+    - name: Clippy (warnings denied)
+      run: cargo clippy --all-targets --features all -- -D warnings

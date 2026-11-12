@@ -267,7 +267,7 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
             0.2,
             (x, y + 0.2 + 0.2 * i as f64, z),
         ));
-        into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
+        let _ = into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0)));
         up = link;
     }
 
@@ -298,7 +298,7 @@ fn rig(into: &mut Skeleton, x: f64, z: f64, y: f64, anchored: bool) -> usize {
                     max: 2.2,
                 }
             };
-            into.add_joint(joint);
+            let _ = into.add_joint(joint);
             previous = body;
         }
     }
@@ -1040,7 +1040,7 @@ fn crush(s: &mut Skeleton, roller: usize) {
     s.step(DT, G, 8);
     for i in 0..s.len() {
         if i != roller && !s.is_retired(i) && s.normal_load(i) > CRUSHED {
-            s.retire(i);
+            let _ = s.retire(i);
         }
     }
 }

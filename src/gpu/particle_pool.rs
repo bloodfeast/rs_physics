@@ -24,7 +24,7 @@ const ROWS_AT: usize = 36;
 const RESTITUTION_AT: usize = ROWS_AT + 4 * MAX_CLASSES;
 const TAIL_AT: usize = RESTITUTION_AT + MAX_CLASSES;
 const FRAME_WORDS: usize = TAIL_AT + 8;
-const _: () = assert!(FRAME_WORDS <= HEADER_WORDS && MAX_CLASSES % 4 == 0);
+const _: () = assert!(FRAME_WORDS <= HEADER_WORDS && MAX_CLASSES.is_multiple_of(4));
 
 /// Words a staged particle takes: position 3, velocity 3, remaining, lifetime, size,
 /// class.
@@ -735,9 +735,9 @@ impl GpuParticlePool {
         let data_words = config.max_emit_per_frame as usize * RECORD_WORDS + DATA_SLACK_WORDS;
         let table_words =
             jump_levels as usize * DIGIT_TABLES * JUMP_TABLE_WORDS + QUARTER_SINE.len();
-        if (slots as u64) * 16 > limits.max_storage_buffer_binding_size as u64
+        if (slots as u64) * 16 > limits.max_storage_buffer_binding_size
             || ((data_words + table_words) as u64) * 4
-                > limits.max_storage_buffer_binding_size as u64
+                > limits.max_storage_buffer_binding_size
         {
             return Err(GpuPoolError::Limit(
                 "arrays past the device's storage binding size",
@@ -1353,6 +1353,7 @@ impl GpuParticlePool {
     /// pool.set_swirl(1, 1.0);
     /// assert_eq!(pool.swirl(1), 1.0);
     /// ```
+    #[allow(clippy::manual_clamp, reason = "max then min maps NaN to 0.0; clamp would return NaN")]
     pub fn set_swirl(&mut self, index: u8, fraction: f32) {
         self.swirl[class_slot(index) as usize] = fraction.max(0.0).min(1.0);
     }
@@ -2168,7 +2169,7 @@ impl GpuParticlePool {
             self.pending_count -= k;
         }
         let record_words = records * RECORD_WORDS;
-        for entry in self.table.chunks_exact_mut(SEGMENT_WORDS) {
+        for entry in self.table.as_chunks_mut::<SEGMENT_WORDS>().0 {
             if entry[2] == SEGMENT_BURST {
                 entry[3] += record_words as u32;
             }

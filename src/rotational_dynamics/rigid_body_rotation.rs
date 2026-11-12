@@ -877,7 +877,7 @@ mod tests {
     /// that the difference between the two is a fact the test suite states rather than
     /// something a reader has to take on trust.
     #[test]
-    #[allow(deprecated)]
+    #[allow(deprecated, reason = "the test pins what the deprecated apply_torque does, on purpose")]
     fn angular_state_3d_apply_torque_is_an_accumulator_and_does_not_tumble() {
         let inertia = inertia_3d::solid_cuboid(1.28, 0.09, 0.26, 0.07);
         let mut state = AngularState3D::new((4.0, 0.7, 11.0));

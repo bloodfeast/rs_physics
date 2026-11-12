@@ -395,10 +395,10 @@ impl FluidGrid3D {
     /// pressure solve ran.
     fn project(
         &self,
-        velocity_x: &mut Vec<f64>,
-        velocity_y: &mut Vec<f64>,
-        velocity_z: &mut Vec<f64>,
-        pressure: &mut Vec<f64>,
+        velocity_x: &mut [f64],
+        velocity_y: &mut [f64],
+        velocity_z: &mut [f64],
+        pressure: &mut [f64],
         ws: &mut SolveScratch,
     ) -> usize {
         match self.solver_config.pressure_solver {
@@ -464,7 +464,7 @@ impl FluidGrid3D {
         }
     }
 
-    fn subtract_pressure_gradient(&self, velocity_x: &mut Vec<f64>, velocity_y: &mut Vec<f64>, velocity_z: &mut Vec<f64>, p: &[f64]) {
+    fn subtract_pressure_gradient(&self, velocity_x: &mut [f64], velocity_y: &mut [f64], velocity_z: &mut [f64], p: &[f64]) {
         let h = 1.0 / self.width as f64;
         for i in 1..self.width-1 {
             for j in 1..self.height-1 {
@@ -608,7 +608,7 @@ impl FluidGrid3D {
     /// fluid passes through a wall. At the other four walls it is copied under
     /// free-slip and negated under no-slip ([`SolverConfig::wall`]). Density and
     /// pressure are copied (no flux).
-    fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut Vec<f64>) {
+    fn set_boundaries(&self, boundary_type: BoundaryType, x: &mut [f64]) {
         let wall = self.solver_config.wall;
         let flip_front_back = boundary_type.flips_at_wall(BoundaryType::VelocityZ, wall);
         let flip_top_bottom = boundary_type.flips_at_wall(BoundaryType::VelocityY, wall);
@@ -839,8 +839,8 @@ impl FluidGrid3D {
     }
 
     /// Performs semi-Lagrangian advection in 3D.
-    fn advect(&self, boundary_type: BoundaryType, d: &mut Vec<f64>, d0: &Vec<f64>,
-              velocity_x: &Vec<f64>, velocity_y: &Vec<f64>, velocity_z: &Vec<f64>) {
+    fn advect(&self, boundary_type: BoundaryType, d: &mut [f64], d0: &[f64],
+              velocity_x: &[f64], velocity_y: &[f64], velocity_z: &[f64]) {
         let dt0 = self.dt * self.width as f64;
 
         for i in 1..self.width-1 {
@@ -947,11 +947,11 @@ impl FluidGrid3D {
 
     /// MacCormack advection of `d0` into `d` ([`AdvectionScheme::MacCormack`]); see
     /// the 2D grid's `advect_maccormack`. `back`, `low` and `high` are scratch.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
     fn advect_maccormack(
         &self,
         boundary_type: BoundaryType,
-        d: &mut Vec<f64>,
+        d: &mut [f64],
         d0: &[f64],
         velocity: [&[f64]; 3],
         back: &mut Vec<f64>,

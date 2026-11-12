@@ -256,7 +256,7 @@ fn no_two_joints_in_a_colour_share_a_body() {
 /// anywhere else.
 #[test]
 fn a_chain_colours_in_two() {
-    let mut s = chain(12);
+    let s = chain(12);
     assert_eq!(
         s.colours().len(),
         2,
@@ -811,7 +811,7 @@ fn an_outlier_leaves_the_grid_and_a_graded_set_keeps_it() {
     // Half the set twice the size of the other half. There is no outlier here, there are
     // two populations, and taking one of them out would be quadratic in half the bodies.
     let mut graded: Vec<f64> = vec![1.0; 200];
-    graded.extend(std::iter::repeat(2.0).take(200));
+    graded.extend(std::iter::repeat_n(2.0, 200));
     assert!(
         held_out(&graded).is_empty(),
         "two hundred bodies are a population and not an outlier; see \
@@ -2580,7 +2580,7 @@ fn a_step_of_no_time_or_of_nonsense_does_nothing() {
         let mut s = stack(2);
         let before: Vec<_> = (0..s.len()).map(|i| s.position(i)).collect();
         s.step(dt, G, 8);
-        for i in 0..s.len() {
+        for (i, &was) in before.iter().enumerate() {
             let now = s.position(i);
             assert!(
                 now.0.is_finite() && now.1.is_finite() && now.2.is_finite(),
@@ -2588,7 +2588,7 @@ fn a_step_of_no_time_or_of_nonsense_does_nothing() {
                  and there is no way back from it",
             );
             assert_eq!(
-                now, before[i],
+                now, was,
                 "a step of dt = {dt} moved body {i}",
             );
         }

@@ -232,7 +232,7 @@ fn pipeline(
 }
 
 fn check_staged(staged: &Staged<'_>, len: u64) -> Result<(), AcousticsError> {
-    if staged.offset % 4 != 0 || staged.len % 4 != 0 {
+    if !staged.offset.is_multiple_of(4) || !staged.len.is_multiple_of(4) {
         return Err(AcousticsError::Misaligned);
     }
     if staged.len != len {
@@ -624,7 +624,7 @@ impl GpuAcoustics {
         over("terrain rows", rows, self.limits.terrain_rows)?;
         over("statics", layout.statics(), self.limits.statics)?;
         let need = layout.resident_bytes();
-        if need > self.device.limits().max_storage_buffer_binding_size as u64 {
+        if need > self.device.limits().max_storage_buffer_binding_size {
             return Err(AcousticsError::Device(
                 "the scene exceeds one storage binding",
             ));

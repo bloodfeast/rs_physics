@@ -473,7 +473,7 @@ impl VelocityGrid {
 
     /// [`Self::sample`] in plain Rust, for targets without SSE2 and as the reference
     /// the SSE version is tested against.
-    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code))]
+    #[cfg_attr(all(target_arch = "x86_64", not(test)), allow(dead_code, reason = "x86_64 takes the SSE path; there only the tests call the portable one"))]
     #[inline(always)]
     fn sample_portable(&self, p: [f32; 3]) -> [f32; 3] {
         let mut base = [0usize; 3];
@@ -673,10 +673,12 @@ impl TurbulenceDrive {
 #[derive(Debug, Clone)]
 struct Octave {
     /// Lattice spacing, cells: 2, 4 or 8.
+    #[allow(dead_code, reason = "read only by the cfg(test) accessor lattice_spacing")]
     spacing: usize,
     /// Eddy size, metres: `spacing * h`.
     scale: f32,
     /// Its eddy speed and turnover time from the drive.
+    #[allow(dead_code, reason = "read only by the cfg(test) accessor octave_law")]
     speed: f32,
     turnover: f32,
     /// What multiplies a unit-variance lattice so the octave's rms speed is `speed`.

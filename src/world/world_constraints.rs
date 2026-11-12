@@ -164,6 +164,7 @@ impl WorldRope3D {
 
 /// All constraint types that can be added to the physics world.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant, reason = "public enum; boxing the hinge changes its layout and adds an allocation per constraint")]
 pub enum WorldConstraint {
     /// Distance constraint (joint)
     Joint(WorldJoint3D),
@@ -191,6 +192,7 @@ impl WorldConstraint {
     /// * `objects` - Map from ObjectId to index in objects vector
     /// * `object_data` - The objects vector
     /// * `dt` - Timestep in seconds
+    ///
     /// Advances this constraint by one step.
     ///
     /// `gravity` is a positive-downward magnitude, as elsewhere in this module.
@@ -428,7 +430,7 @@ fn solve_joint(
 /// Velocity half of a distance constraint: cancel the relative velocity along
 /// `n` (only the separating part when `unilateral`), with the inverse-mass
 /// weighting of an impulse, so momentum is conserved.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn remove_relative_velocity_along(
     object1: Option<ObjectId>,
     idx2: usize,

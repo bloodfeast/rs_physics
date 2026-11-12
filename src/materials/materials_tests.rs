@@ -119,7 +119,7 @@ fn test_elastic_region() {
 
     // Test well within elastic region
     let result = steel.will_break(200e6, yield_strain * 0.5, None);
-    assert_eq!(result.will_break, false);
+    assert!(!result.will_break);
     assert_eq!(result.breakage_type, BreakageType::None);
     assert!(result.safety_factor > 1.0);
 }
@@ -131,7 +131,7 @@ fn test_plastic_region() {
 
     // Test just above yield point
     let result = steel.will_break(steel.yield_strength * 1.1, yield_strain * 1.1, None);
-    assert_eq!(result.will_break, false);
+    assert!(!result.will_break);
     assert_eq!(result.breakage_type, BreakageType::Plastic);
     assert!(result.safety_factor <= 1.0);
 }
@@ -142,13 +142,13 @@ fn test_ultimate_failure() {
 
     // Test stress-based failure
     let stress_result = steel.will_break(steel.ultimate_strength * 1.1, 0.001, None);
-    assert_eq!(stress_result.will_break, true);
+    assert!(stress_result.will_break);
     assert_eq!(stress_result.breakage_type, BreakageType::TensileStress);
 
     // Test strain-based failure
     let ultimate_strain = steel.ultimate_strength / steel.youngs_modulus;
     let strain_result = steel.will_break(steel.yield_strength, ultimate_strain * 1.1, None);
-    assert_eq!(strain_result.will_break, true);
+    assert!(strain_result.will_break);
     assert_eq!(strain_result.breakage_type, BreakageType::TensileStrain);
 }
 
@@ -240,7 +240,6 @@ fn test_edge_cases() {
 #[test]
 fn test_calculate_collision_response_head_on() {
     use crate::materials::calculate_collision_response;
-    use std::f64::consts::PI;
 
     let steel = Material::steel();
     let aluminum = Material::aluminum();

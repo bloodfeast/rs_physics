@@ -48,7 +48,7 @@ fn test_elastic_collision_3d_angle() {
 
     assert!(result.is_ok());
     // After collision, momentum should be conserved
-    let momentum_before_x = 1.0 * 1.0 + 2.0 * (-1.0);
+    let momentum_before_x = 1.0 * 1.0 - 2.0;
     let momentum_before_y = 1.0 * 1.0 + 2.0 * 0.0;
 
     let momentum_after_x = 1.0 * obj1.velocity.x + 2.0 * obj2.velocity.x;

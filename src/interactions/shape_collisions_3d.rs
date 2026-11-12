@@ -192,9 +192,7 @@ pub fn calculate_collision_impulse(
         return 0.0;
     }
 
-    let impulse_mag = -(1.0 + restitution) * vrel_n / impulse_denom;
-
-    impulse_mag
+    -(1.0 + restitution) * vrel_n / impulse_denom
 }
 
 /// Applies a linear impulse to two physical objects

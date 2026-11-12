@@ -131,6 +131,7 @@ pub use substance::*;
 
 // Core thermodynamics
 #[cfg(feature = "thermodynamics")]
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod thermodynamics;
 #[cfg(feature = "thermodynamics")]
 pub use thermodynamics::*;

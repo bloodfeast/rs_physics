@@ -571,7 +571,7 @@ pub(super) fn capsule_contact(
 /// One contact from a pair of points on the two axes, or `None` if the capsules are clear
 /// of one another there. The surface points are carried into each body's own frame so
 /// that a later pass can ask where they have moved to.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn touching(
     a: usize,
     b: usize,
@@ -852,6 +852,10 @@ pub(super) struct GroundContact {
 /// rocking it instead of resting it. Against a plane a lying capsule gets a contact at
 /// each end and settles in a handful of passes. A capsule stood on one end still gets
 /// one contact, and still topples, which is correct.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one body's pose, shape and the plane, read in the solver's hot loop; a struct would only be built to be taken apart"
+)]
 pub(super) fn ground_contacts(
     body: usize,
     position: (f64, f64, f64),
@@ -884,7 +888,6 @@ pub(super) fn ground_contacts(
 }
 
 /// What one ground contact wants done. Reads only; the caller applies.
-#[allow(clippy::too_many_arguments)]
 /// **The whole of one body's contact with the plane, solved as one thing.**
 ///
 /// # Why this is one constraint and was two
@@ -929,7 +932,7 @@ pub(super) fn ground_contacts(
 /// a sphere's two ends coincide, which makes `K` singular and sends it to the one-end
 /// branch; an upright capsule's second end is above the plane, which gives it a
 /// non-positive depth and no load.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
 pub(super) fn solve_ground_normal(
     contact: GroundContact,
     body: &Gathered,
@@ -1020,7 +1023,7 @@ pub(super) fn solve_ground_normal(
 /// See [`solve_contact_friction`] for why the gate is the normal impulse this step spent
 /// rather than the overlap that is left, and the module header on [`super`] for why the
 /// two halves are separate sub-passes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 pub(super) fn solve_ground_friction(
     contact: GroundContact,
     body: &Gathered,
@@ -1055,7 +1058,7 @@ pub(super) fn solve_ground_friction(
 
 /// The body of the above, with the running totals borrowed rather than moved through, so
 /// that its half-dozen early returns have one thing to return.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn ground_friction(
     contact: GroundContact,
     body: &Gathered,
@@ -1207,7 +1210,7 @@ fn ground_friction(
 ///
 /// Reads only; the caller applies. Writes no running total, because the pass runs once a
 /// step and there is nothing for a second one to carry.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 pub(super) fn solve_contact_velocity_normal(
     contact: Contact,
     first: &Gathered,
@@ -1303,6 +1306,10 @@ pub(super) fn solve_contact_velocity_normal(
 /// Measured, resisting it takes the seventeen-bone rig from no draw of twenty-four
 /// travelling past the jostling allowance to six of them, the worst at 4.4 of a reach --
 /// the articulation being braked at the contacts and the rig rocking on what is left.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two gathered bodies and the pair's coefficients, read in the solver's hot loop; a struct would only be built to be taken apart"
+)]
 pub(super) fn solve_contact_velocity_friction(
     contact: Contact,
     first: &Gathered,
@@ -1377,7 +1384,7 @@ pub(super) fn solve_contact_velocity_friction(
 /// The arm is where the patch's load stands, which the normal sub-pass worked out and
 /// [`Patch`] carried: the plane pushes where the load is, so that is where taking some of
 /// the push back has to act.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 pub(super) fn solve_ground_velocity_normal(
     contact: GroundContact,
     body: &Gathered,

@@ -77,6 +77,7 @@ pub use rigid_body_rotation::*;
 
 // Legacy module (feature-gated for backwards compatibility)
 #[cfg(feature = "rotational_dynamics")]
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod rotational_dynamics;
 #[cfg(feature = "rotational_dynamics")]
 pub use rotational_dynamics::*;

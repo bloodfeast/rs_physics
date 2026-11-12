@@ -167,6 +167,9 @@ use super::*;
 /// have thousands of. Eight is the shape this exists for and sixteen is already round.
 pub(super) const MOST_FACETS: u32 = 16;
 
+/// A contact point in world space and how deep it is.
+pub(super) type DepthPoint = ((f64, f64, f64), f64);
+
 /// Where two prisms touch: the direction to separate them along, how deep they are, and up
 /// to two points to apply that at.
 ///
@@ -177,7 +180,7 @@ pub(super) const MOST_FACETS: u32 = 16;
 /// nearly all of the load -- a third point inside the hull of the other two adds no arm.
 pub(super) struct Touch {
     pub normal: (f64, f64, f64),
-    pub points: [Option<((f64, f64, f64), f64)>; 2],
+    pub points: [Option<DepthPoint>; 2],
     /// **Which feature of the two bodies the normal came from**, so the pair can be handed
     /// it back next step. See [`Feature`].
     pub feature: u32,
@@ -365,17 +368,6 @@ impl Shape {
         self.half_length * dot(self.axis, d).abs() + widest
     }
 
-    /// The `2n` corners of the prism, in a fixed order.
-    fn vertices(&self, out: &mut [(f64, f64, f64); 2 * MOST_FACETS as usize]) -> usize {
-        let cap = scale(self.axis, self.half_length);
-        for k in 0..self.facets {
-            let corner = self.corners[k];
-            out[2 * k] = add(add(self.at, cap), corner);
-            out[2 * k + 1] = add(sub(self.at, cap), corner);
-        }
-        2 * self.facets
-    }
-
     /// The prism's `n + 2` outward face normals and how far each face stands from the
     /// centre, in a fixed order: the two caps, then the side faces.
     fn planes(&self, out: &mut [((f64, f64, f64), f64); MOST_FACETS as usize + 2]) -> usize {
@@ -430,43 +422,12 @@ impl Shape {
             // A cap: the whole cross-section at whichever end faces that way.
             None => {
                 let cap = scale(self.axis, if along >= 0.0 { self.half_length } else { -self.half_length });
-                for k in 0..self.facets {
-                    out[k] = add(add(self.at, cap), self.corners[k]);
+                for (slot, corner) in out.iter_mut().zip(self.corners.iter()).take(self.facets) {
+                    *slot = add(add(self.at, cap), *corner);
                 }
                 self.facets
             }
         }
-    }
-
-    /// How far inside the prism a world point is, or a negative number if it is outside.
-    ///
-    /// The faces are the `n` side planes plus the two caps, and a convex body's inside is
-    /// the intersection of its half-spaces, so the depth is the smallest of them.
-    fn depth_of(&self, point: (f64, f64, f64)) -> f64 {
-        let from = sub(point, self.at);
-        // The caps first: cheapest, and the one that rejects most points.
-        let along = dot(from, self.axis);
-        let mut least = self.half_length - along.abs();
-        if least <= 0.0 {
-            return least;
-        }
-        for k in 0..self.facets {
-            // A side face's outward normal is its own corner direction turned by half a
-            // step, which is the bisector of the two corners the face runs between.
-            let next = self.corners[(k + 1) % self.facets];
-            let Some(normal) = normalized(add(self.corners[k], next)) else {
-                continue;
-            };
-            let inradius = dot(self.corners[k], normal);
-            let out = inradius - dot(from, normal);
-            if out < least {
-                least = out;
-            }
-            if least <= 0.0 {
-                return least;
-            }
-        }
-        least
     }
 }
 
@@ -480,6 +441,7 @@ impl Shape {
 /// for a pair that is new or was clear. **It is kept unless another axis beats it by more
 /// than `decisive`**, and that is what makes the direction of a resting contact steady: see
 /// [`touch_keeping`].
+#[cfg(test)]
 pub(super) fn touch(a: &Shape, b: &Shape) -> Option<Touch> {
     touch_keeping(a, b, Feature::None, 0.0)
 }
@@ -597,7 +559,6 @@ pub(super) fn touch_keeping(
             return None;
         }
         if overlap - best <= decisive {
-            best = overlap;
             chosen = held;
             normal = if dot(between, axis) < 0.0 {
                 scale(axis, -1.0)
@@ -717,7 +678,7 @@ fn deepest_two(
     a: &Shape,
     b: &Shape,
     normal: (f64, f64, f64),
-) -> [Option<((f64, f64, f64), f64)>; 2] {
+) -> [Option<DepthPoint>; 2] {
     // The region the two share, taken from each side. `a` as the reference finds a face
     // of `b` lying on `a`; `b` as the reference finds the other way round; and an edge
     // across a face is only seen from one of them, so both are asked.
@@ -797,7 +758,7 @@ fn deepest_two(
 /// The `span` both contacts carry is the arm between them, which is what tells the
 /// friction solve how far this patch reaches. For a prism that is not a guess: it is the
 /// distance between the two clipped points, which is a real length on a real face.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 pub(super) fn prism_contact(
     a: usize,
     b: usize,

@@ -14,6 +14,12 @@ pub struct EasyPhysics {
     constants: PhysicsConstants,
 }
 
+impl Default for EasyPhysics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EasyPhysics {
 
     /// Creates a new `EasyPhysics` instance with default physical constants.

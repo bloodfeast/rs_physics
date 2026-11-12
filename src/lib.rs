@@ -132,6 +132,11 @@
 //!   themselves are single-threaded (use rayon externally for parallelism)
 //! - Collision detection is for convex shapes only (use convex decomposition for concave)
 
+#![allow(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "`!(x > 0.0)` is the crate's NaN-rejecting guard: it is true for NaN, where `x <= 0.0` is not"
+)]
+
 pub mod utils;
 pub mod apis;
 pub mod physics;

@@ -2,10 +2,10 @@
 #[inline]
 pub fn fast_atan(x: f32) -> f32 {
     // Constants for the approximation
-    const A: f32 = 0.0776509570923569;
-    const B: f32 = -0.287434475393028;
-    const C: f32 = 0.995354526943123;
-    const D: f32 = -0.211410230597758;
+    const A: f32 = 0.077_650_96;
+    const B: f32 = -0.287_434_5;
+    const C: f32 = 0.995_354_53;
+    const D: f32 = -0.211_410_22;
 
     let abs_x = x.abs();
     let z = if abs_x > 1.0 { 1.0 / abs_x } else { abs_x };
@@ -144,12 +144,18 @@ pub struct AtanLookupTable {
     table: [f32; 1024],
 }
 
+impl Default for AtanLookupTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtanLookupTable {
     pub fn new() -> Self {
         let mut table = [0.0; 1024];
-        for i in 0..1024 {
+        for (i, slot) in table.iter_mut().enumerate() {
             let x = i as f32 / 1023.0;
-            table[i] = x.atan();
+            *slot = x.atan();
         }
         Self { table }
     }
@@ -227,7 +233,7 @@ pub fn vector_magnitude(v: (f64, f64, f64)) -> f64 {
 
 /// Vector utility: normalization
 #[inline]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "kept: unused private helper; removing it is outside an attribute-only pass")]
 fn normalize_vector(v: (f64, f64, f64)) -> (f64, f64, f64) {
     let mag = crate::interactions::vector_magnitude(v);
     if mag > 1e-10 {

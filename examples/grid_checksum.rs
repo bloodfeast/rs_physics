@@ -116,7 +116,7 @@ fn grid_3d(name: &str, config: SolverConfig, coefficient: f64) {
 
 fn particles() {
     let mut fx = ParticleEffects::with_capacity(20_000);
-    #[allow(clippy::needless_update)]
+    #[allow(clippy::needless_update, reason = "the classes set every field today; the update keeps the example compiling when ParticleClass grows one")]
     {
         fx.set_class(
             0,

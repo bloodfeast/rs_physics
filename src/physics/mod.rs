@@ -50,6 +50,7 @@
 //! - Projectile motion assumes constant gravity and no air resistance
 //! - Circular motion assumes uniform motion
 
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod physics;
 #[cfg(test)]
 mod physics_tests;

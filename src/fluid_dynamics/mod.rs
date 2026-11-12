@@ -188,6 +188,7 @@ pub use solver::*;
 
 // Analytical fluid dynamics (drag, buoyancy, Reynolds number, etc.)
 #[cfg(feature = "fluid_dynamics")]
+#[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod fluid_dynamics;
 #[cfg(feature = "fluid_dynamics")]
 pub use fluid_dynamics::*;

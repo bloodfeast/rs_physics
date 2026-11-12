@@ -9,6 +9,19 @@ use super::physics_world::{ForceId, ContinuousForce};
 #[cfg(feature = "constraints")]
 use super::world_constraints::{ConstraintId, WorldConstraint};
 
+/// The error every [`PhysicsHandle`] call returns when the physics thread has shut down,
+/// so the command could not be sent or its reply never came.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldClosed;
+
+impl std::fmt::Display for WorldClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the physics thread has shut down")
+    }
+}
+
+impl std::error::Error for WorldClosed {}
+
 /// Commands that can be sent to the physics thread
 #[derive(Debug)]
 pub enum PhysicsCommand {
@@ -251,15 +264,15 @@ impl PhysicsHandle {
     /// Send a command to the physics thread
     ///
     /// Returns `Ok(())` if the command was sent successfully,
-    /// or `Err(())` if the physics thread has shut down.
-    pub fn send_command(&self, cmd: PhysicsCommand) -> Result<(), ()> {
-        self.command_sender.send(cmd).map_err(|_| ())
+    /// or `Err(WorldClosed)` if the physics thread has shut down.
+    pub fn send_command(&self, cmd: PhysicsCommand) -> Result<(), WorldClosed> {
+        self.command_sender.send(cmd).map_err(|_| WorldClosed)
     }
 
     /// Add a new object to the physics world
     ///
     /// This blocks until the object is added and returns its ObjectId.
-    pub fn add_object(&self, object: PhysicalObject3D) -> Result<ObjectId, ()> {
+    pub fn add_object(&self, object: PhysicalObject3D) -> Result<ObjectId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
 
         self.send_command(PhysicsCommand::AddObject {
@@ -268,36 +281,36 @@ impl PhysicsHandle {
         })?;
 
         // Wait for response
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Remove an object from the physics world
-    pub fn remove_object(&self, id: ObjectId) -> Result<(), ()> {
+    pub fn remove_object(&self, id: ObjectId) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::RemoveObject(id))
     }
 
     /// Set the simulation timestep
-    pub fn set_timestep(&self, dt: f64) -> Result<(), ()> {
+    pub fn set_timestep(&self, dt: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetTimestep(dt))
     }
 
     /// Apply a force to an object (raw 3D vector)
-    pub fn apply_force(&self, id: ObjectId, force: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn apply_force(&self, id: ObjectId, force: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyForce(id, force))
     }
 
     /// Apply an impulse to an object (instant velocity change)
-    pub fn apply_impulse(&self, id: ObjectId, impulse: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn apply_impulse(&self, id: ObjectId, impulse: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyImpulse(id, impulse))
     }
 
     /// Set the velocity of an object
-    pub fn set_velocity(&self, id: ObjectId, velocity: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn set_velocity(&self, id: ObjectId, velocity: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetVelocity(id, velocity))
     }
 
     /// Set the position of an object
-    pub fn set_position(&self, id: ObjectId, position: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn set_position(&self, id: ObjectId, position: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetPosition(id, position))
     }
 
@@ -310,7 +323,7 @@ impl PhysicsHandle {
     /// // Push object forward with 100N of force
     /// physics.apply_force_directed(id, 100.0, (1.0, 0.0, 0.0))?;
     /// ```
-    pub fn apply_force_directed(&self, id: ObjectId, magnitude: f64, direction: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn apply_force_directed(&self, id: ObjectId, magnitude: f64, direction: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyForceDirected(id, magnitude, direction))
     }
 
@@ -321,7 +334,7 @@ impl PhysicsHandle {
     /// // Pull object toward origin with 50N
     /// physics.apply_force_toward(id, (0.0, 0.0, 0.0), 50.0)?;
     /// ```
-    pub fn apply_force_toward(&self, id: ObjectId, target: (f64, f64, f64), magnitude: f64) -> Result<(), ()> {
+    pub fn apply_force_toward(&self, id: ObjectId, target: (f64, f64, f64), magnitude: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyForceToward(id, target, magnitude))
     }
 
@@ -332,7 +345,7 @@ impl PhysicsHandle {
     /// // Push object away from player with 30N
     /// physics.apply_force_away(id, player_pos, 30.0)?;
     /// ```
-    pub fn apply_force_away(&self, id: ObjectId, source: (f64, f64, f64), magnitude: f64) -> Result<(), ()> {
+    pub fn apply_force_away(&self, id: ObjectId, source: (f64, f64, f64), magnitude: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyForceAway(id, source, magnitude))
     }
 
@@ -343,7 +356,7 @@ impl PhysicsHandle {
     /// // Apply air resistance
     /// physics.apply_drag(id, 0.5)?;
     /// ```
-    pub fn apply_drag(&self, id: ObjectId, drag_coefficient: f64) -> Result<(), ()> {
+    pub fn apply_drag(&self, id: ObjectId, drag_coefficient: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyDrag(id, drag_coefficient))
     }
 
@@ -354,7 +367,7 @@ impl PhysicsHandle {
     /// // Tether object to anchor point
     /// physics.apply_spring_force(id, anchor_pos, 10.0)?;
     /// ```
-    pub fn apply_spring_force(&self, id: ObjectId, rest_position: (f64, f64, f64), stiffness: f64) -> Result<(), ()> {
+    pub fn apply_spring_force(&self, id: ObjectId, rest_position: (f64, f64, f64), stiffness: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplySpringForce(id, rest_position, stiffness))
     }
 
@@ -365,7 +378,7 @@ impl PhysicsHandle {
     /// // Smooth return to rest position
     /// physics.apply_damped_spring(id, rest_pos, 10.0, 2.0)?;
     /// ```
-    pub fn apply_damped_spring(&self, id: ObjectId, rest_position: (f64, f64, f64), stiffness: f64, damping: f64) -> Result<(), ()> {
+    pub fn apply_damped_spring(&self, id: ObjectId, rest_position: (f64, f64, f64), stiffness: f64, damping: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyDampedSpring(id, rest_position, stiffness, damping))
     }
 
@@ -376,7 +389,7 @@ impl PhysicsHandle {
     /// // Explosion at (0, 0, 0) with 1000N force, 10m radius
     /// physics.apply_explosion((0.0, 0.0, 0.0), 1000.0, 10.0)?;
     /// ```
-    pub fn apply_explosion(&self, center: (f64, f64, f64), force: f64, radius: f64) -> Result<(), ()> {
+    pub fn apply_explosion(&self, center: (f64, f64, f64), force: f64, radius: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyExplosion(center, force, radius))
     }
 
@@ -385,7 +398,7 @@ impl PhysicsHandle {
     /// // Spin object around Y axis
     /// physics.apply_torque(id, (0.0, 1.0, 0.0))?;
     /// ```
-    pub fn apply_torque(&self, id: ObjectId, torque: (f64, f64, f64)) -> Result<(), ()> {
+    pub fn apply_torque(&self, id: ObjectId, torque: (f64, f64, f64)) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyTorque(id, torque))
     }
 
@@ -398,7 +411,7 @@ impl PhysicsHandle {
     /// // Water surface at y=0, water density
     /// physics.apply_buoyancy(id, 0.0, 1000.0)?;
     /// ```
-    pub fn apply_buoyancy(&self, id: ObjectId, surface_y: f64, fluid_density: f64) -> Result<(), ()> {
+    pub fn apply_buoyancy(&self, id: ObjectId, surface_y: f64, fluid_density: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyBuoyancy(id, surface_y, fluid_density))
     }
 
@@ -408,22 +421,22 @@ impl PhysicsHandle {
     /// Add a continuous force (generic)
     ///
     /// Returns a ForceId that can be used to manually remove the force later.
-    pub fn add_continuous_force(&self, force: ContinuousForce) -> Result<ForceId, ()> {
+    pub fn add_continuous_force(&self, force: ContinuousForce) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddContinuousForce {
             force,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Remove a continuous force by ID
-    pub fn remove_continuous_force(&self, id: ForceId) -> Result<(), ()> {
+    pub fn remove_continuous_force(&self, id: ForceId) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::RemoveContinuousForce(id))
     }
 
     /// Remove all continuous forces targeting an object
-    pub fn remove_forces_on_object(&self, target: ObjectId) -> Result<(), ()> {
+    pub fn remove_forces_on_object(&self, target: ObjectId) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::RemoveForcesOnObject(target))
     }
 
@@ -435,14 +448,14 @@ impl PhysicsHandle {
     /// // Drag will auto-remove when ball slows down
     /// // Or manually remove: physics.remove_continuous_force(drag_id)?;
     /// ```
-    pub fn add_drag(&self, target: ObjectId, coefficient: f64) -> Result<ForceId, ()> {
+    pub fn add_drag(&self, target: ObjectId, coefficient: f64) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddDrag {
             target,
             coefficient,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add continuous spring force (auto-removes when at rest position)
@@ -451,7 +464,7 @@ impl PhysicsHandle {
     /// // Tether ball to anchor - will oscillate then settle
     /// let spring_id = physics.add_spring(ball_id, anchor_pos, 10.0)?;
     /// ```
-    pub fn add_spring(&self, target: ObjectId, rest_position: (f64, f64, f64), stiffness: f64) -> Result<ForceId, ()> {
+    pub fn add_spring(&self, target: ObjectId, rest_position: (f64, f64, f64), stiffness: f64) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddSpring {
             target,
@@ -459,7 +472,7 @@ impl PhysicsHandle {
             stiffness,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add continuous damped spring (auto-removes when settled)
@@ -468,7 +481,7 @@ impl PhysicsHandle {
     /// // Smooth return to position with reduced oscillation
     /// let spring_id = physics.add_damped_spring(ball_id, rest_pos, 10.0, 2.0)?;
     /// ```
-    pub fn add_damped_spring(&self, target: ObjectId, rest_position: (f64, f64, f64), stiffness: f64, damping: f64) -> Result<ForceId, ()> {
+    pub fn add_damped_spring(&self, target: ObjectId, rest_position: (f64, f64, f64), stiffness: f64, damping: f64) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddDampedSpring {
             target,
@@ -477,7 +490,7 @@ impl PhysicsHandle {
             damping,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add continuous attraction toward a point
@@ -487,7 +500,7 @@ impl PhysicsHandle {
     /// // Temporary gravity well for 5 seconds
     /// let force_id = physics.add_attraction(ball_id, center, 50.0, Some(5.0))?;
     /// ```
-    pub fn add_attraction(&self, target: ObjectId, point: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, ()> {
+    pub fn add_attraction(&self, target: ObjectId, point: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddAttraction {
             target,
@@ -496,7 +509,7 @@ impl PhysicsHandle {
             duration,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add continuous buoyancy (auto-removes when above surface for extended time)
@@ -505,7 +518,7 @@ impl PhysicsHandle {
     /// // Ball will float in water
     /// let buoyancy_id = physics.add_buoyancy(ball_id, water_level, 1000.0)?;
     /// ```
-    pub fn add_buoyancy(&self, target: ObjectId, surface_y: f64, fluid_density: f64) -> Result<ForceId, ()> {
+    pub fn add_buoyancy(&self, target: ObjectId, surface_y: f64, fluid_density: f64) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddBuoyancy {
             target,
@@ -513,7 +526,7 @@ impl PhysicsHandle {
             fluid_density,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add a constant continuous force (like wind or thrust)
@@ -523,14 +536,14 @@ impl PhysicsHandle {
     /// // Constant wind pushing objects
     /// let wind_id = physics.add_constant_force(ball_id, (10.0, 0.0, 0.0))?;
     /// ```
-    pub fn add_constant_force(&self, target: ObjectId, force: (f64, f64, f64)) -> Result<ForceId, ()> {
+    pub fn add_constant_force(&self, target: ObjectId, force: (f64, f64, f64)) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddConstantForce {
             target,
             force,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add continuous repulsion from a point (force field)
@@ -540,7 +553,7 @@ impl PhysicsHandle {
     /// // Push objects away from hazard zone for 10 seconds
     /// let force_id = physics.add_repulsion(ball_id, hazard_center, 100.0, Some(10.0))?;
     /// ```
-    pub fn add_repulsion(&self, target: ObjectId, point: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, ()> {
+    pub fn add_repulsion(&self, target: ObjectId, point: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddRepulsion {
             target,
@@ -549,7 +562,7 @@ impl PhysicsHandle {
             duration,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Add vortex/rotational force around an axis
@@ -560,7 +573,7 @@ impl PhysicsHandle {
     /// // Create tornado effect around Y axis
     /// let vortex_id = physics.add_vortex(ball_id, center, (0.0, 1.0, 0.0), 50.0, None)?;
     /// ```
-    pub fn add_vortex(&self, target: ObjectId, center: (f64, f64, f64), axis: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, ()> {
+    pub fn add_vortex(&self, target: ObjectId, center: (f64, f64, f64), axis: (f64, f64, f64), strength: f64, duration: Option<f64>) -> Result<ForceId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddVortex {
             target,
@@ -570,7 +583,7 @@ impl PhysicsHandle {
             duration,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     // ==================== Kinematic Object Methods ====================
@@ -583,7 +596,7 @@ impl PhysicsHandle {
     /// // Update plank position based on rope particle positions
     /// physics.set_position_kinematic(plank_id, new_pos, dt)?;
     /// ```
-    pub fn set_position_kinematic(&self, id: ObjectId, position: (f64, f64, f64), dt: f64) -> Result<(), ()> {
+    pub fn set_position_kinematic(&self, id: ObjectId, position: (f64, f64, f64), dt: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetPositionKinematic(id, position, dt))
     }
 
@@ -594,7 +607,7 @@ impl PhysicsHandle {
     /// [`Self::set_position_kinematic`] can be moved but never turned, which
     /// leaves a rotating visual and an axis-aligned collider describing
     /// different worlds.
-    pub fn set_orientation_kinematic(&self, id: ObjectId, orientation: (f64, f64, f64), dt: f64) -> Result<(), ()> {
+    pub fn set_orientation_kinematic(&self, id: ObjectId, orientation: (f64, f64, f64), dt: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetOrientationKinematic(id, orientation, dt))
     }
 
@@ -610,18 +623,18 @@ impl PhysicsHandle {
     /// let constraint_id = physics.add_constraint(WorldConstraint::RopeChain { ... })?;
     /// ```
     #[cfg(feature = "constraints")]
-    pub fn add_constraint(&self, constraint: WorldConstraint) -> Result<ConstraintId, ()> {
+    pub fn add_constraint(&self, constraint: WorldConstraint) -> Result<ConstraintId, WorldClosed> {
         let (response_tx, response_rx) = unbounded();
         self.send_command(PhysicsCommand::AddConstraint {
             constraint,
             response: response_tx,
         })?;
-        response_rx.recv().map_err(|_| ())
+        response_rx.recv().map_err(|_| WorldClosed)
     }
 
     /// Remove a constraint from the world
     #[cfg(feature = "constraints")]
-    pub fn remove_constraint(&self, id: ConstraintId) -> Result<(), ()> {
+    pub fn remove_constraint(&self, id: ConstraintId) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::RemoveConstraint(id))
     }
 
@@ -637,7 +650,7 @@ impl PhysicsHandle {
         id: ConstraintId,
         particle_index: usize,
         force: (f64, f64, f64),
-    ) -> Result<(), ()> {
+    ) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyForceToConstraintParticle(
             id,
             particle_index,
@@ -653,7 +666,7 @@ impl PhysicsHandle {
     /// that opens. Collapsing the range around the current angle holds it shut;
     /// widening it lets go.
     #[cfg(feature = "constraints")]
-    pub fn set_hinge_limits(&self, id: ConstraintId, min: f64, max: f64) -> Result<(), ()> {
+    pub fn set_hinge_limits(&self, id: ConstraintId, min: f64, max: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::SetHingeLimits(id, min, max))
     }
 
@@ -664,7 +677,7 @@ impl PhysicsHandle {
     /// have delivered, so a door reacts to being hit rather than swinging on its
     /// own schedule.
     #[cfg(feature = "constraints")]
-    pub fn apply_hinge_impulse(&self, id: ConstraintId, angular_impulse: f64) -> Result<(), ()> {
+    pub fn apply_hinge_impulse(&self, id: ConstraintId, angular_impulse: f64) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::ApplyHingeImpulse(id, angular_impulse))
     }
 
@@ -681,7 +694,7 @@ impl PhysicsHandle {
         object: ObjectId,
         constraint: ConstraintId,
         particle_index: usize,
-    ) -> Result<(), ()> {
+    ) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::AttachObjectToConstraint(
             object, constraint, particle_index,
         ))
@@ -690,19 +703,19 @@ impl PhysicsHandle {
     // ==================== Simulation Control ====================
 
     /// Pause the simulation
-    pub fn pause(&self) -> Result<(), ()> {
+    pub fn pause(&self) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::Pause)
     }
 
     /// Resume the simulation
-    pub fn resume(&self) -> Result<(), ()> {
+    pub fn resume(&self) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::Resume)
     }
 
     /// Shutdown the physics thread
     ///
     /// After calling this, the handle is no longer usable.
-    pub fn shutdown(&self) -> Result<(), ()> {
+    pub fn shutdown(&self) -> Result<(), WorldClosed> {
         self.send_command(PhysicsCommand::Shutdown)
     }
 

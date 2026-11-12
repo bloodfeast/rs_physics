@@ -207,7 +207,7 @@ fn air(c: &mut Criterion) {
                     let mut spent = Duration::ZERO;
                     for _ in 0..iters {
                         on.feed();
-                        if frame % period == 0 {
+                        if frame.is_multiple_of(period) {
                             field.advance(period as f32 * DT);
                         }
                         frame += 1;
@@ -371,7 +371,7 @@ fn gpu_pool(c: &mut Criterion) {
                     let started = Instant::now();
                     let mut paused = Duration::ZERO;
                     feed.feed_into(pool);
-                    if frame % 3 == 0 {
+                    if frame.is_multiple_of(3) {
                         // The field's own step is the worker's, not the frame thread's.
                         let step = Instant::now();
                         field.advance(3.0 * DT);

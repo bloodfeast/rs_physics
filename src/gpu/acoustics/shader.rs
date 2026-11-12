@@ -230,12 +230,12 @@ pub(crate) fn query_source() -> String {
     c("DB_PER_LOG2", f(20.0 * 2f64.log10()), &mut s);
     c("LOG2_E", f(std::f64::consts::LOG2_E), &mut s);
     c("LOG2_10_OVER_10", f(10f64.log2() / 10.0), &mut s);
-    for n in 0..COTH_TERMS {
+    for (n, &term) in series[..COTH_TERMS].iter().enumerate() {
         let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
-        c(&format!("COTH_C{}", n + 1), f(sign * series[n]), &mut s);
+        c(&format!("COTH_C{}", n + 1), f(sign * term), &mut s);
     }
-    for n in 0..COT_TERMS {
-        c(&format!("COT_C{}", n + 1), f(-series[n]), &mut s);
+    for (n, &term) in series[..COT_TERMS].iter().enumerate() {
+        c(&format!("COT_C{}", n + 1), f(-term), &mut s);
     }
     c("FIT_W", vec4(k.fit_weights), &mut s);
     c("FIT_X_MEAN", f(k.fit_x_mean), &mut s);

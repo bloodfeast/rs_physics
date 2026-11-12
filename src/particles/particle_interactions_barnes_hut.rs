@@ -526,12 +526,12 @@ pub unsafe fn compute_force_simd_avx(p: ParticleData, worklist: &[ApproxNode], g
         i += 4;
     }
     // Process remaining nodes in scalar.
-    for j in i..n {
-        let dx = worklist[j].com_x - p.x;
-        let dy = worklist[j].com_y - p.y;
+    for node in &worklist[i..n] {
+        let dx = node.com_x - p.x;
+        let dy = node.com_y - p.y;
         let dist_sq = dx * dx + dy * dy + 1e-12;
         let dist = dist_sq.sqrt();
-        let force = g * p.mass * worklist[j].mass / dist_sq;
+        let force = g * p.mass * node.mass / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
     }
@@ -602,12 +602,12 @@ pub unsafe fn compute_force_simd_avx_low_precision(p: ParticleData, worklist: &[
         i += 8;
     }
     // Process remaining nodes in scalar.
-    for j in i..n {
-        let dx = worklist[j].com_x as f32 - p.x as f32;
-        let dy = worklist[j].com_y as f32 - p.y as f32;
+    for node in &worklist[i..n] {
+        let dx = node.com_x as f32 - p.x as f32;
+        let dy = node.com_y as f32 - p.y as f32;
         let dist_sq = dx * dx + dy * dy + 1e-12;
         let dist = dist_sq.sqrt();
-        let force = g as f32 * p.mass as f32 * worklist[j].mass as f32 / dist_sq;
+        let force = g * p.mass as f32 * node.mass as f32 / dist_sq;
         force_x += force * dx / dist;
         force_y += force * dy / dist;
     }
