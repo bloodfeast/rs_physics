@@ -827,6 +827,9 @@ pub(super) fn prism_contact(
             radius,
             half_length,
             true,
+            // A prism pair's patch is the face it clips; the bounding capsules are only
+            // asked where the pair is closest.
+            false,
         );
     };
 

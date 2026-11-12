@@ -469,6 +469,16 @@ const PARALLEL_SINE: f64 = 0.05;
 /// occasions on which an intermittent constraint is what a rig walks on. Reviving always,
 /// or never, is stable; reviving sometimes is not. So the rule stays "it carried load last
 /// step", which is a fact about the pair rather than a distance.
+///
+/// # And a crossed pair gets a patch too, when `patch` says so
+///
+/// Every other pair -- crossed, or meeting end to end -- touches at a point, and that is
+/// ninety-nine contacts in a hundred in a heap. With `patch` on, an overlapping one is
+/// given the patch its overlap actually has instead: see [`pair_patch`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "two bodies' shapes, whether the pair is remembered and which contact model is on, read in the narrow phase's hot loop; a struct would only be built to be taken apart"
+)]
 pub(super) fn capsule_contact(
     a: usize,
     b: usize,
@@ -477,6 +487,7 @@ pub(super) fn capsule_contact(
     radius: &[f64],
     half_length: &[f64],
     alive: bool,
+    patch: bool,
 ) -> [Option<Contact>; 2] {
     let none = [None, None];
     let (pa, qa) = segment(position[a], orientation[a], half_length[a]);
@@ -550,6 +561,45 @@ pub(super) fn capsule_contact(
         }
     }
 
+    // Crossed capsules overlapping by `depth` share a patch, and with `patch` on they are
+    // held by its two ends. A pair kept alive while clear has no overlap to derive one from
+    // and keeps its one point.
+    let depth = reach - length(between);
+    if patch && depth > 0.0 {
+        let along = |i: usize, c: (f64, f64, f64)| {
+            let axis = rotate(orientation[i], (0.0, 1.0, 0.0));
+            let s = dot(sub(c, position[i]), axis);
+            // On the cylinder's side the closest point is strictly inside the segment; at
+            // either end it is on a cap, which is a sphere.
+            (axis, s.abs() < half_length[i] - 1e-9)
+        };
+        let shapes = [along(a, ca), along(b, cb)];
+        if let Some(PairPatch { offset, span }) = pair_patch(
+            normal,
+            depth,
+            [radius[a], radius[b]],
+            [shapes[0].0, shapes[1].0],
+            [shapes[0].1, shapes[1].1],
+        ) {
+            let end = |sign: f64| {
+                let shift = scale(offset, sign);
+                touching(
+                    a,
+                    b,
+                    add(ca, shift),
+                    add(cb, shift),
+                    normal,
+                    span,
+                    position,
+                    orientation,
+                    radius,
+                    alive,
+                )
+            };
+            return [end(-1.0), end(1.0)];
+        }
+    }
+
     // Crossed capsules touch at a point, which reaches nowhere.
     [
         touching(
@@ -566,6 +616,122 @@ pub(super) fn capsule_contact(
         ),
         None,
     ]
+}
+
+/// **The patch two curved surfaces share when they overlap by `depth`**: the offset from the
+/// closest point to one end of it, and the span from one end to the other, or `None` when
+/// there is no overlap to have a patch.
+///
+/// # Why a crossed pair has a patch at all
+///
+/// As rigid shapes two crossed capsules touch at one point, and a point has no moment arm:
+/// the pair turns about it freely, and a heap whose contacts are nearly all such points
+/// rocks and creeps instead of resting. But the solver never holds a pair at zero overlap.
+/// Every contact it builds is built from the predicted positions, overlapping by the
+/// step's own sag at least, and over that overlap the two surfaces coincide on a region,
+/// not at a point. That region is the patch, and its size is geometry.
+///
+/// # The derivation
+///
+/// Near the contact, a surface of curvature `k` along a tangent direction `u` falls away
+/// from its tangent plane by `k u^2 / 2`. Two surfaces pressed `depth` into each other
+/// still overlap wherever the two fall-aways together are less than `depth`:
+///
+/// ```text
+///   (k_a(u) + k_b(u)) u^2 / 2 < depth
+/// ```
+///
+/// A capsule's curvature is `1 / r` across its cylinder and on its caps in every
+/// direction, and zero along its cylinder. So in every direction `k_a + k_b` is at most
+/// `1 / r_a + 1 / r_b`, which is the two-sphere case, and the patch reaches at least
+///
+/// ```text
+///   rho = sqrt(2 depth r),   r = r_a r_b / (r_a + r_b)
+/// ```
+///
+/// from the closest point whichever way it is measured -- the reduced radius, the same `r`
+/// Hertz's contact radius uses. The overlap has no coefficient in it, nothing to tune, and
+/// it grows with load because a heavier contact sags deeper.
+///
+/// # Which way the two ends go
+///
+/// Two points hold a turn about the axis across them and not the turn about the line
+/// through them, so one direction has to be chosen, and the geometry chooses it: the
+/// patch is an ellipse, and the ends go along its **long axis**, where the true overlap
+/// reaches furthest past `rho` and the two points are surest to be inside it. The long
+/// axis is the direction the surfaces fall away from each other slowest, the smallest
+/// eigenvector of the summed curvature `M = sum_i c_i` in the tangent plane, with `c_i =
+/// p_i p_i^T / r_i` for a cylinder's side (`p_i` the tangent direction across its axis)
+/// and `I / r_i` for a cap. Two crossed limbs put the ends along the thinner limb, which is
+/// the one a seesaw over the thicker would turn; two spheres have no long axis and any
+/// direction is as good.
+///
+/// Both ends are carried at the closest point's depth: the solve holds the pair on the
+/// plane the two surfaces share across the patch, as the ground's patch is held on the
+/// ground, so that tipping it one way presses one end and lifts the other.
+///
+/// # What it does not reach
+///
+/// A near-parallel pair already has the line patch [`capsule_contact`] gives it, a pair of
+/// prisms has the face patch [`super::prism::prism_contact`] clips, and a pair kept alive
+/// while clear has no overlap to derive one from. All three are unchanged.
+pub(super) fn pair_patch(
+    normal: (f64, f64, f64),
+    depth: f64,
+    radius: [f64; 2],
+    axis: [(f64, f64, f64); 2],
+    on_side: [bool; 2],
+) -> Option<PairPatch> {
+    let sum = radius[0] + radius[1];
+    if depth <= 0.0 || radius[0] <= 0.0 || radius[1] <= 0.0 {
+        return None;
+    }
+    let rho = (2.0 * depth * radius[0] * radius[1] / sum).sqrt();
+
+    // A tangent basis. Any will do: the eigenvector found in it is a direction in the
+    // plane, not a coordinate.
+    let seed = if normal.0.abs() < 0.9 { (1.0, 0.0, 0.0) } else { (0.0, 1.0, 0.0) };
+    let first = normalized(cross(normal, seed))?;
+    let second = cross(normal, first);
+
+    // The summed curvature in that basis, as the symmetric 2x2 [[m00, m01], [m01, m11]].
+    let (mut m00, mut m01, mut m11) = (0.0, 0.0, 0.0);
+    for i in 0..2 {
+        let k = 1.0 / radius[i];
+        match normalized(cross(normal, axis[i])).filter(|_| on_side[i]) {
+            // Curved across the axis only.
+            Some(across) => {
+                let (x, y) = (dot(across, first), dot(across, second));
+                m00 += k * x * x;
+                m01 += k * x * y;
+                m11 += k * y * y;
+            }
+            // A cap, or an axis along the normal: curved every way.
+            None => {
+                m00 += k;
+                m11 += k;
+            }
+        }
+    }
+    // The eigenvector of the larger eigenvalue lies at half the angle of (m00 - m11, 2
+    // m01); the long axis is the one at right angles to it.
+    let half = 0.5 * (2.0 * m01).atan2(m00 - m11);
+    let (sin, cos) = half.sin_cos();
+    let long = add(scale(first, -sin), scale(second, cos));
+    let offset = scale(long, rho);
+    Some(PairPatch {
+        offset,
+        span: scale(offset, 2.0),
+    })
+}
+
+/// What [`pair_patch`] answers: where one end of the patch is from the closest point (the
+/// other is the same distance the other way), and the vector from one end to the other,
+/// which is what [`Contact::span`] carries.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PairPatch {
+    pub offset: (f64, f64, f64),
+    pub span: (f64, f64, f64),
 }
 
 /// One contact from a pair of points on the two axes, or `None` if the capsules are clear

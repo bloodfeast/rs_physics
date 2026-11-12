@@ -19,7 +19,8 @@
 //! Nothing here reaches inside the module. If a law cannot be expressed through the public
 //! API then the public API is missing something, which is worth knowing on its own.
 
-use rs_physics::articulated::{Body, Joint, Skeleton};
+use rs_physics::articulated::{Body, Field, Joint, Skeleton};
+use rs_physics::models::Quaternion;
 
 const DT: f64 = 1.0 / 60.0;
 const G: (f64, f64, f64) = (0.0, -9.80665, 0.0);
@@ -1302,6 +1303,395 @@ fn a_hinge_does_not_turn_itself_inside_out() {
     );
 }
 
+// -- a rig at every landing pose, and a heap of them ----------------------------------
+
+/// **A rig that may touch itself comes to rest whatever pose it lands in.**
+///
+/// `a_rig_that_touches_itself_comes_to_rest` drops the rig upright, and the solver's module
+/// header records that upright is one of the good poses. This is the same claim made over
+/// the poses a body actually falls in: twenty copies of the rig, spawned as a pose by
+/// [`untangled_rig`] rather than as [`rig`]'s tangle, on a 2.5 m grid, so that no
+/// two can reach each other and each is an independent sample, every one turned by its own
+/// axis and angle and dropped with its lowest surface 0.55 m clear of the ground. Eight
+/// draws a relative 1e-12 apart in that clearance, a hundred and sixty samples.
+///
+/// # Why every sample, and why one skeleton
+///
+/// A game ends a fallen body when it has come to rest, and a heap sleeps only when its last
+/// rig does, so a pose that never settles is not a slow rig but a rig that is solved for
+/// ever. The law is therefore stated over the fraction of samples and the bound on it is all
+/// of them. One skeleton holds all twenty because separate rigs never touch: they are
+/// separate islands and each sleeps on its own, which is exactly what is counted -- a rig
+/// has come to rest on the step all seventeen of its bodies are asleep.
+///
+/// # The bound, and the measurement behind it
+///
+/// Sixty seconds, the cap the module header's ensemble uses. Measured when this law dropped
+/// [`rig`]'s tangle: 132 of 160 samples came to rest, the median at step 742, and the rigs
+/// that did not were each held awake by a pair of their own bones a few millimetres inside
+/// each other -- the neck or the upper spine against an upper arm, all three bodies jointed
+/// to the chest -- at loads of 300 to 600 N on bones that weigh 39 to 59 N. With
+/// self-collision off the same 160 samples all come to rest, at a median of step 126.
+///
+/// Spawned untangled: 152 of 160 with `Skeleton::set_contact_patch` off, 148 with it on
+/// (the slowest at step 2968 and 3095).
+#[test]
+fn a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose() {
+    let (rested, total, slowest) = landing_poses(None);
+    assert_eq!(
+        rested, total,
+        "{rested} of {total} landing poses came to rest inside sixty seconds (the slowest that \
+         did took {slowest} steps); every one has to"
+    );
+}
+
+/// **And on ground that is a height field.**
+///
+/// The same hundred and sixty samples over a gently rolling [`Field`] -- slopes below six
+/// degrees, well inside the friction angle -- because the ground a game drops a body on is
+/// rarely a plane, and a body on a slope rests on friction where on the plane it rests on the
+/// normal alone. Every rig is lifted so its lowest surface is the same 0.55 m above the
+/// ground beneath it.
+///
+/// Measured when this law dropped [`rig`]'s tangle: 113 of 160 came to rest, the median at
+/// step 929. Spawned untangled: 158 of 160 with `Skeleton::set_contact_patch` off, 150 with
+/// it on.
+#[test]
+fn a_rig_that_touches_itself_comes_to_rest_on_a_height_field() {
+    let heights = rolling_ground();
+    let field = Field::new(&heights, FIELD_SIDE, FIELD_SIDE, FIELD_CELL, FIELD_ORIGIN)
+        .expect("the fixture's field is a valid grid");
+    let (rested, total, slowest) = landing_poses(Some(field));
+    assert_eq!(
+        rested, total,
+        "{rested} of {total} landing poses came to rest on the field inside sixty seconds (the \
+         slowest that did took {slowest} steps); every one has to"
+    );
+}
+
+/// **A heap of rigs that may touch themselves comes to rest.**
+///
+/// Sixteen rigs on a 0.7 m grid, close enough that they land on one another, each spawned
+/// untangled and turned to the landing pose of its own index, all in one skeleton with
+/// self-collision on. A heap is one island and sleeps only when its last body does, so it is
+/// the product of the per-rig fraction the two laws above state, and the reason those have to
+/// be all of their samples rather than most of them.
+///
+/// # Why the landing poses and not upright
+///
+/// This law used to drop every rig upright, and a lone upright rig is a vertical stack of
+/// collinear capsules that cycles with period two at 0.2 to 0.5 J for ever, so the law was
+/// partly measuring that degenerate pose rather than a heap. Measured then: 2 of 8 draws came
+/// to rest inside sixty seconds.
+///
+/// At the landing poses: 0 of 8, with `Skeleton::set_contact_patch` off and on.
+#[test]
+fn a_heap_of_rigs_that_touch_themselves_comes_to_rest() {
+    const DRAWS: usize = 8;
+    const RIGS: usize = 16;
+    const CAP: usize = 3600;
+    let mut rested = Vec::new();
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        let side = (RIGS as f64).sqrt().ceil() as usize;
+        for k in 0..RIGS {
+            let at = ((k % side) as f64 * 0.7, (k / side) as f64 * 0.7);
+            dropped_rig(&mut s, at, landing_turn(k), 0.55 * (1.0 + draw as f64 * 1e-12), None);
+        }
+        assert!(s.self_collision(), "this law is about rigs that may touch themselves");
+        let mut when = None;
+        for step in 1..=CAP {
+            s.step(DT, G, 8);
+            if s.awake_count() == 0 {
+                when = Some(step);
+                break;
+            }
+        }
+        rested.push(when);
+    }
+    let count = rested.iter().filter(|w| w.is_some()).count();
+    assert_eq!(
+        count, DRAWS,
+        "{count} of {DRAWS} heaps of {RIGS} rigs came to rest inside sixty seconds ({rested:?}); \
+         every one has to"
+    );
+}
+
+// -- two bodies leaning, and a body that may only roll ---------------------------------
+
+/// **Two bodies that hold each other up statically are at rest, and stay there.**
+///
+/// A heavy capsule lies on the plane and a limb leans on it at 15 and at 22 degrees, one end
+/// on the plane and its side against the heavy one, a millimetre clear of both. Statically
+/// it holds at either angle on a coefficient of 0.5: its weight falls between its two
+/// supports, and the friction each needs is well inside the cone. So the arrangement is a
+/// fixed point of the physics and has to be one of the solver.
+///
+/// It is the smallest scene with a contact between two bodies that has to hold, and no
+/// joint in it, which is why it is here: a heap of rigs is thousands of these.
+///
+/// # What is asserted
+///
+/// With sleeping off, so that the solver's own sleep cannot hide a creep: after a thousand
+/// steps to land, neither body moves over the next thousand by more than the settling test
+/// lets a body move and still be called still -- its translation plus the arc its turn
+/// sweeps at its own reach, against two per cent of that reach, measured from where it was
+/// at step one thousand rather than from a window that restarts. A body that passes would
+/// be put to sleep on any window and never woken by its own motion.
+///
+/// Measured on the commit this law was written against: neither angle holds. The leaning
+/// body moves 1.40 (15 degrees) and 1.41 (22 degrees) of what the settling test calls still,
+/// and its kinetic energy plateaus at 8e-5 J and 1e-5 J instead of decaying, while the same
+/// body alone on the plane is still to 1e-20 J. With `Skeleton::set_contact_patch` on it is
+/// 1.93 and 5.77: a moment arm at the contact is not what this pair is missing.
+#[test]
+fn two_bodies_leaning_on_each_other_come_to_rest() {
+    let mut failures = Vec::new();
+    for degrees in [15.0_f64, 22.0] {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        s.set_sleeping(false);
+        let mut under = Body::capsule(40.0, 0.06, 0.25, (0.0, 0.06, 0.0));
+        under.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
+        let under = s.add_body(under);
+        let angle = degrees.to_radians();
+        let foot = (-(0.12 + 0.001) / angle.sin(), 0.06 + 0.001, 0.0);
+        let mut over = Body::capsule(
+            4.0,
+            0.06,
+            0.5,
+            (foot.0 + 0.25 * angle.cos(), foot.1 + 0.25 * angle.sin(), 0.0),
+        );
+        over.orientation = Quaternion::from_axis_angle((0.0, 0.0, 1.0), angle - std::f64::consts::FRAC_PI_2);
+        let over = s.add_body(over);
+
+        for _ in 0..1000 {
+            s.step(DT, G, 8);
+        }
+        let from: Vec<_> = [under, over].iter().map(|&i| (s.position(i), s.orientation(i))).collect();
+        let mut worst = [0.0_f64; 2];
+        let mut kinetic = Vec::with_capacity(1000);
+        for _ in 0..1000 {
+            s.step(DT, G, 8);
+            for (k, &i) in [under, over].iter().enumerate() {
+                worst[k] = worst[k].max(still_ratio(&s, i, from[k]));
+            }
+            kinetic.push(kinetic_energy(&s));
+        }
+        kinetic.sort_by(f64::total_cmp);
+        if worst[0] >= 1.0 || worst[1] >= 1.0 {
+            failures.push(format!(
+                "leaning at {degrees} degrees, over the second thousand steps the body underneath \
+                 moved {:.2} and the leaning body {:.2} of what the settling test calls still \
+                 (median kinetic energy {:.2e} J)",
+                worst[0],
+                worst[1],
+                kinetic[kinetic.len() / 2],
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}; both bodies have to stay under 1", failures.join("; "));
+}
+
+/// **A capsule laid across a slope holds below the rolling angle, and rolls past it.**
+///
+/// Rolling resistance is stated as a fraction of the radius, so it is the tangent of an
+/// angle exactly as a friction coefficient is: a round body laid across a slope is held if
+/// the slope's tangent is below it and rolls if it is above. At the default 0.25 that is
+/// 14.0 degrees, so 5 and 10 degrees hold and 20 rolls. Stated in the form of
+/// [`friction_holds_a_slope_and_lets_go_past_coulombs_angle`], with sleeping off and over
+/// a minute, because a hold that leaks is invisible in a second and obvious in a minute.
+///
+/// Measured on the commit this law was written against: neither shallow angle holds. The
+/// capsule keeps about 15 per cent of one step of gravity as velocity for ever and creeps
+/// -- 3.4 mm in 64 s at 5 degrees and 7.3 mm at 10 -- at every pass count, because rolling
+/// resistance has no memory across steps where sliding has its anchor.
+#[test]
+fn rolling_resistance_holds_a_slope_and_lets_go_past_its_angle() {
+    const STILL: f64 = 1e-8;
+    let rolled = |degrees: f64, seconds: f64| -> f64 {
+        let angle: f64 = degrees.to_radians();
+        let up = (-angle.sin(), angle.cos(), 0.0);
+        let downhill = (-angle.cos(), -angle.sin(), 0.0);
+        let mut s = Skeleton::new();
+        s.set_ground(up, 0.0);
+        s.set_sleeping(false);
+        let mut body = Body::capsule(4.0, 0.06, 0.25, (up.0 * 0.062, up.1 * 0.062, 0.0));
+        body.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
+        let i = s.add_body(body);
+        // Half a second to land, then the watch.
+        for _ in 0..30 {
+            s.step(DT, G, 8);
+        }
+        let landed = s.position(i);
+        for _ in 0..(seconds / DT).round() as usize {
+            s.step(DT, G, 8);
+        }
+        let p = s.position(i);
+        let moved = (p.0 - landed.0, p.1 - landed.1, p.2 - landed.2);
+        moved.0 * downhill.0 + moved.1 * downhill.1 + moved.2 * downhill.2
+    };
+    let held: Vec<(f64, f64)> = [5.0, 10.0].iter().map(|&degrees| (degrees, rolled(degrees, 64.0))).collect();
+    assert!(
+        held.iter().all(|&(_, travelled)| travelled.abs() < STILL),
+        "laid across a slope inside the rolling angle of 14.0 degrees the capsule has to stay \
+         put; in 64 s it rolled (degrees, metres) {held:?}",
+    );
+    let travelled = rolled(20.0, 4.0);
+    assert!(
+        travelled > 0.5,
+        "past the rolling angle the capsule has to roll away, and at 20 degrees it went only \
+         {travelled:.3} m in 4 s",
+    );
+}
+
+/// How far body `i` has moved since `from`, as a share of what the settling test calls
+/// still: its translation plus the arc its turn sweeps at its own reach, over two per cent
+/// of that reach. The test `Skeleton::settle` runs, restated from the public state.
+fn still_ratio(s: &Skeleton, i: usize, from: ((f64, f64, f64), Quaternion)) -> f64 {
+    let body = s.body(i);
+    let reach = (body.radius + body.half_length).max(1e-3);
+    let p = body.position;
+    let moved = speed((p.0 - from.0.0, p.1 - from.0.1, p.2 - from.0.2));
+    let delta = body.orientation.multiply(&from.1.conjugate());
+    let sign = if delta.w < 0.0 { -2.0 } else { 2.0 };
+    let turned = (delta.x * sign, delta.y * sign, delta.z * sign);
+    let axis = body.orientation.rotate_point((0.0, 1.0, 0.0));
+    let along = turned.0 * axis.0 + turned.1 * axis.1 + turned.2 * axis.2;
+    let across = speed((turned.0 - axis.0 * along, turned.1 - axis.1 * along, turned.2 - axis.2 * along));
+    (moved + across * reach + along.abs() * body.radius) / (0.02 * reach)
+}
+
+/// Kinetic energy, translational and rotational, of every body with mass.
+fn kinetic_energy(s: &Skeleton) -> f64 {
+    let mut total = 0.0;
+    for i in 0..s.len() {
+        let body = s.body(i);
+        if body.inv_mass <= 0.0 {
+            continue;
+        }
+        let v = body.velocity;
+        total += 0.5 * (v.0 * v.0 + v.1 * v.1 + v.2 * v.2) / body.inv_mass;
+        let w = body.angular_velocity;
+        for (component, inverse) in [(w.0, body.inv_inertia.0), (w.1, body.inv_inertia.1), (w.2, body.inv_inertia.2)] {
+            if inverse > 0.0 {
+                total += 0.5 * component * component / inverse;
+            }
+        }
+    }
+    total
+}
+
+/// The vertices a side of [`rolling_ground`], their spacing in metres, and where the first
+/// one is: a field 31.5 m across that covers the landing-pose grid with room to spare.
+const FIELD_SIDE: usize = 64;
+const FIELD_CELL: f64 = 0.5;
+const FIELD_ORIGIN: (f64, f64) = (-6.0, -6.0);
+
+/// Gently rolling ground: two long swells and a shorter cross-ripple, 0.4 m from trough to
+/// crest at most and nowhere steeper than about six degrees.
+fn rolling_ground() -> Vec<f64> {
+    let mut h = vec![0.0; FIELD_SIDE * FIELD_SIDE];
+    for row in 0..FIELD_SIDE {
+        for column in 0..FIELD_SIDE {
+            let x = FIELD_ORIGIN.0 + column as f64 * FIELD_CELL;
+            let z = FIELD_ORIGIN.1 + row as f64 * FIELD_CELL;
+            h[row * FIELD_SIDE + column] =
+                0.3 * (x / 3.0).sin() * (z / 4.0).cos() + 0.1 * (0.7 * x + 1.3 * z).sin();
+        }
+    }
+    h
+}
+
+/// The landing-pose ensemble the two laws above run, on the plane or on `field`: how many of
+/// its samples came to rest inside sixty seconds, out of how many, and the most steps any
+/// that did took.
+fn landing_poses(field: Option<Field<'_>>) -> (usize, usize, usize) {
+    const DRAWS: usize = 8;
+    const RIGS: usize = 20;
+    const CAP: usize = 3600;
+    let mut rested = 0;
+    let mut slowest = 0;
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        let clearance = 0.55 * (1.0 + draw as f64 * 1e-12);
+        let rigs: Vec<_> = (0..RIGS)
+            .map(|k| {
+                let at = ((k % 5) as f64 * 2.5, (k / 5) as f64 * 2.5);
+                dropped_rig(&mut s, at, landing_turn(k), clearance, field)
+            })
+            .collect();
+        assert!(s.self_collision(), "this law is about rigs that may touch themselves");
+        let mut when = vec![None; RIGS];
+        for step in 1..=CAP {
+            s.step_over(DT, G, 8, field);
+            for (k, bodies) in rigs.iter().enumerate() {
+                if when[k].is_none() && bodies.clone().all(|b| !s.is_awake(b)) {
+                    when[k] = Some(step);
+                }
+            }
+            if s.awake_count() == 0 {
+                break;
+            }
+        }
+        for w in when.into_iter().flatten() {
+            rested += 1;
+            slowest = slowest.max(w);
+        }
+    }
+    (rested, DRAWS * RIGS, slowest)
+}
+
+/// The turn the `k`th rig of the landing-pose ensemble lands with: an axis spread evenly over
+/// the sphere and an angle spread evenly over a whole turn, each by the golden-ratio sequence
+/// of its own constant, so that twenty rigs cover the poses without any two repeating.
+fn landing_turn(k: usize) -> Quaternion {
+    let n = k as f64;
+    let height = 2.0 * (n * 0.618_033_988_75 + 0.1).fract() - 1.0;
+    let around = std::f64::consts::TAU * (n * 0.754_877_666_25 + 0.3).fract();
+    let angle = std::f64::consts::TAU * (n * 0.569_840_290_99 + 0.7).fract();
+    let flat = (1.0 - height * height).max(0.0).sqrt();
+    Quaternion::from_axis_angle((flat * around.cos(), height, flat * around.sin()), angle)
+}
+
+/// [`untangled_rig`], turned by `turn` about its pelvis and set down over `at` with its lowest surface
+/// `clearance` above the ground beneath that surface -- the plane, or `field` where there is
+/// one. Returns the rig's bodies.
+fn dropped_rig(
+    into: &mut Skeleton,
+    at: (f64, f64),
+    turn: Quaternion,
+    clearance: f64,
+    field: Option<Field<'_>>,
+) -> std::ops::Range<usize> {
+    let start = into.len();
+    untangled_rig(into);
+    let bodies = start..into.len();
+    let mut lowest = f64::INFINITY;
+    for i in bodies.clone() {
+        let mut body = into.body(i);
+        let p = turn.rotate_point(body.position);
+        body.position = (p.0 + at.0, p.1, p.2 + at.1);
+        body.orientation = turn.multiply(&body.orientation);
+        let half = body.orientation.rotate_point((0.0, body.half_length, 0.0));
+        for end in [1.0, -1.0] {
+            let x = body.position.0 + end * half.0;
+            let z = body.position.2 + end * half.2;
+            let ground = field.map_or(0.0, |f| f.height_at(x, z));
+            lowest = lowest.min(body.position.1 + end * half.1 - body.radius - ground);
+        }
+        into.set_body(i, body);
+    }
+    for i in bodies.clone() {
+        let mut body = into.body(i);
+        body.position.1 += clearance - lowest;
+        into.set_body(i, body);
+    }
+    bodies
+}
+
 // -- fixtures ---------------------------------------------------------------------
 
 /// A seventeen-bone rig with nothing holding it up: a pelvis, a spine of four up to a
@@ -1343,6 +1733,70 @@ fn rig(into: &mut Skeleton, y: f64) -> usize {
                 }
             };
             let _ = into.add_joint(joint);
+            previous = body;
+        }
+    }
+    into.len() - base
+}
+
+/// **[`rig`]'s bodies and joints, spawned as a pose rather than as a tangle**: every joint
+/// closed and nothing overlapping, the arms raised from the shoulders and the legs hanging
+/// from the hips, built about the origin.
+///
+/// # Why the landing-pose laws drop this and not [`rig`]
+///
+/// [`rig`] lays every limb down the body's own axis from its root, so each upper arm starts
+/// in the same place as the thigh below it and 0.475 m from the shoulder it is jointed to.
+/// The first step then pulls two limbs through each other, and what the rest laws measured
+/// on it was mostly that: dropped at the twenty landing poses, two draws, it rested 29 of 40
+/// at a median of step 489 where this spawn rests 37 of 40 at 107, and it ended carrying 40
+/// per cent of its weight again in squeeze between its own bones where this one carries 4.
+/// A body is dropped in the pose it was in, which is never a tangle.
+///
+/// The same rig as `Kit::Untangled` in `tests/articulated_rest_ladder.rs`, body for body;
+/// an integration test cannot import another, so the two are kept identical by hand.
+fn untangled_rig(into: &mut Skeleton) -> usize {
+    let base = into.len();
+    let limb = |y: f64, z: f64, raised: bool| {
+        let mut body = Body::capsule(4.0, 0.06, 0.25, (0.0, y, z));
+        if raised {
+            body.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::PI);
+        }
+        body
+    };
+    let pelvis = into.add_body(Body::capsule(8.0, 0.1, 0.16, (0.0, 0.0, 0.0)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, 0.2 + 0.2 * i as f64, 0.0)));
+        assert!(into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0))));
+        up = link;
+    }
+    for which in 0..4 {
+        let (root, arm) = if which < 2 { (base + 3, true) } else { (pelvis, false) };
+        let side_z = if which % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            let along = 0.25 * segment as f64;
+            let body = into.add_body(if arm {
+                limb(0.725 + along, side_z, true)
+            } else {
+                limb(-0.125 - along, side_z, false)
+            });
+            let joint = if segment == 0 {
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            assert!(into.add_joint(joint));
             previous = body;
         }
     }
