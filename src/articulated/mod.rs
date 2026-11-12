@@ -1884,7 +1884,8 @@
 //!   nothing to tune, and it grows with load because a heavier contact is a deeper one.
 //!   That is a derived moment arm for every contact in the set, where before there was one
 //!   for one in a hundred. **Built, measured, and it is not the fix**: it is
-//!   [`Skeleton::set_contact_patch`], on by default, and the table is below.
+//!   [`Skeleton::set_contact_patch`], off by default for that reason, and the table is
+//!   below.
 //!
 //! ```text
 //!   eight passes, rigs spawned untangled            patch off   patch on
@@ -3129,7 +3130,7 @@ impl Default for Skeleton {
             jointed_to: Vec::new(),
             jointed_component: Vec::new(),
             self_collision: true,
-            contact_patch: true,
+            contact_patch: false,
             pairs: Vec::new(),
             contacts: Vec::new(),
             persisting: Vec::new(),
@@ -3301,8 +3302,13 @@ impl Skeleton {
         self.self_collision
     }
 
-    /// **Whether a contact between two curved bodies is held as a patch or as a point.** On
-    /// by default.
+    /// **Whether a contact between two curved bodies is held as a patch or as a point.** Off
+    /// by default, because it was built, measured and is not the fix it was written to be:
+    /// see the module header's table under "And the rocking is the shape". With it on, the
+    /// leaning pair creeps further, lone rigs rest a little less often, no heap rests that
+    /// did not, and four tests that pass with it off fail. It stays a switch because one
+    /// scene does need it: a limb lying across the end of another rocks with it off and is
+    /// exactly still with it on.
     ///
     /// Two capsules that are not near parallel touch, as rigid shapes, at one point, and a
     /// point has no moment arm: the pair is free to turn about it, and a heap whose contacts
