@@ -2880,6 +2880,9 @@ pub struct Skeleton {
     /// otherwise, which is what the broad phase tests.
     jointed_component: Vec<u32>,
     self_collision: bool,
+    /// Whether a contact between two curved bodies is held as a patch rather than a point.
+    /// See [`Skeleton::set_contact_patch`].
+    contact_patch: bool,
     /// Candidate pairs from the broad phase, and the contacts that survived the narrow
     /// one. Both are cleared and refilled per step rather than reallocated.
     pairs: Vec<(usize, usize)>,
@@ -3106,6 +3109,7 @@ impl Default for Skeleton {
             jointed_to: Vec::new(),
             jointed_component: Vec::new(),
             self_collision: true,
+            contact_patch: true,
             pairs: Vec::new(),
             contacts: Vec::new(),
             persisting: Vec::new(),
@@ -3275,6 +3279,35 @@ impl Skeleton {
     /// [`Skeleton::set_self_collision`].
     pub fn self_collision(&self) -> bool {
         self.self_collision
+    }
+
+    /// **Whether a contact between two curved bodies is held as a patch or as a point.** On
+    /// by default.
+    ///
+    /// Two capsules that are not near parallel touch, as rigid shapes, at one point, and a
+    /// point has no moment arm: the pair is free to turn about it, and a heap whose contacts
+    /// are nearly all such points rocks and creeps instead of resting. With this on, a pair
+    /// that overlaps by `d` gets the contact patch two surfaces of those radii overlapping
+    /// by `d` actually share -- two points `sqrt(2 d r)` either side of the closest point,
+    /// `r` the pair's reduced radius -- so the normal load can move between them and resist
+    /// a turn the way the ground's two-ended patch does. See `contacts::pair_patch` for the
+    /// derivation; there is no coefficient in it.
+    ///
+    /// A switch so that the two can be compared in one build. A near-parallel pair, a pair of
+    /// prisms and a pair kept alive while clear are unaffected either way: the first two
+    /// already have a patch of their own and the third has no overlap to derive one from.
+    pub fn set_contact_patch(&mut self, patch: bool) {
+        if self.contact_patch == patch {
+            return;
+        }
+        self.contact_patch = patch;
+        // A changed contact model is a disturbance no settling test can see.
+        self.wake_all();
+    }
+
+    /// Whether pair contacts are held as patches. See [`Skeleton::set_contact_patch`].
+    pub fn contact_patch(&self) -> bool {
+        self.contact_patch
     }
 
     /// Removes the ground plane.
@@ -4247,6 +4280,7 @@ impl Skeleton {
         let held_axis = &self.held_axis;
         let decisive = self.anchor_reach;
         let facets = &self.facets;
+        let patch = self.contact_patch;
         let test = |&(a, b): &(usize, usize)| {
             let alive = persisting.binary_search(&(a as u32, b as u32)).is_ok();
             // **Both flat or neither.** A prism against a capsule is a third test with its
@@ -4264,7 +4298,7 @@ impl Skeleton {
                     decisive,
                 )
             } else {
-                capsule_contact(a, b, position, orientation, radius, half_length, alive)
+                capsule_contact(a, b, position, orientation, radius, half_length, alive, patch)
             }
             .into_iter()
             .flatten()

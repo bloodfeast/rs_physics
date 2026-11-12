@@ -474,7 +474,7 @@ fn a_loaded_pair_keeps_its_contact_when_it_is_solved_exactly_together() {
     let radius = [0.1, 0.1];
     let half_length = [0.5, 0.5];
 
-    let gone = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false);
+    let gone = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, true);
     assert_eq!(
         gone.iter().flatten().count(),
         0,
@@ -482,7 +482,7 @@ fn a_loaded_pair_keeps_its_contact_when_it_is_solved_exactly_together() {
          told otherwise says so",
     );
 
-    let kept = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true);
+    let kept = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true, true);
     let kept: Vec<Contact> = kept.iter().flatten().copied().collect();
     assert_eq!(
         kept.len(),
@@ -528,18 +528,111 @@ fn a_patch_with_one_end_loaded_is_not_given_a_second() {
     let radius = [0.1, 0.1];
     let half_length = [0.5, 0.5];
 
-    let plain = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false);
+    let plain = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, true);
     assert_eq!(
         plain.iter().flatten().count(),
         1,
         "one end of the overlap is loaded and the other is clear",
     );
-    let revived = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true);
+    let revived = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, true, true);
     assert_eq!(
         revived.iter().flatten().count(),
         1,
         "the pair still has a constraint, so nothing is revived",
     );
+}
+
+/// **A crossed pair overlapping by `d` is held by the two ends of the patch the overlap
+/// has**: two contacts `sqrt(2 d r)` either side of the closest point, `r` the reduced
+/// radius, both at the closest point's depth, along the thinner body -- and one contact
+/// with the patch switched off.
+#[test]
+fn a_crossed_pair_is_held_by_the_two_ends_of_its_patch() {
+    let (ra, rb, d) = (0.06, 0.1, 2.5e-3);
+    // A thin capsule along x and a thick one along z, resting across it overlapping by d.
+    let position = [(0.0, 0.0, 0.0), (0.03, ra + rb - d, -0.05)];
+    let orientation = [
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2),
+        Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2),
+    ];
+    let radius = [ra, rb];
+    let half_length = [0.25, 0.25];
+    let world = |c: &Contact| {
+        let surface_a = add(position[0], rotate(orientation[0], c.local_a));
+        let surface_b = add(position[1], rotate(orientation[1], c.local_b));
+        (surface_a, dot(sub(surface_a, surface_b), c.normal))
+    };
+
+    let point: Vec<Contact> =
+        capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, false)
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+    assert_eq!(point.len(), 1, "with the patch off a crossed pair touches at one point");
+    let (centre, centre_depth) = world(&point[0]);
+    assert!((centre_depth - d).abs() < 1e-12, "the point is at depth {centre_depth:e}, not {d:e}");
+    assert_eq!(point[0].span, (0.0, 0.0, 0.0));
+
+    let ends: Vec<Contact> =
+        capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, true)
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+    assert_eq!(ends.len(), 2, "with the patch on a crossed pair is held at two points");
+    let rho = (2.0 * d * ra * rb / (ra + rb)).sqrt();
+    let (one, depth_one) = world(&ends[0]);
+    let (two, depth_two) = world(&ends[1]);
+    for depth in [depth_one, depth_two] {
+        assert!((depth - d).abs() < 1e-12, "an end is at depth {depth:e}, not the closest point's {d:e}");
+    }
+    let apart = sub(two, one);
+    assert!(
+        (length(apart) - 2.0 * rho).abs() < 1e-12,
+        "the ends are {} apart, where the patch is {} across",
+        length(apart),
+        2.0 * rho,
+    );
+    let middle = scale(add(one, two), 0.5);
+    assert!(length(sub(middle, centre)) < 1e-12, "the patch is centred on the closest point");
+    assert!(dot(apart, point[0].normal).abs() < 1e-12, "the patch lies in the tangent plane");
+    assert!(
+        (dot(apart, (1.0, 0.0, 0.0)).abs() - 2.0 * rho).abs() < 1e-12,
+        "the ends lie along the thinner body, the patch's long axis; they are {apart:?} apart",
+    );
+    for end in &ends {
+        assert!(!end.revived);
+        assert!(length(sub(end.span, apart)) < 1e-12 || length(add(end.span, apart)) < 1e-12);
+    }
+
+    // The same pair a hundredth of a millimetre clear but remembered: no overlap, no patch.
+    let mut clear = position;
+    clear[1].1 = ra + rb + 1e-5;
+    let kept = capsule_contact(0, 1, &clear, &orientation, &radius, &half_length, true, true);
+    assert_eq!(kept.iter().flatten().count(), 1, "a revived pair has no overlap to make a patch of");
+}
+
+/// **And the parallel case is the line patch it always was, switch or no switch.**
+#[test]
+fn the_patch_switch_leaves_a_parallel_pair_alone() {
+    let position = [(0.0, 0.0, 0.0), (0.1, 0.199, 0.0)];
+    let orientation = [
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2),
+        Quaternion::from_axis_angle((0.0, 0.0, 1.0), -std::f64::consts::FRAC_PI_2 + 1e-3),
+    ];
+    let radius = [0.1, 0.1];
+    let half_length = [0.5, 0.5];
+    let off = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, false);
+    let on = capsule_contact(0, 1, &position, &orientation, &radius, &half_length, false, true);
+    assert_eq!(off.iter().flatten().count(), 2, "a parallel pair has its two line ends");
+    for (x, y) in off.iter().zip(on.iter()) {
+        let (x, y) = (x.expect("both ends"), y.expect("both ends"));
+        assert_eq!(
+            (x.local_a, x.local_b, x.normal, x.span, x.revived),
+            (y.local_a, y.local_b, y.normal, y.span, y.revived),
+        );
+    }
 }
 
 /// The same invariant the joint colouring has, for the set that is rebuilt every step:
