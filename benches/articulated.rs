@@ -1276,10 +1276,57 @@ fn a_burst_with_and_without_the_pair_patch(c: &mut Criterion) {
     group.finish();
 }
 
+/// **What `Skeleton::set_stick_memory` costs at a burst**: the scene and the bracket of
+/// [`a_burst_with_and_without_the_pair_patch`], pair patch off, with the stick memory off,
+/// on and off again. Each arm arrives under its own setting.
+///
+/// Criterion medians and their intervals, CPU time a step, the same machine under the run
+/// queue's quiet CPU take, one sitting:
+///
+/// ```text
+///   arm         pair contacts   awake           a step
+///   off              861        1190 of 1190    15.25 ms  [14.90, 15.55]
+///   on               937        1173 of 1190    16.46 ms  [16.24, 16.83]
+///   off again        861        1190 of 1190    14.06 ms  [13.95, 14.15]
+/// ```
+///
+/// The off arms disagree by 1.2 ms, so the machine drifted across the sitting; the memory
+/// costs between 1.2 and 2.4 ms a step at this burst, of which 1.2 is inside the drift.
+fn a_burst_with_and_without_the_stick_memory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("articulated/stick_burst");
+    group.sample_size(10);
+    let heights = rolling_heights();
+    let field = Field::new(&heights, ROLLING_SIDE, ROLLING_SIDE, ROLLING_CELL, ROLLING_ORIGIN)
+        .expect("the bench's field is a valid grid");
+    for (arm, stick) in [("off", false), ("on", true), ("off_again", false)] {
+        let mut s = dropped_on(BURST_RIGS, field, true);
+        s.set_contact_patch(false);
+        s.set_stick_memory(stick);
+        for _ in 0..FIELD_ARRIVING {
+            s.step_over(DT, G, 8, Some(field));
+        }
+        let name = format!("{BURST_RIGS}/self/arriving/stick_{arm}");
+        println!(
+            "  stick_burst {name}: {} bodies, {} pair contacts, {} of {} awake",
+            s.len(),
+            s.contact_count(),
+            s.awake_count(),
+            s.len(),
+        );
+        group.bench_function(name, |b| {
+            steady(b, &s, |s| {
+                s.step_over(black_box(DT), black_box(G), black_box(8), Some(field));
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     rigs_on_a_field,
     a_burst_with_and_without_the_pair_patch,
+    a_burst_with_and_without_the_stick_memory,
     one_skeleton,
     joints_only,
     the_pile,
