@@ -1876,13 +1876,33 @@
 //! rather than out of a coefficient. It is why a box on a table does not rock and a can
 //! does.
 //!
-//! Two ways out, and the cheap one has not been tried:
+//! Two ways out:
 //!
 //! * **Give every contact the patch, not only the parallel ones.** Two spheres of radii
 //!   `ra` and `rb` overlapping by `d` meet in a circle of radius about `sqrt(2 d r)` with
-//!   `r` the harmonic mean -- pure geometry, no material constant, nothing to tune, and it
-//!   grows with load because a heavier contact is a deeper one. That is a derived moment
-//!   arm for every contact in the set, where today there is one for one in a hundred.
+//!   `r` the reduced radius `ra rb / (ra + rb)` -- pure geometry, no material constant,
+//!   nothing to tune, and it grows with load because a heavier contact is a deeper one.
+//!   That is a derived moment arm for every contact in the set, where before there was one
+//!   for one in a hundred. **Built, measured, and it is not the fix**: it is
+//!   [`Skeleton::set_contact_patch`], on by default, and the table is below.
+//!
+//! ```text
+//!   eight passes, rigs spawned untangled            patch off   patch on
+//!   landing poses on the plane, of 160                 152        148
+//!   landing poses on the height field, of 160          158        150
+//!   heap of 16 at the landing poses, of 8 draws          0          0
+//!   heap of 8, rigs asleep of 64 (2000 steps)            0          0
+//!   limb across a limb's end, kinetic J, sleeping off  6.3e-7     3.9e-20
+//!   limb leaning at 15 degrees, of still (< 1)         1.40       1.93
+//!   limb leaning at 22 degrees, of still (< 1)         1.41       5.77
+//! ```
+//!
+//!   It closes the one scene that is a point contact rocking -- a limb lying across the
+//!   end of another goes from a creep to exactly still -- and nothing else: the leaning
+//!   pair creeps as before or worse, lone rigs rest a little less often, and a heap is
+//!   untouched. So a heap's pair contacts are not failing for want of a moment arm. What
+//!   the leaning pair still lacks is memory: its friction forgives each step's slip, where
+//!   the ground's anchor asks for it back.
 //! * **Give the bodies flats.** An octagonal prism is the shape that suits this: its face
 //!   normals are eight fixed directions in body space plus two caps, so there is no support
 //!   search; its inertia is closed form, so there is no polyhedral integration; and a fixed

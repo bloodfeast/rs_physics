@@ -1233,6 +1233,20 @@ const BURST_RIGS: usize = 70;
 /// smaller than that gap is not a difference. Each arm arrives under its own setting, so
 /// what it times is the step a game would be paying for, and the line printed with it
 /// carries its pair-contact and awake counts, without which the time cannot be read.
+///
+/// Criterion medians and their intervals, CPU time a step on one lane, an i9-10980XE with
+/// the run queue's quiet take holding the machine (a compiler process was flagged during
+/// the take; the bracket below is what says it did not move the numbers):
+///
+/// ```text
+///   arm         pair contacts   awake           a step
+///   off              861        1190 of 1190    12.08 ms  [11.98, 12.18]
+///   on              1610        1190 of 1190    15.26 ms  [15.18, 15.39]
+///   off again        861        1190 of 1190    12.09 ms  [12.02, 12.15]
+/// ```
+///
+/// The off arms agree to 0.01 ms, so the patch costs 3.2 ms a step at this burst, 26 per
+/// cent, almost all of it the pair contacts nearly doubling.
 fn a_burst_with_and_without_the_pair_patch(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/patch_burst");
     group.sample_size(10);

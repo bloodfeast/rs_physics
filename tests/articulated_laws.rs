@@ -1309,7 +1309,8 @@ fn a_hinge_does_not_turn_itself_inside_out() {
 ///
 /// `a_rig_that_touches_itself_comes_to_rest` drops the rig upright, and the solver's module
 /// header records that upright is one of the good poses. This is the same claim made over
-/// the poses a body actually falls in: twenty copies of the rig on a 2.5 m grid, so that no
+/// the poses a body actually falls in: twenty copies of the rig, spawned as a pose by
+/// [`untangled_rig`] rather than as [`rig`]'s tangle, on a 2.5 m grid, so that no
 /// two can reach each other and each is an independent sample, every one turned by its own
 /// axis and angle and dropped with its lowest surface 0.55 m clear of the ground. Eight
 /// draws a relative 1e-12 apart in that clearance, a hundred and sixty samples.
@@ -1325,12 +1326,15 @@ fn a_hinge_does_not_turn_itself_inside_out() {
 ///
 /// # The bound, and the measurement behind it
 ///
-/// Sixty seconds, the cap the module header's ensemble uses. Measured on the commit this law
-/// was written against: 132 of 160 samples came to rest, the median at step 742, and the
-/// rigs that did not were each held awake by a pair of their own bones a few millimetres
-/// inside each other -- the neck or the upper spine against an upper arm, all three bodies
-/// jointed to the chest -- at loads of 300 to 600 N on bones that weigh 39 to 59 N. With
+/// Sixty seconds, the cap the module header's ensemble uses. Measured when this law dropped
+/// [`rig`]'s tangle: 132 of 160 samples came to rest, the median at step 742, and the rigs
+/// that did not were each held awake by a pair of their own bones a few millimetres inside
+/// each other -- the neck or the upper spine against an upper arm, all three bodies jointed
+/// to the chest -- at loads of 300 to 600 N on bones that weigh 39 to 59 N. With
 /// self-collision off the same 160 samples all come to rest, at a median of step 126.
+///
+/// Spawned untangled: 152 of 160 with `Skeleton::set_contact_patch` off, 148 with it on
+/// (the slowest at step 2968 and 3095).
 #[test]
 fn a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose() {
     let (rested, total, slowest) = landing_poses(None);
@@ -1349,8 +1353,9 @@ fn a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose() {
 /// normal alone. Every rig is lifted so its lowest surface is the same 0.55 m above the
 /// ground beneath it.
 ///
-/// Measured on the commit this law was written against: 113 of 160 came to rest, the median
-/// at step 929.
+/// Measured when this law dropped [`rig`]'s tangle: 113 of 160 came to rest, the median at
+/// step 929. Spawned untangled: 158 of 160 with `Skeleton::set_contact_patch` off, 150 with
+/// it on.
 #[test]
 fn a_rig_that_touches_itself_comes_to_rest_on_a_height_field() {
     let heights = rolling_ground();
@@ -1366,13 +1371,20 @@ fn a_rig_that_touches_itself_comes_to_rest_on_a_height_field() {
 
 /// **A heap of rigs that may touch themselves comes to rest.**
 ///
-/// Sixteen rigs dropped upright on a 0.7 m grid, close enough that they land on one another,
-/// all in one skeleton with self-collision on. A heap is one island and sleeps only when its
-/// last body does, so it is the product of the per-rig fraction the two laws above state, and
-/// the reason those have to be all of their samples rather than most of them.
+/// Sixteen rigs on a 0.7 m grid, close enough that they land on one another, each spawned
+/// untangled and turned to the landing pose of its own index, all in one skeleton with
+/// self-collision on. A heap is one island and sleeps only when its last body does, so it is
+/// the product of the per-rig fraction the two laws above state, and the reason those have to
+/// be all of their samples rather than most of them.
 ///
-/// Measured on the commit this law was written against: 2 of 8 draws came to rest inside sixty
-/// seconds, at step 1031 and 1670. The rest end with about two hundred of their 272 bodies awake.
+/// # Why the landing poses and not upright
+///
+/// This law used to drop every rig upright, and a lone upright rig is a vertical stack of
+/// collinear capsules that cycles with period two at 0.2 to 0.5 J for ever, so the law was
+/// partly measuring that degenerate pose rather than a heap. Measured then: 2 of 8 draws came
+/// to rest inside sixty seconds.
+///
+/// At the landing poses: 0 of 8, with `Skeleton::set_contact_patch` off and on.
 #[test]
 fn a_heap_of_rigs_that_touch_themselves_comes_to_rest() {
     const DRAWS: usize = 8;
@@ -1429,9 +1441,10 @@ fn a_heap_of_rigs_that_touch_themselves_comes_to_rest() {
 /// be put to sleep on any window and never woken by its own motion.
 ///
 /// Measured on the commit this law was written against: neither angle holds. The leaning
-/// body is reset out of its settling window about once in five hundred steps and its
-/// kinetic energy plateaus at 8e-5 J (15 degrees) and 1e-5 J (22 degrees) instead of
-/// decaying, while the same body alone on the plane is still to 1e-20 J.
+/// body moves 1.40 (15 degrees) and 1.41 (22 degrees) of what the settling test calls still,
+/// and its kinetic energy plateaus at 8e-5 J and 1e-5 J instead of decaying, while the same
+/// body alone on the plane is still to 1e-20 J. With `Skeleton::set_contact_patch` on it is
+/// 1.93 and 5.77: a moment arm at the contact is not what this pair is missing.
 #[test]
 fn two_bodies_leaning_on_each_other_come_to_rest() {
     let mut failures = Vec::new();
@@ -1492,7 +1505,7 @@ fn two_bodies_leaning_on_each_other_come_to_rest() {
 ///
 /// Measured on the commit this law was written against: neither shallow angle holds. The
 /// capsule keeps about 15 per cent of one step of gravity as velocity for ever and creeps
-/// -- 2.4 mm in 33 s at 5 degrees and 6.3 mm at 10 -- at every pass count, because rolling
+/// -- 3.4 mm in 64 s at 5 degrees and 7.3 mm at 10 -- at every pass count, because rolling
 /// resistance has no memory across steps where sliding has its anchor.
 #[test]
 fn rolling_resistance_holds_a_slope_and_lets_go_past_its_angle() {
