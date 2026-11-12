@@ -100,6 +100,8 @@ struct Dials {
     sleeping: bool,
     /// `Skeleton::set_contact_patch`: a crossed pair held by the two ends of its patch.
     patch: bool,
+    /// `Skeleton::set_stick_memory`: pairs remember where they stuck, bodies where their rolling stuck.
+    stick: bool,
 }
 
 impl Dials {
@@ -112,6 +114,7 @@ impl Dials {
         self_collision: true,
         sleeping: true,
         patch: true,
+        stick: false,
     };
 
     fn awake(self) -> Dials {
@@ -125,6 +128,7 @@ impl Dials {
         s.set_self_collision(self.self_collision);
         s.set_sleeping(self.sleeping);
         s.set_contact_patch(self.patch);
+        s.set_stick_memory(self.stick);
     }
 }
 
@@ -1299,4 +1303,44 @@ fn p_the_pair_patch_off_and_on() {
         text += &report(&name, &asleep, &awake);
     }
     emit("p", &text);
+}
+
+// -- (s) the stick memory, off and on -------------------------------------------------------
+
+/// The rungs the stick memory is judged on, with `Skeleton::set_stick_memory` off and then on
+/// in the same build and the pair patch off: the two leaning scenes of (a), the rolling-hold
+/// scene of (b) at 5, 10 and 20 degrees, the lone untangled rig of (c) and the untangled heap
+/// of eight of (e), at the landing poses. In the order the stop rule reads them.
+#[test]
+#[ignore = "diagnostic ladder: prints a table and asserts nothing; a few minutes"]
+fn s_the_stick_memory_off_and_on() {
+    let mut text = String::from("(s) the stick memory, off and on\n");
+    for stick in [false, true] {
+        let dials = Dials { patch: false, stick, ..Dials::PLAIN };
+        let which = if stick { "memory on" } else { "memory off" };
+        for degrees in [15.0_f64, 22.0] {
+            let build = move |s: &mut Skeleton| two_bodies(s, 0, Some(degrees));
+            let name = format!("s a2 capsule leaning at {degrees} deg, {which}");
+            let asleep = run(&name, Floor::FLAT, dials, STEPS, &build);
+            let awake = run(&format!("{name} awake"), Floor::FLAT, dials.awake(), STEPS, &build);
+            text += &report(&name, &[asleep], &[awake]);
+        }
+        for degrees in [5.0, 10.0, 20.0] {
+            let name = format!("s b2 capsule across the slope, {degrees} deg, rolling 0.25, {which}");
+            let (travel, _, _, asleep) = on_a_slope(&name, 0, degrees, true, dials);
+            let (free_travel, _, _, awake) = on_a_slope(&format!("{name} awake"), 0, degrees, true, dials.awake());
+            text += &report(&name, &[asleep], &[awake]);
+            let _ = writeln!(text, "    rolling    : travelled {travel:.3e} m asleep-able, {free_travel:.3e} m awake");
+        }
+
+        let name = format!("s c Untangled, self-collision on, {which}");
+        let (asleep, awake) = lone(&name, Kit::Untangled, POSES, Floor::FLAT, dials);
+        text += &report(&name, &asleep, &awake);
+
+        let heap = Heap { kit: Kit::Untangled, rigs: 8, turned: true, arrangement: Arrangement::Together };
+        let name = format!("s e {}, together, {which}", heap_name(heap));
+        let (asleep, awake) = heaps(&name, heap, dials);
+        text += &report(&name, &asleep, &awake);
+    }
+    emit("s", &text);
 }
