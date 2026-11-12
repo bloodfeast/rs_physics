@@ -570,7 +570,7 @@ fn test_calculate_fatigue_strength_transition() {
 
 // ---- Wetting ----
 
-use crate::materials::{film_albedo, normal_reflectance, pore_filled_albedo, Finish, Wetting, WATER_REFRACTIVE_INDEX};
+use crate::materials::{film_albedo, normal_reflectance, pore_filled_albedo, Finish, Structure, Wetting, WATER_REFRACTIVE_INDEX};
 
 /// Every preset constructor, by name, so a new preset has to be listed here and decide
 /// its wetting.
@@ -663,9 +663,37 @@ fn soaking_darkens_more_than_a_film() {
 }
 
 #[test]
+fn a_consolidated_solid_takes_the_film_alone() {
+    // Lekner and Dorf 1988, section IV: the film theory for rough solids such as concrete,
+    // the pore theory for finely divided media. Concrete soaks (it holds water) and its
+    // scattering does not collapse.
+    let concrete = Material::concrete().wetting.unwrap();
+    assert_eq!(concrete.structure, Structure::Consolidated);
+    assert!(concrete.soaks());
+    assert_eq!(concrete.pore_scattering_ratio(1.0), 1.0);
+    for a in [0.1, 0.35, 0.41, 0.8] {
+        assert_eq!(concrete.wet_albedo(a, 1.0), film_albedo(a));
+        assert!(concrete.with_structure(Structure::Divided).wet_albedo(a, 1.0) < 0.6 * concrete.wet_albedo(a, 1.0));
+    }
+    // Levinson and Akbari 2001 (LBNL-48334): solar reflectance of Portland cement concrete,
+    // the mean of 32 mixes 0.41 dry and 0.24 wet, of the 8 smooth ones 0.53 and 0.31. A
+    // solar band holds water's own near-infrared absorption, so the visible law sits a
+    // little above the measurement.
+    assert!((concrete.wet_albedo(0.41, 1.0) - 0.24).abs() < 0.02);
+    assert!((concrete.wet_albedo(0.53, 1.0) - 0.31).abs() < 0.05);
+    let ratio = concrete.wet_albedo(0.35, 1.0) / 0.35;
+    assert!((0.5..=0.7).contains(&ratio), "{ratio}");
+    // The divided presets stay divided.
+    for m in [Material::canvas(), Material::rope(), Material::wood()] {
+        assert_eq!(m.wetting.unwrap().structure, Structure::Divided);
+    }
+    assert_eq!(Wetting::new(0.3, 10.0, 1.5).unwrap().structure, Structure::Divided);
+}
+
+#[test]
 fn porosity_is_a_gate_not_an_amount() {
-    // Documented in the module's model limits: any wetted open porosity gives the same
-    // albedo; a sealed one gives the film alone.
+    // Documented in the module's model limits: in a divided medium any wetted open porosity
+    // gives the same albedo; a sealed one gives the film alone.
     let full = Wetting::new(0.61, 0.0, 1.53).unwrap();
     let little = Wetting::new(0.03, 0.0, 1.53).unwrap();
     let sealed = Wetting::new(0.0, 0.0, 1.53).unwrap();

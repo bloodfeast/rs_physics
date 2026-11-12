@@ -1,7 +1,7 @@
 // src/materials.rs
 
 use crate::utils::PhysicsError;
-use crate::materials::{Finish, Wetting};
+use crate::materials::{Finish, Structure, Wetting};
 
 /// Represents different types of material failure.
 ///
@@ -804,7 +804,7 @@ impl Material {
         // about 0.6 to 0.7 of its volume (Hearle, Grosberg and Backer, "Structural
         // Mechanics of Fibers, Yarns, and Fabrics", 1969), so about 0.35 is open space
         // between fibres that natural fibre wicks full; cellulose's mean index 1.53.
-        .wetted(Wetting { open_porosity: 0.35, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+        .wetted(Wetting { open_porosity: 0.35, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
     }
 
     /// Heavy cotton canvas (cotton duck): tents, tarpaulins, covers.
@@ -863,7 +863,7 @@ impl Material {
         ).expect("Failed to create canvas material")
         // Wetting: 1 - 600 / 1540 = 0.61 open; scoured cotton spreads water (0 degrees);
         // cellulose's mean index 1.53.
-        .wetted(Wetting { open_porosity: 0.61, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+        .wetted(Wetting { open_porosity: 0.61, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
         // Cellulose, as wood's fuel but thin: it lights sooner and leaves less char.
         .burning(Combustion {
             ignition_temperature: 528.0,      // ~255 C piloted, cotton fabric
@@ -914,7 +914,7 @@ impl Material {
             70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
         // Wetting: 1 - 700 / 1500, the cell wall's density about 1500 kg/m3; sanded wood 40 to 80 degrees; cellulose n 1.53.
-        .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse })
+        .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
         // Softwood, as measured in a cone calorimeter. The residue fraction is why a
         // wood fire ends as embers and a charred stump rather than as bare ground.
         .burning(Combustion {
@@ -1160,7 +1160,10 @@ impl Material {
             40.0e6,             // ultimate strength (Pa) - compressive
         ).expect("Failed to create concrete material")
         // Wetting: porosity from a 5 % by mass water absorption (ASTM C642 range 4 to 6 %) x 2400 / 998; cement paste wets; quartz aggregate n 1.55.
-        .wetted(Wetting { open_porosity: 0.12, contact_angle_deg: 30.0, solid_index: 1.55, finish: Finish::Diffuse })
+        // A consolidated solid: it takes water in and darkens as a film darkens a rough top
+        // (Lekner and Dorf 1988 name concrete for the film theory; Levinson and Akbari 2001
+        // measure 0.41 dry to 0.24 wet over 32 mixes, and the film law gives 0.25).
+        .wetted(Wetting { open_porosity: 0.12, contact_angle_deg: 30.0, solid_index: 1.55, finish: Finish::Diffuse, structure: Structure::Consolidated })
     }
 
     /// Creates a new Material instance with properties of glass (soda-lime).
@@ -1206,7 +1209,7 @@ impl Material {
         ).expect("Failed to create glass material")
         // Wetting: soda-lime float glass in ordinary air: 20 to 30 degrees; n 1.52; smooth,
         // so a film adds a reflection and darkens nothing.
-        .wetted(Wetting { open_porosity: 0.0, contact_angle_deg: 25.0, solid_index: 1.52, finish: Finish::Smooth })
+        .wetted(Wetting { open_porosity: 0.0, contact_angle_deg: 25.0, solid_index: 1.52, finish: Finish::Smooth, structure: Structure::Consolidated })
     }
 
     /// Creates a new Material instance with properties of brass (70/30).
@@ -1382,6 +1385,7 @@ impl Material {
             contact_angle_deg: 75.0,
             solid_index: 1.5,
             finish: Finish::Diffuse,
+            structure: Structure::Consolidated,
         })
     }
 

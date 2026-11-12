@@ -24,6 +24,13 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
   rubber, polyurethane, concrete, wood and rope; ice, napalm and dry vegetation are left
   `None` on purpose. `MaterialBuilder` carries it (`wetting`), `Material::wetted` sets it,
   and `Material`'s `PartialEq` compares it.
+- **`materials::Structure`** on `Wetting` (`Divided` or `Consolidated`): which darkening a
+  porous material takes. A divided medium (cloth, rope, wood's cells) fills its pores; a
+  consolidated solid (concrete, stone, brick) takes the film alone, however porous, after
+  Lekner and Dorf 1988, section IV. Concrete is `Consolidated`: wet over dry about 0.6
+  (0.41 to 0.25; Levinson and Akbari 2001 measure 0.41 to 0.24 over 32 mixes), where the
+  pore term gave 0.12. `Wetting::with_structure` replaces it. A struct literal of `Wetting`
+  needs the new field.
 - **Breaking**: `Material` has a new public field, `wetting`, so a struct literal outside
   the crate needs `..Material::default()` or the field.
 - **`Material::paint_steel()`**: steel under a coat of paint, sealed at 75 degrees (water on
