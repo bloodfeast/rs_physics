@@ -15,8 +15,11 @@
 //! absorption again, so the darkening grows as the albedo falls. A surface that is
 //! already smooth under a clear coat (gloss paint, glass) gains almost nothing, because
 //! the trap is already there: water over it changes which boundary is the outer one,
-//! not whether there is one. That decision belongs to the caller, who knows the surface
-//! finish; [`film_albedo`] is the law for a diffuse surface.
+//! not whether there is one. A metal has nothing to trap at all: its reflectance comes
+//! off the surface, not scattered back from inside. So the film is applied only to a
+//! [`Finish::Diffuse`] surface; on a [`Finish::Smooth`] one (metal, glass, gloss paint)
+//! water adds a mirror and darkens nothing. [`film_albedo`] is the law for the diffuse
+//! case.
 //!
 //! **The pores** (Twomey, Bohren and Mergenthaler, "Reflectance and albedo differences
 //! between wet and dry surfaces", *Applied Optics* 25(3), 1986). A porous material scatters
@@ -29,7 +32,15 @@
 //!
 //! ## Model limits
 //!
-//! - Albedos are for one wavelength band at a time; call per channel for colour.
+//! - Albedos are linear reflectances (linear light), for one wavelength band at a time;
+//!   call per channel for colour. The pore term is nonlinear in the albedo, so an
+//!   sRGB-encoded value gives a wrong answer: decode it first.
+//! - Open porosity is a gate, not a quantity in the albedo: any open porosity that water
+//!   wets gives the full pore-filling collapse at saturation 1. In the Twomey, Bohren and
+//!   Mergenthaler picture a porous material scatters at its pore boundaries, and filling
+//!   them changes every boundary's index step however many there are; the porosity sets
+//!   how much water the material holds ([`Wetting::saturation_water_content`]), not how
+//!   dark it gets. A sealed coat with a few cracks is better described as sealed.
 //! - The pore term scales the scattering by the normal-incidence Fresnel reflectance of
 //!   one boundary, a proxy for the scattering strength of a random pore network. It is
 //!   a ratio, so the material's own absolute scattering never enters.
@@ -40,10 +51,12 @@
 //! ```
 //! use rs_physics::materials::{Material, Wetting};
 //!
-//! // Soaked canvas against a wet steel plate, both 0.5 albedo dry.
+//! // Soaked canvas against a wet steel plate, both 0.5 albedo dry: the canvas goes
+//! // several times darker, the steel not at all (it only gains gloss).
 //! let canvas = Material::canvas().wetting.unwrap();
 //! let steel = Material::steel().wetting.unwrap();
 //! assert!(canvas.wet_albedo(0.5, 1.0) < 0.25);
+//! assert_eq!(steel.wet_albedo(0.5, 1.0), 0.5);
 //! assert_eq!(steel.pore_scattering_ratio(1.0), 1.0);
 //! assert!(Wetting::new(0.3, 40.0, 1.55).is_ok());
 //! ```
@@ -94,7 +107,7 @@ pub const WATER_DIFFUSE_REFLECTANCE: f64 = 0.066;
 /// the light that escapes from inside is the light that enters from outside, divided by
 /// n² for the narrower cone it squeezes into: `1 - (1 - R_e) / n²` = 0.474 for water.
 /// About half of what a wet diffuse surface scatters upward is sent back down.
-pub fn water_internal_reflectance() -> f64 {
+pub const fn water_internal_reflectance() -> f64 {
     1.0 - (1.0 - WATER_DIFFUSE_REFLECTANCE) / (WATER_REFRACTIVE_INDEX * WATER_REFRACTIVE_INDEX)
 }
 
@@ -112,7 +125,7 @@ pub fn water_internal_reflectance() -> f64 {
 ///
 /// # Arguments
 ///
-/// * `albedo` - The dry surface's diffuse albedo, 0 to 1.
+/// * `albedo` - The dry surface's diffuse albedo, linear (not sRGB-encoded), 0 to 1.
 ///
 /// # Returns
 ///
@@ -144,12 +157,12 @@ pub fn film_albedo(albedo: f64) -> f64 {
 ///
 /// # Arguments
 ///
-/// * `dry_albedo` - The dry material's albedo, 0 to 1.
+/// * `dry_albedo` - The dry material's albedo, linear (not sRGB-encoded), 0 to 1.
 /// * `ratio` - Wet scattering over dry, 0 to 1 (1 leaves the albedo as it is).
 ///
 /// # Returns
 ///
-/// The albedo with its pores filled.
+/// The albedo with its pores filled, never above the dry one; 0 stays 0.
 ///
 /// # Examples
 ///
@@ -158,8 +171,14 @@ pub fn film_albedo(albedo: f64) -> f64 {
 ///
 /// assert!((pore_filled_albedo(0.6, 1.0) - 0.6).abs() < 1e-12);
 /// assert!(pore_filled_albedo(0.6, 0.1) < 0.35);
+/// assert_eq!(pore_filled_albedo(0.0, 0.1), 0.0);
 /// ```
 pub fn pore_filled_albedo(dry_albedo: f64, ratio: f64) -> f64 {
+    // Black absorbs everything whatever the scattering; without this the clamp below
+    // would lift it to a few 1e-8.
+    if dry_albedo <= 0.0 {
+        return 0.0;
+    }
     let r = dry_albedo.clamp(1e-6, 1.0 - 1e-9);
     let ratio = ratio.clamp(1e-6, 1.0);
     if ratio >= 1.0 {
@@ -169,12 +188,33 @@ pub fn pore_filled_albedo(dry_albedo: f64, ratio: f64) -> f64 {
     1.0 + k_over_s - (k_over_s * k_over_s + 2.0 * k_over_s).sqrt()
 }
 
+/// **The optical finish of a surface's top boundary**, which decides whether a water film
+/// over it darkens it ([`Wetting::wet_albedo`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finish {
+    /// A rough or matt surface that scatters light at its top: bare wood, concrete,
+    /// cloth, rubber, matt paint. A film over it traps part of that light
+    /// ([`film_albedo`]).
+    Diffuse,
+    /// An optically smooth top boundary, or a metal: glass, gloss paint, and any metal
+    /// whatever its roughness (a metal's reflectance comes off its surface rather than
+    /// being scattered back from inside, so there is nothing under a film to trap). A film
+    /// adds a mirror reflection and darkens nothing.
+    Smooth,
+}
+
 /// **How water takes to a material**: whether it soaks in, and what it does to the light.
 ///
 /// Mechanical and thermal properties say what a material does when struck or heated; this
 /// says what it does when it rains. Kept as an `Option` on [`crate::materials::Material`]
 /// for the same reason as its combustion: `None` means not characterised, a different claim
-/// from "does not wet".
+/// from "does not wet". The presets left `None` on purpose are `ice` (water on ice is a
+/// melt film, another law), `napalm` (a gel fuel) and `dry_vegetation` (a leaf's cuticle
+/// runs from wetting to strongly water-repellent by species and age, so no one value
+/// describes it).
+///
+/// The contact angles on the presets are typical as-received values for each surface;
+/// clean, freshly prepared metal is more hydrophilic and a contaminated one less.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Wetting {
     /// Open porosity: the volume fraction of connected pores water can fill, 0 to 1.
@@ -188,20 +228,23 @@ pub struct Wetting {
     /// Refractive index of the solid phase in the visible (589 nm), for the pore term.
     /// Unused when the material has no open porosity.
     pub solid_index: f64,
+    /// The finish of the top boundary: whether a film over it darkens it.
+    pub finish: Finish,
 }
 
 impl Wetting {
-    /// Creates a wetting description, checked.
+    /// Creates a wetting description with a [`Finish::Diffuse`] top, checked.
     ///
     /// # Arguments
     ///
     /// * `open_porosity` - Volume fraction of connected pores, 0 to 1.
     /// * `contact_angle_deg` - Water contact angle, 0 to 180 degrees.
-    /// * `solid_index` - Refractive index of the solid phase, at least 1.
+    /// * `solid_index` - Refractive index of the solid phase, finite and at least 1.
     ///
     /// # Returns
     ///
-    /// The description, or a `PhysicsError` naming the value out of range.
+    /// The description, or a `PhysicsError` naming the value out of range (NaN and the
+    /// infinities are out of range).
     ///
     /// # Examples
     ///
@@ -210,6 +253,7 @@ impl Wetting {
     ///
     /// assert!(Wetting::new(0.1, 30.0, 1.55).is_ok());
     /// assert!(Wetting::new(1.5, 30.0, 1.55).is_err());
+    /// assert!(Wetting::new(0.1, 30.0, f64::INFINITY).is_err());
     /// ```
     pub fn new(open_porosity: f64, contact_angle_deg: f64, solid_index: f64) -> Result<Self, PhysicsError> {
         if !(0.0..=1.0).contains(&open_porosity) {
@@ -218,13 +262,15 @@ impl Wetting {
         if !(0.0..=180.0).contains(&contact_angle_deg) {
             return Err(PhysicsError::CalculationError("Contact angle must be between 0 and 180 degrees".to_string()));
         }
-        if solid_index.is_nan() || solid_index < 1.0 {
-            return Err(PhysicsError::CalculationError("Solid refractive index must be at least 1".to_string()));
+        if !solid_index.is_finite() || solid_index < 1.0 {
+            return Err(PhysicsError::CalculationError("Solid refractive index must be finite and at least 1".to_string()));
         }
-        Ok(Self { open_porosity, contact_angle_deg, solid_index })
+        Ok(Self { open_porosity, contact_angle_deg, solid_index, finish: Finish::Diffuse })
     }
 
     /// A sealed solid: no open pores, water stays on the surface at `contact_angle_deg`.
+    /// The finish is [`Finish::Diffuse`]; a metal, glass or gloss coat sets
+    /// [`Finish::Smooth`] with [`Wetting::with_finish`].
     ///
     /// # Examples
     ///
@@ -236,7 +282,27 @@ impl Wetting {
     /// assert!(!sealed.soaks());
     /// ```
     pub fn sealed(contact_angle_deg: f64) -> Self {
-        Self { open_porosity: 0.0, contact_angle_deg: contact_angle_deg.clamp(0.0, 180.0), solid_index: 1.5 }
+        Self {
+            open_porosity: 0.0,
+            contact_angle_deg: contact_angle_deg.clamp(0.0, 180.0),
+            solid_index: 1.5,
+            finish: Finish::Diffuse,
+        }
+    }
+
+    /// The same description with its top boundary's finish replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{Finish, Wetting};
+    ///
+    /// let polished = Wetting::sealed(70.0).with_finish(Finish::Smooth);
+    /// assert_eq!(polished.wet_albedo(0.5, 1.0), 0.5);
+    /// assert!(Wetting::sealed(70.0).wet_albedo(0.5, 1.0) < 0.5);
+    /// ```
+    pub fn with_finish(self, finish: Finish) -> Self {
+        Self { finish, ..self }
     }
 
     /// Water held by a cubic metre of the material at saturation, kg: the open pores full.
@@ -312,41 +378,47 @@ impl Wetting {
     }
 
     /// **The diffuse albedo of the material wet**, at `saturation` (0 dry, 1 soaked with
-    /// a film over it): the pores filled ([`pore_filled_albedo`]), then the film over a
-    /// diffuse surface ([`film_albedo`]), blended in by the saturation.
-    ///
-    /// For a material that does not soak this is the film alone, which is the right law
-    /// only for a diffusely scattering surface; a caller with a smooth or clear-coated
-    /// finish should not darken it (see the module's notes).
+    /// a film over it): the pores filled ([`pore_filled_albedo`]), then, on a
+    /// [`Finish::Diffuse`] top only, the film ([`film_albedo`]) blended in by the
+    /// saturation. A [`Finish::Smooth`] material that does not soak (metal, glass, gloss
+    /// paint) keeps its albedo: water adds gloss, a mirror term for the renderer, not a
+    /// change of albedo.
     ///
     /// # Arguments
     ///
-    /// * `dry_albedo` - The dry albedo, 0 to 1.
-    /// * `saturation` - 0 dry to 1 soaked.
+    /// * `dry_albedo` - The dry albedo, linear (not sRGB-encoded), 0 to 1.
+    /// * `saturation` - 0 dry to 1 soaked. NaN and anything at or below 0 read as dry.
     ///
     /// # Returns
     ///
-    /// The wet albedo; equal to `dry_albedo` at `saturation` 0.
+    /// The wet albedo, never above the dry one. At `saturation` 0 it is `dry_albedo`
+    /// exactly as given; once wet, an albedo outside 0 to 1 is clamped into it first.
     ///
     /// # Examples
     ///
     /// ```
     /// use rs_physics::materials::Material;
     ///
-    /// // Cotton canvas at 0.68 dry, soaked: about a quarter as bright (a soaked sandbag
-    /// // against a dry one in the same sun measures 0.26).
+    /// // Undyed cotton canvas, taken as 0.68 dry (an assumed value), soaked: about a
+    /// // quarter as bright. Indicative only: a geotextile bag photographed wet below and
+    /// // dry above in one frame measures 0.26, a single uncontrolled photograph.
     /// let canvas = Material::canvas().wetting.unwrap();
     /// let ratio = canvas.wet_albedo(0.68, 1.0) / 0.68;
     /// assert!(ratio > 0.22 && ratio < 0.32);
     /// assert_eq!(canvas.wet_albedo(0.68, 0.0), 0.68);
+    /// // Steel only gains gloss.
+    /// assert_eq!(Material::steel().wetting.unwrap().wet_albedo(0.68, 1.0), 0.68);
     /// ```
     pub fn wet_albedo(&self, dry_albedo: f64, saturation: f64) -> f64 {
-        let s = saturation.clamp(0.0, 1.0);
-        if s == 0.0 {
+        // `!(saturation > 0)` also catches NaN, which `clamp` would pass through.
+        if !(saturation > 0.0) {
             return dry_albedo;
         }
-        let filled = pore_filled_albedo(dry_albedo, self.pore_scattering_ratio(s));
-        let film = film_albedo(filled);
-        filled + (film - filled) * s
+        let s = saturation.min(1.0);
+        let filled = pore_filled_albedo(dry_albedo.clamp(0.0, 1.0), self.pore_scattering_ratio(s));
+        match self.finish {
+            Finish::Smooth => filled,
+            Finish::Diffuse => filled + (film_albedo(filled) - filled) * s,
+        }
     }
 }

@@ -11,7 +11,8 @@
 //! - **Predefined materials**: Steel, stainless steel, aluminum, copper, titanium,
 //!   brass, concrete, glass, rubber, polyurethane, wood, canvas, ice
 //! - **Wetting**: open porosity, water contact angle and the wet albedo law
-//!   ([`Wetting`]: why canvas soaks darker in the rain and steel only gains gloss)
+//!   ([`Wetting`]: why canvas soaks darker in the rain and steel only gains gloss;
+//!   linear albedos)
 //! - **Mechanical properties**: Young's modulus, yield/ultimate strength, Poisson's ratio
 //! - **Thermal properties**: Thermal conductivity, specific heat capacity, thermal diffusivity
 //! - **Collision properties**: Friction coefficient, restitution coefficient
