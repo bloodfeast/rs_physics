@@ -222,13 +222,15 @@ pub enum Finish {
 /// (Lekner and Dorf 1988, section IV; the module's notes quote it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Structure {
-    /// Finely divided: fibres or grains with air between them (cloth, rope, sand, and wood's
-    /// open cell structure). Its scattering is at the solid-to-pore boundaries, so water in
-    /// the pores collapses it ([`pore_filled_albedo`]).
+    /// Finely divided: fibres or grains with air between them (cloth, rope, sand). Its
+    /// scattering is at the solid-to-pore boundaries, so water in the pores collapses it
+    /// ([`pore_filled_albedo`]).
     Divided,
-    /// A consolidated solid with pores in it: concrete, stone, brick, fired tile. Its
-    /// scattering is in the solid, which water does not reach; water darkens it as a film
-    /// over a rough top does ([`film_albedo`]) and no further.
+    /// A consolidated solid with pores in it: concrete, stone, brick, fired tile, and wood
+    /// (its cells are bonded; a short submersion darkens it by the film's size, Baar and
+    /// others 2019, cited at [`Material::wood`](super::Material::wood)). Its scattering is
+    /// in the solid, which water does not reach; water darkens it as a film over a rough
+    /// top does ([`film_albedo`]) and no further.
     Consolidated,
 }
 

@@ -703,9 +703,15 @@ fn a_consolidated_solid_takes_the_film_alone() {
     let ratio = concrete.wet_albedo(0.35, 1.0) / 0.35;
     assert!((0.5..=0.7).contains(&ratio), "{ratio}");
     // The divided presets stay divided.
-    for m in [Material::canvas(), Material::rope(), Material::wood()] {
+    for m in [Material::canvas(), Material::rope()] {
         assert_eq!(m.wetting.unwrap().structure, Structure::Divided);
     }
+    // Wood takes the film alone: oak at L* 64.6 (luminance 0.335) wets to L* 54.5 (0.2245),
+    // a ratio of 0.67 (Baar and others 2019). The pore term would give under 0.2.
+    let wood = Material::wood().wetting.unwrap();
+    assert_eq!(wood.structure, Structure::Consolidated);
+    let ratio = wood.wet_albedo(0.335, 1.0) / 0.335;
+    assert!((ratio - 0.67).abs() < 0.1, "{ratio}");
     assert_eq!(Wetting::new(0.3, 10.0, 1.5).unwrap().structure, Structure::Divided);
 }
 
