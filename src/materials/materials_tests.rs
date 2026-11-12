@@ -597,7 +597,26 @@ fn presets() -> Vec<(&'static str, Material)> {
 }
 
 fn wetted_presets() -> Vec<(&'static str, Wetting)> {
-    presets().into_iter().filter_map(|(n, m)| m.wetting.map(|w| (n, w))).collect()
+    // The material presets' wettings, then the two that are a wetting alone.
+    presets().into_iter().filter_map(|(n, m)| m.wetting.map(|w| (n, w))).chain([("chitin", Wetting::chitin()), ("skin", Wetting::skin())]).collect()
+}
+
+#[test]
+fn cuticle_and_skin_are_sealed_matt_and_spread_a_film() {
+    for (name, w) in [("chitin", Wetting::chitin()), ("skin", Wetting::skin())] {
+        assert_eq!(w.open_porosity, 0.0, "{name}");
+        assert!(!w.soaks() && !w.beads(), "{name}");
+        assert_eq!(w.finish, crate::materials::Finish::Diffuse, "{name}");
+        assert_eq!(w.pore_scattering_ratio(1.0), 1.0, "{name}");
+        // The film alone, by the saturation.
+        for a in [0.1, 0.4, 0.8] {
+            assert_eq!(w.wet_albedo(a, 1.0), crate::materials::film_albedo(a), "{name} at {a}");
+        }
+        // A polished cuticle only gains gloss.
+        assert_eq!(w.with_finish(crate::materials::Finish::Smooth).wet_albedo(0.4, 1.0), 0.4, "{name}");
+    }
+    // The published range's ends: the low end spreads, the high end beads.
+    assert!(!Wetting::sealed(47.5).beads() && Wetting::sealed(109.1).beads());
 }
 
 #[test]

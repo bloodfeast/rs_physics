@@ -324,6 +324,70 @@ impl Wetting {
         }
     }
 
+    /// **Sclerotised arthropod cuticle** (chitin fibres in a tanned protein matrix under a wax
+    /// layer: a beetle's wing case, a carapace plate).
+    ///
+    /// Sealed: the cuticle is a waterproof barrier, so water stays on it. The contact angle
+    /// is 78 degrees, the middle of the 47.5 to 109.1 degrees measured as static angles on
+    /// the native wing cases of 11 beetle species (Sun, Liang, Watson, Watson, Zheng and
+    /// Jiang, "Compound microstructures and wax layer of beetle elytral surfaces and their
+    /// influence on wetting properties", *PLoS ONE* 7(10): e46710, 2012), which that paper
+    /// calls hydrophilic to weakly hydrophobic: most species spread a film, a few bead. A
+    /// species at the top of the range is better described by `Wetting::sealed(105.0)`.
+    ///
+    /// The finish is [`Finish::Diffuse`], the matt, microsculptured case; a polished cuticle
+    /// (a smooth wax layer over the pigment) is `with_finish(Finish::Smooth)` and only gains
+    /// gloss. That microstructure is the same paper's subject, and it varies by species.
+    ///
+    /// Wetting alone, not a [`crate::materials::Material`]: the cuticle's stiffness (1 to
+    /// 20 GPa sclerotised) and density (1000 to 1300 kg/m3) are published (Vincent and
+    /// Wegst, "Design and mechanical properties of insect cuticle", *Arthropod Structure
+    /// and Development* 33(3):187-199, 2004), but no measured friction, restitution or
+    /// thermal values were found, and a preset does not make numbers up.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{film_albedo, Wetting};
+    ///
+    /// let plate = Wetting::chitin();
+    /// assert!(!plate.soaks() && !plate.beads());
+    /// assert_eq!(plate.wet_albedo(0.3, 1.0), film_albedo(0.3));
+    /// ```
+    pub fn chitin() -> Self {
+        Self::sealed(78.0)
+    }
+
+    /// **Bare skin** (the horny outer layer of a mammal's hide, unwashed, with its lipids).
+    ///
+    /// Sealed for the light: the outer layer takes up water slowly and swells, but it is a
+    /// barrier, not a pore network that fills, so rain sits on it as a film. Diffuse: the
+    /// surface is a matt microrelief.
+    ///
+    /// **The contact angle is pending.** 85 degrees is the middle of the 80 to 91 degrees a
+    /// review reports for water on the human inner forearm, attributed to Mavon et al.,
+    /// *Colloids and Surfaces B: Biointerfaces* 8:147-155, 1997; the primary paper was not
+    /// read, so the figure is second hand until it is. Oilier skin is reported lower (57 to
+    /// 73 degrees on the forehead, also second hand). Across the whole reported range it
+    /// spreads rather than soaks, so the film law holds; only a value of 90 or more would
+    /// change what [`Wetting::beads`] answers.
+    ///
+    /// Wetting alone, not a [`crate::materials::Material`], for the reason
+    /// [`Wetting::chitin`] gives: no mechanical or thermal values were confirmed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Wetting;
+    ///
+    /// let hide = Wetting::skin();
+    /// assert!(!hide.soaks() && !hide.beads());
+    /// assert!(hide.wet_albedo(0.4, 1.0) < 0.4);
+    /// ```
+    pub fn skin() -> Self {
+        Self::sealed(85.0)
+    }
+
     /// The same description with its top boundary's finish replaced.
     ///
     /// # Examples

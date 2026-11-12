@@ -891,6 +891,9 @@ impl Material {
     /// * Specific heat capacity: 1700 J/(kg·K)
     /// * Yield strength: 40 MPa
     /// * Ultimate strength: 70 MPa
+    /// * Wetting: open porosity 0.53, contact angle 60 degrees, cellulose n 1.53,
+    ///   [`Structure::Divided`]. The size of the pore-fill darkening is **uncited** for
+    ///   wood: the preset's body gives what was found and what was not.
     ///
     /// # Examples
     ///
@@ -914,6 +917,19 @@ impl Material {
             70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
         // Wetting: 1 - 700 / 1500, the cell wall's density about 1500 kg/m3; sanded wood 40 to 80 degrees; cellulose n 1.53.
+        // UNCITED SIZE: Structure::Divided (the pore fill) is this preset's assumption for
+        // wood, by analogy with cloth (the same cellulose, open cells). The mechanism is
+        // published for wood: water in the cell lumens scatters forward, light goes deeper
+        // and is absorbed more, and the darkening about doubles from a short submersion to
+        // a vacuum impregnation (Baar, Paschova, Cermak and Wimmer, "Color changes of
+        // various wood species in response to moisture", Wood and Fiber Science 51(2):
+        // 119-131, 2019). Its size here is not: that paper's short submersion took 2.5 to
+        // 14.4 off L* over 14 species (oak 64.6 to 54.5, a luminance ratio of 0.67), which
+        // is what the film alone gives, and it tabulates no lightness for the impregnated
+        // state. Wood chips at HSL lightness 54 at 54 % surface moisture against 68.5 at
+        // 26 % (US patent 7,778,786 B2) are the same size. The full collapse this preset
+        // computes (about 0.15 to 0.2 of the dry albedo at saturation) has no measured pair
+        // behind it.
         .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse, structure: Structure::Divided })
         // Softwood, as measured in a cone calorimeter. The residue fraction is why a
         // wood fire ends as embers and a charred stump rather than as bare ground.
