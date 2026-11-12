@@ -1,6 +1,6 @@
 # STAIN-MOVE: the stain's flow laws move into rs_physics
 
-Ridgeline's `terrain_stain.rs` hand-rolls three laws on its 1400 x 1000 stain buffer: the
+Ridgeline's `terrain_stain.rs` hand-rolled three laws on its 1400 x 1000 stain buffer: the
 film flow (`Flux`, `flux_tile`, `gather_tile`), the soak of running blood into the ground
 (`soak`, `absorb`, the drink in `gather_tile`) and the ridge slump (`slump`). Ruling
 (Brandon 2026-11-12, "Measure, then move"): add the laws here as standalone, unit-tested
@@ -101,21 +101,44 @@ Integer, branch-light, the stain's exact arithmetic. Ridgeline's `soak`, the ref
 (RAIN-SKIN/CANOPY-EDGE, per FLUIDS-B-INTEGRATION) is a different quantity (a wetting
 depth, in the shader) and is not touched; these functions are there for it to use.
 
-## 3. The slump -- a design fork, not moved yet
+## 3. `fluid_dynamics::tile_fade` -- the slump, moved as a fade
 
-The ruling names "a standalone granular slump law (angle of repose)". The stain's
-`slump` is not one: it fades the ridge's amplitude in place by `255 / HEAVE_LIFE_S` a
-second and leaves the footprint alone (its own test says so: a true repose slump would
-widen the band toward `2 * BURROW_HEAVE_M / REPOSE_TAN`). A repose law moves material to
-neighbours (reads them, conserves volume, widens the band) and so changes the look and
-the cost; the bar says the look is unchanged. This is put to Brandon as a question; until
-it is answered the slump stays in Ridgeline.
+The ruling named "a standalone granular slump law (angle of repose)". The stain's `slump`
+is not one: it fades the ridge's amplitude in place by `255 / HEAVE_LIFE_S` a second and
+leaves the footprint alone (a repose slump would move material to neighbours, widen the
+band toward `2 * BURROW_HEAVE_M / REPOSE_TAN` and change the look and the cost). Put to
+Brandon; his answer (2026-11-12): "Move today's fade as is." No repose spreading.
+
+```rust
+pub struct TileFade { /* width, height, tiles_x, standing: Vec<bool>, per_step: f32, owed: f32 */ }
+pub struct FadeStep { pub moved: bool, pub dirty_min: (usize, usize),
+                      pub dirty_max: (usize, usize), pub drop: u8, pub tiles: usize }
+
+impl TileFade {
+    pub fn new(width: usize, height: usize, per_step: f32) -> TileFade; // full / life * dt
+    pub fn raise(&mut self, x: usize, y: usize);       // the caller wrote into this tile
+    pub fn step(&mut self, field: &mut [u8]) -> FadeStep;
+    pub fn standing(&self) -> &[bool];
+    pub fn any_standing(&self) -> bool;
+    pub fn owed(&self) -> f32;
+    pub fn set_owed(&mut self, owed: f32);
+    pub fn clear(&mut self);
+}
+```
+
+The stain's arithmetic, moved: the rate is banked in one `f32` for the field (0.212 units
+a step for the ridge; four steps in five only bank), a step that spends takes `drop` off
+every texel of every flagged tile with a branchless `saturating_sub` row, and a tile's
+flag clears on the step that leaves it at zero. The field (`heave`, `u8` a texel) stays
+the caller's; the flags and the debt live here. `step` allocates nothing. Ridgeline tests
+it step for step against a frozen copy of its old slump.
 
 ## How terrain_stain calls them
 
 `StainMap` keeps its buffers and implements `FilmField` on a borrowed view
 (`pixels`, `pool_fraction`, `ground`, `sheet`, `pools`). `blood_settles` calls
 `tile_film.step(&mut view, &LAW, &fall_x, &fall_z, drying, &mut touched)` where it called
-`settle`, then `slump`. Painting calls `tile_film.wake` where it called `wake`. `LAW` is a
+`settle`, then `tile_fade.step(&mut heave)` where it called `slump`. Painting calls
+`tile_film.wake` where it called `wake`, and `ridge` calls `tile_fade.raise`. `LAW` is a
 `const` built from the constants the stain already derives (`COURANT`, `GRADE_PER_HEAD`,
 ...), so no number crosses the crate boundary twice.
