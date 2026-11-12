@@ -5743,8 +5743,10 @@ impl Skeleton {
             }
             // And the twist, on its own budget; see `contacts::untwist`. A patch that turned
             // on the spot at its limit has slipped, and remembers nothing.
-            let half = 0.25 * length(sub(contact.local[1], contact.local[0]));
-            let twist_budget = self.friction * spent.normal * half;
+            let half_length = 0.5 * length(sub(contact.local[1], contact.local[0]));
+            let twist_budget = crate::forces::friction::twist_friction_limit(self.friction, spent.normal, half_length);
+            // The lever that budget acts at: the mean of a uniform load along the patch.
+            let half = 0.5 * half_length;
             if self.ground_rolling.get(i) && twist_budget > 0.0 && self.ground_impulse[k].twist.abs() >= twist_budget * (1.0 - SATURATED) {
                 continue;
             }

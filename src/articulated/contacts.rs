@@ -251,9 +251,11 @@ pub(super) struct PairMemory {
 /// never damped out of the body. Measured on a capsule laid across a slope, 64 s after half
 /// a second to land, free against velocity: 5 degrees -1e-18 m against 6e-18 m, both still;
 /// 10 degrees 4.7e-4 m against 2.6e-6 m, both arriving in the first second and constant from
-/// then to the end, where without the memory it creeps 7.3 mm. The twist is charged free:
-/// charged as velocity the leaning pair goes from 0.07 of still to 4.5 and the 10 degree
-/// capsule rolls away.
+/// then to the end, where without the memory it creeps 7.3 mm. (Both 10 degree figures were
+/// read while the step's own twist went unresisted, at one phase of the cycle that left;
+/// with [`untwist`] answering it, charged as velocity, 10 degrees is 2.2e-11 m.) The stored twist is charged
+/// free: charged as velocity the leaning pair goes from 0.07 of still to 4.5 and the 10 degree
+/// capsule rolls away. The step's own twist is charged as velocity; see [`untwist`].
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RollMemory {
     pub orientation: Quaternion,
@@ -306,27 +308,50 @@ pub(super) fn pair_memory_debt(
 /// the travel over 64 s is 2e-17 m. Charging it on the rolling cone instead was measured
 /// and is wrong: the cone is on the resultant, so a twist shrinks the share left for the
 /// roll, and at 10 degrees the capsule rolled away.
+///
+/// # The step's own twist first, as motion
+///
+/// The stored twist is only what earlier steps left. The turn the body makes about the
+/// normal *this* step is answered first, on the same budget, and charged
+/// [`Charge::Moving`], so friction takes it out of the body's spin. Without it nothing
+/// resisted a step's own twist and the free correction turned the body back without
+/// touching its spin: measured on a capsule laid across a 10 degree slope, an exact 15-step
+/// limit cycle with the body spinning at 0.16 to 0.45 rad/s about the normal and its centre
+/// swinging by 3e-4 m, held in place and never dissipated. The law is
+/// [`crate::forces::friction::twist_friction`].
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn untwist(
     out: Correction,
     body: &Gathered,
     normal: (f64, f64, f64),
     span: (f64, f64, f64),
-    coulomb: f64,
+    friction: f64,
+    normal_impulse: f64,
     taken: &mut f64,
     roll: RollMemory,
 ) -> Correction {
+    use crate::forces::friction::{twist_friction, twist_friction_limit};
     let mut out = out;
-    let owed = dot(turned_since(body.prev_orientation, roll.orientation), normal);
-    let limit = coulomb * 0.25 * length(span);
+    let limit = twist_friction_limit(friction, normal_impulse, 0.5 * length(span));
     let ease = dot(normal, body.now.world_inv_inertia.apply(normal));
-    if owed == 0.0 || limit <= 0.0 || ease <= 1e-12 || !body.now.movable() {
+    if limit <= 0.0 || ease <= 1e-12 || !body.now.movable() {
         return out;
     }
-    let total = (*taken - owed / ease).clamp(-limit, limit);
-    let delta = total - *taken;
+    // Including what this contact's correction is already turning it by, which is how the
+    // slide's own impulse, at a load point off the centre, shows up here.
+    let pending = out.rotation.multiply(&body.now.orientation);
+    let turned = dot(turned_since(pending, body.prev_orientation), normal);
+    let (applied, total) = twist_friction(turned, ease, *taken, limit);
     *taken = total;
-    if delta != 0.0 {
-        let turn = Quaternion::from_axis_angle(normal, delta * ease);
+    if applied != 0.0 {
+        let turn = Quaternion::from_axis_angle(normal, applied * ease);
+        out.rotation = renormalized(turn.multiply(&out.rotation));
+    }
+    let owed = dot(turned_since(body.prev_orientation, roll.orientation), normal);
+    let (applied, total) = twist_friction(owed, ease, *taken, limit);
+    *taken = total;
+    if applied != 0.0 {
+        let turn = Quaternion::from_axis_angle(normal, applied * ease);
         out.free_rotation = renormalized(turn.multiply(&out.free_rotation));
     }
     out
@@ -1451,89 +1476,98 @@ fn ground_friction(
     if friction <= 0.0 {
         return out;
     }
-    if let Some(roll) = roll {
-        out = untwist(out, body, normal, sub(arm[1], arm[0]), friction * spent.normal, twist, roll);
-    }
-    // The patch slides as one, so the drift that friction answers is the drift of the
-    // point the load stands at, not of either end on its own.
-    let here = add(body.now.position, load);
-    let before = add(
-        body.prev_position,
-        rotate(body.prev_orientation, local_load),
-    );
-    let flat = |v: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
-    let slid = flat(sub(here, before));
-    // What earlier steps failed to take off, if this patch has been stuck since -- the
-    // travel of the piece of surface that is stuck, from where it stuck to where the step
-    // began. The anchor is dropped here as well as in the maintenance if that piece has
-    // risen off the plane, because then the body has rolled and the memory is about
-    // somewhere else. See [`Anchor`].
-    let anchor = anchor.filter(|anchor| {
-        let at = add(body.now.position, rotate(body.now.orientation, anchor.local));
-        distance - dot(normal, at) > 0.0
-    });
-    let stored = match anchor {
-        Some(anchor) => {
-            let stuck = add(anchor.position, rotate(anchor.orientation, anchor.local));
-            let then = add(body.prev_position, rotate(body.prev_orientation, anchor.local));
-            flat(sub(then, stuck))
-        }
-        None => (0.0, 0.0, 0.0),
-    };
-    // The direction the whole of it lies in, which is what the patch's reach and the
-    // couple it can carry are measured along.
-    let Some(heading) = normalized(add(slid, stored)) else {
-        return out;
-    };
-    // The stored part is redeemable only up to the budget it was banked at, turned into a
-    // distance by the same inverse mass the impulse will be divided by. This step's own
-    // slide keeps today's authority, which is the cone below.
-    let tangential = match anchor {
-        None => slid,
-        Some(anchor) => {
-            let span = 0.5 * dot(sub(arm[1], arm[0]), heading).abs();
-            let lever = patch_arm(load, normal, span, friction);
-            let mobility = generalised_inverse_mass(&body.now, lever, heading);
-            let most = (anchor.hold * mobility).min(anchor_reach);
-            let size = length(stored);
-            if size > most {
-                add(slid, scale(stored, most / size))
-            } else {
-                add(slid, stored)
+    let mut out = 'slide: {
+        // The patch slides as one, so the drift that friction answers is the drift of the
+        // point the load stands at, not of either end on its own.
+        let here = add(body.now.position, load);
+        let before = add(
+            body.prev_position,
+            rotate(body.prev_orientation, local_load),
+        );
+        let flat = |v: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
+        let slid = flat(sub(here, before));
+        // What earlier steps failed to take off, if this patch has been stuck since -- the
+        // travel of the piece of surface that is stuck, from where it stuck to where the step
+        // began. The anchor is dropped here as well as in the maintenance if that piece has
+        // risen off the plane, because then the body has rolled and the memory is about
+        // somewhere else. See [`Anchor`].
+        let anchor = anchor.filter(|anchor| {
+            let at = add(body.now.position, rotate(body.now.orientation, anchor.local));
+            distance - dot(normal, at) > 0.0
+        });
+        let stored = match anchor {
+            Some(anchor) => {
+                let stuck = add(anchor.position, rotate(anchor.orientation, anchor.local));
+                let then = add(body.prev_position, rotate(body.prev_orientation, anchor.local));
+                flat(sub(then, stuck))
             }
+            None => (0.0, 0.0, 0.0),
+        };
+        // The direction the whole of it lies in, which is what the patch's reach and the
+        // couple it can carry are measured along.
+        let Some(heading) = normalized(add(slid, stored)) else {
+            break 'slide out;
+        };
+        // The stored part is redeemable only up to the budget it was banked at, turned into a
+        // distance by the same inverse mass the impulse will be divided by. This step's own
+        // slide keeps today's authority, which is the cone below.
+        let tangential = match anchor {
+            None => slid,
+            Some(anchor) => {
+                let span = 0.5 * dot(sub(arm[1], arm[0]), heading).abs();
+                let lever = patch_arm(load, normal, span, friction);
+                let mobility = generalised_inverse_mass(&body.now, lever, heading);
+                let most = (anchor.hold * mobility).min(anchor_reach);
+                let size = length(stored);
+                if size > most {
+                    add(slid, scale(stored, most / size))
+                } else {
+                    add(slid, stored)
+                }
+            }
+        };
+        let Some(direction) = normalized(tangential) else {
+            break 'slide out;
+        };
+        // The load stands where it stands, but the couple the impulse leaves still has to be
+        // carried, and how much of it the patch can absorb is what [`patch_arm`] answers. The
+        // reach is the patch's own, half of it, along the direction being resisted -- which is
+        // the one thing the two ends are still needed for once the normal solve has decided
+        // how they share the load.
+        let reach = 0.5 * dot(sub(arm[1], arm[0]), direction).abs();
+        let couple = patch_arm(load, normal, reach, friction);
+        let tw = generalised_inverse_mass(&body.now, couple, direction);
+        if tw <= 1e-12 {
+            break 'slide out;
         }
+        // Coulomb over the step, and as a cone; see the pair version and [`Spent`].
+        let wanted = scale(direction, -length(tangential) / tw);
+        let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
+        if grip == (0.0, 0.0, 0.0) {
+            break 'slide out;
+        }
+        spent.tangential = total_grip;
+        // **The whole of it reads back as velocity, the stored part included**, and that was
+        // measured rather than assumed. Taking off slip an earlier step left behind is the
+        // correction of an error rather than something the body did, so the argument for
+        // `Correction::free_translation` -- which the normal solve a few lines above makes for
+        // exactly this reason -- looks like it should apply to the stored share. It does not
+        // pay: charging that share as free leaves the body undamped by it, and over eight draws
+        // that takes a stack of five from settling every time to settling in five, and a
+        // settled pile of forty from 0.103 of a reach to 0.189. Damping the old error as well
+        // is what those settle on.
+        accumulate(&mut out, &body.now, couple, grip, Charge::Moving);
+        out
     };
-    let Some(direction) = normalized(tangential) else {
-        return out;
-    };
-    // The load stands where it stands, but the couple the impulse leaves still has to be
-    // carried, and how much of it the patch can absorb is what [`patch_arm`] answers. The
-    // reach is the patch's own, half of it, along the direction being resisted -- which is
-    // the one thing the two ends are still needed for once the normal solve has decided
-    // how they share the load.
-    let reach = 0.5 * dot(sub(arm[1], arm[0]), direction).abs();
-    let couple = patch_arm(load, normal, reach, friction);
-    let tw = generalised_inverse_mass(&body.now, couple, direction);
-    if tw <= 1e-12 {
-        return out;
+    // **The twist last**, so that what it answers includes the turn the slide's own impulse
+    // makes: the load point is off the centre, so holding the body against sliding turns
+    // it about the normal. Answered before the slide, that turn was left in the body and
+    // the next step's free untwist took it back without its spin, which also moved the
+    // slide anchor's stuck point and so came back as velocity: measured on a capsule laid
+    // across a 10 degree slope, a two-step cycle at 2e-3 to 7e-3 rad/s and 3e-3 m/s.
+    if let Some(roll) = roll {
+        out = untwist(out, body, normal, sub(arm[1], arm[0]), friction, spent.normal, twist, roll);
     }
-    // Coulomb over the step, and as a cone; see the pair version and [`Spent`].
-    let wanted = scale(direction, -length(tangential) / tw);
-    let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
-    if grip == (0.0, 0.0, 0.0) {
-        return out;
-    }
-    spent.tangential = total_grip;
-    // **The whole of it reads back as velocity, the stored part included**, and that was
-    // measured rather than assumed. Taking off slip an earlier step left behind is the
-    // correction of an error rather than something the body did, so the argument for
-    // `Correction::free_translation` -- which the normal solve a few lines above makes for
-    // exactly this reason -- looks like it should apply to the stored share. It does not
-    // pay: charging that share as free leaves the body undamped by it, and over eight draws
-    // that takes a stack of five from settling every time to settling in five, and a
-    // settled pile of forty from 0.103 of a reach to 0.189. Damping the old error as well
-    // is what those settle on.
-    accumulate(&mut out, &body.now, couple, grip, Charge::Moving);
     out
 }
 
