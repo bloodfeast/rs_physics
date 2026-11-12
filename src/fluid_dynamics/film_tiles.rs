@@ -262,6 +262,13 @@ impl TileFilm {
         self.liquid.iter().any(|&l| l)
     }
 
+    /// The tile flags, row-major: `(active, liquid)`. Active tiles are what the next step
+    /// visits; liquid tiles are what a drying step adds to them. For a caller that mirrors
+    /// the film's state (a reference implementation run beside it) or inspects it.
+    pub fn flags(&self) -> (&[bool], &[bool]) {
+        (&self.active, &self.liquid)
+    }
+
     /// Tiles in the whole field.
     pub fn tile_count(&self) -> usize {
         self.active.len()

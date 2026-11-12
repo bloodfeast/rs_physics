@@ -144,8 +144,8 @@ impl TileFade {
         self.owed -= drop as f32;
         report.drop = drop;
 
-        for t in 0..self.standing.len() {
-            if !self.standing[t] {
+        for (t, flag) in self.standing.iter_mut().enumerate() {
+            if !*flag {
                 continue;
             }
             let (tx, ty) = (t % self.tiles_x, t / self.tiles_x);
@@ -165,7 +165,7 @@ impl TileFade {
                 }
                 standing |= any != 0;
             }
-            self.standing[t] = standing;
+            *flag = standing;
             report.tiles += 1;
             report.moved = true;
             report.dirty_min.0 = report.dirty_min.0.min(x0);

@@ -214,6 +214,12 @@ pub use film_tiles::*;
 mod porous;
 #[cfg(feature = "fluid_dynamics")]
 pub use porous::*;
+// The sparse-tile linear fade on the film's tiles (a ridge of loose soil settling back in
+// place). Gated with `film_tiles`, whose `TILE` it shares.
+#[cfg(feature = "fluid_dynamics")]
+mod tile_fade;
+#[cfg(feature = "fluid_dynamics")]
+pub use tile_fade::*;
 
 // Grid-based fluid simulation (Eulerian solver)
 #[cfg(feature = "fluid_simulation")]
