@@ -9,7 +9,10 @@
 //! ## Features
 //!
 //! - **Predefined materials**: Steel, stainless steel, aluminum, copper, titanium,
-//!   brass, concrete, glass, rubber, polyurethane, wood, ice
+//!   brass, concrete, glass, rubber, polyurethane, wood, canvas, ice
+//! - **Wetting**: open porosity, water contact angle and the wet albedo law
+//!   ([`Wetting`]: why canvas soaks darker in the rain and steel only gains gloss;
+//!   linear albedos)
 //! - **Mechanical properties**: Young's modulus, yield/ultimate strength, Poisson's ratio
 //! - **Thermal properties**: Thermal conductivity, specific heat capacity, thermal diffusivity
 //! - **Collision properties**: Friction coefficient, restitution coefficient
@@ -49,6 +52,7 @@
 //! | Rubber | 1100 | 0.01 | Dampers, seals |
 //! | Polyurethane | 1200 | 0.02 | Flexible components |
 //! | Wood | 700 | 12 | Construction |
+//! | Canvas | 600 | 0.5 | Tents, tarpaulins, covers |
 //! | Ice | 917 | 9.3 | Environmental simulation |
 //!
 //! ## Creating Custom Materials
@@ -107,6 +111,10 @@
 mod materials;
 #[cfg(feature = "materials")]
 pub use materials::*;
+#[cfg(feature = "materials")]
+mod wetting;
+#[cfg(feature = "materials")]
+pub use wetting::*;
 
 #[cfg(test)]
 #[cfg(feature = "materials")]

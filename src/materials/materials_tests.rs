@@ -567,3 +567,160 @@ fn test_calculate_fatigue_strength_transition() {
     assert!(strength > endurance_limit,
         "Transition strength should be greater than endurance limit");
 }
+
+// ---- Wetting ----
+
+use crate::materials::{film_albedo, normal_reflectance, pore_filled_albedo, Finish, Wetting, WATER_REFRACTIVE_INDEX};
+
+/// Every preset constructor, by name, so a new preset has to be listed here and decide
+/// its wetting.
+fn presets() -> Vec<(&'static str, Material)> {
+    vec![
+        ("steel", Material::steel()),
+        ("aluminum", Material::aluminum()),
+        ("rubber", Material::rubber()),
+        ("polyurethane", Material::polyurethane()),
+        ("rope", Material::rope()),
+        ("canvas", Material::canvas()),
+        ("wood", Material::wood()),
+        ("dry_vegetation", Material::dry_vegetation()),
+        ("napalm", Material::napalm()),
+        ("copper", Material::copper()),
+        ("titanium", Material::titanium()),
+        ("concrete", Material::concrete()),
+        ("glass", Material::glass()),
+        ("brass", Material::brass()),
+        ("ice", Material::ice()),
+        ("stainless_steel", Material::stainless_steel()),
+    ]
+}
+
+fn wetted_presets() -> Vec<(&'static str, Wetting)> {
+    presets().into_iter().filter_map(|(n, m)| m.wetting.map(|w| (n, w))).collect()
+}
+
+#[test]
+fn the_presets_left_uncharacterised_are_the_listed_ones() {
+    let none: Vec<_> = presets().into_iter().filter(|(_, m)| m.wetting.is_none()).map(|(n, _)| n).collect();
+    assert_eq!(none, ["dry_vegetation", "napalm", "ice"]);
+}
+
+#[test]
+fn dry_is_exactly_unchanged() {
+    for (name, w) in wetted_presets() {
+        for a in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            assert_eq!(w.wet_albedo(a, 0.0), a, "{name} at {a}");
+            assert_eq!(w.wet_albedo(a, -1.0), a, "{name} at {a}");
+            assert_eq!(w.wet_albedo(a, f64::NAN), a, "{name} at {a}, NaN saturation");
+        }
+    }
+}
+
+#[test]
+fn wet_is_bounded_and_monotone_over_the_grid() {
+    // 0 <= wet <= dry <= 1 for every albedo and saturation, black stays black, and more
+    // water is never brighter.
+    for (name, w) in wetted_presets() {
+        for ai in 0..=50 {
+            let a = ai as f64 / 50.0;
+            let mut last = a;
+            for si in 0..=20 {
+                let s = si as f64 / 20.0;
+                let wet = w.wet_albedo(a, s);
+                assert!((0.0..=a).contains(&wet), "{name}: a {a} s {s} -> {wet}");
+                assert!(wet <= last + 1e-12, "{name}: a {a} s {s}: {wet} after {last}");
+                last = wet;
+            }
+        }
+        assert_eq!(w.wet_albedo(0.0, 1.0), 0.0, "{name}: black");
+    }
+    assert_eq!(pore_filled_albedo(0.0, 0.1), 0.0);
+}
+
+#[test]
+fn smooth_tops_do_not_darken_and_diffuse_ones_take_the_film() {
+    // Metals and glass only gain gloss; rubber, a matt sealed solid, takes the film.
+    for m in [Material::steel(), Material::stainless_steel(), Material::aluminum(), Material::copper(),
+              Material::brass(), Material::titanium(), Material::glass()] {
+        let w = m.wetting.unwrap();
+        assert_eq!(w.finish, Finish::Smooth);
+        for a in [0.05, 0.3, 0.6, 0.95] {
+            assert_eq!(w.wet_albedo(a, 1.0), a);
+        }
+    }
+    let rubber = Material::rubber().wetting.unwrap();
+    assert_eq!(rubber.finish, Finish::Diffuse);
+    assert!((rubber.wet_albedo(0.6, 1.0) - film_albedo(0.6)).abs() < 1e-12);
+}
+
+#[test]
+fn soaking_darkens_more_than_a_film() {
+    let canvas = Material::canvas().wetting.unwrap().wet_albedo(0.6, 1.0);
+    let matt = Wetting::sealed(70.0).wet_albedo(0.6, 1.0);
+    assert!(canvas < 0.5 * matt, "canvas {canvas} matt sealed {matt}");
+    assert!((matt - film_albedo(0.6)).abs() < 1e-12);
+}
+
+#[test]
+fn porosity_is_a_gate_not_an_amount() {
+    // Documented in the module's model limits: any wetted open porosity gives the same
+    // albedo; a sealed one gives the film alone.
+    let full = Wetting::new(0.61, 0.0, 1.53).unwrap();
+    let little = Wetting::new(0.03, 0.0, 1.53).unwrap();
+    let sealed = Wetting::new(0.0, 0.0, 1.53).unwrap();
+    for a in [0.2, 0.68] {
+        for s in [0.5, 1.0] {
+            assert_eq!(full.wet_albedo(a, s), little.wet_albedo(a, s));
+        }
+        assert!((sealed.wet_albedo(a, 1.0) - film_albedo(a)).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn the_sandbag_photograph_indicative() {
+    // Indicative, not a validation: a geotextile bag photographed wet below and dry above
+    // in one frame measures wet/dry 0.26 in linear light, one uncontrolled photograph;
+    // the 0.68 dry albedo for undyed cotton is an assumption. The band is wide on purpose.
+    let r = Material::canvas().wetting.unwrap().wet_albedo(0.68, 1.0) / 0.68;
+    assert!((r - 0.26).abs() < 0.05, "{r}");
+}
+
+#[test]
+fn film_internal_reflectance() {
+    // R_i = 1 - (1 - R_e) / n^2 with R_e = 0.066 (Lekner and Dorf 1988) is about 0.474.
+    let r_i = crate::materials::water_internal_reflectance();
+    assert!((r_i - 0.474).abs() < 0.005, "{r_i}");
+    assert!(film_albedo(1.0) > 0.9);
+    assert!(film_albedo(0.2) / 0.2 < film_albedo(0.8) / 0.8);
+}
+
+#[test]
+fn pore_term_limits() {
+    assert!((pore_filled_albedo(0.4, 1.0) - 0.4).abs() < 1e-12);
+    assert!(pore_filled_albedo(0.4, 0.5) < 0.4);
+    let r = normal_reflectance(1.53, WATER_REFRACTIVE_INDEX) / normal_reflectance(1.53, 1.0);
+    assert!((r - 0.108).abs() < 0.002, "{r}");
+}
+
+#[test]
+fn wetting_validation_and_flags() {
+    assert!(Wetting::new(-0.1, 10.0, 1.5).is_err());
+    assert!(Wetting::new(0.1, 190.0, 1.5).is_err());
+    assert!(Wetting::new(0.1, 10.0, 0.9).is_err());
+    assert!(Wetting::new(f64::NAN, 10.0, 1.5).is_err());
+    assert!(Wetting::new(0.1, f64::NAN, 1.5).is_err());
+    assert!(Wetting::new(0.1, 10.0, f64::NAN).is_err());
+    assert!(Wetting::new(0.1, 10.0, f64::INFINITY).is_err());
+    assert!(Material::rubber().wetting.unwrap().beads());
+    assert!(!Material::glass().wetting.unwrap().soaks());
+    assert!(Material::wood().wetting.unwrap().soaks());
+    assert!(Material::rope().wetting.unwrap().soaks());
+}
+
+#[test]
+fn builder_keeps_wetting_and_equality_sees_it() {
+    let m = crate::materials::MaterialBuilder::from(Material::canvas()).friction_coefficient(0.5).build().unwrap();
+    assert_eq!(m.wetting, Material::canvas().wetting);
+    assert!(crate::materials::MaterialBuilder::new().build().unwrap().wetting.is_none());
+    assert_ne!(Material::canvas(), Material::canvas().wetted(Wetting::sealed(110.0)));
+}

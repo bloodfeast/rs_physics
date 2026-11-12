@@ -1,6 +1,7 @@
 // src/materials.rs
 
 use crate::utils::PhysicsError;
+use crate::materials::{Finish, Wetting};
 
 /// Represents different types of material failure.
 ///
@@ -426,6 +427,13 @@ pub struct Material {
     /// means a caller cannot compute a burn duration for a pane of glass and get a
     /// plausible-looking answer back.
     pub combustion: Option<Combustion>,
+    /// How water takes to this material: whether it soaks in or beads, and what it does to
+    /// the light the material sends back ([`Wetting`]).
+    ///
+    /// `None` means not characterised, as with [`Material::combustion`]: a caller asking a
+    /// material that nobody has measured how dark it gets in the rain gets no answer rather
+    /// than a made-up one.
+    pub wetting: Option<Wetting>,
 }
 
 impl Material {
@@ -523,6 +531,7 @@ impl Material {
             // sake of a property most materials do not have. Opt in with
             // [`Material::burning`].
             combustion: None,
+            wetting: None,
         })
     }
 
@@ -533,6 +542,29 @@ impl Material {
     /// that steel does not burn.
     pub fn burning(mut self, combustion: Combustion) -> Self {
         self.combustion = Some(combustion);
+        self
+    }
+
+    /// Attaches wetting properties, replacing any already there.
+    ///
+    /// # Arguments
+    ///
+    /// * `wetting` - How water takes to the material.
+    ///
+    /// # Returns
+    ///
+    /// The material with its wetting set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{Material, Wetting};
+    ///
+    /// let waxed = Material::canvas().wetted(Wetting::sealed(110.0));
+    /// assert!(waxed.wetting.unwrap().beads());
+    /// ```
+    pub fn wetted(mut self, wetting: Wetting) -> Self {
+        self.wetting = Some(wetting);
         self
     }
 
@@ -578,6 +610,9 @@ impl Material {
             250.0e6,            // yield strength (Pa)
             400.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create steel material")
+        // Wetting: as-received mild steel under its oxide and air film: 60 to 80 degrees typical.
+        // A metal: water adds gloss and no darkening.
+        .wetted(Wetting::sealed(70.0).with_finish(Finish::Smooth))
     }
 
     /// Creates a new Material instance with properties of aluminum.
@@ -617,6 +652,8 @@ impl Material {
             95.0e6,             // yield strength (Pa)
             110.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create aluminum material")
+        // Wetting: native oxide with adsorbed hydrocarbons: 70 to 85 degrees typical.
+        .wetted(Wetting::sealed(75.0).with_finish(Finish::Smooth))
     }
 
     /// Creates a new Material instance with properties of rubber.
@@ -656,6 +693,8 @@ impl Material {
             7.0e6,              // yield strength (Pa)
             15.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create rubber material")
+        // Wetting: natural rubber is hydrophobic: 95 to 105 degrees typical; water beads.
+        .wetted(Wetting::sealed(100.0))
         // Burns dirty and long: a high heat of combustion with a slow flux, which is the
         // combination that makes a tyre fire last for days.
         .burning(Combustion {
@@ -705,6 +744,8 @@ impl Material {
             35.0e6,             // yield strength (Pa)
             55.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create polyurethane material")
+        // Wetting: polyurethane elastomers: 70 to 80 degrees typical.
+        .wetted(Wetting::sealed(75.0))
         // Foam plastics are the fastest common fuel there is: little mass, enormous
         // surface area, almost nothing left behind.
         .burning(Combustion {
@@ -735,6 +776,7 @@ impl Material {
     /// * Specific heat capacity: 1400 J/(kg·K)
     /// * Yield strength: 30 MPa
     /// * Ultimate strength: 50 MPa
+    /// * Wetting: open porosity 0.35 between the fibres, wicking, cellulose n 1.53
     ///
     /// # Examples
     ///
@@ -743,6 +785,7 @@ impl Material {
     ///
     /// let rope = Material::rope();
     /// assert_eq!(rope.restitution_coefficient, 0.15);
+    /// assert!(rope.wetting.unwrap().soaks());
     /// ```
     pub fn rope() -> Self {
         Self::new(
@@ -757,6 +800,80 @@ impl Material {
             30.0e6,             // yield strength (Pa)
             50.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create rope material")
+        // Wetting: the density above is the fibre's; a twisted yarn packs its fibres at
+        // about 0.6 to 0.7 of its volume (Hearle, Grosberg and Backer, "Structural
+        // Mechanics of Fibers, Yarns, and Fabrics", 1969), so about 0.35 is open space
+        // between fibres that natural fibre wicks full; cellulose's mean index 1.53.
+        .wetted(Wetting { open_porosity: 0.35, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+    }
+
+    /// Heavy cotton canvas (cotton duck): tents, tarpaulins, covers.
+    ///
+    /// **A woven fabric, so most of its volume is air.** Cotton fibre is about 1540 kg/m³;
+    /// a heavy duck of 450 to 600 g/m² at 0.75 to 1.0 mm thick is about 600 kg/m³ as a
+    /// sheet, so three fifths of it is open pore that untreated cotton wicks full. That
+    /// is why a canvas cover in the rain goes several times darker and stays matt, where
+    /// a gloss-painted panel beside it (a [`Finish::Smooth`] top) only gains gloss: the
+    /// water is inside the canvas, not on it ([`Wetting::wet_albedo`]). A waxed or proofed canvas is a different surface; give
+    /// it [`Wetting::sealed`] with a beading angle.
+    ///
+    /// The mechanical numbers are the sheet's, in-plane, along the warp, and are
+    /// order-of-magnitude: a fabric has no yield in the metal sense, and its stiffness
+    /// depends on the weave's crimp. Breaking strength of a heavy duck is about
+    /// 900 N per 25 mm strip (ASTM D5034 grab values for #8 to #10 duck); over a
+    /// 25 mm x 0.8 mm section that is about 45 MPa.
+    ///
+    /// # Returns
+    ///
+    /// A Material instance with typical properties of heavy cotton duck:
+    /// * Density: 600 kg/m³ (the sheet, pores included)
+    /// * Young's modulus: 0.5 GPa (in-plane, warp)
+    /// * Poisson's ratio: 0.3
+    /// * Friction coefficient: 0.6 (cotton on cotton, as [`Material::rope`])
+    /// * Restitution coefficient: 0.1
+    /// * Rolling resistance coefficient: 0.05
+    /// * Thermal conductivity: 0.06 W/(m·K) (fibre and trapped air)
+    /// * Specific heat capacity: 1340 J/(kg·K) (cellulose)
+    /// * Yield strength: 25 MPa (the knee of the load curve)
+    /// * Ultimate strength: 45 MPa
+    /// * Wetting: open porosity 0.61, contact angle 0 (untreated cotton wicks), cellulose n 1.53
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::Material;
+    ///
+    /// let canvas = Material::canvas();
+    /// assert_eq!(canvas.density, 600.0);
+    /// assert!(canvas.wetting.unwrap().soaks());
+    /// assert!(canvas.is_combustible());
+    /// ```
+    pub fn canvas() -> Self {
+        Self::new(
+            600.0,              // density (kg/m³), the woven sheet
+            0.5e9,              // Young's modulus (Pa), in-plane along the warp
+            0.3,                // Poisson's ratio
+            0.6,                // friction coefficient
+            0.1,                // restitution coefficient
+            0.05,               // rolling resistance coefficient
+            0.06,               // thermal conductivity (W/(m·K))
+            1340.0,             // specific heat capacity (J/(kg·K))
+            25.0e6,             // yield strength (Pa)
+            45.0e6,             // ultimate strength (Pa)
+        ).expect("Failed to create canvas material")
+        // Wetting: 1 - 600 / 1540 = 0.61 open; scoured cotton spreads water (0 degrees);
+        // cellulose's mean index 1.53.
+        .wetted(Wetting { open_porosity: 0.61, contact_angle_deg: 0.0, solid_index: 1.53, finish: Finish::Diffuse })
+        // Cellulose, as wood's fuel but thin: it lights sooner and leaves less char.
+        .burning(Combustion {
+            ignition_temperature: 528.0,      // ~255 C piloted, cotton fabric
+            heat_of_combustion: 16.5e6,       // J/kg, cellulose
+            mass_burning_flux: 0.015,         // kg/(m2 s)
+            residue_fraction: 0.05,
+            // Cotton's standard moisture regain, about 8 %.
+            moisture_fraction: 0.08,
+            volatile: None,
+        })
     }
 
     /// Creates a new Material instance with properties of wood (hardwood).
@@ -796,6 +913,8 @@ impl Material {
             40.0e6,             // yield strength (Pa)
             70.0e6,             // ultimate strength (Pa)
         ).expect("Failed to create wood material")
+        // Wetting: 1 - 700 / 1500, the cell wall's density about 1500 kg/m3; sanded wood 40 to 80 degrees; cellulose n 1.53.
+        .wetted(Wetting { open_porosity: 0.53, contact_angle_deg: 60.0, solid_index: 1.53, finish: Finish::Diffuse })
         // Softwood, as measured in a cone calorimeter. The residue fraction is why a
         // wood fire ends as embers and a charred stump rather than as bare ground.
         .burning(Combustion {
@@ -947,6 +1066,8 @@ impl Material {
             70.0e6,             // yield strength (Pa) - annealed
             220.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create copper material")
+        // Wetting: as-received copper: 75 to 85 degrees typical.
+        .wetted(Wetting::sealed(80.0).with_finish(Finish::Smooth))
     }
 
     /// Creates a new Material instance with properties of titanium (Ti-6Al-4V).
@@ -994,6 +1115,8 @@ impl Material {
             880.0e6,            // yield strength (Pa)
             950.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create titanium material")
+        // Wetting: native TiO2 as received: 60 to 75 degrees typical.
+        .wetted(Wetting::sealed(70.0).with_finish(Finish::Smooth))
     }
 
     /// Creates a new Material instance with properties of concrete.
@@ -1036,6 +1159,8 @@ impl Material {
             25.0e6,             // yield strength (Pa) - compressive
             40.0e6,             // ultimate strength (Pa) - compressive
         ).expect("Failed to create concrete material")
+        // Wetting: porosity from a 5 % by mass water absorption (ASTM C642 range 4 to 6 %) x 2400 / 998; cement paste wets; quartz aggregate n 1.55.
+        .wetted(Wetting { open_porosity: 0.12, contact_angle_deg: 30.0, solid_index: 1.55, finish: Finish::Diffuse })
     }
 
     /// Creates a new Material instance with properties of glass (soda-lime).
@@ -1079,6 +1204,9 @@ impl Material {
             33.0e6,             // yield strength (Pa) - practical strength
             33.0e6,             // ultimate strength (Pa) - same as yield (brittle)
         ).expect("Failed to create glass material")
+        // Wetting: soda-lime float glass in ordinary air: 20 to 30 degrees; n 1.52; smooth,
+        // so a film adds a reflection and darkens nothing.
+        .wetted(Wetting { open_porosity: 0.0, contact_angle_deg: 25.0, solid_index: 1.52, finish: Finish::Smooth })
     }
 
     /// Creates a new Material instance with properties of brass (70/30).
@@ -1123,6 +1251,8 @@ impl Material {
             200.0e6,            // yield strength (Pa)
             400.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create brass material")
+        // Wetting: as-received brass: 75 to 85 degrees typical.
+        .wetted(Wetting::sealed(80.0).with_finish(Finish::Smooth))
     }
 
     /// Creates a new Material instance with properties of ice (at 0°C).
@@ -1211,6 +1341,8 @@ impl Material {
             215.0e6,            // yield strength (Pa)
             505.0e6,            // ultimate strength (Pa)
         ).expect("Failed to create stainless steel material")
+        // Wetting: passive chromium oxide, as received: 70 to 80 degrees typical.
+        .wetted(Wetting::sealed(75.0).with_finish(Finish::Smooth))
     }
 
     /// Calculates the shear modulus of the material.
@@ -1559,8 +1691,8 @@ impl Default for Material {
 
 /// PartialEq implementation for Material.
 ///
-/// Compares all fields for approximate equality using a relative tolerance
-/// of 1e-10 for floating point comparisons.
+/// Compares the mechanical and thermal fields for approximate equality using a relative
+/// tolerance of 1e-10, and the wetting exactly. Combustion is not compared.
 ///
 /// # Examples
 ///
@@ -1596,6 +1728,7 @@ impl PartialEq for Material {
             && approx_eq(self.specific_heat_capacity, other.specific_heat_capacity)
             && approx_eq(self.yield_strength, other.yield_strength)
             && approx_eq(self.ultimate_strength, other.ultimate_strength)
+            && self.wetting == other.wetting
     }
 }
 
@@ -1644,10 +1777,15 @@ pub struct MaterialBuilder {
     specific_heat_capacity: f64,
     yield_strength: f64,
     ultimate_strength: f64,
+    wetting: Option<Wetting>,
 }
 
 impl MaterialBuilder {
     /// Creates a new MaterialBuilder with default values (steel properties).
+    ///
+    /// The wetting is not steel's: a new material's surface is unknown until
+    /// [`MaterialBuilder::wetting`] sets it, so the built material has `wetting: None`
+    /// and differs from [`Material::default`] in that one field.
     ///
     /// # Examples
     ///
@@ -1672,6 +1810,8 @@ impl MaterialBuilder {
             specific_heat_capacity: steel.specific_heat_capacity,
             yield_strength: steel.yield_strength,
             ultimate_strength: steel.ultimate_strength,
+            // A new material is not steel's surface: its wetting is unknown until set.
+            wetting: None,
         }
     }
 
@@ -1736,6 +1876,21 @@ impl MaterialBuilder {
         self
     }
 
+    /// Sets how water takes to the material ([`Wetting`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{MaterialBuilder, Wetting};
+    ///
+    /// let m = MaterialBuilder::new().wetting(Wetting::sealed(95.0)).build().unwrap();
+    /// assert!(m.wetting.unwrap().beads());
+    /// ```
+    pub fn wetting(mut self, wetting: Wetting) -> Self {
+        self.wetting = Some(wetting);
+        self
+    }
+
     /// Builds the Material, validating all properties.
     ///
     /// # Returns
@@ -1773,6 +1928,7 @@ impl MaterialBuilder {
             self.yield_strength,
             self.ultimate_strength,
         )
+        .map(|m| Material { wetting: self.wetting, ..m })
     }
 }
 
@@ -1813,6 +1969,7 @@ impl From<Material> for MaterialBuilder {
             specific_heat_capacity: material.specific_heat_capacity,
             yield_strength: material.yield_strength,
             ultimate_strength: material.ultimate_strength,
+            wetting: material.wetting,
         }
     }
 }

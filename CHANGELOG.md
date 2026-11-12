@@ -5,6 +5,30 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
 
 ## Unreleased
 
+### Added
+
+- **`materials::Wetting`: how water takes to a material**, as `Material::wetting:
+  Option<Wetting>` (`None` is "not characterised", as with `combustion`): open porosity, the
+  water contact angle and the solid's refractive index, with `soaks`, `beads` and
+  `saturation_water_content`. The wet albedo law, `Wetting::wet_albedo(dry, saturation)`:
+  pore filling through the Kubelka-Munk infinite layer with the scattering scaled by the
+  Fresnel step solid-to-water over solid-to-air (Twomey, Bohren and Mergenthaler 1986), then
+  the thin film over a diffuse surface (Angstrom; Lekner and Dorf 1988), with the parts as
+  free functions (`film_albedo`, `pore_filled_albedo`, `normal_reflectance`). Albedos are
+  linear. The film applies only to a `Finish::Diffuse` top; a `Finish::Smooth` one (the
+  metals, glass, a gloss coat) keeps its albedo and only gains gloss. Open porosity is a
+  gate in the albedo, not an amount (documented and pinned by a test). Indicative only:
+  soaked cotton at an assumed 0.68 dry comes out at 0.28 of its dry brightness, and a
+  geotextile bag photographed wet below and dry above in one frame measures 0.26.
+  Wetting is set on steel, stainless steel, aluminum, copper, titanium, brass, glass,
+  rubber, polyurethane, concrete, wood and rope; ice, napalm and dry vegetation are left
+  `None` on purpose. `MaterialBuilder` carries it (`wetting`), `Material::wetted` sets it,
+  and `Material`'s `PartialEq` compares it.
+- **Breaking**: `Material` has a new public field, `wetting`, so a struct literal outside
+  the crate needs `..Material::default()` or the field.
+- **`Material::canvas()`**: heavy cotton duck (tents, tarpaulins, covers), 600 kg/m³ as a
+  sheet, open porosity 0.61, wicking, combustible as cellulose.
+
 ### Changed
 
 - **`particles::MAX_CLASSES` is 16, was 8**, on the CPU pool and the resident GPU pool alike,
