@@ -437,19 +437,21 @@ fn parallel_capsules_meet_along_a_line_and_crossed_ones_at_a_point() {
         "one capsule lying along another touches it at both ends of the overlap",
     );
 
-    let mut s = Skeleton::new();
-    s.add_body(lying(Body::pinned((0.0, 0.0, 0.0)).shaped(0.1, 0.5), 0.0));
-    // The same capsule turned across the lower one rather than along it.
-    let mut across = Body::capsule(4.0, 0.1, 0.5, (0.0, 0.19, 0.0));
-    across.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
-    s.add_body(across);
-    s.step(DT, G, 1);
-    assert_eq!(
-        s.contact_count(),
-        1,
-        "two capsules crossing touch at one point, and inventing a second would invent a \
-         torque with it",
-    );
+    // The same capsule turned across the lower one rather than along it: one point as rigid
+    // shapes, and the two ends of the patch the overlap has with `set_contact_patch` on.
+    for (patch, expected, why) in [
+        (false, 1, "two rigid capsules crossing touch at one point"),
+        (true, 2, "an overlapping crossed pair is held by the two ends of its patch"),
+    ] {
+        let mut s = Skeleton::new();
+        s.set_contact_patch(patch);
+        s.add_body(lying(Body::pinned((0.0, 0.0, 0.0)).shaped(0.1, 0.5), 0.0));
+        let mut across = Body::capsule(4.0, 0.1, 0.5, (0.0, 0.19, 0.0));
+        across.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::FRAC_PI_2);
+        s.add_body(across);
+        s.step(DT, G, 1);
+        assert_eq!(s.contact_count(), expected, "{why}");
+    }
 }
 
 /// **A pair that was carrying load keeps its contact through the step it is solved exactly

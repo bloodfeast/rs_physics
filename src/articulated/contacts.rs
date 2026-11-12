@@ -574,7 +574,7 @@ pub(super) fn capsule_contact(
             (axis, s.abs() < half_length[i] - 1e-9)
         };
         let shapes = [along(a, ca), along(b, cb)];
-        if let Some((offset, span)) = pair_patch(
+        if let Some(PairPatch { offset, span }) = pair_patch(
             normal,
             depth,
             [radius[a], radius[b]],
@@ -681,7 +681,7 @@ pub(super) fn pair_patch(
     radius: [f64; 2],
     axis: [(f64, f64, f64); 2],
     on_side: [bool; 2],
-) -> Option<((f64, f64, f64), (f64, f64, f64))> {
+) -> Option<PairPatch> {
     let sum = radius[0] + radius[1];
     if depth <= 0.0 || radius[0] <= 0.0 || radius[1] <= 0.0 {
         return None;
@@ -719,7 +719,19 @@ pub(super) fn pair_patch(
     let (sin, cos) = half.sin_cos();
     let long = add(scale(first, -sin), scale(second, cos));
     let offset = scale(long, rho);
-    Some((offset, scale(offset, 2.0)))
+    Some(PairPatch {
+        offset,
+        span: scale(offset, 2.0),
+    })
+}
+
+/// What [`pair_patch`] answers: where one end of the patch is from the closest point (the
+/// other is the same distance the other way), and the vector from one end to the other,
+/// which is what [`Contact::span`] carries.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PairPatch {
+    pub offset: (f64, f64, f64),
+    pub span: (f64, f64, f64),
 }
 
 /// One contact from a pair of points on the two axes, or `None` if the capsules are clear
