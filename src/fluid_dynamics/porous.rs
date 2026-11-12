@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(soak_uptake(0, 255, 255), 255);
         // Half the scale offered takes half the headroom (truncated).
         assert_eq!(soak_uptake(0, 128, 255), 128);
-        assert_eq!(soak_uptake(100, 128, 255), 100 + (128 * 155) / 255);
+        assert_eq!(soak_uptake(100, 128, 255) as u32, 100 + (128 * 155) / 255);
     }
 
     #[test]
