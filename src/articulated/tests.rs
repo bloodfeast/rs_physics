@@ -3473,3 +3473,400 @@ fn a_forced_sleep_leaves_an_island_it_finds_alone() {
         "the natural island did not survive a forced sleep passing over it",
     );
 }
+
+// -- a read-only probe: what a rig that will not rest is touching --------------------
+//
+// Nothing below changes the solver or is compiled outside the tests. It reads the lists a
+// step leaves behind -- the contacts, what each one spent, and the settling counters -- and
+// sorts them by what the constraint is between, which the public interface cannot say.
+
+/// The kinds a constraint is sorted into by the probe.
+const PROBE_KINDS: [&str; 4] = [
+    "ground",
+    "own rig, shared neighbour",
+    "own rig, further apart",
+    "between rigs",
+];
+
+/// The bones of [`probe_rig`], and the bone each is jointed to towards the pelvis.
+const PROBE_BONES: [&str; 17] = [
+    "pelvis", "spine1", "spine2", "spine3", "spine4", "armA1", "armA2", "armA3", "armB1", "armB2",
+    "armB3", "legA1", "legA2", "legA3", "legB1", "legB2", "legB3",
+];
+const PROBE_PARENT: [usize; 17] = [0, 0, 1, 2, 3, 3, 5, 6, 3, 8, 9, 0, 11, 12, 0, 14, 15];
+
+/// How many joints lie between two bones of one rig.
+fn probe_joints_between(a: usize, b: usize) -> usize {
+    let chain = |mut bone: usize| {
+        let mut up = vec![bone];
+        while bone != 0 {
+            bone = PROBE_PARENT[bone];
+            up.push(bone);
+        }
+        up
+    };
+    let (up_a, up_b) = (chain(a), chain(b));
+    for (i, bone) in up_a.iter().enumerate() {
+        if let Some(j) = up_b.iter().position(|other| other == bone) {
+            return i + j;
+        }
+    }
+    usize::MAX
+}
+
+/// The seventeen-bone rig of `tests/articulated_laws.rs`, turned about its pelvis and set
+/// down over `at` with its lowest surface `clearance` above the plane.
+fn probe_rig(into: &mut Skeleton, untangled: bool, at: (f64, f64), turn: Quaternion, clearance: f64) {
+    let base = into.len();
+    let pelvis = into.add_body(Body::capsule(8.0, 0.1, 0.16, (0.0, 0.0, 0.0)));
+    let mut up = pelvis;
+    for i in 0..4 {
+        let link = into.add_body(Body::capsule(6.0, 0.08, 0.2, (0.0, 0.2 + 0.2 * i as f64, 0.0)));
+        assert!(into.add_joint(Joint::free_ball(up, link, (0.0, 0.1, 0.0), (0.0, -0.1, 0.0))), "the fixture could not build its own rig");
+        up = link;
+    }
+    for limb in 0..4 {
+        let (root, side) = if limb < 2 { (base + 3, 1.0) } else { (pelvis, -1.0) };
+        let side_z = if limb % 2 == 0 { 0.15 } else { -0.15 };
+        let mut previous = root;
+        for segment in 0..3 {
+            // As the laws spawn it, an upper arm starts where the thigh below it is and
+            // 0.475 m from its shoulder. Untangled, every joint starts closed and nothing
+            // overlaps: arms raised from the shoulders, legs hanging from the hips.
+            let along = 0.25 * segment as f64;
+            let mut limb_body = Body::capsule(4.0, 0.06, 0.25, (0.0, side * along, side_z));
+            if untangled && limb < 2 {
+                limb_body.position.1 = 0.725 + along;
+                limb_body.orientation = Quaternion::from_axis_angle((1.0, 0.0, 0.0), std::f64::consts::PI);
+            } else if untangled {
+                limb_body.position.1 = -0.125 - along;
+            }
+            let body = into.add_body(limb_body);
+            let joint = if segment == 0 {
+                Joint::free_ball(previous, body, (0.0, 0.0, side_z), (0.0, 0.125, 0.0))
+            } else {
+                Joint::Hinge {
+                    a: previous,
+                    b: body,
+                    anchor_a: (0.0, -0.125, 0.0),
+                    anchor_b: (0.0, 0.125, 0.0),
+                    axis_a: (1.0, 0.0, 0.0),
+                    axis_b: (1.0, 0.0, 0.0),
+                    min: -0.1,
+                    max: 2.2,
+                }
+            };
+            assert!(into.add_joint(joint), "the fixture could not build its own rig");
+            previous = body;
+        }
+    }
+    let mut lowest = f64::INFINITY;
+    for i in base..into.len() {
+        let mut body = into.body(i);
+        let p = turn.rotate_point(body.position);
+        body.position = (p.0 + at.0, p.1, p.2 + at.1);
+        body.orientation = turn.multiply(&body.orientation);
+        let half = body.orientation.rotate_point((0.0, body.half_length, 0.0));
+        lowest = lowest.min(body.position.1 - half.1.abs() - body.radius);
+        into.set_body(i, body);
+    }
+    for i in base..into.len() {
+        let mut body = into.body(i);
+        body.position.1 += clearance - lowest;
+        into.set_body(i, body);
+    }
+}
+
+/// The landing-pose ensemble's `k`th turn, as in `tests/articulated_laws.rs`.
+fn probe_turn(k: usize) -> Quaternion {
+    let n = k as f64;
+    let height = 2.0 * (n * 0.618_033_988_75 + 0.1).fract() - 1.0;
+    let around = std::f64::consts::TAU * (n * 0.754_877_666_25 + 0.3).fract();
+    let angle = std::f64::consts::TAU * (n * 0.569_840_290_99 + 0.7).fract();
+    let flat = (1.0 - height * height).max(0.0).sqrt();
+    Quaternion::from_axis_angle((flat * around.cos(), height, flat * around.sin()), angle)
+}
+
+/// One constraint as the probe read it after a step.
+#[derive(Clone, Copy)]
+struct ProbeReading {
+    loaded: bool,
+    depth: f64,
+    force: f64,
+    driven: f64,
+    binding: bool,
+    slip: f64,
+    revived: bool,
+    point: bool,
+}
+
+/// What the probe adds up for one kind of constraint.
+#[derive(Clone, Copy, Default)]
+struct ProbeKind {
+    seen: u64,
+    loaded: u64,
+    depth: f64,
+    deepest: f64,
+    force: f64,
+    driven: f64,
+    binding: u64,
+    slip: f64,
+    worst_slip: f64,
+    revived: u64,
+    point: u64,
+}
+
+/// What the probe adds up over the tail of every world of one scene.
+#[derive(Default)]
+struct ProbeTally {
+    worlds: u64,
+    worlds_awake: u64,
+    steps: u64,
+    kinds: [ProbeKind; 4],
+    resets_by_bone: [u64; 17],
+    resets_by_touch: [u64; 16],
+    rig_steps_awake: u64,
+    rig_steps_blocked: u64,
+    bodies_awake: u64,
+    bodies_unready: u64,
+    rigs_restless: u64,
+    rigs: u64,
+}
+
+impl ProbeTally {
+    fn kind(&mut self, kind: usize, read: ProbeReading) {
+        let k = &mut self.kinds[kind];
+        k.seen += 1;
+        k.revived += u64::from(read.revived);
+        k.point += u64::from(read.point);
+        k.depth += read.depth.max(0.0);
+        k.deepest = k.deepest.max(read.depth);
+        if read.loaded {
+            k.loaded += 1;
+            k.force += read.force;
+            k.driven += read.driven;
+            k.binding += u64::from(read.binding);
+            k.slip += read.slip;
+            k.worst_slip = k.worst_slip.max(read.slip);
+        }
+    }
+
+    fn print(&self, name: &str) {
+        println!("{name}: {} of {} worlds awake at the end; per awake world-step of the tail:", self.worlds_awake, self.worlds);
+        let steps = self.steps.max(1) as f64;
+        println!("  kind                        a step  loaded  revived  1-point  depth mm (mean/max)  force N  driven/normal  cone binds  slip mm/step (mean/max)");
+        for (k, name) in self.kinds.iter().zip(PROBE_KINDS) {
+            let (seen, loaded) = (k.seen.max(1) as f64, k.loaded.max(1) as f64);
+            println!(
+                "  {name:<26} {:>7.2} {:>6.0}% {:>7.0}% {:>7.0}% {:>10.3} / {:<7.3} {:>8.1} {:>13.3} {:>10.0}% {:>10.4} / {:.4}",
+                k.seen as f64 / steps,
+                100.0 * k.loaded as f64 / seen,
+                100.0 * k.revived as f64 / seen,
+                100.0 * k.point as f64 / seen,
+                1e3 * k.depth / seen,
+                1e3 * k.deepest,
+                k.force / loaded,
+                k.driven / k.force.max(1e-30),
+                100.0 * k.binding as f64 / loaded,
+                1e3 * k.slip / loaded,
+                1e3 * k.worst_slip,
+            );
+        }
+        println!(
+            "  rigs: {} of {} had a window reset in the tail; of {} awake rig-steps {:.1}% had every bone ready and were held awake by a neighbour; {:.2} bones unready of {:.2} awake a step",
+            self.rigs_restless,
+            self.rigs,
+            self.rig_steps_awake,
+            100.0 * self.rig_steps_blocked as f64 / self.rig_steps_awake.max(1) as f64,
+            self.bodies_unready as f64 / steps,
+            self.bodies_awake as f64 / steps,
+        );
+        let total: u64 = self.resets_by_touch.iter().sum();
+        print!("  window resets by what the bone was loaded by ({total}):");
+        let mut order: Vec<usize> = (0..16).collect();
+        order.sort_by_key(|&m| std::cmp::Reverse(self.resets_by_touch[m]));
+        for m in order.into_iter().filter(|&m| self.resets_by_touch[m] > 0) {
+            let mut what = String::new();
+            for (bit, kind) in PROBE_KINDS.iter().enumerate() {
+                if m & (1 << bit) != 0 {
+                    if !what.is_empty() {
+                        what.push_str(" + ");
+                    }
+                    what.push_str(kind);
+                }
+            }
+            if what.is_empty() {
+                what.push_str("nothing");
+            }
+            print!(" [{what}] {:.0}%;", 100.0 * self.resets_by_touch[m] as f64 / total.max(1) as f64);
+        }
+        println!();
+        print!("  window resets by bone:");
+        let mut order: Vec<usize> = (0..17).collect();
+        order.sort_by_key(|&b| std::cmp::Reverse(self.resets_by_bone[b]));
+        for b in order.into_iter().take(8) {
+            print!(" {} {:.0}%;", PROBE_BONES[b], 100.0 * self.resets_by_bone[b] as f64 / total.max(1) as f64);
+        }
+        println!();
+    }
+}
+
+/// How a probe world is laid out: `rigs` rigs on a grid of `pitch`, `turned` to the
+/// landing poses from `first_pose` on or upright, at `draw`.
+#[derive(Clone, Copy)]
+struct ProbeScene {
+    rigs: usize,
+    pitch: f64,
+    turned: bool,
+    draw: usize,
+    first_pose: usize,
+    self_collision: bool,
+    untangled: bool,
+}
+
+/// One world, stepped two thousand times, its last three hundred steps read into `tally`
+/// while anything in it is awake.
+fn probe_world(scene: ProbeScene, tally: &mut ProbeTally) {
+    const STEPS: usize = 2000;
+    const TAIL: usize = 300;
+    let rigs = scene.rigs;
+    let mut s = Skeleton::new();
+    s.set_ground((0.0, 1.0, 0.0), 0.0);
+    s.set_self_collision(scene.self_collision);
+    let side = (rigs as f64).sqrt().ceil() as usize;
+    for k in 0..rigs {
+        let turn = if scene.turned { probe_turn(scene.first_pose + k) } else { Quaternion::identity() };
+        let at = ((k % side) as f64 * scene.pitch, (k / side) as f64 * scene.pitch);
+        probe_rig(&mut s, scene.untangled, at, turn, 0.55 * (1.0 + scene.draw as f64 * 1e-12));
+    }
+    let window = |s: &Skeleton, i: usize| sleep::settling_steps((s.radius[i] + s.half_length[i]).max(1e-3), 9.80665, DT);
+    let mut restless = vec![false; rigs];
+    let mut touch = vec![0u8; s.len()];
+    tally.worlds += 1;
+    tally.rigs += rigs as u64;
+    for step in 1..=STEPS {
+        s.step(DT, G, 8);
+        if step <= STEPS - TAIL || !s.awake.any() {
+            continue;
+        }
+        if step == STEPS {
+            tally.worlds_awake += 1;
+        }
+        tally.steps += 1;
+        touch.iter_mut().for_each(|t| *t = 0);
+        let point_velocity = |i: usize, r: (f64, f64, f64)| add(s.velocity[i], cross(s.angular_velocity[i], r));
+        for (k, contact) in s.contacts.iter().enumerate() {
+            let spent = s.contact_impulse[k];
+            let (ra, rb) = (rotate(s.orientation[contact.a], contact.local_a), rotate(s.orientation[contact.b], contact.local_b));
+            let depth = dot(sub(add(s.position[contact.a], ra), add(s.position[contact.b], rb)), contact.normal);
+            let relative = sub(point_velocity(contact.a, ra), point_velocity(contact.b, rb));
+            let slip = length(sub(relative, scale(contact.normal, dot(relative, contact.normal)))) * DT;
+            let kind = if contact.a / 17 != contact.b / 17 {
+                3
+            } else if probe_joints_between(contact.a % 17, contact.b % 17) <= 2 {
+                1
+            } else {
+                2
+            };
+            let loaded = spent.normal > 0.0;
+            tally.kind(
+                kind,
+                ProbeReading {
+                    loaded,
+                    depth,
+                    force: spent.normal / (DT * DT),
+                    driven: spent.driven / (DT * DT),
+                    binding: loaded && length(spent.tangential) >= 0.999 * s.friction * spent.normal,
+                    slip,
+                    revived: contact.revived,
+                    point: contact.span == (0.0, 0.0, 0.0),
+                },
+            );
+            if loaded {
+                touch[contact.a] |= 1 << kind;
+                touch[contact.b] |= 1 << kind;
+            }
+        }
+        for (k, contact) in s.ground_contacts.iter().enumerate() {
+            let patch = s.ground_impulse[k];
+            let i = contact.body;
+            let depth = contact
+                .local
+                .iter()
+                .map(|&local| contact.distance - dot(contact.normal, add(s.position[i], rotate(s.orientation[i], local))))
+                .fold(f64::NEG_INFINITY, f64::max);
+            let at = point_velocity(i, rotate(s.orientation[i], patch.local_load));
+            let loaded = patch.spent.normal > 0.0;
+            tally.kind(
+                0,
+                ProbeReading {
+                    loaded,
+                    depth,
+                    force: patch.spent.normal / (DT * DT),
+                    driven: patch.spent.driven / (DT * DT),
+                    binding: loaded && length(patch.spent.tangential) >= 0.999 * s.friction * patch.spent.normal,
+                    slip: length(sub(at, scale(contact.normal, dot(at, contact.normal)))) * DT,
+                    revived: false,
+                    point: false,
+                },
+            );
+            if loaded {
+                touch[i] |= 1;
+            }
+        }
+        for (rig, restless) in restless.iter_mut().enumerate() {
+            let bones = rig * 17..rig * 17 + 17;
+            if !s.awake.get(bones.start) {
+                continue;
+            }
+            tally.rig_steps_awake += 1;
+            let unready = bones.clone().filter(|&i| s.still_steps[i] < window(&s, i)).count();
+            tally.bodies_awake += 17;
+            tally.bodies_unready += unready as u64;
+            if unready == 0 {
+                tally.rig_steps_blocked += 1;
+            }
+            for i in bones {
+                // A count of zero after a step is a window that was reset on it: the body
+                // moved further than the settling test allows.
+                if s.still_steps[i] == 0 {
+                    *restless = true;
+                    tally.resets_by_bone[i % 17] += 1;
+                    tally.resets_by_touch[touch[i] as usize] += 1;
+                }
+            }
+        }
+    }
+    tally.rigs_restless += restless.iter().filter(|&&r| r).count() as u64;
+}
+
+/// **Not a law: a reading.** What the constraints of a rig that has not come to rest are
+/// between, how deep each kind is left after the solve, what it carries, whether its
+/// friction is at the cone, and which bones' settling windows keep being reset and by
+/// what. Printed for a lone rig at every landing pose and for heaps of two, four and
+/// eight, with and without self-collision, as the laws spawn a rig and untangled.
+#[test]
+#[ignore = "a diagnostic that prints tables and asserts nothing; minutes unless optimised"]
+fn probe_what_a_restless_rig_is_touching() {
+    for untangled in [false, true] {
+        let spawn = if untangled { "untangled" } else { "as the laws spawn it" };
+        for self_collision in [true, false] {
+            let mut tally = ProbeTally::default();
+            for draw in 0..2 {
+                for first_pose in 0..20 {
+                    probe_world(ProbeScene { rigs: 1, pitch: 0.7, turned: true, draw, first_pose, self_collision, untangled }, &mut tally);
+                }
+            }
+            tally.print(&format!("lone rig {spawn}, 20 landing poses x 2 draws, self-collision {self_collision}"));
+        }
+        for rigs in [2, 4, 8] {
+            for self_collision in [true, false] {
+                let mut tally = ProbeTally::default();
+                for draw in 0..8 {
+                    probe_world(ProbeScene { rigs, pitch: 0.7, turned: true, draw, first_pose: 0, self_collision, untangled }, &mut tally);
+                }
+                tally.print(&format!("heap of {rigs} {spawn} at the landing poses, 8 draws, self-collision {self_collision}"));
+            }
+        }
+    }
+}
