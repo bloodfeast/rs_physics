@@ -1290,8 +1290,17 @@ fn a_burst_with_and_without_the_pair_patch(c: &mut Criterion) {
 ///   off again        861        1190 of 1190    14.06 ms  [13.95, 14.15]
 /// ```
 ///
-/// The off arms disagree by 1.2 ms, so the machine drifted across the sitting; the memory
-/// costs between 1.2 and 2.4 ms a step at this burst, of which 1.2 is inside the drift.
+/// The off arms disagree by 1.2 ms, so the machine drifted across the sitting. A second
+/// sitting, the same take, eleven minutes later:
+///
+/// ```text
+///   off              861        1190 of 1190    15.81 ms  [15.56, 15.97]
+///   on               937        1173 of 1190    17.70 ms  [17.52, 17.95]
+///   off again        861        1190 of 1190    15.14 ms  [14.96, 15.38]
+/// ```
+///
+/// Read together: the memory costs about 2 ms a step at this burst (1.2 to 2.6 across the two
+/// sittings' brackets), with 76 more pair contacts, the pairs it keeps touching.
 fn a_burst_with_and_without_the_stick_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("articulated/stick_burst");
     group.sample_size(10);
