@@ -567,3 +567,79 @@ fn test_calculate_fatigue_strength_transition() {
     assert!(strength > endurance_limit,
         "Transition strength should be greater than endurance limit");
 }
+// ---- Wetting ----
+
+use crate::materials::{film_albedo, normal_reflectance, pore_filled_albedo, Wetting, WATER_REFRACTIVE_INDEX};
+
+#[test]
+fn dry_is_exactly_unchanged() {
+    for m in [Material::canvas(), Material::steel(), Material::glass(), Material::concrete(), Material::wood()] {
+        let w = m.wetting.unwrap();
+        for a in [0.0, 0.1, 0.5, 0.9] {
+            assert_eq!(w.wet_albedo(a, 0.0), a);
+        }
+    }
+}
+
+#[test]
+fn wetter_is_never_brighter() {
+    for m in [Material::canvas(), Material::steel(), Material::concrete(), Material::wood()] {
+        let w = m.wetting.unwrap();
+        let mut last = 0.6;
+        for i in 1..=10 {
+            let a = w.wet_albedo(0.6, i as f64 / 10.0);
+            assert!(a <= last + 1e-12, "{a} after {last}");
+            last = a;
+        }
+    }
+}
+
+#[test]
+fn soaking_darkens_more_than_a_film() {
+    let canvas = Material::canvas().wetting.unwrap().wet_albedo(0.6, 1.0);
+    let steel = Material::steel().wetting.unwrap().wet_albedo(0.6, 1.0);
+    assert!(canvas < 0.5 * steel, "canvas {canvas} steel {steel}");
+    assert!((steel - film_albedo(0.6)).abs() < 1e-12);
+}
+
+#[test]
+fn the_sandbag_reference() {
+    // A geotextile bag wet below and dry above in one frame: wet/dry 0.26 in linear light.
+    let r = Material::canvas().wetting.unwrap().wet_albedo(0.68, 1.0) / 0.68;
+    assert!((r - 0.26).abs() < 0.05, "{r}");
+}
+
+#[test]
+fn film_matches_lekner_dorf() {
+    // The internal reflectance of water for diffuse light is about 0.47.
+    let r_i = crate::materials::water_internal_reflectance();
+    assert!((r_i - 0.474).abs() < 0.005, "{r_i}");
+    assert!(film_albedo(1.0) > 0.9);
+    assert!(film_albedo(0.2) / 0.2 < film_albedo(0.8) / 0.8);
+}
+
+#[test]
+fn pore_term_limits() {
+    assert!((pore_filled_albedo(0.4, 1.0) - 0.4).abs() < 1e-12);
+    assert!(pore_filled_albedo(0.4, 0.5) < 0.4);
+    let r = normal_reflectance(1.53, WATER_REFRACTIVE_INDEX) / normal_reflectance(1.53, 1.0);
+    assert!((r - 0.108).abs() < 0.002, "{r}");
+}
+
+#[test]
+fn wetting_validation_and_flags() {
+    assert!(Wetting::new(-0.1, 10.0, 1.5).is_err());
+    assert!(Wetting::new(0.1, 190.0, 1.5).is_err());
+    assert!(Wetting::new(0.1, 10.0, 0.9).is_err());
+    assert!(Material::rubber().wetting.unwrap().beads());
+    assert!(!Material::glass().wetting.unwrap().soaks());
+    assert!(Material::wood().wetting.unwrap().soaks());
+    assert!(Material::napalm().wetting.is_none());
+}
+
+#[test]
+fn builder_keeps_wetting() {
+    let m = crate::materials::MaterialBuilder::from(Material::canvas()).friction_coefficient(0.5).build().unwrap();
+    assert_eq!(m.wetting, Material::canvas().wetting);
+    assert!(crate::materials::MaterialBuilder::new().build().unwrap().wetting.is_none());
+}
