@@ -26,6 +26,8 @@ Notable changes to `rs_physics`. Versions before 0.3.0 are recorded only in the 
   and `Material`'s `PartialEq` compares it.
 - **Breaking**: `Material` has a new public field, `wetting`, so a struct literal outside
   the crate needs `..Material::default()` or the field.
+- **`Material::paint_steel()`**: steel under a coat of paint, sealed at 75 degrees (water on
+  epoxy 76.3, on PMMA 70.9: the Accu Dyne Test polymer table), binder n 1.5, a diffuse finish.
 - **`Material::canvas()`**: heavy cotton duck (tents, tarpaulins, covers), 600 kg/m³ as a
   sheet, open porosity 0.61, wicking, combustible as cellulose.
 

@@ -592,6 +592,7 @@ fn presets() -> Vec<(&'static str, Material)> {
         ("brass", Material::brass()),
         ("ice", Material::ice()),
         ("stainless_steel", Material::stainless_steel()),
+        ("paint_steel", Material::paint_steel()),
     ]
 }
 

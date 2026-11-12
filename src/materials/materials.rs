@@ -1345,6 +1345,46 @@ impl Material {
         .wetted(Wetting::sealed(75.0).with_finish(Finish::Smooth))
     }
 
+    /// Mild steel under a coat of paint: panels, hulls, frames.
+    ///
+    /// **Steel's body, the paint's surface.** The coat is a fraction of a millimetre, so
+    /// every mechanical and thermal number is [`Material::steel`]'s; what changes is how
+    /// water takes to it. Paint binders are polymers that water wets partly: the mean
+    /// equilibrium and advancing contact angle of water is 76.3 degrees on epoxy and 70.9
+    /// on poly(methyl methacrylate), the acrylic binder (Diversified Enterprises, "Critical
+    /// Surface Tension and Contact Angle with Water for Various Polymers", the Accu Dyne
+    /// Test polymer table), so 75 degrees here. A binder's refractive index is about 1.5
+    /// (PMMA 1.49, epoxy 1.55 to 1.57).
+    ///
+    /// The coat is sealed, so rain leaves a film on it and never soaks in. The finish is
+    /// [`Finish::Diffuse`], a matt or satin coat whose pigment scatters at its top, so a
+    /// film darkens it a little; a gloss coat is optically smooth on top and only gains
+    /// gloss in the rain: give it `.with_finish(Finish::Smooth)`.
+    ///
+    /// # Returns
+    ///
+    /// [`Material::steel`] with the paint's wetting: sealed, 75 degrees, n 1.5, diffuse.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rs_physics::materials::{Finish, Material};
+    ///
+    /// let panel = Material::paint_steel();
+    /// let paint = panel.wetting.unwrap();
+    /// assert_eq!(panel.density, Material::steel().density);
+    /// assert!(!paint.soaks() && !paint.beads());
+    /// assert_eq!(paint.finish, Finish::Diffuse);
+    /// ```
+    pub fn paint_steel() -> Self {
+        Self::steel().wetted(Wetting {
+            open_porosity: 0.0,
+            contact_angle_deg: 75.0,
+            solid_index: 1.5,
+            finish: Finish::Diffuse,
+        })
+    }
+
     /// Calculates the shear modulus of the material.
     ///
     /// The shear modulus (G) is calculated from Young's modulus (E) and
