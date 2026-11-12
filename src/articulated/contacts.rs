@@ -126,6 +126,10 @@ pub(super) struct Patch {
     /// that found any. Body-frame so that it follows the body through the corrections
     /// applied between the two sub-passes.
     pub local_load: (f64, f64, f64),
+    /// **The twist the stick memory has taken back this step**, as an angular impulse about the
+    /// plane's normal, carried across the passes like the other totals. Its own budget rather
+    /// than a share of rolling's: see [`RollMemory`].
+    pub twist: f64,
 }
 
 /// **Where a ground patch stuck, and the Coulomb budget it stuck under.**
@@ -184,6 +188,148 @@ pub(super) struct Anchor {
     /// spread to 1.9 m instead of the 4 m it spreads to with nothing holding it, which is
     /// the anchor quietly doing rolling resistance's job.
     pub local: (f64, f64, f64),
+}
+
+/// **Where two bodies stuck to one another, and the budgets they stuck under**: the pair's
+/// half of the stick memory. See [`super::Skeleton::set_stick_memory`] for what it is for
+/// and the module header on [`super`] for what was measured.
+///
+/// One per touching pair rather than one per contact, because a memory per contact remembers
+/// a pair's relative rotation out of two moments and was measured to be the shape that fails
+/// (see the module header on anchors between bodies). It travels with the pair's first
+/// contact, and the list of them is sorted by the pair like [`super::Skeleton::persist_contacts`]'s.
+///
+/// Both halves are relative and name material points, so a rigid motion the two bodies make
+/// together is not a slip and is not asked back.
+///
+/// # How what it remembers is bounded
+///
+/// What it may hand back in one step is bounded by the weakest budget it was banked under
+/// (`hold`, `turn_hold`, as [`Anchor::hold`] argues) and by one step of gravity's sag,
+/// `anchor_reach`, as a distance at the contact and as that distance over the radius as an
+/// angle. Both bounds are applied to the memory itself when it is kept at the end of a step,
+/// by moving the remembered pose towards the present one until what is left fits: so the
+/// most a step can be asked to redeem is what it starts with. That is a different thing from
+/// dropping a memory that has outgrown a step, which the header records as worse.
+///
+/// # Redeemed as a free correction
+///
+/// Unlike the ground's [`Anchor`], whose stored slip reads back as velocity, what this hands
+/// back is charged [`super::Charge::Free`]: it moves the bodies and moves where they came
+/// from with them. That is the one variant of the anchors between bodies that stopped the
+/// pumping at its source -- a pair that redeems real motion as if it were residue would
+/// otherwise hand it back as momentum, and two bodies can then pump one another. It is also
+/// what makes the memory spend itself: the stored slip is measured from where the bodies
+/// came from, which a free correction moves, so the passes of one step converge on it the
+/// way they converge on any other constraint.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PairMemory {
+    pub a: u32,
+    pub b: u32,
+    /// The material point on each body that stuck, in its own frame.
+    pub local_a: (f64, f64, f64),
+    pub local_b: (f64, f64, f64),
+    /// `a`'s point minus `b`'s, in `a`'s frame, as they stood when they stuck.
+    pub offset: (f64, f64, f64),
+    /// The smallest Coulomb budget seen while the slide memory has been live, as an impulse.
+    /// Zero when the pair's friction is not remembered this step.
+    pub hold: f64,
+    /// `conj(q_b) * q_a` when they stuck: the pair's relative orientation.
+    pub turn: Quaternion,
+    /// The smallest rolling budget, `arm * N`, seen while the rolling memory has been live,
+    /// as an angular impulse. Zero when the pair's rolling is not remembered this step.
+    pub turn_hold: f64,
+}
+
+/// **Where a body stood against the ground when its rolling stuck, and the budget it stuck
+/// under**: the rolling half of the ground's stick memory. The sliding half is [`Anchor`].
+///
+/// What it asks back is the turn since it stuck, in two parts: about axes in the plane, on
+/// the rolling cone, and about the normal, on a budget of its own (see [`untwist`]). The
+/// first is charged as velocity, like [`Anchor`]'s stored slip and for its measured reason:
+/// the plane does not move, so there is no loop to pump, and charged free the old error is
+/// never damped out of the body. Measured on a capsule laid across a slope, 64 s after half
+/// a second to land, free against velocity: 5 degrees -1e-18 m against 6e-18 m, both still;
+/// 10 degrees 4.7e-4 m against 2.6e-6 m, both arriving in the first second and constant from
+/// then to the end, where without the memory it creeps 7.3 mm. The twist is charged free:
+/// charged as velocity the leaning pair goes from 0.07 of still to 4.5 and the 10 degree
+/// capsule rolls away.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RollMemory {
+    pub orientation: Quaternion,
+    /// The smallest rolling budget, `arm * N`, seen while it has been live.
+    pub hold: f64,
+}
+
+/// What a pair's stick memory asks back at the start of this step: how far `a`'s remembered
+/// point has slid across `b`'s, flattened onto the contact plane, and how far the pair has
+/// rolled about axes in that plane. Both measured from where the bodies came from, which is
+/// what the free correction that redeems them moves.
+#[inline]
+pub(super) fn pair_memory_debt(
+    memory: &PairMemory,
+    first: &Gathered,
+    second: &Gathered,
+    normal: (f64, f64, f64),
+) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let flat = |v: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
+    let slid = if memory.hold > 0.0 {
+        let was_a = add(first.prev_position, rotate(first.prev_orientation, memory.local_a));
+        let was_b = add(second.prev_position, rotate(second.prev_orientation, memory.local_b));
+        flat(sub(sub(was_a, was_b), rotate(first.prev_orientation, memory.offset)))
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    let rolled = if memory.turn_hold > 0.0 {
+        let held = second.prev_orientation.multiply(&memory.turn);
+        flat(turned_since(first.prev_orientation, held))
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    (slid, rolled)
+}
+
+/// **The twist a ground patch's stick memory asks back**: the turn about the plane's normal
+/// since the body's rolling stuck, taken back on a budget of its own, as a free correction.
+///
+/// A body lying on the plane is held against sliding at the point its load stands and
+/// against rolling about axes in the plane, and nothing holds it against turning about the
+/// normal through that point. Friction acting at one point cannot: the load point is where
+/// friction acts, so a turn about it costs friction nothing. A real patch resists that turn
+/// with friction spread along it, and the most it can resist is `friction * N` times the
+/// mean lever of a uniform load over the patch, which for a patch of half-length `h` is
+/// `h / 2`. A patch that reaches nowhere -- a sphere, an upright capsule -- resists nothing,
+/// which is right.
+///
+/// Measured on a capsule laid across a 5 degree slope with the rolling memory on: without
+/// this it turns on the spot at 8.2e-4 rad/s and its centre creeps 8.5e-9 m a step; with it
+/// the travel over 64 s is 2e-17 m. Charging it on the rolling cone instead was measured
+/// and is wrong: the cone is on the resultant, so a twist shrinks the share left for the
+/// roll, and at 10 degrees the capsule rolled away.
+fn untwist(
+    out: Correction,
+    body: &Gathered,
+    normal: (f64, f64, f64),
+    span: (f64, f64, f64),
+    coulomb: f64,
+    taken: &mut f64,
+    roll: RollMemory,
+) -> Correction {
+    let mut out = out;
+    let owed = dot(turned_since(body.prev_orientation, roll.orientation), normal);
+    let limit = coulomb * 0.25 * length(span);
+    let ease = dot(normal, body.now.world_inv_inertia.apply(normal));
+    if owed == 0.0 || limit <= 0.0 || ease <= 1e-12 || !body.now.movable() {
+        return out;
+    }
+    let total = (*taken - owed / ease).clamp(-limit, limit);
+    let delta = total - *taken;
+    *taken = total;
+    if delta != 0.0 {
+        let turn = Quaternion::from_axis_angle(normal, delta * ease);
+        out.free_rotation = renormalized(turn.multiply(&out.free_rotation));
+    }
+    out
 }
 
 /// The impulse to add this pass, given what the contact wants and what the cone allows,
@@ -308,7 +454,7 @@ pub(super) fn cone(
 /// that reaches nowhere, so it still topples; a capsule lying down and sliding *across*
 /// its own axis has a patch that reaches nowhere in that direction, so it still rolls.
 #[inline]
-fn patch_arm(
+pub(super) fn patch_arm(
     r: (f64, f64, f64),
     normal: (f64, f64, f64),
     reach: f64,
@@ -903,6 +1049,13 @@ pub(super) fn solve_contact_normal(
 /// one anyway: friction exists wherever a normal force was carried, and the normal force
 /// this contact carried over this step is exactly `spent.normal`. A contact that carried
 /// nothing is untouched and costs one comparison.
+///
+/// # The stick memory, when the pair has one
+///
+/// `memory` is the pair's [`PairMemory`], handed only to its first contact. What it asks
+/// back is answered after this step's own slide and roll, on the same cones, so this step's
+/// motion is answered first at today's authority and the memory gets what is left. It is
+/// charged [`Charge::Free`]; see [`PairMemory`] for why.
 pub(super) fn solve_contact_friction(
     contact: Contact,
     first: &Gathered,
@@ -910,6 +1063,7 @@ pub(super) fn solve_contact_friction(
     friction: f64,
     rolling_resistance: f64,
     spent: Spent,
+    memory: Option<PairMemory>,
 ) -> ([Correction; 2], Spent) {
     let mut out = [Correction::none(); 2];
     let mut spent = spent;
@@ -923,6 +1077,10 @@ pub(super) fn solve_contact_friction(
     }
 
     let Surfaces { ra, rb, slid, .. } = surfaces(&contact, first, second);
+    let (owed_slide, owed_roll) = match memory {
+        Some(memory) => pair_memory_debt(&memory, first, second, normal),
+        None => ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+    };
 
     // The rolling half of the same law, on the same carried budget. The arm is the
     // smaller radius: the tighter body is the one that rolls.
@@ -934,41 +1092,54 @@ pub(super) fn solve_contact_friction(
         rolling_resistance * first.radius.min(second.radius),
         spent.normal,
         spent.rolling,
+        owed_roll,
     );
 
     if friction <= 0.0 {
         return (out, spent);
     }
 
-    let tangential = sub(slid, scale(normal, dot(slid, normal)));
-    let Some(direction) = normalized(tangential) else {
-        return (out, spent);
-    };
-    // Each body feels only the part of the friction couple its share of the patch cannot
+    // This step's slide, then what the memory is owed, at the memory's own points. Each
+    // body feels only the part of the friction couple its share of the patch cannot
     // cancel; see [`patch_arm`], which is where the argument is. The reach is the pair's,
     // the offset is each body's own radius.
-    let reach = 0.5 * dot(span, direction).abs();
-    let arm_a = patch_arm(ra, normal, reach, friction);
-    let arm_b = patch_arm(rb, normal, reach, friction);
-    let ta = generalised_inverse_mass(&first.now, arm_a, direction);
-    let tb = generalised_inverse_mass(&second.now, arm_b, direction);
-    let total = ta + tb;
-    if total <= 1e-12 {
-        return (out, spent);
-    }
+    let tangential = sub(slid, scale(normal, dot(slid, normal)));
+    let owed_at = memory.map(|memory| {
+        (
+            rotate(first.now.orientation, memory.local_a),
+            rotate(second.now.orientation, memory.local_b),
+        )
+    });
+    for (drift, (ra, rb), charge) in [
+        (tangential, (ra, rb), Charge::Moving),
+        (owed_slide, owed_at.unwrap_or((ra, rb)), Charge::Free),
+    ] {
+        let Some(direction) = normalized(drift) else {
+            continue;
+        };
+        let reach = 0.5 * dot(span, direction).abs();
+        let arm_a = patch_arm(ra, normal, reach, friction);
+        let arm_b = patch_arm(rb, normal, reach, friction);
+        let ta = generalised_inverse_mass(&first.now, arm_a, direction);
+        let tb = generalised_inverse_mass(&second.now, arm_b, direction);
+        let total = ta + tb;
+        if total <= 1e-12 {
+            continue;
+        }
 
-    // Coulomb, over the step rather than over this pass and as a cone rather than a
-    // running total: see [`Spent`]. The impulse that would cancel the whole remaining
-    // slide is added to what the step has already applied, the resultant is projected
-    // back into the cone if it has left it, and the difference is what goes on now.
-    let wanted = scale(direction, -length(tangential) / total);
-    let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
-    if grip == (0.0, 0.0, 0.0) {
-        return (out, spent);
+        // Coulomb, over the step rather than over this pass and as a cone rather than a
+        // running total: see [`Spent`]. The impulse that would cancel the whole remaining
+        // slide is added to what the step has already applied, the resultant is projected
+        // back into the cone if it has left it, and the difference is what goes on now.
+        let wanted = scale(direction, -length(drift) / total);
+        let (grip, total_grip) = cone(spent.tangential, wanted, friction * spent.normal);
+        if grip == (0.0, 0.0, 0.0) {
+            continue;
+        }
+        spent.tangential = total_grip;
+        accumulate(&mut out[0], &first.now, arm_a, grip, charge);
+        accumulate(&mut out[1], &second.now, arm_b, scale(grip, -1.0), charge);
     }
-    spent.tangential = total_grip;
-    accumulate(&mut out[0], &first.now, arm_a, grip, Charge::Moving);
-    accumulate(&mut out[1], &second.now, arm_b, scale(grip, -1.0), Charge::Moving);
     (out, spent)
 }
 
@@ -1200,6 +1371,7 @@ pub(super) fn solve_ground_friction(
     patch: Patch,
     anchor: Option<Anchor>,
     anchor_reach: f64,
+    roll: Option<RollMemory>,
 ) -> (Correction, Patch) {
     let mut patch = patch;
     if patch.spent.normal <= 0.0 {
@@ -1216,8 +1388,10 @@ pub(super) fn solve_ground_friction(
         distance,
         patch.local_load,
         &mut patch.spent,
+        &mut patch.twist,
         anchor,
         anchor_reach,
+        roll,
     );
     (out, patch)
 }
@@ -1234,8 +1408,10 @@ fn ground_friction(
     distance: f64,
     local_load: (f64, f64, f64),
     spent: &mut Spent,
+    twist: &mut f64,
     anchor: Option<Anchor>,
     anchor_reach: f64,
+    roll: Option<RollMemory>,
 ) -> Correction {
     let mut out = Correction::none();
     let GroundContact { body: index, local, .. } = contact;
@@ -1249,6 +1425,15 @@ fn ground_friction(
     // since. See [`Patch`].
     let load = rotate(body.now.orientation, local_load);
 
+    // What the rolling memory is owed: the turn since the body's rolling stuck, about axes
+    // in the plane, measured from where the body came from. See [`RollMemory`].
+    let owed_roll = match roll {
+        Some(roll) => {
+            let turned = turned_since(body.prev_orientation, roll.orientation);
+            sub(turned, scale(normal, dot(turned, normal)))
+        }
+        None => (0.0, 0.0, 0.0),
+    };
     // The ground does not turn, so the whole of the resistance lands on the body.
     let mut pair = [out, Correction::none()];
     spent.rolling = resist_rolling(
@@ -1259,11 +1444,15 @@ fn ground_friction(
         rolling_resistance * body.radius,
         spent.normal,
         spent.rolling,
+        owed_roll,
     );
     out = pair[0];
 
     if friction <= 0.0 {
         return out;
+    }
+    if let Some(roll) = roll {
+        out = untwist(out, body, normal, sub(arm[1], arm[0]), friction * spent.normal, twist, roll);
     }
     // The patch slides as one, so the drift that friction answers is the drift of the
     // point the load stands at, not of either end on its own.

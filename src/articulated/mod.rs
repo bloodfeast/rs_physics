@@ -2999,6 +2999,25 @@ pub struct Skeleton {
     /// recomputed each step; the longest offset an anchor may remember.
     anchor_reach: f64,
 
+    /// Whether pairs remember where they stuck, and bodies where their rolling stuck. See
+    /// [`Skeleton::set_stick_memory`].
+    stick_memory: bool,
+    /// **Each touching pair's stick memory**, sorted by the pair, kept by
+    /// [`Skeleton::remember_sticking`] at the end of a step. See [`contacts::PairMemory`].
+    pair_memory: Vec<contacts::PairMemory>,
+    /// The same list being built for the next step. Scratch, reused.
+    pair_memory_next: Vec<contacts::PairMemory>,
+    /// One per contact this step: the index into `pair_memory` of the memory its pair
+    /// carries if it is the pair's first contact, or `u32::MAX`. Empty when nothing is
+    /// remembered.
+    memory_of: Vec<u32>,
+    /// Where each body's rolling against the ground stuck. Only meaningful where
+    /// `ground_rolling` says so. See [`contacts::RollMemory`].
+    ground_roll: Vec<contacts::RollMemory>,
+    /// One bit per body: its rolling against the ground ended the last step strictly inside
+    /// its cone, so the memory above is live.
+    ground_rolling: BitSet,
+
     /// The stages of a pass, in order, with the empty colours left out. Rebuilt when the
     /// colouring is, not per pass. See [`Skeleton::plan_pass`].
     plan: Vec<Stage>,
@@ -3153,6 +3172,12 @@ impl Default for Skeleton {
             ground_stuck: BitSet::default(),
             ground_sticking: Vec::new(),
             anchor_reach: 0.0,
+            stick_memory: false,
+            pair_memory: Vec::new(),
+            pair_memory_next: Vec::new(),
+            memory_of: Vec::new(),
+            ground_roll: Vec::new(),
+            ground_rolling: BitSet::default(),
             plan: Vec::new(),
             plan_near: Vec::new(),
             plan_velocity: Vec::new(),
@@ -3336,6 +3361,41 @@ impl Skeleton {
         self.contact_patch
     }
 
+    /// **Whether a pair of bodies remembers where it stuck, and a body where its rolling
+    /// stuck**, the way the ground patch remembers where it stuck (see
+    /// `contacts::Anchor`). Off by default.
+    ///
+    /// The ground has a memory for sliding and nothing else has one: a slip between two
+    /// bodies that a step fails to take off is forgiven by the next, and so is a roll, against
+    /// the ground or another body. A body held by such a contact keeps a fixed share of each
+    /// step's gravity as motion and creeps. With this on, a pair whose friction stayed
+    /// strictly inside its cone over a step, and slid no further than one step of gravity's
+    /// sag, remembers the material points that stuck and how they stood; a contact whose
+    /// rolling stayed strictly inside its rolling cone remembers how the bodies were turned.
+    /// The next step asks it back, after its own slide and roll, on the same cones: between
+    /// two bodies as a correction that moves them without handing them momentum, against
+    /// the ground as velocity, the way the ground anchor's stored slip is. A body lying on
+    /// the ground also has its turn about the normal asked back, on a budget of its own. See
+    /// `contacts::PairMemory`, `contacts::RollMemory` and `contacts::untwist`.
+    ///
+    /// A switch so that the two can be compared in one build.
+    pub fn set_stick_memory(&mut self, memory: bool) {
+        if self.stick_memory == memory {
+            return;
+        }
+        self.stick_memory = memory;
+        self.pair_memory.clear();
+        self.memory_of.clear();
+        self.ground_rolling.clear();
+        // A changed contact model is a disturbance no settling test can see.
+        self.wake_all();
+    }
+
+    /// Whether contacts remember where they stuck. See [`Skeleton::set_stick_memory`].
+    pub fn stick_memory(&self) -> bool {
+        self.stick_memory
+    }
+
     /// Removes the ground plane.
     pub fn clear_ground(&mut self) {
         self.ground = None;
@@ -3404,6 +3464,10 @@ impl Skeleton {
             hold: 0.0,
             local: (0.0, 0.0, 0.0),
         });
+        self.ground_roll.push(contacts::RollMemory {
+            orientation: body.orientation,
+            hold: 0.0,
+        });
         self.island_of.push(NO_ISLAND);
         self.normal_load.push(0.0);
         let i = self.position.len() - 1;
@@ -3411,6 +3475,7 @@ impl Skeleton {
         self.awake.resize(n, false);
         self.retired.resize(n, false);
         self.ground_stuck.resize(n, false);
+        self.ground_rolling.resize(n, false);
         self.swept.resize(n, false);
         self.frontier.resize(n, false);
         self.next_frontier.resize(n, false);
@@ -3484,6 +3549,7 @@ impl Skeleton {
         // anchor live would have friction drag it back towards a place the caller has just
         // taken it from.
         self.ground_stuck.unset(i);
+        self.forget_sticking(i);
         self.position[i] = body.position;
         // Unit on the way in; see [`Skeleton::add_body`].
         self.orientation[i] = body.orientation.normalized();
@@ -3709,6 +3775,7 @@ impl Skeleton {
         self.ready.unset(i);
         self.disturbing.unset(i);
         self.ground_stuck.unset(i);
+        self.forget_sticking(i);
         self.island_of[i] = NO_ISLAND;
         self.still_steps[i] = 0;
         self.normal_load[i] = 0.0;
@@ -4842,6 +4909,7 @@ impl Skeleton {
         // between passes so that nothing ever converged.
         self.find_pairs();
         self.build_contacts();
+        self.attach_memory();
         // Before anything that reads the awake set: a contact that names a sleeping body
         // has to name an awake one by the time the solve reaches it, and a body woken here
         // needs the plane under it in the same step.
@@ -4915,6 +4983,8 @@ impl Skeleton {
         // stuck is the Coulomb total the whole step spent, which only exists once the last
         // pass has run. See [`Skeleton::anchor_ground`].
         self.anchor_ground();
+        // The stick memory, for the same reason. See [`Skeleton::remember_sticking`].
+        self.remember_sticking();
         // And for the same reason: which pairs were carrying load is a fact about the
         // whole step. See [`Skeleton::persist_contacts`].
         self.persist_contacts();
@@ -5275,6 +5345,10 @@ impl Skeleton {
         let ground_anchor = &self.ground_anchor;
         let ground_stuck = &self.ground_stuck;
         let anchor_reach = self.anchor_reach;
+        let ground_roll = &self.ground_roll;
+        let ground_rolling = &self.ground_rolling;
+        let pair_memory = &self.pair_memory;
+        let memory_of = &self.memory_of;
         // Read-only, and frozen for the whole of a velocity pass: the read-back sweep
         // wrote them before the pass began and the next one will rewrite them after it.
         // That is what makes the pass simultaneous rather than a second ordered sweep.
@@ -5366,6 +5440,8 @@ impl Skeleton {
                         velocity,
                         angular_velocity,
                         velocity_share,
+                        pair_memory,
+                        memory_of,
                     );
                 }
                 Stage::Overflow { half } => {
@@ -5385,6 +5461,8 @@ impl Skeleton {
                             velocity,
                             angular_velocity,
                             velocity_share,
+                            pair_memory,
+                            memory_of,
                         );
                     }
                 }
@@ -5419,6 +5497,9 @@ impl Skeleton {
                                         .get(contact.body)
                                         .then(|| ground_anchor[contact.body]),
                                     anchor_reach,
+                                    ground_rolling
+                                        .get(contact.body)
+                                        .then(|| ground_roll[contact.body]),
                                 );
                                 ground_impulse.set(k, totals);
                                 correction
@@ -5590,6 +5671,275 @@ impl Skeleton {
         held_axis.dedup_by_key(|&mut (a, b, _)| (a, b));
         self.persisting = persisting;
         self.held_axis = held_axis;
+    }
+
+    /// **Which contact carries which pair's stick memory this step**: the first contact of
+    /// each pair that has one. Run once the contact list is final. See
+    /// [`contacts::PairMemory`].
+    fn attach_memory(&mut self) {
+        self.memory_of.clear();
+        if !self.stick_memory || self.pair_memory.is_empty() {
+            return;
+        }
+        self.memory_of.resize(self.contacts.len(), u32::MAX);
+        let mut previous = None;
+        for (k, contact) in self.contacts.iter().enumerate() {
+            let key = (contact.a as u32, contact.b as u32);
+            if previous == Some(key) {
+                continue;
+            }
+            previous = Some(key);
+            if let Ok(at) = self.pair_memory.binary_search_by_key(&key, |m| (m.a, m.b)) {
+                self.memory_of[k] = at as u32;
+            }
+        }
+    }
+
+    /// Forget whatever body `i` remembers having stuck to, because it has been put somewhere
+    /// else or taken out of the world.
+    fn forget_sticking(&mut self, i: usize) {
+        self.ground_rolling.unset(i);
+        self.pair_memory
+            .retain(|memory| memory.a as usize != i && memory.b as usize != i);
+        self.memory_of.clear();
+    }
+
+    /// **Which pairs stuck to one another this step, and which bodies' rolling stuck**, and
+    /// where, decided once a step while its Coulomb totals are in hand. The stick memory's
+    /// half of [`Skeleton::anchor_ground`], and the same tests:
+    ///
+    /// * **A slide is stuck** when every loaded contact of the pair kept its friction
+    ///   strictly inside its cone, *and* the pair's remembered points slid over the step by
+    ///   no more than one step of gravity's sag. The second half is the kinematic test the
+    ///   module header found a pair needs and the plane does not: a pair in a heap can sit
+    ///   inside its cone and still slide, because the other contacts on either body undo
+    ///   its friction inside the step.
+    /// * **A roll is stuck** when every loaded contact kept its rolling resistance strictly
+    ///   inside its cone. Against the ground there is one contact a body.
+    ///
+    /// A memory that is still stuck keeps where it stuck and the weakest budget it has seen;
+    /// a new one starts from where the bodies came from this step, because what is being
+    /// remembered is the slip this step failed to take off. Either way it is then bounded:
+    /// moved towards where the bodies are now until what it would ask back fits under its
+    /// budget and under one step of gravity's sag. A pair or a body with no loaded contact
+    /// this step, or one that slid or rolled, remembers nothing.
+    fn remember_sticking(&mut self) {
+        if !self.stick_memory {
+            return;
+        }
+        let reach = self.anchor_reach;
+        let flat = |v: (f64, f64, f64), normal: (f64, f64, f64)| sub(v, scale(normal, dot(v, normal)));
+
+        // Rolling against the ground, a body at a time.
+        let mut rolling = std::mem::take(&mut self.ground_sticking);
+        rolling.clear();
+        for k in 0..self.ground_contacts.len() {
+            let contact = self.ground_contacts[k];
+            let i = contact.body;
+            let spent = self.ground_impulse[k].spent;
+            let budget = self.rolling_resistance * self.radius[i] * spent.normal;
+            if spent.normal <= 0.0 || length(spent.rolling) >= budget * (1.0 - SATURATED) {
+                continue;
+            }
+            // And the twist, on its own budget; see `contacts::untwist`. A patch that turned
+            // on the spot at its limit has slipped, and remembers nothing.
+            let half = 0.25 * length(sub(contact.local[1], contact.local[0]));
+            let twist_budget = self.friction * spent.normal * half;
+            if self.ground_rolling.get(i) && twist_budget > 0.0 && self.ground_impulse[k].twist.abs() >= twist_budget * (1.0 - SATURATED) {
+                continue;
+            }
+            let mut memory = if self.ground_rolling.get(i) {
+                let kept = self.ground_roll[i];
+                contacts::RollMemory {
+                    hold: kept.hold.min(budget),
+                    ..kept
+                }
+            } else {
+                contacts::RollMemory {
+                    orientation: self.prev_orientation[i],
+                    hold: budget,
+                }
+            };
+            // Bounded in its two parts: the roll by its budget and by one step of sag at the
+            // radius, the twist by its own budget and by one step of sag at the patch's lever.
+            let turned = turned_since(self.orientation[i], memory.orientation);
+            let world_inv_inertia = SymMat3::of(self.orientation[i], self.inv_inertia[i]);
+            let owed = flat(turned, contact.normal);
+            let mut excess = (0.0, 0.0, 0.0);
+            if let Some(axis) = normalized(owed) {
+                let turn = dot(axis, world_inv_inertia.apply(axis));
+                let most = (memory.hold * turn).min(reach / self.radius[i]);
+                let size = length(owed);
+                if size > most {
+                    excess = scale(axis, size - most);
+                }
+            }
+            let twisted = dot(turned, contact.normal);
+            let most = if half > 0.0 {
+                (twist_budget * dot(contact.normal, world_inv_inertia.apply(contact.normal))).min(reach / half)
+            } else {
+                0.0
+            };
+            excess = add(excess, scale(contact.normal, twisted - twisted.clamp(-most, most)));
+            if let Some(axis) = normalized(excess) {
+                let turn = Quaternion::from_axis_angle(axis, length(excess));
+                memory.orientation = renormalized(turn.multiply(&memory.orientation));
+            }
+            self.ground_roll[i] = memory;
+            rolling.push(i as u32);
+        }
+        self.ground_rolling.clear();
+        for &i in rolling.iter() {
+            self.ground_rolling.set(i as usize);
+        }
+        self.ground_sticking = rolling;
+
+        // Pairs. A pair's contacts are adjacent in the list, because the narrow phase makes
+        // them together.
+        let old = std::mem::take(&mut self.pair_memory);
+        let mut next = std::mem::take(&mut self.pair_memory_next);
+        next.clear();
+        let contacts = &self.contacts;
+        let (position, orientation) = (&self.position, &self.orientation);
+        let (prev_position, prev_orientation) = (&self.prev_position, &self.prev_orientation);
+        let pose = |i: usize| Pose {
+            position: position[i],
+            orientation: orientation[i],
+            inv_mass: self.inv_mass[i],
+            inv_inertia: self.inv_inertia[i],
+            world_inv_inertia: SymMat3::of(orientation[i], self.inv_inertia[i]),
+        };
+        let at = |i: usize, local: (f64, f64, f64)| add(position[i], rotate(orientation[i], local));
+        let was = |i: usize, local: (f64, f64, f64)| add(prev_position[i], rotate(prev_orientation[i], local));
+        let mut k = 0;
+        while k < contacts.len() {
+            let first = contacts[k];
+            let (a, b) = (first.a, first.b);
+            let mut end = k + 1;
+            while end < contacts.len() && contacts[end].a == a && contacts[end].b == b {
+                end += 1;
+            }
+            let arm = self.rolling_resistance * self.radius[a].min(self.radius[b]);
+            let (mut loaded, mut sliding, mut rolled) = (false, false, false);
+            let (mut hold, mut turn_hold) = (f64::INFINITY, f64::INFINITY);
+            for spent in &self.contact_impulse[k..end] {
+                if spent.normal <= 0.0 {
+                    continue;
+                }
+                loaded = true;
+                let budget = self.friction * spent.normal;
+                if length(spent.tangential) >= budget * (1.0 - SATURATED) {
+                    sliding = true;
+                } else {
+                    hold = hold.min(budget);
+                }
+                let budget = arm * spent.normal;
+                if length(spent.rolling) >= budget * (1.0 - SATURATED) {
+                    rolled = true;
+                } else {
+                    turn_hold = turn_hold.min(budget);
+                }
+            }
+            k = end;
+            if !loaded {
+                continue;
+            }
+            let normal = first.normal;
+            // The kinematic half of "stuck", at the pair's first contact.
+            let slip = flat(
+                sub(
+                    sub(at(a, first.local_a), was(a, first.local_a)),
+                    sub(at(b, first.local_b), was(b, first.local_b)),
+                ),
+                normal,
+            );
+            if length(slip) > reach {
+                sliding = true;
+            }
+            let kept = old
+                .binary_search_by_key(&(a as u32, b as u32), |m| (m.a, m.b))
+                .ok()
+                .map(|at| old[at]);
+            let mut memory = contacts::PairMemory {
+                a: a as u32,
+                b: b as u32,
+                local_a: first.local_a,
+                local_b: first.local_b,
+                offset: rotate_inv(
+                    prev_orientation[a],
+                    sub(was(a, first.local_a), was(b, first.local_b)),
+                ),
+                hold: 0.0,
+                turn: prev_orientation[b].conjugate().multiply(&prev_orientation[a]),
+                turn_hold: 0.0,
+            };
+            let (pa, pb) = (pose(a), pose(b));
+            if !sliding {
+                match kept.filter(|kept| kept.hold > 0.0) {
+                    Some(kept) => {
+                        memory.local_a = kept.local_a;
+                        memory.local_b = kept.local_b;
+                        memory.offset = kept.offset;
+                        memory.hold = kept.hold.min(hold);
+                    }
+                    None => memory.hold = hold,
+                }
+                let ra = rotate(orientation[a], memory.local_a);
+                let rb = rotate(orientation[b], memory.local_b);
+                let owed = flat(
+                    sub(
+                        sub(add(position[a], ra), add(position[b], rb)),
+                        rotate(orientation[a], memory.offset),
+                    ),
+                    normal,
+                );
+                if let Some(direction) = normalized(owed) {
+                    let patch = 0.5 * dot(first.span, direction).abs();
+                    let arm_a = contacts::patch_arm(ra, normal, patch, self.friction);
+                    let arm_b = contacts::patch_arm(rb, normal, patch, self.friction);
+                    let mobility = generalised_inverse_mass(&pa, arm_a, direction)
+                        + generalised_inverse_mass(&pb, arm_b, direction);
+                    let most = (memory.hold * mobility).min(reach);
+                    let size = length(owed);
+                    if size > most {
+                        let excess = scale(owed, 1.0 - most / size);
+                        memory.offset = add(memory.offset, rotate_inv(orientation[a], excess));
+                    }
+                }
+            }
+            if !rolled {
+                match kept.filter(|kept| kept.turn_hold > 0.0) {
+                    Some(kept) => {
+                        memory.turn = kept.turn;
+                        memory.turn_hold = kept.turn_hold.min(turn_hold);
+                    }
+                    None => memory.turn_hold = turn_hold,
+                }
+                let held = orientation[b].multiply(&memory.turn);
+                let owed = flat(turned_since(orientation[a], held), normal);
+                if let Some(axis) = normalized(owed) {
+                    let turn = dot(axis, pa.world_inv_inertia.apply(axis))
+                        + dot(axis, pb.world_inv_inertia.apply(axis));
+                    let most = (memory.turn_hold * turn)
+                        .min(reach / self.radius[a].min(self.radius[b]));
+                    let size = length(owed);
+                    if size > most {
+                        // Turn where `a` is held towards where it is, in the world, and
+                        // carry that back into `b`'s frame.
+                        let excess = Quaternion::from_axis_angle(axis, size - most);
+                        let moved = excess.multiply(&held);
+                        memory.turn = renormalized(orientation[b].conjugate().multiply(&moved));
+                    }
+                }
+            }
+            if memory.hold > 0.0 || memory.turn_hold > 0.0 {
+                next.push(memory);
+            }
+        }
+        // Keys are unique, one per pair, so the unstable sort is deterministic.
+        next.sort_unstable_by_key(|m| (m.a, m.b));
+        self.pair_memory = next;
+        self.pair_memory_next = old;
     }
 
     /// **No live joint has one end awake and the other asleep**, asserted rather than
@@ -6334,6 +6684,8 @@ unsafe fn solve_some_contacts(
     velocity: &[(f64, f64, f64)],
     angular_velocity: &[(f64, f64, f64)],
     velocity_share: &[f64],
+    pair_memory: &[contacts::PairMemory],
+    memory_of: &[u32],
 ) {
     for &k in set {
         let contact = contacts[k];
@@ -6348,7 +6700,13 @@ unsafe fn solve_some_contacts(
             }
             Half::Friction => {
                 let (corrections, totals) =
-                    solve_contact_friction(contact, &first, &second, friction, rolling, spent);
+                    {
+                    let memory = memory_of
+                        .get(k)
+                        .filter(|&&at| at != u32::MAX)
+                        .map(|&at| pair_memory[at as usize]);
+                    solve_contact_friction(contact, &first, &second, friction, rolling, spent, memory)
+                };
                 impulse.set(k, totals);
                 corrections
             }
@@ -6948,7 +7306,13 @@ fn turned_since(now: Quaternion, before: Quaternion) -> (f64, f64, f64) {
 /// is a body spinning on the spot, which is a different effect with a different arm.
 /// `b` is `None` when the other side of the contact is the ground, which does not turn
 /// and takes none of the correction.
-#[allow(clippy::too_many_arguments, reason = "kept: stale, the fn takes fewer than 8 arguments so the lint does not fire; dropping it is outside an attribute-only pass")]
+///
+/// `owed` is what a stick memory asks back, as a turn of `a` relative to `b` in the contact
+/// plane, already measured from where the bodies came from. It is answered after this step's
+/// own roll and on the same cone, so it gets only the budget the step's roll left. It is
+/// charged [`Charge::Free`] between two bodies and [`Charge::Moving`] against the ground:
+/// see [`contacts::PairMemory`] and [`contacts::RollMemory`].
+#[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn resist_rolling(
     out: &mut [Correction; 2],
     a: &Gathered,
@@ -6957,12 +7321,35 @@ fn resist_rolling(
     arm: f64,
     normal_impulse: f64,
     spent: (f64, f64, f64),
+    owed: (f64, f64, f64),
 ) -> (f64, f64, f64) {
     let mut relative = turned_since(a.now.orientation, a.prev_orientation);
     if let Some(b) = b {
         relative = sub(relative, turned_since(b.now.orientation, b.prev_orientation));
     }
     let rolled = sub(relative, scale(normal, dot(relative, normal)));
+    let spent = roll_back(out, a, b, rolled, arm * normal_impulse, spent, Charge::Moving);
+    if owed == (0.0, 0.0, 0.0) {
+        return spent;
+    }
+    // Against the ground as velocity, as the ground anchor's stored slip is and for its reason:
+    // the plane cannot pump, and a body the old error is not damped out of keeps it. Between
+    // two bodies as free, which is what stops a pair pumping. See [`contacts::RollMemory`].
+    let charge = if b.is_none() { Charge::Moving } else { Charge::Free };
+    roll_back(out, a, b, owed, arm * normal_impulse, spent, charge)
+}
+
+/// One turn `rolled` of `a` relative to `b`, taken back on the rolling cone `limit` into
+/// whichever channel `charge` names. The body of [`resist_rolling`].
+fn roll_back(
+    out: &mut [Correction; 2],
+    a: &Gathered,
+    b: Option<&Gathered>,
+    rolled: (f64, f64, f64),
+    limit: f64,
+    spent: (f64, f64, f64),
+    charge: Charge,
+) -> (f64, f64, f64) {
     let Some(axis) = normalized(rolled) else {
         return spent;
     };
@@ -6983,7 +7370,7 @@ fn resist_rolling(
     // likely, because the friction impulse that turns a body is applied at an arm and the
     // normal impulse that untilts it is applied at another.
     let wanted = scale(axis, -length(rolled) / total);
-    let (delta, total_impulse) = contacts::cone(spent, wanted, arm * normal_impulse);
+    let (delta, total_impulse) = contacts::cone(spent, wanted, limit);
     let size = length(delta);
     let Some(along) = normalized(delta) else {
         return spent;
@@ -6998,13 +7385,15 @@ fn resist_rolling(
         Some(b) => dot(along, b.now.world_inv_inertia.apply(along)),
         None => 0.0,
     };
+    let into = |slot: &mut Correction, turn: Quaternion| match charge {
+        Charge::Moving | Charge::Still => slot.rotation = renormalized(turn.multiply(&slot.rotation)),
+        Charge::Free => slot.free_rotation = renormalized(turn.multiply(&slot.free_rotation)),
+    };
     if ia > 0.0 {
-        let turn = Quaternion::from_axis_angle(along, size * ia);
-        out[0].rotation = renormalized(turn.multiply(&out[0].rotation));
+        into(&mut out[0], Quaternion::from_axis_angle(along, size * ia));
     }
     if ib > 0.0 {
-        let turn = Quaternion::from_axis_angle(along, -size * ib);
-        out[1].rotation = renormalized(turn.multiply(&out[1].rotation));
+        into(&mut out[1], Quaternion::from_axis_angle(along, -size * ib));
     }
     total_impulse
 }
