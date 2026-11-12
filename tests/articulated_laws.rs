@@ -1434,6 +1434,7 @@ fn a_heap_of_rigs_that_touch_themselves_comes_to_rest() {
 /// decaying, while the same body alone on the plane is still to 1e-20 J.
 #[test]
 fn two_bodies_leaning_on_each_other_come_to_rest() {
+    let mut failures = Vec::new();
     for degrees in [15.0_f64, 22.0] {
         let mut s = Skeleton::new();
         s.set_ground((0.0, 1.0, 0.0), 0.0);
@@ -1466,16 +1467,18 @@ fn two_bodies_leaning_on_each_other_come_to_rest() {
             kinetic.push(kinetic_energy(&s));
         }
         kinetic.sort_by(f64::total_cmp);
-        assert!(
-            worst[0] < 1.0 && worst[1] < 1.0,
-            "leaning at {degrees} degrees, over the second thousand steps the body underneath \
-             moved {:.2} and the leaning body {:.2} of what the settling test calls still; \
-             median kinetic energy {:.2e} J. Both have to stay under 1",
-            worst[0],
-            worst[1],
-            kinetic[kinetic.len() / 2],
-        );
+        if worst[0] >= 1.0 || worst[1] >= 1.0 {
+            failures.push(format!(
+                "leaning at {degrees} degrees, over the second thousand steps the body underneath \
+                 moved {:.2} and the leaning body {:.2} of what the settling test calls still \
+                 (median kinetic energy {:.2e} J)",
+                worst[0],
+                worst[1],
+                kinetic[kinetic.len() / 2],
+            ));
+        }
     }
+    assert!(failures.is_empty(), "{}; both bodies have to stay under 1", failures.join("; "));
 }
 
 /// **A capsule laid across a slope holds below the rolling angle, and rolls past it.**
@@ -1516,14 +1519,12 @@ fn rolling_resistance_holds_a_slope_and_lets_go_past_its_angle() {
         let moved = (p.0 - landed.0, p.1 - landed.1, p.2 - landed.2);
         moved.0 * downhill.0 + moved.1 * downhill.1 + moved.2 * downhill.2
     };
-    for degrees in [5.0, 10.0] {
-        let travelled = rolled(degrees, 64.0);
-        assert!(
-            travelled.abs() < STILL,
-            "laid across a {degrees}-degree slope, inside the rolling angle of 14.0, the capsule \
-             rolled {travelled:.3e} m in 64 s; it has to stay put",
-        );
-    }
+    let held: Vec<(f64, f64)> = [5.0, 10.0].iter().map(|&degrees| (degrees, rolled(degrees, 64.0))).collect();
+    assert!(
+        held.iter().all(|&(_, travelled)| travelled.abs() < STILL),
+        "laid across a slope inside the rolling angle of 14.0 degrees the capsule has to stay \
+         put; in 64 s it rolled (degrees, metres) {held:?}",
+    );
     let travelled = rolled(20.0, 4.0);
     assert!(
         travelled > 0.5,
