@@ -245,17 +245,28 @@ pub(super) struct PairMemory {
 /// under**: the rolling half of the ground's stick memory. The sliding half is [`Anchor`].
 ///
 /// What it asks back is the turn since it stuck, in two parts: about axes in the plane, on
-/// the rolling cone, and about the normal, on a budget of its own (see [`untwist`]). The
-/// first is charged as velocity, like [`Anchor`]'s stored slip and for its measured reason:
-/// the plane does not move, so there is no loop to pump, and charged free the old error is
-/// never damped out of the body. Measured on a capsule laid across a slope, 64 s after half
-/// a second to land, free against velocity: 5 degrees -1e-18 m against 6e-18 m, both still;
-/// 10 degrees 4.7e-4 m against 2.6e-6 m, both arriving in the first second and constant from
-/// then to the end, where without the memory it creeps 7.3 mm. (Both 10 degree figures were
-/// read while the step's own twist went unresisted, at one phase of the cycle that left;
-/// with [`untwist`] answering it, charged as velocity, 10 degrees is 2.2e-11 m.) The stored twist is charged
-/// free: charged as velocity the leaning pair goes from 0.07 of still to 4.5 and the 10 degree
-/// capsule rolls away. The step's own twist is charged as velocity; see [`untwist`].
+/// the rolling cone, and about the normal, on a budget of its own (see [`untwist`]). Both are
+/// charged free; the step's own roll and twist, answered first, are charged as velocity.
+///
+/// # Why the stored roll is free, and was velocity
+///
+/// It was charged as velocity, on the argument that the plane does not move and so cannot
+/// pump. The plane cannot, but a pair can hold the body for it: a capsule leaning on another
+/// is held by the pair's memory, which is paid free, and by this one. When the two disagree
+/// about where the body should be, this one pushed it towards its pose as velocity every step
+/// and the pair's took the move back free, so the push was never seen as motion and never
+/// damped. Measured on the leaning pair (15 degrees, 8 passes), the over capsule held a spin
+/// of 0.069 rad/s about its own axis while still, its velocity exactly the negative of the
+/// free turn each step, the pair holding 3.2e-4 J at 15 degrees and 2.0e-4 J at 22. Charged
+/// free: 7.3e-6 and 8.9e-6 J, leaning 0.009 and 0.001 of still, lone untangled rigs 40 of
+/// 40 asleep against 37.
+///
+/// What argued for velocity was a capsule across a 10 degree slope that crept 4.7e-4 m free
+/// against 2.6e-6 m as velocity; both figures were read while the step's own twist went
+/// unresisted, in the 15-step cycle that [`untwist`] now answers. Measured again with it: 5
+/// degrees 0 m, 10 degrees 2.3e-10 m, 20 degrees still rolls. Charging only the part of the
+/// stored roll that opposes the body's spin as velocity was tried two ways and is worse: the
+/// 22 degree leaning pair rose to 4.4 of still, or the 10 degree capsule crept 1.9e-7 m.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RollMemory {
     pub orientation: Quaternion,

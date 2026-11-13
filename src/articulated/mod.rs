@@ -7312,8 +7312,8 @@ fn turned_since(now: Quaternion, before: Quaternion) -> (f64, f64, f64) {
 /// `owed` is what a stick memory asks back, as a turn of `a` relative to `b` in the contact
 /// plane, already measured from where the bodies came from. It is answered after this step's
 /// own roll and on the same cone, so it gets only the budget the step's roll left. It is
-/// charged [`Charge::Free`] between two bodies and [`Charge::Moving`] against the ground:
-/// see [`contacts::PairMemory`] and [`contacts::RollMemory`].
+/// charged [`Charge::Free`], between two bodies and against the ground alike: see
+/// [`contacts::PairMemory`] and [`contacts::RollMemory`].
 #[allow(clippy::too_many_arguments, reason = "private solver helper; a struct for these arguments would only be built to be taken apart")]
 fn resist_rolling(
     out: &mut [Correction; 2],
@@ -7334,11 +7334,10 @@ fn resist_rolling(
     if owed == (0.0, 0.0, 0.0) {
         return spent;
     }
-    // Against the ground as velocity, as the ground anchor's stored slip is and for its reason:
-    // the plane cannot pump, and a body the old error is not damped out of keeps it. Between
-    // two bodies as free, which is what stops a pair pumping. See [`contacts::RollMemory`].
-    let charge = if b.is_none() { Charge::Moving } else { Charge::Free };
-    roll_back(out, a, b, owed, arm * normal_impulse, spent, charge)
+    // Free, against the ground as between two bodies: a stored roll is where an earlier step,
+    // or another contact, left the body, not something it is doing, and charged as velocity it
+    // pushes. See [`contacts::RollMemory`] for what that was measured to do.
+    roll_back(out, a, b, owed, arm * normal_impulse, spent, Charge::Free)
 }
 
 /// One turn `rolled` of `a` relative to `b`, taken back on the rolling cone `limit` into
