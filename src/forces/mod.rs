@@ -70,6 +70,8 @@
 #[allow(clippy::module_inception, reason = "renaming it would move the paths dependents import from")]
 mod forces;
 mod forces_2d;
+/// Friction laws as pure functions: Coulomb's bound, and twist friction about a normal.
+pub mod friction;
 
 pub use forces::*;
 pub use forces_2d::*;
