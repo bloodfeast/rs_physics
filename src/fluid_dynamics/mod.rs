@@ -204,6 +204,23 @@ mod thin_film;
 #[cfg(feature = "fluid_dynamics")]
 pub use thin_film::*;
 
+// The sparse-tile film step (fixed-point, eight-neighbour, tile-flagged) and the porous
+// absorption laws it drinks through. Laws, gated with `thin_film` for the same reason.
+#[cfg(feature = "fluid_dynamics")]
+mod film_tiles;
+#[cfg(feature = "fluid_dynamics")]
+pub use film_tiles::*;
+#[cfg(feature = "fluid_dynamics")]
+mod porous;
+#[cfg(feature = "fluid_dynamics")]
+pub use porous::*;
+// The sparse-tile linear fade on the film's tiles (a ridge of loose soil settling back in
+// place). Gated with `film_tiles`, whose `TILE` it shares.
+#[cfg(feature = "fluid_dynamics")]
+mod tile_fade;
+#[cfg(feature = "fluid_dynamics")]
+pub use tile_fade::*;
+
 // Grid-based fluid simulation (Eulerian solver)
 #[cfg(feature = "fluid_simulation")]
 mod fluid_simulation;
