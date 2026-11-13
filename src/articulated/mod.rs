@@ -1894,6 +1894,130 @@
 //!   mode to watch for is that flats have metastable states of their own: eight faces is
 //!   eight resting orientations to flip between.
 //!
+//! # Every landing pose, and two more things that are not the fix
+//!
+//! The rest defect is now held by three laws in `tests/articulated_laws.rs`, all red:
+//! `a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose` (132 of 160 samples come
+//! to rest inside sixty seconds, median step 742), the same over a rolling height field (113
+//! of 160, median 929), and `a_heap_of_rigs_that_touch_themselves_comes_to_rest` (2 heaps of
+//! 8). With self-collision off the landing-pose ensemble is 160 of 160 at a median of 126.
+//!
+//! **What holds the last rigs awake is one pair, and it is most often the same pair.**
+//! At sixty seconds, the deepest overlap between two bones of a rig that has not stopped,
+//! over the twenty-eight such samples: neck or upper spine against an upper arm in
+//! seventeen -- three bodies all jointed to the chest -- at 0.5 to 10 mm, carrying 300 to 600
+//! N on bones that weigh 39 to 59 N, the overlap cycling with a period of two to four steps.
+//! The chest itself carries nothing. More passes help and do not close it: 92 per cent at
+//! thirty-two, 97 at a hundred and twenty-eight, against 82 at eight.
+//!
+//! Three things were built against it and measured on the ensemble. None of them is here.
+//!
+//! * **Leaving out the self-contacts near the shared joint.** Pairs with a common jointed
+//!   neighbour, which is every pair above: 132 of 160, unchanged. Everything within three
+//!   joints: 159 of 160 -- and a forearm then passes through the other upper arm and one
+//!   thigh through the other, which is the one thing self-collision exists to stop. The
+//!   module's earlier finding stands: the joint graph does not say which pairs may part.
+//! * **Repairing a joint's inherited error without momentum.** Post-stabilisation, in the
+//!   sense of split impulses: joint passes run on the positions before the step copies
+//!   them, so the error last step left in a joint is put right without being read back as
+//!   velocity. On lone rigs it is the largest single improvement this defect has seen, and
+//!   the settling time falls by a factor of three to six; it is not monotone in its own
+//!   pass count and it ruins a heap:
+//!
+//! ```text
+//!   joint passes before the step      0     1     2     3     4     8
+//!   ensemble, of 160                132   153   146   160   157   142
+//!   median step to rest             742   190   225   125   363   180
+//!   field, of 160                   113   143                       143
+//!   heap of 16, of 8                  2     0                         0
+//! ```
+//!
+//!   At eight passes six heaps of eight finish with every one of their 272 bodies awake,
+//!   against about two hundred before. A term that buys a lone rig and costs a pile
+//!   moves the defect rather than closing it, and the spread across its own count is the
+//!   shape this page has learned to read as a coefficient rather than a cure.
+//! * **Solving the loop as one constraint.** The pair above and the two joints that hold
+//!   it to the chest close a loop, and a coloured Gauss-Seidel pass converges slowly round
+//!   a loop. Worse, it charges the two halves of the fight differently: the contact's push
+//!   out of an inherited overlap is free, and the joints' pull back is moving, so the loop
+//!   hands the bodies momentum every step. So every self-contact whose bodies share a
+//!   jointed neighbour was made a block with that neighbour and both joints, blocks merged
+//!   where they share a body, and each block solved directly once a pass: the joint point
+//!   as three rows, hinge alignment as two, cones, ranges and contact normals as one-sided
+//!   rows under a drop-only active set, `J M^-1 J^T` factored densely, and the moving and
+//!   free shares solved separately on the same factor, so that the free share removes the
+//!   overlap *while keeping the joints*. Nothing tuned: the only number is the precision
+//!   floor a dependent row is dropped at. It does what it says on a loop by itself -- 13
+//!   to 25 mm of inherited overlap between a neck and an arm closed in one step, the joints
+//!   exact, 0.01 to 0.06 rad/s left over -- and it hardly moves the laws:
+//!
+//! ```text
+//!                                   before   block
+//!   ensemble, of 160                   132     140
+//!   median step to rest                742     786
+//!   at rest by step 240, of 160         36      14
+//!   ensemble at 4 / 16 passes    110 / 146  103 / 150
+//!   field, of 160                      113     119
+//!   field at rest by step 240           20      14
+//!   heap of 16, of 8                     2       0
+//! ```
+//!
+//!   The heaps end with 68 to 204 of their 272 bodies awake, against mostly 204 before,
+//!   and none of the eight comes to rest. What holds the remaining rigs awake is half the
+//!   same loops, now fighting the ground and the joints outside the block, and half pairs
+//!   three or more joints apart -- pelvis against a hand, a forearm against a thigh --
+//!   which a rule about shared neighbours does not reach. The rigs that do not stop are
+//!   moving at a tenth to a quarter of a metre a second, which is not a residual a sharper
+//!   solve of one loop takes out. The block is kept on the branch `ragdoll-block-solve`
+//!   for whoever comes next; it is not a fix.
+//! * **Solving each rig whole.** If the loop is the trouble because it is cut off from the
+//!   rest of the rig, the next thing is not to cut it off: every joint-connected rig made
+//!   one block, and its joint rows, its violated cones and ranges, both ends of every
+//!   ground patch of every one of its bodies and every one of its self-contacts solved
+//!   together once a pass -- the same dense `J M^-1 J^T` and one-sided active set as the
+//!   loop above, the joints factored once as the head and the one-sided rows as a Schur
+//!   complement refactored over the active set alone. A seventeen-bone rig is about a
+//!   hundred rows. Contacts between two rigs stay in the coloured pass after the blocks,
+//!   and friction stays where it was. Nothing tuned again, and the lanes still give the
+//!   same bits at any count. It is the first thing on this page that makes a lone rig
+//!   settle *sooner*, and not only more often:
+//!
+//! ```text
+//!                                   before   block   whole
+//!   ensemble, of 160                   132     140     149
+//!   median step to rest                742     786     258
+//!   at rest by step 240, of 160         36      14      68
+//!   ensemble at 4 / 16 passes    110 / 146  103 / 150  129 / 159
+//!   field, of 160                      113     119     109
+//!   field at rest by step 240           20      14      20
+//!   heap of 16, of 8                     2       0       0
+//! ```
+//!
+//!   And it ruins a heap outright: all eight finish with every one of their 272 bodies
+//!   awake. Each rig is solved exactly and the contacts between rigs are then solved
+//!   after it by Gauss-Seidel, so every pass the exact answer for one rig is undone by its
+//!   neighbours and redone in the next -- the fight has moved from inside a rig to between
+//!   rigs, where nothing sleeps. On the field it is no better than before. And it costs
+//!   what a dense solve was predicted to cost, measured on `field_rigs` with the bench in
+//!   the order A B B A:
+//!
+//! ```text
+//!   ms a step, medians            before          whole
+//!   16 rigs arriving         2.54 / 2.58   14.63 / 15.09
+//!   16 rigs settled          2.77 / 2.90    4.95 /  5.10
+//!   64 rigs arriving        11.72 / 11.36  53.91 / 58.03
+//!   200 rigs arriving       37.29 / 38.92  164.6 / 178.5
+//!   200 rigs settled        41.05 / 41.54  67.59 / 74.99
+//!   200 rigs, no self       25.50 / 26.02  23.62 / 25.95
+//! ```
+//!
+//!   Four and a half times the step at two hundred rigs arriving, against the factor of
+//!   two this was allowed. (The settled scenes are cheaper than that only because they
+//!   sleep under the block where they did not before: 714 of 3400 bodies awake, against
+//!   all of them.) The code is kept on the branch `ragdoll-whole-solve`, with the
+//!   counters it was measured with still in it; it is not a fix, and an exact solve of
+//!   one rig at a time is not the shape of one while a heap is many rigs.
+//!
 //! # The GPU question, which double precision answers
 //!
 //! A graph-coloured constraint solve is a GPU-shaped workload: a colour is thousands of

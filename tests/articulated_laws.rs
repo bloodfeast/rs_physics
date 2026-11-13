@@ -19,7 +19,8 @@
 //! Nothing here reaches inside the module. If a law cannot be expressed through the public
 //! API then the public API is missing something, which is worth knowing on its own.
 
-use rs_physics::articulated::{Body, Joint, Skeleton};
+use rs_physics::articulated::{Body, Field, Joint, Skeleton};
+use rs_physics::models::Quaternion;
 
 const DT: f64 = 1.0 / 60.0;
 const G: (f64, f64, f64) = (0.0, -9.80665, 0.0);
@@ -1300,6 +1301,218 @@ fn a_hinge_does_not_turn_itself_inside_out() {
         worst_at.2,
         worst_at.0,
     );
+}
+
+// -- a rig at every landing pose, and a heap of them ----------------------------------
+
+/// **A rig that may touch itself comes to rest whatever pose it lands in.**
+///
+/// `a_rig_that_touches_itself_comes_to_rest` drops the rig upright, and the solver's module
+/// header records that upright is one of the good poses. This is the same claim made over
+/// the poses a body actually falls in: twenty copies of the rig on a 2.5 m grid, so that no
+/// two can reach each other and each is an independent sample, every one turned by its own
+/// axis and angle and dropped with its lowest surface 0.55 m clear of the ground. Eight
+/// draws a relative 1e-12 apart in that clearance, a hundred and sixty samples.
+///
+/// # Why every sample, and why one skeleton
+///
+/// A game ends a fallen body when it has come to rest, and a heap sleeps only when its last
+/// rig does, so a pose that never settles is not a slow rig but a rig that is solved for
+/// ever. The law is therefore stated over the fraction of samples and the bound on it is all
+/// of them. One skeleton holds all twenty because separate rigs never touch: they are
+/// separate islands and each sleeps on its own, which is exactly what is counted -- a rig
+/// has come to rest on the step all seventeen of its bodies are asleep.
+///
+/// # The bound, and the measurement behind it
+///
+/// Sixty seconds, the cap the module header's ensemble uses. Measured on the commit this law
+/// was written against: 132 of 160 samples came to rest, the median at step 742, and the
+/// rigs that did not were each held awake by a pair of their own bones a few millimetres
+/// inside each other -- the neck or the upper spine against an upper arm, all three bodies
+/// jointed to the chest -- at loads of 300 to 600 N on bones that weigh 39 to 59 N. With
+/// self-collision off the same 160 samples all come to rest, at a median of step 126.
+#[test]
+fn a_rig_that_touches_itself_comes_to_rest_at_every_landing_pose() {
+    let (rested, total, slowest) = landing_poses(None);
+    assert_eq!(
+        rested, total,
+        "{rested} of {total} landing poses came to rest inside sixty seconds (the slowest that \
+         did took {slowest} steps); every one has to"
+    );
+}
+
+/// **And on ground that is a height field.**
+///
+/// The same hundred and sixty samples over a gently rolling [`Field`] -- slopes below six
+/// degrees, well inside the friction angle -- because the ground a game drops a body on is
+/// rarely a plane, and a body on a slope rests on friction where on the plane it rests on the
+/// normal alone. Every rig is lifted so its lowest surface is the same 0.55 m above the
+/// ground beneath it.
+///
+/// Measured on the commit this law was written against: 113 of 160 came to rest, the median
+/// at step 929.
+#[test]
+fn a_rig_that_touches_itself_comes_to_rest_on_a_height_field() {
+    let heights = rolling_ground();
+    let field = Field::new(&heights, FIELD_SIDE, FIELD_SIDE, FIELD_CELL, FIELD_ORIGIN)
+        .expect("the fixture's field is a valid grid");
+    let (rested, total, slowest) = landing_poses(Some(field));
+    assert_eq!(
+        rested, total,
+        "{rested} of {total} landing poses came to rest on the field inside sixty seconds (the \
+         slowest that did took {slowest} steps); every one has to"
+    );
+}
+
+/// **A heap of rigs that may touch themselves comes to rest.**
+///
+/// Sixteen rigs dropped upright on a 0.7 m grid, close enough that they land on one another,
+/// all in one skeleton with self-collision on. A heap is one island and sleeps only when its
+/// last body does, so it is the product of the per-rig fraction the two laws above state, and
+/// the reason those have to be all of their samples rather than most of them.
+///
+/// Measured on the commit this law was written against: 2 of 8 draws came to rest inside sixty
+/// seconds, at step 1031 and 1670. The rest end with about two hundred of their 272 bodies awake.
+#[test]
+fn a_heap_of_rigs_that_touch_themselves_comes_to_rest() {
+    const DRAWS: usize = 8;
+    const RIGS: usize = 16;
+    const CAP: usize = 3600;
+    let mut rested = Vec::new();
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        let side = (RIGS as f64).sqrt().ceil() as usize;
+        for k in 0..RIGS {
+            let at = ((k % side) as f64 * 0.7, (k / side) as f64 * 0.7);
+            dropped_rig(&mut s, at, Quaternion::identity(), 0.55 * (1.0 + draw as f64 * 1e-12), None);
+        }
+        assert!(s.self_collision(), "this law is about rigs that may touch themselves");
+        let mut when = None;
+        for step in 1..=CAP {
+            s.step(DT, G, 8);
+            if s.awake_count() == 0 {
+                when = Some(step);
+                break;
+            }
+        }
+        rested.push(when);
+    }
+    let count = rested.iter().filter(|w| w.is_some()).count();
+    assert_eq!(
+        count, DRAWS,
+        "{count} of {DRAWS} heaps of {RIGS} rigs came to rest inside sixty seconds ({rested:?}); \
+         every one has to"
+    );
+}
+
+/// The vertices a side of [`rolling_ground`], their spacing in metres, and where the first
+/// one is: a field 31.5 m across that covers the landing-pose grid with room to spare.
+const FIELD_SIDE: usize = 64;
+const FIELD_CELL: f64 = 0.5;
+const FIELD_ORIGIN: (f64, f64) = (-6.0, -6.0);
+
+/// Gently rolling ground: two long swells and a shorter cross-ripple, 0.4 m from trough to
+/// crest at most and nowhere steeper than about six degrees.
+fn rolling_ground() -> Vec<f64> {
+    let mut h = vec![0.0; FIELD_SIDE * FIELD_SIDE];
+    for row in 0..FIELD_SIDE {
+        for column in 0..FIELD_SIDE {
+            let x = FIELD_ORIGIN.0 + column as f64 * FIELD_CELL;
+            let z = FIELD_ORIGIN.1 + row as f64 * FIELD_CELL;
+            h[row * FIELD_SIDE + column] =
+                0.3 * (x / 3.0).sin() * (z / 4.0).cos() + 0.1 * (0.7 * x + 1.3 * z).sin();
+        }
+    }
+    h
+}
+
+/// The landing-pose ensemble the two laws above run, on the plane or on `field`: how many of
+/// its samples came to rest inside sixty seconds, out of how many, and the most steps any
+/// that did took.
+fn landing_poses(field: Option<Field<'_>>) -> (usize, usize, usize) {
+    const DRAWS: usize = 8;
+    const RIGS: usize = 20;
+    const CAP: usize = 3600;
+    let mut rested = 0;
+    let mut slowest = 0;
+    for draw in 0..DRAWS {
+        let mut s = Skeleton::new();
+        s.set_ground((0.0, 1.0, 0.0), 0.0);
+        let clearance = 0.55 * (1.0 + draw as f64 * 1e-12);
+        let rigs: Vec<_> = (0..RIGS)
+            .map(|k| {
+                let at = ((k % 5) as f64 * 2.5, (k / 5) as f64 * 2.5);
+                dropped_rig(&mut s, at, landing_turn(k), clearance, field)
+            })
+            .collect();
+        assert!(s.self_collision(), "this law is about rigs that may touch themselves");
+        let mut when = vec![None; RIGS];
+        for step in 1..=CAP {
+            s.step_over(DT, G, 8, field);
+            for (k, bodies) in rigs.iter().enumerate() {
+                if when[k].is_none() && bodies.clone().all(|b| !s.is_awake(b)) {
+                    when[k] = Some(step);
+                }
+            }
+            if s.awake_count() == 0 {
+                break;
+            }
+        }
+        for w in when.into_iter().flatten() {
+            rested += 1;
+            slowest = slowest.max(w);
+        }
+    }
+    (rested, DRAWS * RIGS, slowest)
+}
+
+/// The turn the `k`th rig of the landing-pose ensemble lands with: an axis spread evenly over
+/// the sphere and an angle spread evenly over a whole turn, each by the golden-ratio sequence
+/// of its own constant, so that twenty rigs cover the poses without any two repeating.
+fn landing_turn(k: usize) -> Quaternion {
+    let n = k as f64;
+    let height = 2.0 * (n * 0.618_033_988_75 + 0.1).fract() - 1.0;
+    let around = std::f64::consts::TAU * (n * 0.754_877_666_25 + 0.3).fract();
+    let angle = std::f64::consts::TAU * (n * 0.569_840_290_99 + 0.7).fract();
+    let flat = (1.0 - height * height).max(0.0).sqrt();
+    Quaternion::from_axis_angle((flat * around.cos(), height, flat * around.sin()), angle)
+}
+
+/// [`rig`], turned by `turn` about its pelvis and set down over `at` with its lowest surface
+/// `clearance` above the ground beneath that surface -- the plane, or `field` where there is
+/// one. Returns the rig's bodies.
+fn dropped_rig(
+    into: &mut Skeleton,
+    at: (f64, f64),
+    turn: Quaternion,
+    clearance: f64,
+    field: Option<Field<'_>>,
+) -> std::ops::Range<usize> {
+    let start = into.len();
+    rig(into, 0.0);
+    let bodies = start..into.len();
+    let mut lowest = f64::INFINITY;
+    for i in bodies.clone() {
+        let mut body = into.body(i);
+        let p = turn.rotate_point(body.position);
+        body.position = (p.0 + at.0, p.1, p.2 + at.1);
+        body.orientation = turn.multiply(&body.orientation);
+        let half = body.orientation.rotate_point((0.0, body.half_length, 0.0));
+        for end in [1.0, -1.0] {
+            let x = body.position.0 + end * half.0;
+            let z = body.position.2 + end * half.2;
+            let ground = field.map_or(0.0, |f| f.height_at(x, z));
+            lowest = lowest.min(body.position.1 + end * half.1 - body.radius - ground);
+        }
+        into.set_body(i, body);
+    }
+    for i in bodies.clone() {
+        let mut body = into.body(i);
+        body.position.1 += clearance - lowest;
+        into.set_body(i, body);
+    }
+    bodies
 }
 
 // -- fixtures ---------------------------------------------------------------------
